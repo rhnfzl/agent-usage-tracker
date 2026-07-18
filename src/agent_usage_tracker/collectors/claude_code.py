@@ -40,9 +40,11 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[UsageEvent], Callable[
         for raw in lines:
             try:
                 o = json.loads(raw)
-                if o.get("type") != "assistant":
+                if not isinstance(o, dict) or o.get("type") != "assistant":
                     continue
-                msg = o.get("message") or {}
+                msg = o.get("message")
+                if not isinstance(msg, dict):
+                    continue
                 u = msg.get("usage")
                 if not isinstance(u, dict):
                     continue
@@ -50,7 +52,7 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[UsageEvent], Callable[
                 out = int(u.get("output_tokens") or 0)
                 cr = int(u.get("cache_read_input_tokens") or 0)
                 cw = int(u.get("cache_creation_input_tokens") or 0)
-            except (json.JSONDecodeError, UnicodeDecodeError, ValueError, TypeError):
+            except (json.JSONDecodeError, UnicodeDecodeError, ValueError, TypeError, AttributeError):
                 continue
             total = inp + out + cr + cw
             if total == 0:

@@ -172,6 +172,21 @@ def test_cursor_db_path() -> None:
     print("ok cursor_db_path")
 
 
+def test_non_object_lines() -> None:
+    # valid-but-non-object JSON lines (a scalar, an array, a string) must be skipped, not crash
+    with tempfile.TemporaryDirectory() as d:
+        home = Path(d)
+        good = {"type": "assistant", "uuid": "u1", "timestamp": "2026-07-18T10:00:00Z",
+                "message": {"model": "m", "usage": {"input_tokens": 1, "output_tokens": 1,
+                            "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}}}
+        path = home / ".claude/projects/p/s.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('42\n[1,2,3]\n"a string"\n' + json.dumps(good) + "\n")
+        ev = _drain(claude_code.collect, _cfg(home))
+        assert len(ev) == 1 and ev[0].total_tokens == 2
+    print("ok non_object_lines")
+
+
 def test_sender_config() -> None:
     from agent_usage_tracker.push import make_sender
     # nothing configured -> refuse to send
@@ -197,6 +212,7 @@ def main() -> int:
     test_pi()
     test_cursor()
     test_cursor_db_path()
+    test_non_object_lines()
     test_sender_config()
     print("\nALL PASS")
     return 0

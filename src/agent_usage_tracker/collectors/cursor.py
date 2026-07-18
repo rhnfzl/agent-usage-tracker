@@ -114,10 +114,14 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[UsageEvent], Callable[
         for key, val in rows:
             try:
                 o = json.loads(val)
-                tc = o.get("tokenCount") or {}
+                if not isinstance(o, dict):
+                    continue
+                tc = o.get("tokenCount")
+                if not isinstance(tc, dict):
+                    tc = {}
                 inp = int(tc.get("inputTokens") or 0)
                 out = int(tc.get("outputTokens") or 0)
-            except (json.JSONDecodeError, TypeError, ValueError):
+            except (json.JSONDecodeError, TypeError, ValueError, AttributeError):
                 continue
             if inp + out == 0:
                 continue

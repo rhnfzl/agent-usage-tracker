@@ -173,7 +173,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.cmd == "export":
-        out = open(args.out, "w", newline="") if args.out else sys.stdout
+        out = open(args.out, "w", newline="", encoding="utf-8") if args.out else sys.stdout
         try:
             n = run_export(cfg, list(agents), out)
         finally:

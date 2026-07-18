@@ -58,8 +58,12 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[UsageEvent], Callable[
                 o = json.loads(raw)
             except (json.JSONDecodeError, UnicodeDecodeError):
                 continue
+            if not isinstance(o, dict):
+                continue
             t = o.get("type")
-            msg = o.get("message") if isinstance(o.get("message"), dict) else {}
+            msg = o.get("message")
+            if not isinstance(msg, dict):
+                msg = {}
             if t in ("model_change", "session"):
                 m = o.get("model") or msg.get("model")
                 if m:

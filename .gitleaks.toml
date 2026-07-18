@@ -12,5 +12,5 @@ useDefault = true
 regexes = [
   '''env:[A-Z_]+''',                          # env-var indirections are references, not secrets
   '''https://n8n\.example[^\s'"]*''',         # placeholder webhook host in docs
-  '''postgresql://agents_writer@[^\s'"]*''',  # placeholder DSN in docs
+  '''postgresql://agents_writer@db\.example[^\s'"]*''',  # placeholder DSN in docs (host pinned)
 ]

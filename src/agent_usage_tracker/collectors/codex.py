@@ -60,6 +60,8 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[UsageEvent], Callable[
                 o = json.loads(raw)
             except (json.JSONDecodeError, UnicodeDecodeError):
                 continue
+            if not isinstance(o, dict):
+                continue
             t = o.get("type")
             p = o.get("payload") or {}
             if not isinstance(p, dict):
@@ -75,13 +77,16 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[UsageEvent], Callable[
                     cur["cwd"] = p.get("cwd")
             elif t == "event_msg" and p.get("type") == "token_count":
                 try:
-                    last = (p.get("info") or {}).get("last_token_usage") or {}
+                    info = p.get("info")
+                    last = info.get("last_token_usage") if isinstance(info, dict) else None
+                    if not isinstance(last, dict):
+                        continue
                     inp = int(last.get("input_tokens") or 0)
                     cached = int(last.get("cached_input_tokens") or 0)
                     out = int(last.get("output_tokens") or 0)
                     rea = int(last.get("reasoning_output_tokens") or 0)
                     total = int(last.get("total_tokens") or (inp + out))
-                except (ValueError, TypeError):
+                except (ValueError, TypeError, AttributeError):
                     continue
                 cur["tc_ord"] += 1
                 if inp + out + rea == 0:

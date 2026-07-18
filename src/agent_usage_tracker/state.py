@@ -50,5 +50,11 @@ def save_state(state: dict) -> None:
 
 
 def collector_wm(state: dict, name: str) -> dict:
-    """Return (creating if needed) the private watermark dict for one collector."""
-    return state.setdefault("collectors", {}).setdefault(name, {})
+    """Return (creating if needed) the private watermark dict for one collector. Resets a
+    non-dict value (from external corruption) to an empty dict so a scan can't crash on it."""
+    collectors = state.setdefault("collectors", {})
+    wm = collectors.get(name)
+    if not isinstance(wm, dict):
+        wm = {}
+        collectors[name] = wm
+    return wm

@@ -17,7 +17,7 @@ webhook_secret = "env:AUT_WEBHOOK_SECRET"      # shared secret sent as the X-AUT
 
 # Optional fallback: direct Postgres over Tailscale. Only used if the webhook is
 # unreachable. Requires the [postgres] extra (uv tool install "agent-usage-tracker[postgres]").
-# pg_dsn = "env:AUT_PG_DSN"                     # postgresql://agents_writer@ct103.tailnet:5432/agents
+# pg_dsn = "env:AUT_PG_DSN"                     # e.g. postgresql://agents_writer@db.example:5432/agents
 
 # The home directory the collectors read from. Defaults to the RUNNING user's $HOME, so on a
 # SHARED machine it only ever sees YOUR logs, never other users' homes. Set it explicitly to

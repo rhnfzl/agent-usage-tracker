@@ -26,8 +26,9 @@ Requires Python 3.11+. **Runs on macOS, Linux, and Windows** (agent log paths ar
 per-OS). Base install has **zero runtime dependencies**. The direct-Postgres fallback is
 optional: `uv tool install "agent-usage-tracker[postgres]"`.
 
-On a **shared machine**, the collector only ever reads the running user's `$HOME` (never other
-users' homes); set `home` explicitly in the config to be sure. See `config.example.toml`.
+On a **shared machine**, the collector reads the running user's `$HOME` by default (it never
+scans other users' homes); if you set a `home` override, point it only at your own user's
+directory. See `config.example.toml`.
 
 ## Configure
 
