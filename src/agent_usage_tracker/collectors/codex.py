@@ -1,13 +1,15 @@
 """Codex CLI collector: ~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl
 
-Streaming parse: session_meta gives provider + cwd, turn_context updates the current
-model, and each `token_count` event carries a per-turn `last_token_usage` delta. We emit
-one row per token_count event (its delta), NOT the cumulative total, so re-scans never
-double-count. Codex's input_tokens INCLUDES cached, so we split it into fresh input +
-cache_read to match the other agents. Subscription-safe (plan_type: pro observed).
+Streaming parse: session_meta gives provider + cwd, turn_context updates the current model,
+and each `token_count` event carries a per-turn `last_token_usage` delta. We emit one row per
+token_count event (its delta), NOT the cumulative total, so re-scans never double-count.
+Codex's input_tokens INCLUDES cached, so we split it into fresh input + cache_read to match
+the other agents. Subscription-safe (plan_type: pro observed).
 
-Per-file streaming state is persisted so resuming from a byte offset keeps the right
-model/session/ordinal across scans.
+Idempotency: the event id is a hash of stable content (session, timestamp, and the token
+fields), NOT a positional ordinal, so a duplicated or reordered token_count line dedups at
+the sink instead of double-counting. Per-file streaming state (model/session/offset/inode) is
+persisted so resuming from a byte offset keeps the right attribution across scans.
 """
 
 from __future__ import annotations
@@ -24,8 +26,8 @@ from ._util import basename, read_new_lines
 NAME = "codex"
 
 
-def _fresh_state() -> dict:
-    return {"offset": 0, "model": None, "provider": "openai",
+def _fresh_state(ino: int | None = None) -> dict:
+    return {"off": 0, "ino": ino, "model": None, "provider": "openai",
             "session_id": None, "cwd": None, "tc_ord": 0}
 
 
@@ -37,27 +39,31 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[UsageEvent], Callable[
 
     for path in glob.glob(str(base / "**" / "rollout-*.jsonl"), recursive=True):
         try:
-            size = os.path.getsize(path)
+            st = os.stat(path)
         except OSError:
             continue
-        st = files.get(path) or _fresh_state()
-        off = st.get("offset", 0)
-        if size < off:            # truncated/rotated -> reparse from scratch
-            st = _fresh_state()
+        prev = files.get(path)
+        if not prev or prev.get("ino") != st.st_ino:   # new/rotated file -> reset all state
+            prev = _fresh_state(st.st_ino)
+        off = int(prev.get("off", 0))
+        if st.st_size < off:                            # truncated
+            prev = _fresh_state(st.st_ino)
             off = 0
-        if size <= off:
+        if st.st_size <= off:
             continue
 
         lines, new_off = read_new_lines(path, off)
-        cur = dict(st)            # mutate a copy; commit swaps it in after push
+        cur = dict(prev)
         events: list[UsageEvent] = []
         for raw in lines:
             try:
                 o = json.loads(raw)
-            except json.JSONDecodeError:
+            except (json.JSONDecodeError, UnicodeDecodeError):
                 continue
             t = o.get("type")
             p = o.get("payload") or {}
+            if not isinstance(p, dict):
+                continue
             if t == "session_meta":
                 cur["session_id"] = p.get("session_id") or p.get("id") or cur["session_id"]
                 cur["provider"] = p.get("model_provider") or cur["provider"]
@@ -68,20 +74,25 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[UsageEvent], Callable[
                 if p.get("cwd"):
                     cur["cwd"] = p.get("cwd")
             elif t == "event_msg" and p.get("type") == "token_count":
-                info = p.get("info") or {}
-                last = info.get("last_token_usage") or {}
-                cur["tc_ord"] += 1     # advance ordinal for EVERY token_count (stable id)
-                inp = int(last.get("input_tokens") or 0)
-                cached = int(last.get("cached_input_tokens") or 0)
-                out = int(last.get("output_tokens") or 0)
-                rea = int(last.get("reasoning_output_tokens") or 0)
+                try:
+                    last = (p.get("info") or {}).get("last_token_usage") or {}
+                    inp = int(last.get("input_tokens") or 0)
+                    cached = int(last.get("cached_input_tokens") or 0)
+                    out = int(last.get("output_tokens") or 0)
+                    rea = int(last.get("reasoning_output_tokens") or 0)
+                    total = int(last.get("total_tokens") or (inp + out))
+                except (ValueError, TypeError):
+                    continue
+                cur["tc_ord"] += 1
                 if inp + out + rea == 0:
                     continue
-                total = int(last.get("total_tokens") or (inp + out))
+                ts = o.get("timestamp")
                 sid = cur["session_id"] or os.path.basename(path)
+                # content hash, not position; only fall back to the ordinal if ts is absent.
+                tiebreak = "" if ts else cur["tc_ord"]
                 events.append(UsageEvent(
-                    event_id=make_event_id(NAME, sid, cur["tc_ord"]),
-                    ts=o.get("timestamp"),
+                    event_id=make_event_id(NAME, sid, ts or "", inp, cached, out, rea, total, tiebreak),
+                    ts=ts,
                     agent=NAME,
                     model=cur["model"],
                     provider=cur["provider"] or "openai",
@@ -93,7 +104,7 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[UsageEvent], Callable[
                     total_tokens=total,
                     project=basename(cur["cwd"]),
                 ))
-        cur["offset"] = new_off
+        cur["off"] = new_off
 
         def commit(p: str = path, c: dict = cur) -> None:
             files[p] = c

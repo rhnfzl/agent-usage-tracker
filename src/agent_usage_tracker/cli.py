@@ -107,19 +107,40 @@ def _print_report(cfg: Config, report: dict, dry_run: bool) -> None:
     print(f"{'TOTAL':<12} {grand:>32,} tokens")
 
 
-def cmd_status(cfg: Config) -> None:
+def run_export(cfg: Config, agents: list[str], out) -> int:
+    """Write all normalized events (from scratch, ignoring the watermark) as CSV to `out`.
+    Column order matches push.COLUMNS / the sink table, so it loads via COPY. Useful for
+    an offline bulk backfill or a bridged load where the live transport is not wired yet."""
+    import csv
+
+    from .push import COLUMNS
+
+    writer = csv.writer(out)
+    writer.writerow(COLUMNS)
+    n = 0
+    for name in agents:
+        for events, _commit in REGISTRY[name](cfg, {}):
+            for e in events:
+                e.machine = cfg.machine
+                if e.ts is None:
+                    continue
+                d = e.to_dict()
+                writer.writerow(["" if d[c] is None else d[c] for c in COLUMNS])
+                n += 1
+    return n
+
+
+def cmd_status(cfg: Config, agents: tuple[str, ...]) -> None:
     state = load_state()
     print(f"machine       : {cfg.machine}")
-    print(f"agents        : {', '.join(cfg.agents)}")
+    print(f"agents        : {', '.join(agents)}")
     print(f"webhook       : {'configured' if cfg.has_webhook else 'NOT set'}")
     print(f"pg fallback   : {'configured' if cfg.has_pg else 'not set'}")
     print("watermarks    :")
-    for name in cfg.agents:
+    for name in agents:
         wm = state.get("collectors", {}).get(name, {})
         if name == "cursor":
             detail = "full-scan each run (no watermark)"
-        elif "offsets" in wm:
-            detail = f"{len(wm['offsets'])} files tracked"
         elif "files" in wm:
             detail = f"{len(wm['files'])} files tracked"
         else:
@@ -135,6 +156,8 @@ def main(argv: list[str] | None = None) -> int:
     p_scan.add_argument("--dry-run", action="store_true", help="parse + report, send nothing")
     sub.add_parser("backfill", help="reset watermark for selected agents, then scan all history")
     sub.add_parser("status", help="show config + watermark state")
+    p_export = sub.add_parser("export", help="write all usage as CSV (bulk load / offline bridge)")
+    p_export.add_argument("--out", help="output CSV file (default: stdout)")
     args = parser.parse_args(argv)
 
     cfg = load_config()
@@ -146,7 +169,18 @@ def main(argv: list[str] | None = None) -> int:
             parser.error(f"unknown agent(s): {bad}; valid = {list(REGISTRY)}")
 
     if args.cmd == "status":
-        cmd_status(cfg)
+        cmd_status(cfg, agents)
+        return 0
+
+    if args.cmd == "export":
+        out = open(args.out, "w", newline="") if args.out else sys.stdout
+        try:
+            n = run_export(cfg, list(agents), out)
+        finally:
+            if args.out:
+                out.close()
+        dest = f" -> {args.out}" if args.out else ""
+        print(f"exported {n} events{dest}", file=sys.stderr)
         return 0
 
     if args.cmd == "backfill":

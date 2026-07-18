@@ -36,6 +36,7 @@ class Config:
     webhook_secret: str | None
     pg_dsn: str | None
     home: Path
+    cursor_db_path: str | None = None    # override Cursor's state.vscdb location
 
     @property
     def has_webhook(self) -> bool:
@@ -66,5 +67,6 @@ def load_config() -> Config:
         webhook_url=_resolve(transport.get("webhook_url")),
         webhook_secret=_resolve(transport.get("webhook_secret")),
         pg_dsn=_resolve(transport.get("pg_dsn")),
-        home=Path(data.get("home") or Path.home()),
+        home=Path(data.get("home") or Path.home()).expanduser(),
+        cursor_db_path=_resolve(data.get("cursor_db_path")),
     )

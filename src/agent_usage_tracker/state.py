@@ -27,9 +27,12 @@ def load_state() -> dict:
     if not path.exists():
         return {"collectors": {}}
     try:
-        return json.loads(path.read_text())
+        obj = json.loads(path.read_text())
     except (json.JSONDecodeError, OSError):
         return {"collectors": {}}
+    if not isinstance(obj, dict) or not isinstance(obj.get("collectors"), dict):
+        return {"collectors": {}}   # corrupt / unexpected shape -> start clean
+    return obj
 
 
 def save_state(state: dict) -> None:

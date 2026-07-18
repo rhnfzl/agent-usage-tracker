@@ -45,6 +45,9 @@ both transports, re-scans) never double-counts.
   per-turn `last_token_usage` delta (not the cumulative total) to avoid double counting.
 - `est_cost_usd` is only populated where the source logs a cost (Pi, Cursor). It is an
   API-equivalent estimate, never a real bill.
+- `ts` is required at the sink (hypertable partition column). The collector **drops** any
+  record whose source line has no timestamp (they are counted as skipped, never pushed), so
+  null never reaches the sink even though `UsageEvent.ts` is typed `str | None`.
 
 ## Per-agent reality (measured on real logs, 2026-07-18)
 

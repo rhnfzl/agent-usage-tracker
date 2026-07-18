@@ -1,6 +1,8 @@
 # Copy to ~/.config/agent-usage-tracker/config.toml and edit.
-# SECRETS NEVER LIVE IN THIS REPO. Put real values in that local file (which is
-# gitignored) or the environment. Any "env:VAR" value is resolved at run time.
+# SECRETS NEVER LIVE IN THIS REPO. Put real values in the local config file or the
+# environment; any "env:VAR" value is resolved at run time. That local file lives OUTSIDE
+# the repo, so gitignore does not protect it - restrict it with filesystem permissions:
+#   chmod 600 ~/.config/agent-usage-tracker/config.toml   (macOS / Linux)
 
 # Role-based label for this machine (avoid personal names). e.g. laptop, buildbox, workstation.
 machine = "laptop"
@@ -17,5 +19,14 @@ webhook_secret = "env:AUT_WEBHOOK_SECRET"      # shared secret sent as the X-AUT
 # unreachable. Requires the [postgres] extra (uv tool install "agent-usage-tracker[postgres]").
 # pg_dsn = "env:AUT_PG_DSN"                     # postgresql://agents_writer@ct103.tailnet:5432/agents
 
-# Override the home dir the collectors read from (mainly for testing). Defaults to $HOME.
-# home = "/Users/you"
+# The home directory the collectors read from. Defaults to the RUNNING user's $HOME, so on a
+# SHARED machine it only ever sees YOUR logs, never other users' homes. Set it explicitly to
+# be safe on a shared box:
+#   Linux:    home = "/home/youruser"
+#   macOS:    home = "/Users/youruser"
+#   Windows:  home = "C:/Users/youruser"
+# home = "/home/youruser"
+
+# Cursor's state.vscdb is auto-located per OS (macOS ~/Library/Application Support/Cursor/...,
+# Windows %APPDATA%/Cursor/..., Linux ~/.config/Cursor/...). Override only if yours is elsewhere:
+# cursor_db_path = "/custom/path/Cursor/User/globalStorage/state.vscdb"

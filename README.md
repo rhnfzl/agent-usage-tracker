@@ -22,8 +22,12 @@ durable answer is to read what each tool already records locally. That also mean
 uv tool install git+https://github.com/<you>/agent-usage-tracker      # or: pipx install .
 ```
 
-Requires Python 3.11+. Base install has **zero runtime dependencies**. The direct-Postgres
-fallback is optional: `uv tool install "agent-usage-tracker[postgres]"`.
+Requires Python 3.11+. **Runs on macOS, Linux, and Windows** (agent log paths are resolved
+per-OS). Base install has **zero runtime dependencies**. The direct-Postgres fallback is
+optional: `uv tool install "agent-usage-tracker[postgres]"`.
+
+On a **shared machine**, the collector only ever reads the running user's `$HOME` (never other
+users' homes); set `home` explicitly in the config to be sure. See `config.example.toml`.
 
 ## Configure
 

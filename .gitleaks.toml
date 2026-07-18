@@ -7,14 +7,10 @@ title = "agent-usage-tracker"
 useDefault = true
 
 [allowlist]
-description = "Docs use placeholder values only"
-paths = [
-  '''README\.md''',
-  '''CONTRACT\.md''',
-  '''config\.example\.toml''',
-]
+# Only narrowly-scoped placeholder patterns are allowed. NO whole-file path exclusions, so a
+# real secret accidentally committed to a doc still trips the scan.
 regexes = [
-  '''env:[A-Z_]+''',            # env-var indirections are references, not secrets
-  '''https://n8n\.example''',   # placeholder webhook host in docs
-  '''agents_writer@ct103''',    # placeholder DSN in docs
+  '''env:[A-Z_]+''',                          # env-var indirections are references, not secrets
+  '''https://n8n\.example[^\s'"]*''',         # placeholder webhook host in docs
+  '''postgresql://agents_writer@[^\s'"]*''',  # placeholder DSN in docs
 ]

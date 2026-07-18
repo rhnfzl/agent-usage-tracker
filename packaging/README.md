@@ -24,6 +24,7 @@ in the local config file (not as `env:`).
 ```bash
 uv tool install .
 mkdir -p ~/.config/agent-usage-tracker && cp config.example.toml ~/.config/agent-usage-tracker/config.toml
+chmod 600 ~/.config/agent-usage-tracker/config.toml   # it can hold the webhook secret / DSN
 $EDITOR ~/.config/agent-usage-tracker/config.toml
 
 mkdir -p ~/.config/systemd/user
@@ -35,6 +36,22 @@ loginctl enable-linger "$USER"          # so the timer runs when you are not log
 
 Put the secret in the config file, or use `env:AUT_WEBHOOK_SECRET` with a systemd
 `Environment=` / drop-in if you prefer.
+
+## Windows (Task Scheduler)
+
+```powershell
+uv tool install .
+mkdir $HOME\.config\agent-usage-tracker -Force
+copy config.example.toml $HOME\.config\agent-usage-tracker\config.toml
+notepad $HOME\.config\agent-usage-tracker\config.toml   # set machine + webhook_url + webhook_secret
+
+# register the 15-minute task
+powershell -ExecutionPolicy Bypass -File packaging\windows\register-task.ps1
+```
+
+Claude Code, Codex, and Cursor all work on Windows: their logs live under `%USERPROFILE%`
+(`~/.claude`, `~/.codex`) and `%APPDATA%\Cursor\...`, which the collector locates
+automatically. The config lives at `C:\Users\<you>\.config\agent-usage-tracker\config.toml`.
 
 ## First run
 

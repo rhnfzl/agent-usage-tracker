@@ -48,6 +48,11 @@ def test_claude_code() -> None:
              "cwd": "/x/myproj", "message": {"model": "claude-opus-4-8", "usage": {
                  "input_tokens": 2, "output_tokens": 500,
                  "cache_read_input_tokens": 1000, "cache_creation_input_tokens": 300}}},
+            # zero-token assistant record -> must be filtered out
+            {"type": "assistant", "uuid": "u2", "timestamp": "2026-07-18T10:01:00Z",
+             "message": {"model": "claude-opus-4-8", "usage": {
+                 "input_tokens": 0, "output_tokens": 0,
+                 "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}}},
         ])
         ev = _drain(claude_code.collect, _cfg(home))
         assert len(ev) == 1, ev
@@ -71,15 +76,28 @@ def test_codex() -> None:
              "payload": {"type": "token_count", "info": {"last_token_usage": {
                  "input_tokens": 1000, "cached_input_tokens": 900,
                  "output_tokens": 40, "reasoning_output_tokens": 15, "total_tokens": 1040}}}},
+            # second turn: its OWN delta, not a cumulative running total
+            {"type": "event_msg", "timestamp": "2026-07-18T10:00:05Z",
+             "payload": {"type": "token_count", "info": {"last_token_usage": {
+                 "input_tokens": 500, "cached_input_tokens": 300,
+                 "output_tokens": 30, "reasoning_output_tokens": 5, "total_tokens": 530}}}},
+            # zero-token snapshot -> filtered
+            {"type": "event_msg", "timestamp": "2026-07-18T10:00:09Z",
+             "payload": {"type": "token_count", "info": {"last_token_usage": {
+                 "input_tokens": 0, "cached_input_tokens": 0, "output_tokens": 0,
+                 "reasoning_output_tokens": 0, "total_tokens": 0}}}},
         ])
         ev = _drain(codex.collect, _cfg(home))
-        assert len(ev) == 1, ev
-        e = ev[0]
-        assert e.input_tokens == 100, e.input_tokens          # 1000 - 900 cached
-        assert e.cache_read_tokens == 900 and e.output_tokens == 40
-        assert e.reasoning_tokens == 15 and e.total_tokens == 1040
-        assert e.model == "gpt-5.6-sol" and e.provider == "openai"
-        assert e.project == "repo"
+        assert len(ev) == 2, ev                                 # 2 non-zero turns, zero filtered
+        first = next(e for e in ev if e.output_tokens == 40)
+        second = next(e for e in ev if e.output_tokens == 30)
+        assert first.input_tokens == 100 and first.cache_read_tokens == 900   # 1000 - 900
+        assert first.reasoning_tokens == 15 and first.total_tokens == 1040
+        assert second.input_tokens == 200 and second.cache_read_tokens == 300  # 500 - 300, its own delta
+        assert second.total_tokens == 530                       # per-turn, not 1040+530 cumulative
+        assert all(e.model == "gpt-5.6-sol" and e.provider == "openai" for e in ev)
+        assert all(e.project == "repo" for e in ev)
+        assert first.event_id != second.event_id                # content-hash ids are distinct
     print("ok codex")
 
 
@@ -92,6 +110,9 @@ def test_pi() -> None:
              "message": {"provider": "anthropic", "usage": {
                  "input": 200, "output": 80, "cacheRead": 50, "cacheWrite": 10,
                  "totalTokens": 340, "cost": {"total": 0.0021}}}},
+            # zero-token message -> filtered
+            {"type": "message", "id": "m2", "timestamp": "2026-07-18T10:00:05Z",
+             "message": {"usage": {"input": 0, "output": 0, "totalTokens": 0}}},
         ])
         ev = _drain(pi.collect, _cfg(home))
         assert len(ev) == 1, ev
@@ -100,6 +121,7 @@ def test_pi() -> None:
         assert e.cache_read_tokens == 50 and e.cache_write_tokens == 10
         assert e.total_tokens == 340 and e.est_cost_usd == 0.0021
         assert e.model == "claude-opus-4-8"                    # streamed from model_change
+        assert e.project is None                               # encoded dir is not reconstructable
     print("ok pi")
 
 
@@ -137,11 +159,45 @@ def test_cursor() -> None:
     print("ok cursor")
 
 
+def test_cursor_db_path() -> None:
+    from agent_usage_tracker.collectors.cursor import _cursor_db
+    home = Path("/tmp/fakehome")
+    override = _cfg(home)
+    object.__setattr__(override, "cursor_db_path", "/custom/state.vscdb")
+    assert str(_cursor_db(override)) == "/custom/state.vscdb"
+    p = _cursor_db(_cfg(home))
+    assert p is not None
+    assert str(p).endswith("Cursor/User/globalStorage/state.vscdb")   # same subpath every OS
+    assert str(home) in str(p) or "AppData" in str(p)
+    print("ok cursor_db_path")
+
+
+def test_sender_config() -> None:
+    from agent_usage_tracker.push import make_sender
+    # nothing configured -> refuse to send
+    try:
+        make_sender(_cfg(Path("/tmp")))
+        raise AssertionError("expected SystemExit for no transport")
+    except SystemExit:
+        pass
+    # webhook url set but secret missing -> fail closed (no unauthenticated POST)
+    c = Config(machine="t", agents=(), webhook_url="https://n8n.example/webhook/x",
+               webhook_secret=None, pg_dsn=None, home=Path("/tmp"))
+    try:
+        make_sender(c)
+        raise AssertionError("expected SystemExit for missing secret")
+    except SystemExit:
+        pass
+    print("ok sender_config")
+
+
 def main() -> int:
     test_claude_code()
     test_codex()
     test_pi()
     test_cursor()
+    test_cursor_db_path()
+    test_sender_config()
     print("\nALL PASS")
     return 0
 

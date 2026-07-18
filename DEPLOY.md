@@ -71,9 +71,9 @@ aut backfill            # optional one-time history push
 ## C. Verify end-to-end
 
 ```bash
-# 1. fake event lands a row
+# 1. fake event lands a row  (read the secret from the env, not inline, so it stays out of shell history)
 curl -sS -X POST https://n8n.<domain>/webhook/llm-usage \
-  -H 'X-AUT-Secret: <secret>' -H 'content-type: application/json' \
+  -H "X-AUT-Secret: $AUT_WEBHOOK_SECRET" -H 'content-type: application/json' \
   -d '{"events":[{"event_id":"t1","ts":"2026-07-18T00:00:00Z","machine":"test","agent":"codex","model":"x","provider":"openai","input_tokens":1,"output_tokens":1,"cache_read_tokens":0,"cache_write_tokens":0,"reasoning_tokens":null,"total_tokens":2,"est_cost_usd":null,"project":null}]}'
 # 2. psql agents -c "select count(*) from agents.usage_event;"
 # 3. a real scan shows up in Grafana within the timer interval

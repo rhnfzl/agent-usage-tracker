@@ -48,4 +48,4 @@ class UsageEvent:
     def any_tokens(self) -> bool:
         return (self.input_tokens + self.output_tokens
                 + self.cache_read_tokens + self.cache_write_tokens
-                + (self.reasoning_tokens or 0)) > 0
+                + (self.reasoning_tokens or 0) + self.total_tokens) > 0

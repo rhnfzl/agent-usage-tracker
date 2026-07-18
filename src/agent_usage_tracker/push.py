@@ -5,6 +5,10 @@ Fallback = direct Postgres over Tailscale (only used if the webhook is unavailab
 transport.pg_dsn is set). Both are idempotent at the sink via event_id + ON CONFLICT, so
 re-delivery is harmless. A sender that cannot deliver RAISES, so the watermark is not
 committed and the events are re-sent on the next scan.
+
+Delivery is strict on purpose: redirects are NOT followed (a 3xx that turns the POST into a
+GET could otherwise look like success and advance the watermark over data the sink never
+stored), and any non-2xx is a hard failure.
 """
 
 from __future__ import annotations
@@ -26,16 +30,25 @@ COLUMNS = (
 TABLE = "agents.usage_event"
 
 
-def _post_webhook(url: str, secret: str | None, batch: list[UsageEvent]) -> None:
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None  # do not follow; urllib raises HTTPError for the 3xx instead of silently GETting
+
+
+_OPENER = urllib.request.build_opener(_NoRedirect)
+
+
+def _post_webhook(url: str, secret: str, batch: list[UsageEvent]) -> None:
     body = json.dumps({"events": [e.to_dict() for e in batch]}).encode("utf-8")
-    headers = {"Content-Type": "application/json"}
-    if secret:
-        headers["X-AUT-Secret"] = secret
+    headers = {"Content-Type": "application/json", "X-AUT-Secret": secret}
     req = urllib.request.Request(url, data=body, method="POST", headers=headers)
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        status = getattr(resp, "status", resp.getcode())
-        if not (200 <= status < 300):
-            raise RuntimeError(f"webhook returned HTTP {status}")
+    try:
+        with _OPENER.open(req, timeout=30) as resp:
+            status = getattr(resp, "status", None) or resp.getcode()
+    except urllib.error.HTTPError as exc:            # 3xx (no-follow) / 4xx / 5xx
+        raise RuntimeError(f"webhook HTTP {exc.code}") from exc
+    if not (200 <= status < 300):
+        raise RuntimeError(f"webhook HTTP {status}")
 
 
 def _insert_pg(dsn: str, batch: list[UsageEvent]) -> None:
@@ -55,12 +68,17 @@ def _insert_pg(dsn: str, batch: list[UsageEvent]) -> None:
 
 
 def make_sender(cfg: Config) -> Callable[[list[UsageEvent]], None]:
-    """Return a send(batch) that tries the webhook, then the PG fallback. Raises if it
-    cannot deliver and nothing is configured."""
+    """Return a send(batch) that tries the webhook, then the PG fallback. Raises (before any
+    send) if nothing is configured or a configured webhook is missing its secret."""
     if not cfg.has_webhook and not cfg.has_pg:
         raise SystemExit(
             "no transport configured: set [transport].webhook_url (and/or pg_dsn) in your "
             "config, or run with --dry-run to preview without sending."
+        )
+    if cfg.has_webhook and not cfg.webhook_secret:
+        raise SystemExit(
+            "transport.webhook_url is set but webhook_secret is missing or unresolved; "
+            "refusing to send unauthenticated. Set webhook_secret (or its env: value)."
         )
 
     def send(batch: list[UsageEvent]) -> None:
