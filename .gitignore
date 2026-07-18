@@ -1,0 +1,20 @@
+# never commit a real config (it can carry a webhook URL / secret / DSN)
+config.toml
+*.local.toml
+
+# python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# local state / scratch
+state.json
+*.log
+.DS_Store

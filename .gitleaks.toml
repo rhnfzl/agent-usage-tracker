@@ -1,0 +1,20 @@
+# gitleaks config for agent-usage-tracker.
+# This repo is private now and intended to open later, so the no-secrets rule is
+# enforced from day one: run `gitleaks detect` before flipping it public.
+title = "agent-usage-tracker"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Docs use placeholder values only"
+paths = [
+  '''README\.md''',
+  '''CONTRACT\.md''',
+  '''config\.example\.toml''',
+]
+regexes = [
+  '''env:[A-Z_]+''',            # env-var indirections are references, not secrets
+  '''https://n8n\.example''',   # placeholder webhook host in docs
+  '''agents_writer@ct103''',    # placeholder DSN in docs
+]

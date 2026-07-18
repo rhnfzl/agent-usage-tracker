@@ -1,0 +1,28 @@
+[project]
+name = "agent-usage-tracker"
+version = "0.1.0"
+description = "Passive, subscription-safe token/model usage tracker for coding agents (Claude Code, Codex, Cursor, Pi). Reads local logs, normalizes, pushes to a self-hosted sink."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+keywords = ["tokens", "usage", "coding-agent", "claude-code", "codex", "cursor", "pi", "observability"]
+# Base install has ZERO runtime dependencies: stdlib json / sqlite3 / urllib / tomllib / hashlib.
+dependencies = []
+
+[project.optional-dependencies]
+# Only needed if you use the direct-Postgres fallback transport (transport.pg_dsn).
+postgres = ["psycopg[binary]>=3.1"]
+
+[project.scripts]
+aut = "agent_usage_tracker.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/agent_usage_tracker"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"

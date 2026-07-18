@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  macOS timer for `aut scan`. Install:
+    cp packaging/launchd/dev.aut.scan.plist ~/Library/LaunchAgents/
+    # edit the aut path below to `which aut` output, then:
+    launchctl load ~/Library/LaunchAgents/dev.aut.scan.plist
+  Runs every 15 minutes and once at load. Offline runs are safe (nothing is lost).
+  Note: launchd jobs do NOT inherit your shell env, so put the webhook secret directly in
+  ~/.config/agent-usage-tracker/config.toml (local + gitignored, chmod 600) rather than env:.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+ "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>dev.aut.scan</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/CHANGEME/.local/bin/aut</string>
+    <string>scan</string>
+  </array>
+  <key>StartInterval</key>
+  <integer>900</integer>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>StandardOutPath</key>
+  <string>/tmp/aut.log</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/aut.err</string>
+</dict>
+</plist>

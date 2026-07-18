@@ -1,0 +1,10 @@
+[Unit]
+Description=agent-usage-tracker: scan coding-agent logs and push usage
+Documentation=https://github.com/CHANGEME/agent-usage-tracker
+
+[Service]
+Type=oneshot
+# Adjust the path to `which aut`. The webhook secret is read from
+# ~/.config/agent-usage-tracker/config.toml (or the environment via env: values).
+ExecStart=%h/.local/bin/aut scan
+Nice=10

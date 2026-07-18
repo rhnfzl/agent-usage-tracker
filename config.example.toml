@@ -1,0 +1,21 @@
+# Copy to ~/.config/agent-usage-tracker/config.toml and edit.
+# SECRETS NEVER LIVE IN THIS REPO. Put real values in that local file (which is
+# gitignored) or the environment. Any "env:VAR" value is resolved at run time.
+
+# Role-based label for this machine (avoid personal names). e.g. laptop, buildbox, workstation.
+machine = "laptop"
+
+# Which agents to collect. Omit to collect all installed ones.
+agents = ["claude_code", "codex", "cursor", "pi"]
+
+[transport]
+# Default transport: POST batches to the n8n ingest webhook (behind Cloudflare Access).
+webhook_url    = "https://n8n.example.tld/webhook/llm-usage"
+webhook_secret = "env:AUT_WEBHOOK_SECRET"      # shared secret sent as the X-AUT-Secret header
+
+# Optional fallback: direct Postgres over Tailscale. Only used if the webhook is
+# unreachable. Requires the [postgres] extra (uv tool install "agent-usage-tracker[postgres]").
+# pg_dsn = "env:AUT_PG_DSN"                     # postgresql://agents_writer@ct103.tailnet:5432/agents
+
+# Override the home dir the collectors read from (mainly for testing). Defaults to $HOME.
+# home = "/Users/you"
