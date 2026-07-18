@@ -94,6 +94,8 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[UsageEvent], Callable[
             ):
                 try:
                     o = json.loads(val)
+                    if not isinstance(o, dict):
+                        continue
                 except (json.JSONDecodeError, TypeError):
                     continue
                 comp[key.split(":", 1)[1]] = {

@@ -149,7 +149,9 @@ def test_cursor() -> None:
                     ("bubbleId:c1:b3", json.dumps({"tokenCount": {"inputTokens": 0}})))
         con.commit()
         con.close()
-        ev = _drain(cursor.collect, _cfg(home))
+        cfg = _cfg(home)
+        cfg.cursor_db_path = str(db)   # platform-independent: point straight at the test db
+        ev = _drain(cursor.collect, cfg)
         assert len(ev) == 2, ev
         e1 = next(e for e in ev if e.input_tokens == 100)
         assert e1.total_tokens == 120 and e1.ts is not None      # inherited composer ts
