@@ -15,6 +15,19 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import asdict, dataclass, field
+from datetime import datetime
+
+
+def valid_ts(ts: object) -> bool:
+    """True only for a non-empty ISO-8601 string the sink can cast to timestamptz.
+    Rejects None, "", numbers, and malformed strings so a bad ts can't wedge the batch."""
+    if not isinstance(ts, str) or not ts.strip():
+        return False
+    try:
+        datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        return True
+    except ValueError:
+        return False
 
 
 def make_event_id(agent: str, *parts: object) -> str:

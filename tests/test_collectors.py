@@ -187,6 +187,15 @@ def test_non_object_lines() -> None:
     print("ok non_object_lines")
 
 
+def test_valid_ts() -> None:
+    from agent_usage_tracker.event import valid_ts
+    assert valid_ts("2026-07-18T10:00:00Z")
+    assert valid_ts("2026-07-18T10:00:00+00:00")
+    for bad in (None, "", "   ", 12345, 3.14, "not-a-date", []):
+        assert not valid_ts(bad), bad
+    print("ok valid_ts")
+
+
 def test_sender_config() -> None:
     from agent_usage_tracker.push import make_sender
     # nothing configured -> refuse to send
@@ -213,6 +222,7 @@ def main() -> int:
     test_cursor()
     test_cursor_db_path()
     test_non_object_lines()
+    test_valid_ts()
     test_sender_config()
     print("\nALL PASS")
     return 0

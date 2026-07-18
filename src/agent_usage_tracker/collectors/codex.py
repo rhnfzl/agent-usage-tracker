@@ -43,7 +43,10 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[UsageEvent], Callable[
         except OSError:
             continue
         prev = files.get(path)
-        if not prev or prev.get("ino") != st.st_ino:   # new/rotated file -> reset all state
+        # New/rotated file (or a state-format upgrade whose old state lacks 'ino') -> reset and
+        # re-read. Safe because event_id is content-deterministic: re-emitted rows dedup at the
+        # sink. Changing the id scheme itself would instead need a state-version bump.
+        if not prev or prev.get("ino") != st.st_ino:
             prev = _fresh_state(st.st_ino)
         off = int(prev.get("off", 0))
         if st.st_size < off:                            # truncated

@@ -55,5 +55,5 @@ both transports, re-scans) never double-counts.
 |---|---|---|---|---|
 | **claude_code** | `~/.claude/projects/**/*.jsonl` `assistant.message.usage` | yes | record `timestamp` | Most tokens are in the **cache** fields; summing only `input_tokens` undercounts ~460x. Scan by mtime (20k+ files). |
 | **codex** | `~/.codex/sessions/**/rollout-*.jsonl` `token_count` | `turn_context.model` | event `timestamp` | `input` includes cached; we split it. Captures `reasoning_tokens`. |
-| **pi** | `~/.pi/**/*.jsonl` `message.usage` | `message.model` / `model_change` | record `timestamp` | Cleanest schema; older sessions may log zeros. |
+| **pi** | `~/.pi/agent/sessions/**/*.jsonl` `message.usage` | `message.model` / `model_change` | record `timestamp` | Cleanest schema; older sessions may log zeros. |
 | **cursor** | `state.vscdb` `cursorDiskKV bubbleId:*` | **often null** (not in DB) | bubble `createdAt` or joined `composerData` | EXPERIMENTAL: a LOWER BOUND. For complete + model-attributed + costed data, use the dashboard API with `cursorAuth/accessToken` (follow-up, not in v1). Full-scans each run + dedups at the sink. |

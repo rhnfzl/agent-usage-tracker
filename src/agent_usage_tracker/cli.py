@@ -16,7 +16,7 @@ import sys
 
 from .collectors import REGISTRY
 from .config import Config, load_config
-from .event import UsageEvent
+from .event import UsageEvent, valid_ts
 from .push import make_sender
 from .state import collector_wm, load_state, save_state
 
@@ -67,7 +67,7 @@ def run_scan(cfg: Config, agents: list[str], dry_run: bool) -> dict:
             for events, commit in collect(cfg, wm):
                 for e in events:
                     e.machine = cfg.machine
-                    if e.ts is None:
+                    if not valid_ts(e.ts):
                         agg["skipped_no_ts"] += 1
                         continue
                     _add(agg, e)
@@ -102,39 +102,45 @@ def _print_report(cfg: Config, report: dict, dry_run: bool) -> None:
         for model, mv in sorted(agg["by_model"].items(), key=lambda kv: -kv[1]["total"]):
             print(f"    {model:<28} {mv['events']:>5} turns  {mv['total']:>12,} tokens")
         if agg["skipped_no_ts"]:
-            print(f"    (skipped {agg['skipped_no_ts']} records with no timestamp)")
+            print(f"    (skipped {agg['skipped_no_ts']} records with missing/invalid timestamp)")
     print("-" * 60)
     print(f"{'TOTAL':<12} {grand:>32,} tokens")
 
 
-def run_export(cfg: Config, agents: list[str], out) -> int:
+def run_export(cfg: Config, agents: list[str], out) -> tuple[int, int]:
     """Write all normalized events (from scratch, ignoring the watermark) as CSV to `out`.
     Column order matches push.COLUMNS / the sink table, so it loads via COPY. Useful for
-    an offline bulk backfill or a bridged load where the live transport is not wired yet."""
+    an offline bulk backfill or a bridged load where the live transport is not wired yet.
+    Returns (written, skipped) where skipped counts records with a missing/invalid ts."""
     import csv
 
     from .push import COLUMNS
 
     writer = csv.writer(out)
     writer.writerow(COLUMNS)
-    n = 0
+    n = skipped = 0
     for name in agents:
         for events, _commit in REGISTRY[name](cfg, {}):
             for e in events:
                 e.machine = cfg.machine
-                if e.ts is None:
+                if not valid_ts(e.ts):
+                    skipped += 1
                     continue
                 d = e.to_dict()
                 writer.writerow(["" if d[c] is None else d[c] for c in COLUMNS])
                 n += 1
-    return n
+    return n, skipped
 
 
 def cmd_status(cfg: Config, agents: tuple[str, ...]) -> None:
     state = load_state()
     print(f"machine       : {cfg.machine}")
     print(f"agents        : {', '.join(agents)}")
-    print(f"webhook       : {'configured' if cfg.has_webhook else 'NOT set'}")
+    if cfg.has_webhook and not cfg.webhook_secret:
+        webhook_state = "url set but SECRET MISSING (scan will refuse)"
+    else:
+        webhook_state = "configured" if cfg.has_webhook else "NOT set"
+    print(f"webhook       : {webhook_state}")
     print(f"pg fallback   : {'configured' if cfg.has_pg else 'not set'}")
     print("watermarks    :")
     for name in agents:
@@ -175,12 +181,13 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "export":
         out = open(args.out, "w", newline="", encoding="utf-8") if args.out else sys.stdout
         try:
-            n = run_export(cfg, list(agents), out)
+            n, skipped = run_export(cfg, list(agents), out)
         finally:
             if args.out:
                 out.close()
         dest = f" -> {args.out}" if args.out else ""
-        print(f"exported {n} events{dest}", file=sys.stderr)
+        skip_note = f" ({skipped} skipped: missing/invalid ts)" if skipped else ""
+        print(f"exported {n} events{skip_note}{dest}", file=sys.stderr)
         return 0
 
     if args.cmd == "backfill":
