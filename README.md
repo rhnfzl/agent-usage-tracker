@@ -10,6 +10,13 @@ It also has an opt-in `cursor_sdk` collector for **agents built on the Cursor Ag
 point `cursor_sdk_manifests` at the run `manifest.json` files such an app writes and their
 per-run token usage flows through the same pipeline. Off unless configured.
 
+For **accurate Cursor usage** (the local `cursor` collector is only a lower bound, and the
+`cursor-agent` CLI writes no token counts to disk), an opt-in `cursor_api` collector pulls your
+own per-event usage from Cursor's dashboard API using the locally-stored session token (never
+persisted by this tool). On a team plan it scopes strictly to your own user and re-checks every
+event, so a teammate's usage is never captured. It makes authenticated network calls, so it is
+**off by default** - enable with `cursor_api = true`.
+
 ## Why not a proxy?
 
 Because these agents log in with an **OAuth subscription, not an API key** (Claude Max/Pro,

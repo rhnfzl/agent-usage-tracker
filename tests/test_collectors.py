@@ -323,6 +323,64 @@ def test_file_identity_reset() -> None:
     print("ok file_identity_reset")
 
 
+def test_cursor_api() -> None:
+    from agent_usage_tracker.collectors import cursor_api
+    UID = 114903562
+    # _map_event: maps my event; REJECTS a teammate's event (owningUser != uid); skips zero-token.
+    mine = {"owningUser": UID, "timestamp": "1784314315897", "model": "composer-2.5",
+            "conversationId": "conv-1",
+            "tokenUsage": {"inputTokens": 100, "outputTokens": 20, "cacheReadTokens": 500}}
+    teammate = {**mine, "owningUser": 999999, "conversationId": "conv-2"}
+    zero = {"owningUser": UID, "timestamp": "1784314315999", "model": "m", "conversationId": "c",
+            "tokenUsage": {"inputTokens": 0, "outputTokens": 0}}
+    ev = cursor_api._map_event(mine, UID)
+    assert ev is not None and ev.total_tokens == 620 and ev.cache_write_tokens == 0
+    assert ev.agent == "cursor_api" and ev.provider == "cursor" and ev.model == "composer-2.5"
+    assert cursor_api._map_event(teammate, UID) is None      # SAFETY: never a teammate's event
+    assert cursor_api._map_event(zero, UID) is None
+    # non-str model coerced to None (no crash downstream)
+    assert cursor_api._map_event({**mine, "model": {"x": 1}, "conversationId": "c3"}, UID).model is None
+
+    # full collect() with injected HTTP: pagination + incremental watermark + safety filter
+    calls = {"pages": []}
+    page1 = {"usageEventsDisplay": [mine, teammate,
+             {"owningUser": UID, "timestamp": "1784314310000", "model": "composer-2.5",
+              "conversationId": "conv-3", "tokenUsage": {"inputTokens": 5, "outputTokens": 5}}]}
+
+    def fake_post(cookie, name, body):
+        if name == "get-me":
+            return {"userId": UID}
+        calls["pages"].append(body.get("page"))
+        return page1 if body.get("page") == 1 else {"usageEventsDisplay": []}
+
+    cfg = _cfg(Path("/tmp"))
+    cfg.cursor_api = True
+    orig_auth, orig_post = cursor_api._auth, cursor_api._post
+    cursor_api._auth = lambda c: ("cookie", 3867693)
+    cursor_api._post = fake_post
+    try:
+        wm: dict = {}
+        events = []
+        for batch, commit in cursor_api.collect(cfg, wm):
+            events.extend(batch)
+            commit()
+        # 2 of my events emitted (teammate filtered out); watermark = newest ts
+        assert len(events) == 2, events
+        assert all(e.agent == "cursor_api" for e in events)
+        assert wm["since_ms"] == 1784314315897, wm
+        # a second scan with only-older events -> nothing new
+        page1["usageEventsDisplay"] = [{"owningUser": UID, "timestamp": "1784314310000",
+                                        "model": "m", "conversationId": "conv-3",
+                                        "tokenUsage": {"inputTokens": 1, "outputTokens": 1}}]
+        again = [e for batch, _ in cursor_api.collect(cfg, wm) for e in batch]
+        assert again == [], again                            # older than watermark -> skipped
+    finally:
+        cursor_api._auth, cursor_api._post = orig_auth, orig_post
+    # disabled by default -> no network, no events
+    assert list(cursor_api.collect(_cfg(Path("/tmp")), {})) == []
+    print("ok cursor_api")
+
+
 def test_cursor_db_path() -> None:
     from agent_usage_tracker.collectors.cursor import _cursor_db
     home = Path("/tmp/fakehome")
@@ -443,6 +501,7 @@ def main() -> int:
     test_pi()
     test_cursor()
     test_cursor_sdk()
+    test_cursor_api()
     test_export_drains_past_cap()
     test_file_identity_reset()
     test_cursor_db_path()

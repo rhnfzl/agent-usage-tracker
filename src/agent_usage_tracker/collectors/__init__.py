@@ -8,13 +8,14 @@ watermark). The runner pushes `events`, and only on a successful push calls `com
 
 from __future__ import annotations
 
-from . import claude_code, codex, cursor, cursor_sdk, pi
+from . import claude_code, codex, cursor, cursor_api, cursor_sdk, pi
 
 REGISTRY = {
     claude_code.NAME: claude_code.collect,
     codex.NAME: codex.collect,
     cursor.NAME: cursor.collect,
     cursor_sdk.NAME: cursor_sdk.collect,
+    cursor_api.NAME: cursor_api.collect,
     pi.NAME: pi.collect,
 }
 

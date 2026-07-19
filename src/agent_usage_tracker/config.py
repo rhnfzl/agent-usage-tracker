@@ -12,7 +12,7 @@ import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
-ALL_AGENTS = ("claude_code", "codex", "cursor", "cursor_sdk", "pi")
+ALL_AGENTS = ("claude_code", "codex", "cursor", "cursor_sdk", "cursor_api", "pi")
 
 
 def _config_path() -> Path:
@@ -39,6 +39,8 @@ class Config:
     home: Path
     cursor_db_path: str | None = None      # override Cursor's state.vscdb location
     cursor_sdk_manifests: str | None = None  # glob of orchestrator manifest.json files (SDK usage)
+    cursor_api: bool = False               # opt-in: pull accurate usage from Cursor's dashboard API
+    cursor_api_lookback_days: int = 90     # first-scan window when there is no watermark yet
     # Cloudflare Access service token (Pattern 2) so a machine can push through CF Access from
     # anywhere - no VPN. Both set -> sent as CF-Access-Client-Id / CF-Access-Client-Secret headers.
     cf_access_client_id: str | None = None
@@ -93,6 +95,8 @@ def load_config() -> Config:
         home=Path(data.get("home") or Path.home()).expanduser(),
         cursor_db_path=_resolve(data.get("cursor_db_path")),
         cursor_sdk_manifests=_resolve(data.get("cursor_sdk_manifests")),
+        cursor_api=bool(data.get("cursor_api", False)),
+        cursor_api_lookback_days=int(data.get("cursor_api_lookback_days") or 90),
         cf_access_client_id=cf_id,
         cf_access_client_secret=cf_secret,
     )

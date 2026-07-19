@@ -166,6 +166,9 @@ def cmd_status(cfg: Config, agents: tuple[str, ...]) -> None:
         wm = state.get("collectors", {}).get(name, {})
         if name in ("cursor", "cursor_sdk"):
             detail = "full-scan each run (no watermark)"
+        elif name == "cursor_api":
+            detail = ("since_ms=" + str(wm["since_ms"])) if "since_ms" in wm else \
+                     ("enabled, not yet scanned" if cfg.cursor_api else "disabled (cursor_api=false)")
         elif "files" in wm:
             detail = f"{len(wm['files'])} files tracked"
         else:
