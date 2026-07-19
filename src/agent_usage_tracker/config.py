@@ -29,6 +29,15 @@ def _resolve(value):
     return value
 
 
+def _as_bool(value) -> bool:
+    """Truthy parse that respects a quoted string. TOML `x = false` is already a native bool, but
+    `x = "false"` (a quoted string) would be truthy under bool(); treat common false-y strings as
+    False so a mistyped opt-in flag can't silently enable a network collector."""
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "yes", "on")
+    return bool(value)
+
+
 @dataclass(slots=True)
 class Config:
     machine: str
@@ -95,7 +104,7 @@ def load_config() -> Config:
         home=Path(data.get("home") or Path.home()).expanduser(),
         cursor_db_path=_resolve(data.get("cursor_db_path")),
         cursor_sdk_manifests=_resolve(data.get("cursor_sdk_manifests")),
-        cursor_api=bool(data.get("cursor_api", False)),
+        cursor_api=_as_bool(data.get("cursor_api", False)),
         cursor_api_lookback_days=int(data.get("cursor_api_lookback_days") or 90),
         cf_access_client_id=cf_id,
         cf_access_client_secret=cf_secret,

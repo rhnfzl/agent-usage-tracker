@@ -27,7 +27,7 @@ from typing import Callable, Iterator
 
 from ..config import Config
 from ..event import UsageEvent, make_event_id
-from ._util import safe_int
+from ._util import basename, safe_int
 
 NAME = "cursor_sdk"
 
@@ -51,7 +51,7 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[UsageEvent], Callable[
         if not isinstance(m, dict) or not isinstance(m.get("runs"), list):
             continue
         ticket = m.get("ticket") or path
-        project = m.get("project")
+        project = basename(m.get("project"))   # basename-only (never a full path) per CONTRACT.md
         for pos, r in enumerate(m["runs"]):
             if not isinstance(r, dict):
                 continue

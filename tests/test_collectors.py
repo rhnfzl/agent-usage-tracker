@@ -338,6 +338,13 @@ def test_cursor_api() -> None:
     assert ev.agent == "cursor" and ev.provider == "cursor" and ev.model == "composer-2.5"
     assert cursor_api._map_event(teammate, UID) is None      # SAFETY: never a teammate's event
     assert cursor_api._map_event(zero, UID) is None
+    # privacy hardening: empty/None/'None' ids must NEVER match, even on both sides
+    assert not cursor_api._same_user("", "")
+    assert not cursor_api._same_user(None, UID)
+    assert not cursor_api._same_user("None", None)
+    assert not cursor_api._same_user(UID, "")
+    assert cursor_api._same_user(UID, UID) and cursor_api._same_user(str(UID), UID)
+    assert cursor_api._map_event({**mine, "owningUser": ""}, "") is None   # empty both sides -> drop
     # non-str model coerced to None (no crash downstream)
     assert cursor_api._map_event({**mine, "model": {"x": 1}, "conversationId": "c3"}, UID).model is None
 

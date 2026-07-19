@@ -63,15 +63,19 @@ def _auth(cfg: Config) -> tuple[str, int] | None:
         # sub is the second JWT segment's "sub"; the web cookie is  <sub>::<jwt>  (:: url-encoded)
         payload = token.split(".")[1]
         payload += "=" * (-len(payload) % 4)
-        sub = json.loads(base64.urlsafe_b64decode(payload)).get("sub", "")
+        claims = json.loads(base64.urlsafe_b64decode(payload))
+        if not isinstance(claims, dict):     # a JWT payload that decodes to a list/scalar
+            return None
+        sub = claims.get("sub", "")
         try:
-            team_id = int(json.loads(team_raw).get("teamId")) if team_raw else 0
+            team = json.loads(team_raw) if team_raw else {}
+            team_id = int(team.get("teamId") or 0) if isinstance(team, dict) else 0
         except (json.JSONDecodeError, TypeError, ValueError):
             team_id = 0
         cookie = f"WorkosCursorSessionToken={urllib.parse.quote(sub)}%3A%3A{token}"
         return cookie, team_id
-    except (sqlite3.DatabaseError, ValueError, KeyError, IndexError,
-            binascii.Error, json.JSONDecodeError):
+    except (sqlite3.DatabaseError, ValueError, KeyError, IndexError, TypeError,
+            AttributeError, binascii.Error, json.JSONDecodeError):
         return None                      # malformed/partial token -> treat as no auth, never crash
     finally:
         con.close()
@@ -89,9 +93,18 @@ def _post(cookie: str, name: str, body: dict) -> Any:
         return json.loads(resp.read())
 
 
+def _same_user(owner, uid) -> bool:
+    """True only when BOTH ids are present, non-empty scalars AND equal. Guards the privacy
+    boundary: an empty/missing owningUser must never match an empty/'None' uid on a team feed."""
+    if owner is None or uid is None:
+        return False
+    o, u = str(owner).strip(), str(uid).strip()
+    return o != "" and u != "" and o.lower() != "none" and o == u
+
+
 def _map_event(e: dict, uid) -> UsageEvent | None:
     """One Cursor usage event -> UsageEvent, or None if it is not this user's or has no tokens."""
-    if not isinstance(e, dict) or str(e.get("owningUser")) != str(uid):
+    if not isinstance(e, dict) or not _same_user(e.get("owningUser"), uid):
         return None                       # SAFETY: never emit another team member's event
     tu = e.get("tokenUsage")
     if not isinstance(tu, dict):
@@ -133,9 +146,9 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[UsageEvent], Callable[
     cookie, team_id = auth
     try:
         me = _post(cookie, "get-me", {})
-        uid = me.get("userId")
-        if uid is None:
-            print("aut: cursor_api: could not resolve userId; skipping", file=sys.stderr)
+        uid = me.get("userId") if isinstance(me, dict) else None
+        if not uid:                       # None, empty, or non-dict response -> can't self-scope, skip
+            print("aut: cursor_api: could not resolve a userId; skipping", file=sys.stderr)
             return
         # incremental: only fetch events newer than the last one we committed (epoch ms)
         since = safe_int(wm.get("since_ms"))
@@ -150,19 +163,27 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[UsageEvent], Callable[
             batch = data.get("usageEventsDisplay") if isinstance(data, dict) else None
             if not batch:
                 break
+            new_in_page = 0
             for raw in batch:
-                ms = safe_int(raw.get("timestamp"))
-                if ms < since:           # STRICTLY older than the watermark -> past new events, stop.
-                    batch = None         # events at exactly `since` are re-emitted (event_id dedups
-                    break                # at the sink) so a same-ms sibling event is never missed.
-                ev = _map_event(raw, uid)
+                # SKIP (not break) rows older than the watermark: robust to a page that isn't
+                # perfectly newest-first, so a stray old row can't hide newer rows behind it.
+                if safe_int(raw.get("timestamp")) < since:
+                    continue
+                ev = _map_event(raw, uid)   # also drops teammates' events + zero-token rows
                 if ev is None:
                     continue
-                newest = max(newest, ms)
+                new_in_page += 1
+                newest = max(newest, safe_int(raw.get("timestamp")))
                 events.append(ev)
-            if batch is None or len(batch) < _PAGE:
-                break
-    except (urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError, OSError) as exc:
+            if new_in_page == 0 or len(batch) < _PAGE:
+                break                       # a whole page had nothing new, or last page -> done
+        else:
+            # loop ran the full cap without a natural stop: a very large window remains unread.
+            # Never happens for 6h deltas; only a huge first backfill. Flag it (don't silently orphan).
+            print(f"aut: cursor_api: reached the {_MAX_PAGES}-page cap; older events this window may "
+                  "be unread -- shorten cursor_api_lookback_days or run again.", file=sys.stderr)
+    except (urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError,
+            AttributeError, TypeError, OSError) as exc:
         print(f"aut: cursor_api: usage fetch failed ({exc}); skipping this run", file=sys.stderr)
         return
 

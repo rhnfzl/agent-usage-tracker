@@ -42,6 +42,13 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[UsageEvent], Callable[
         # (message.id, requestId) within the scan, keeping the max-total record (also correct if
         # the repeats are cumulative-growing rather than identical), and derive event_id from that
         # key so the sink dedups the same message across scans too.
+        #
+        # Accepted-low: a message whose blocks straddle a scan boundary (a scan racing an in-flight
+        # write) or the _MAX_LINES chunk cap is deduped per-chunk, so its two halves can carry
+        # different first-block ts and both persist (sink conflicts on (event_id, ts)) -> that one
+        # message double-counts. Reachability is a mid-write race on a single message; impact is one
+        # message; same trust class as the other accepted lows (st_ino reuse, TOCTOU). Not worth a
+        # persistent per-message ts cache to close.
         best: dict[str, UsageEvent] = {}
         for raw in lines:
             try:
