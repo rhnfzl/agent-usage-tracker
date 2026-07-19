@@ -56,8 +56,9 @@ agents  = ["claude_code", "codex", "cursor", "cursor_sdk", "pi"]
 [transport]
 webhook_url    = "https://n8n.example/webhook/llm-usage"
 webhook_secret = "env:AUT_WEBHOOK_SECRET"
-# cf_access_client_id/secret = env:...  # sync from ANYWHERE through Cloudflare Access, no VPN
-# pg_dsn       = "env:AUT_PG_DSN"        # optional Tailscale fallback
+# cf_access_client_id     = "env:CF_ACCESS_CLIENT_ID"      # sync from ANYWHERE via Cloudflare
+# cf_access_client_secret = "env:CF_ACCESS_CLIENT_SECRET"  #   Access, no VPN (see below)
+# pg_dsn       = "env:AUT_PG_DSN"        # optional direct-Postgres fallback
 ```
 
 **Syncing from anywhere (no VPN).** If the webhook sits behind Cloudflare Access, set a service

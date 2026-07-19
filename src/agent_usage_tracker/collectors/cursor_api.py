@@ -19,6 +19,7 @@ No prompt/response content is read - only token counts, model, and timestamp.
 from __future__ import annotations
 
 import base64
+import binascii
 import json
 import sqlite3
 import sys
@@ -66,8 +67,9 @@ def _auth(cfg: Config) -> tuple[str, int] | None:
             team_id = 0
         cookie = f"WorkosCursorSessionToken={urllib.parse.quote(sub)}%3A%3A{token}"
         return cookie, team_id
-    except (sqlite3.DatabaseError, ValueError, KeyError, json.JSONDecodeError):
-        return None
+    except (sqlite3.DatabaseError, ValueError, KeyError, IndexError,
+            binascii.Error, json.JSONDecodeError):
+        return None                      # malformed/partial token -> treat as no auth, never crash
     finally:
         con.close()
 
@@ -146,13 +148,13 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[UsageEvent], Callable[
             if not batch:
                 break
             for raw in batch:
+                ms = safe_int(raw.get("timestamp"))
+                if ms < since:           # STRICTLY older than the watermark -> past new events, stop.
+                    batch = None         # events at exactly `since` are re-emitted (event_id dedups
+                    break                # at the sink) so a same-ms sibling event is never missed.
                 ev = _map_event(raw, uid)
                 if ev is None:
                     continue
-                ms = safe_int(raw.get("timestamp"))
-                if ms <= since:          # already have it (feed is newest-first) -> stop paging
-                    batch = None
-                    break
                 newest = max(newest, ms)
                 events.append(ev)
             if batch is None or len(batch) < _PAGE:

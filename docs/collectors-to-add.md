@@ -37,6 +37,9 @@ Effort: ~1 hour once the real DB exists to read the schema from.
 - **Windsurf** - `state.vscdb` usage blob is undocumented; needs reverse-engineering a key. Low value.
 - **JetBrains AI** - `AIAssistantQuotaManager2.xml` is quota-only (no token log), so it would feed a
   quota gauge, not token-usage events. Different data model; revisit only if quota tracking is added.
-- **Gemini CLI / Copilot / Amp / Kiro / everything else** - API-key / OAuth / browser-cookie based.
-  Capturing them would turn this from a passive local parser into a live-polling credential client,
-  which is out of scope. (The one exception already made is `cursor_api`, opt-in and off by default.)
+- **Amp / Kiro** - exposed via a CLI-invocation path (`amp usage`, `kiro-cli ... /usage`), i.e.
+  scraping a command's output, not parsing a log file. Out of scope because it's live CLI execution,
+  a different collector shape from "tail a file", not because of stored credentials.
+- **Gemini CLI / Copilot / everything else** - API-key / OAuth / browser-cookie based. Capturing
+  them would turn this from a passive local parser into a live-polling credential client, which is
+  out of scope. (The one exception already made is `cursor_api`, opt-in and off by default.)

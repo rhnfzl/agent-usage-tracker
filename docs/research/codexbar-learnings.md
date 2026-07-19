@@ -83,9 +83,13 @@ day.
   token file that's already local and already trusted (the CLI itself reads it to authenticate
   every session).
 
-**This is the top thing worth borrowing.** It's a small, well-scoped addition (2 read-only GETs,
-reusing credential files we can already locate) that gives the tracker something no amount of
-JSONL parsing can: "how much of my 5-hour window is left right now."
+**High value, but note the boundary shift.** This is authenticated OAuth polling, not passive
+file-parsing — adopting it moves the tracker past its "no live calls, no credentials" default (the
+same boundary the opt-in `cursor_api` collector already crosses, off by default). So treat quota
+tracking as a **separate opt-in feature / future product decision**, not a drop-in to the passive
+core. Given that, it's a small, well-scoped addition (2 read-only GETs, reusing credential files we
+can already locate) that gives something no amount of JSONL parsing can: "how much of my 5-hour
+window is left right now."
 
 ## Cost / pricing table
 

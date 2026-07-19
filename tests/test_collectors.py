@@ -376,6 +376,32 @@ def test_cursor_api() -> None:
         assert again == [], again                            # older than watermark -> skipped
     finally:
         cursor_api._auth, cursor_api._post = orig_auth, orig_post
+    # a same-ms event at the watermark must NOT be permanently skipped (stop is strictly-older)
+    wm2 = {"since_ms": 1784314315897}
+    page1["usageEventsDisplay"] = [
+        {"owningUser": UID, "timestamp": "1784314315897", "model": "m", "conversationId": "same-ms",
+         "tokenUsage": {"inputTokens": 3, "outputTokens": 3}},          # == watermark -> re-emitted
+        {"owningUser": UID, "timestamp": "1784314310000", "model": "m", "conversationId": "older",
+         "tokenUsage": {"inputTokens": 1, "outputTokens": 1}}]          # older -> stops paging
+    cursor_api._auth, cursor_api._post = (lambda c: ("ck", 1)), fake_post
+    try:
+        boundary = [e for batch, _ in cursor_api.collect(cfg, wm2) for e in batch]
+    finally:
+        cursor_api._auth, cursor_api._post = orig_auth, orig_post
+    assert len(boundary) == 1 and boundary[0].total_tokens == 6, boundary   # same-ms emitted, not skipped
+
+    # _auth must NOT crash on a malformed stored token (non-JWT / bad base64) -> returns None
+    for bad in ("not-a-jwt", "a.b", "x.@@@notbase64@@@.z", ""):
+        with tempfile.TemporaryDirectory() as d:
+            db = Path(d) / "state.vscdb"
+            con = sqlite3.connect(db)
+            con.execute("CREATE TABLE ItemTable (key TEXT, value TEXT)")
+            con.execute("INSERT INTO ItemTable VALUES ('cursorAuth/accessToken', ?)", (bad,))
+            con.commit()
+            con.close()
+            c = _cfg(Path(d))
+            c.cursor_db_path = str(db)
+            assert cursor_api._auth(c) is None, bad          # malformed -> no auth, no crash
     # disabled by default -> no network, no events
     assert list(cursor_api.collect(_cfg(Path("/tmp")), {})) == []
     print("ok cursor_api")

@@ -92,6 +92,9 @@ def run_scan(cfg: Config, agents: list[str], dry_run: bool) -> dict:
                 flush()
                 if _wm_fp(wm) == before:    # a whole pass advanced nothing -> fully drained
                     break
+            else:                           # loop exhausted without draining (astronomically rare)
+                print(f"aut: warning: {name} hit the drain-pass cap ({_MAX_DRAIN_PASSES}); more "
+                      "usage remains and will be picked up on the next scan.", file=sys.stderr)
         finally:
             if not dry_run:
                 save_state(state)
