@@ -215,6 +215,9 @@ def test_cursor_sdk() -> None:
                 {"index": 4, "phase": "revise", "model": "composer-2.5", "status": "completed",
                  "finished_at": "2026-07-18T10:03:00+00:00", "run_id": "r4",
                  "usage": {"input_tokens": 7, "output_tokens": 3, "cache_read_tokens": 5}},  # no total
+                {"index": 5, "phase": "bad-model", "model": {"nested": "obj"},   # non-str -> None, no crash
+                 "status": "completed", "finished_at": "2026-07-18T10:04:00+00:00", "run_id": "r5",
+                 "usage": {"input_tokens": 9, "output_tokens": 1}},
             ],
         }))
         # a stray JSON matched by the same glob but NOT a manifest -> must be ignored, not crash
@@ -225,7 +228,7 @@ def test_cursor_sdk() -> None:
         cfg = _cfg(home)
         cfg.cursor_sdk_manifests = str(home / "**/.state/runs/*/manifest.json")
         ev = _drain(cursor_sdk.collect, cfg)
-        assert len(ev) == 2, ev                                  # index 1 + 4; 2 (no usage) & 3 (zero) out
+        assert len(ev) == 3, ev                          # index 1, 4, 5; 2 (no usage) & 3 (zero) out
         e1 = next(e for e in ev if e.input_tokens == 100)
         assert e1.output_tokens == 20 and e1.cache_read_tokens == 100 and e1.cache_write_tokens == 0
         assert e1.total_tokens == 220                            # given total kept as-is
@@ -234,6 +237,8 @@ def test_cursor_sdk() -> None:
         e4 = next(e for e in ev if e.input_tokens == 7)
         assert e4.total_tokens == 15                             # 7 + 3 + 5, summed when total absent
         assert e1.event_id != e4.event_id
+        e5 = next(e for e in ev if e.input_tokens == 9)
+        assert e5.model is None                          # non-str model coerced to None (no crash)
     # two runs with NO index and NO run_id must still get distinct ids (append-order position)
     with tempfile.TemporaryDirectory() as d2:
         h2 = Path(d2)
@@ -249,6 +254,26 @@ def test_cursor_sdk() -> None:
         cfg2.cursor_sdk_manifests = str(h2 / "**/.state/runs/*/manifest.json")
         ev2 = _drain(cursor_sdk.collect, cfg2)
         assert len(ev2) == 2 and ev2[0].event_id != ev2[1].event_id, ev2
+    # a documented "~/..."-style glob must expand the home dir (glob.glob does not do this itself)
+    import os as _os
+    fake_home = _os.path.join(tempfile.gettempdir(), "aut_cursor_sdk_hometest")
+    mp3 = Path(fake_home) / ".state/runs/H/manifest.json"
+    mp3.parent.mkdir(parents=True, exist_ok=True)
+    mp3.write_text(json.dumps({"ticket": "H", "runs": [
+        {"index": 1, "model": "m", "finished_at": "2026-07-18T10:00:00+00:00",
+         "usage": {"input_tokens": 4, "output_tokens": 1}}]}))
+    old = _os.environ.get("HOME")
+    _os.environ["HOME"] = tempfile.gettempdir()
+    try:
+        cfg3 = _cfg(Path("/tmp"))
+        cfg3.cursor_sdk_manifests = "~/aut_cursor_sdk_hometest/.state/runs/*/manifest.json"
+        ev3 = _drain(cursor_sdk.collect, cfg3)
+        assert len(ev3) == 1 and ev3[0].input_tokens == 4, ev3   # ~ expanded and matched
+    finally:
+        if old is not None:
+            _os.environ["HOME"] = old
+        import shutil as _sh
+        _sh.rmtree(fake_home, ignore_errors=True)
     # unset glob -> collector no-ops (opt-in)
     assert _drain(cursor_sdk.collect, _cfg(Path("/tmp"))) == []
     print("ok cursor_sdk")

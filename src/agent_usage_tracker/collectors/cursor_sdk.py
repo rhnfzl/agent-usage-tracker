@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import glob
 import json
+import os
 from typing import Callable, Iterator
 
 from ..config import Config
@@ -39,6 +40,7 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[UsageEvent], Callable[
     pattern = cfg.cursor_sdk_manifests
     if not pattern:
         return
+    pattern = os.path.expanduser(pattern)   # glob does not expand ~; the documented form uses it
     events: list[UsageEvent] = []
     for path in glob.glob(pattern, recursive=True):
         try:
@@ -67,11 +69,14 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[UsageEvent], Callable[
             # unique per-manifest run id even when the optional `index`/`run_id` fields are absent.
             idx = r.get("index")
             run_disc = str(pos if idx is None else idx)
+            model = r.get("model")
+            if not isinstance(model, str):   # a list/dict here becomes an unhashable dict key downstream
+                model = None
             events.append(UsageEvent(
                 event_id=make_event_id(NAME, str(ticket), run_disc, str(r.get("run_id") or "")),
                 ts=r.get("finished_at") or r.get("started_at"),
                 agent=NAME,
-                model=r.get("model"),
+                model=model,
                 provider="cursor",
                 input_tokens=inp,
                 output_tokens=out,
