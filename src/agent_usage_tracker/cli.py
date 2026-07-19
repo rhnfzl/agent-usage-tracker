@@ -12,6 +12,7 @@ sums straight from your real logs.
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 
 from .collectors import REGISTRY
@@ -21,6 +22,17 @@ from .push import make_sender
 from .state import collector_wm, load_state, save_state
 
 BATCH = 500
+# Each collect() pass reads at most _MAX_LINES (50k) new lines per file (see collectors/_util.py).
+# One-shot commands (export/backfill) and each scan drain by re-running collect() until the
+# watermark stops advancing. Bound the loop far above any real file so a misbehaving collector
+# can't spin forever (50k lines/pass * this = an absurd ceiling, never hit in practice).
+_MAX_DRAIN_PASSES = 100_000
+
+
+def _wm_fp(wm: dict) -> str:
+    """Stable fingerprint of a collector's watermark; unchanged across a pass == fully drained.
+    Full-scan collectors (cursor, cursor_sdk) never mutate wm, so they settle after one pass."""
+    return json.dumps(wm, sort_keys=True, default=str)
 
 
 def _blank_agg() -> dict:
@@ -55,30 +67,31 @@ def run_scan(cfg: Config, agents: list[str], dry_run: bool) -> dict:
         buf_commits: list = []
 
         def flush() -> None:
-            if not dry_run and buf_events and sender is not None:
+            if buf_events and sender is not None:   # sender is None in dry-run -> nothing sent
                 sender(buf_events)          # raises on delivery failure -> commits skipped
-            if not dry_run:
-                for commit in buf_commits:
-                    commit()
+            for commit in buf_commits:      # always advance the (in-memory) watermark so the
+                commit()                    # drain loop below terminates; only scan persists it
             buf_events.clear()
             buf_commits.clear()
 
         try:
-            for events, commit in collect(cfg, wm):
-                for e in events:
-                    e.machine = cfg.machine
-                    if not valid_ts(e.ts):
-                        agg["skipped_no_ts"] += 1
-                        continue
-                    _add(agg, e)
-                    if not dry_run:
-                        buf_events.append(e)
-                if not dry_run:
+            for _ in range(_MAX_DRAIN_PASSES):
+                before = _wm_fp(wm)
+                for events, commit in collect(cfg, wm):
+                    for e in events:
+                        e.machine = cfg.machine
+                        if not valid_ts(e.ts):
+                            agg["skipped_no_ts"] += 1
+                            continue
+                        _add(agg, e)
+                        if not dry_run:
+                            buf_events.append(e)
                     buf_commits.append(commit)
                     if len(buf_events) >= BATCH:
                         flush()
-            if not dry_run:
                 flush()
+                if _wm_fp(wm) == before:    # a whole pass advanced nothing -> fully drained
+                    break
         finally:
             if not dry_run:
                 save_state(state)
@@ -120,15 +133,21 @@ def run_export(cfg: Config, agents: list[str], out) -> tuple[int, int]:
     writer.writerow(COLUMNS)
     n = skipped = 0
     for name in agents:
-        for events, _commit in REGISTRY[name](cfg, {}):
-            for e in events:
-                e.machine = cfg.machine
-                if not valid_ts(e.ts):
-                    skipped += 1
-                    continue
-                d = e.to_dict()
-                writer.writerow(["" if d[c] is None else d[c] for c in COLUMNS])
-                n += 1
+        wm: dict = {}
+        for _ in range(_MAX_DRAIN_PASSES):    # drain past the per-file line cap (one-shot command)
+            before = _wm_fp(wm)
+            for events, commit in REGISTRY[name](cfg, wm):
+                for e in events:
+                    e.machine = cfg.machine
+                    if not valid_ts(e.ts):
+                        skipped += 1
+                        continue
+                    d = e.to_dict()
+                    writer.writerow(["" if d[c] is None else d[c] for c in COLUMNS])
+                    n += 1
+                commit()                      # advance wm so the next pass continues past the cap
+            if _wm_fp(wm) == before:
+                break
     return n, skipped
 
 

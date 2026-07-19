@@ -50,8 +50,9 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[UsageEvent], Callable[
         except OSError:
             continue
         prev = files.get(path)
-        if not prev or prev.get("ino") != st.st_ino or st.st_size < safe_int(prev.get("off")):
-            prev = {"off": 0, "ino": st.st_ino, "model": None}
+        if (not prev or (prev.get("dev"), prev.get("ino")) != (st.st_dev, st.st_ino)
+                or st.st_size < safe_int(prev.get("off"))):   # identity is (dev, ino); see _util
+            prev = {"off": 0, "dev": st.st_dev, "ino": st.st_ino, "model": None}
         off = safe_int(prev.get("off"))
         if st.st_size <= off:
             continue

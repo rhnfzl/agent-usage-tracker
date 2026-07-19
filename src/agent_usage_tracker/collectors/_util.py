@@ -38,32 +38,38 @@ def read_new_lines(path: str, offset: int) -> tuple[list[bytes], int]:
         return [], offset
     lines: list[bytes] = []
     consumed = offset
-    with open(path, "rb") as fh:
-        fh.seek(offset)
-        for raw in fh:
-            if raw.endswith(b"\n"):
-                lines.append(raw)
-                consumed += len(raw)
-                if len(lines) >= _MAX_LINES:
-                    break        # commit here; next scan continues from `consumed`
-            else:
-                break            # trailing partial line at EOF; picked up whole next time
+    try:                         # TOCTOU: the file can vanish/rotate between getsize and open
+        with open(path, "rb") as fh:
+            fh.seek(offset)
+            for raw in fh:
+                if raw.endswith(b"\n"):
+                    lines.append(raw)
+                    consumed += len(raw)
+                    if len(lines) >= _MAX_LINES:
+                        break    # commit here; next scan continues from `consumed`
+                else:
+                    break        # trailing partial line at EOF; picked up whole next time
+    except OSError:
+        return [], offset        # gone/unreadable now; leave the offset put, retry next scan
     return lines, consumed
 
 
 def scan_file(path: str, fstate: dict) -> tuple[list[bytes], dict]:
-    """Inode-aware tail. `fstate` carries {'ino','off'} (empty on first sight). Resets the
-    offset to 0 when the inode changes (file rotated/replaced) so the beginning of a
-    replacement file is never skipped. Returns (complete_lines, new_fstate)."""
+    """Inode-aware tail. `fstate` carries {'dev','ino','off'} (empty on first sight). Resets the
+    offset to 0 when the file behind the path changes (rotated/replaced) so the beginning of a
+    replacement file is never skipped. Identity is (st_dev, st_ino): an inode number alone is
+    only unique within a device, so a path that moves across filesystems could otherwise collide.
+    Returns (complete_lines, new_fstate)."""
     try:
         st = os.stat(path)
     except OSError:
         return [], fstate
     off = safe_int(fstate.get("off"))
-    if fstate.get("ino") != st.st_ino:     # different file behind the same path
+    if (fstate.get("dev"), fstate.get("ino")) != (st.st_dev, st.st_ino):  # different file at path
         off = 0
     lines, new_off = read_new_lines(path, off)
     new_fstate = dict(fstate)
+    new_fstate["dev"] = st.st_dev
     new_fstate["ino"] = st.st_ino
     new_fstate["off"] = new_off
     return lines, new_fstate

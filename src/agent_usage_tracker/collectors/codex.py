@@ -26,8 +26,8 @@ from ._util import basename, read_new_lines, safe_int
 NAME = "codex"
 
 
-def _fresh_state(ino: int | None = None) -> dict:
-    return {"off": 0, "ino": ino, "model": None, "provider": "openai",
+def _fresh_state(dev: int | None = None, ino: int | None = None) -> dict:
+    return {"off": 0, "dev": dev, "ino": ino, "model": None, "provider": "openai",
             "session_id": None, "cwd": None, "tc_ord": 0}
 
 
@@ -43,14 +43,14 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[UsageEvent], Callable[
         except OSError:
             continue
         prev = files.get(path)
-        # New/rotated file (or a state-format upgrade whose old state lacks 'ino') -> reset and
-        # re-read. Safe because event_id is content-deterministic: re-emitted rows dedup at the
-        # sink. Changing the id scheme itself would instead need a state-version bump.
-        if not prev or prev.get("ino") != st.st_ino:
-            prev = _fresh_state(st.st_ino)
+        # New/rotated file (or a state-format upgrade whose old state lacks 'dev'/'ino') -> reset
+        # and re-read. Safe because event_id is content-deterministic: re-emitted rows dedup at
+        # the sink. Identity is (st_dev, st_ino); ino alone is only unique within a device.
+        if not prev or (prev.get("dev"), prev.get("ino")) != (st.st_dev, st.st_ino):
+            prev = _fresh_state(st.st_dev, st.st_ino)
         off = safe_int(prev.get("off"))
         if st.st_size < off:                            # truncated
-            prev = _fresh_state(st.st_ino)
+            prev = _fresh_state(st.st_dev, st.st_ino)
             off = 0
         if st.st_size <= off:
             continue

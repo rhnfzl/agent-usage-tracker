@@ -83,11 +83,15 @@ def make_sender(cfg: Config) -> Callable[[list[UsageEvent]], None]:
         )
     if cfg.has_webhook:
         parsed = urlparse(cfg.webhook_url)
+        scheme = parsed.scheme.lower()
         host = (parsed.hostname or "").lower()
-        if parsed.scheme.lower() == "http" and host not in ("localhost", "127.0.0.1", "::1"):
+        local = host in ("localhost", "127.0.0.1", "::1")
+        # Allowlist, not blocklist: only https, or http to localhost for testing. Anything else
+        # (http to a remote host, or ftp:/file:/no-scheme) could leak the secret or misfire.
+        if not (scheme == "https" or (scheme == "http" and local)):
             raise SystemExit(
-                f"refusing to send the webhook secret over plaintext http:// to '{host}'; "
-                "use https:// (http is allowed only for localhost testing)."
+                f"refusing to send the webhook secret to '{cfg.webhook_url}': only https:// "
+                f"(or http:// to localhost for testing) is allowed, not '{scheme or 'no'}-scheme'."
             )
 
     def send(batch: list[UsageEvent]) -> None:

@@ -50,7 +50,7 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[UsageEvent], Callable[
             continue
         ticket = m.get("ticket") or path
         project = m.get("project")
-        for r in m["runs"]:
+        for pos, r in enumerate(m["runs"]):
             if not isinstance(r, dict):
                 continue
             u = r.get("usage")
@@ -63,8 +63,12 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[UsageEvent], Callable[
             total = safe_int(u.get("total_tokens")) or (inp + out + cr + cw)
             if total == 0:
                 continue
+            # runs[] is append-only (never reordered/removed mid-list), so `pos` is a stable,
+            # unique per-manifest run id even when the optional `index`/`run_id` fields are absent.
+            idx = r.get("index")
+            run_disc = str(pos if idx is None else idx)
             events.append(UsageEvent(
-                event_id=make_event_id(NAME, str(ticket), str(r.get("index")), r.get("run_id") or ""),
+                event_id=make_event_id(NAME, str(ticket), run_disc, str(r.get("run_id") or "")),
                 ts=r.get("finished_at") or r.get("started_at"),
                 agent=NAME,
                 model=r.get("model"),

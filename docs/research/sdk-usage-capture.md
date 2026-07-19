@@ -19,7 +19,7 @@ plus `total_cost_usd`. The TS SDK additionally exposes a per-model breakdown via
 
 Known accuracy bugs: `output_tokens` has been reported wrong/non-cumulative (https://github.com/anthropics/claude-agent-sdk-python/issues/112) and thinking tokens get folded into `output_tokens` with no separate breakdown (https://github.com/anthropics/claude-agent-sdk-python/issues/540).
 
-**Default persistence.** The `claude` CLI (which the SDK drives) writes a full per-session JSONL transcript to `~/.claude/projects/<encoded-cwd>/<session-uuid>.jsonl`, one JSON object per line, with `message.usage` embedded on every assistant record — no setup required (https://claude-dev.tools/docs/jsonl-format, https://www.tokenforest.com.au/en/track-claude-code-usage). Caveat: a currently-open bug reports that the JSONL's `output_tokens` field is a placeholder (1–2) — the real value only appears in the streaming `result` event, never persisted to disk (https://github.com/anthropics/claude-code/issues/25941). `input_tokens`, `cache_creation_input_tokens`, `cache_read_input_tokens` are reported accurate.
+**Default persistence.** The `claude` CLI (which the SDK drives) writes a full per-session JSONL transcript to `~/.claude/projects/<encoded-cwd>/<session-uuid>.jsonl`, one JSON object per line, with `message.usage` embedded on every assistant record — no setup required (https://claude-dev.tools/docs/jsonl-format, https://www.tokenforest.com.au/en/track-claude-code-usage). Caveat: bug reports describe the JSONL's `output_tokens` field as an unreliable placeholder (1–2) with the real value appearing only in the streaming `result` event (see https://github.com/anthropics/claude-code/issues/25941 for the persisted-vs-streamed discrepancy; note issue numbers and open/closed status drift, so treat the field-accuracy claim as version-dependent and re-check against your CLI version). `input_tokens`, `cache_creation_input_tokens`, `cache_read_input_tokens` are reported accurate.
 
 **Auth.** Both: `ANTHROPIC_API_KEY` (pay-per-token) or `CLAUDE_CODE_OAUTH_TOKEN` from `claude setup-token` (Claude Pro/Max subscription quota, no API billing). API key takes precedence if both are set. OAuth tokens are policy-restricted (Feb 2026) to official Anthropic clients only. (https://lalatenduswain.medium.com/claude-code-on-claude-max-plan-understanding-oauth-token-vs-api-key-authentication-in-2026-96a6213d2cde)
 
@@ -37,7 +37,12 @@ Known accuracy bugs: `output_tokens` has been reported wrong/non-cumulative (htt
 
 **Auth.** Both: `CURSOR_API_KEY` (automation/CI) or browser OAuth login tied to a Cursor subscription (Pro/Business token pool) (https://cursor.com/docs/cli/reference/authentication).
 
-**Verdict: NEEDS EMIT HOOK.** Local chat storage doesn't reliably carry usage; usage lives in the SDK's in-process result or behind the Cloud Agents API (pollable, not a file to tail).
+**Three distinct capture surfaces — don't conflate them:**
+1. **`cursor-agent` CLI chat store** (`~/.cursor/chats/`): chat/prompt text only, no token usage → not parseable.
+2. **Cloud Agents API**: usage tracked server-side, retrievable by polling → not a local file to tail.
+3. **SDK-driven app that persists its own run manifest**: the in-process usage the SDK returns is written by the *app*. The reference case is the research-backend-tickets-orchestrator's per-ticket `manifest.json` (`{input_tokens, output_tokens, total_tokens, cache_read_tokens}` per run) → **parseable, no emit hook needed**. This tracker ships a `cursor_sdk` collector for exactly this surface (config `cursor_sdk_manifests`).
+
+**Verdict: PARSEABLE where an app persists a run manifest (surface 3, what our `cursor_sdk` collector does); otherwise NEEDS EMIT HOOK** — the bare SDK/CLI does not persist usage itself (surfaces 1-2).
 
 ---
 
@@ -81,7 +86,7 @@ Known accuracy bugs: `output_tokens` has been reported wrong/non-cumulative (htt
 
 ## 6. Vercel AI SDK (`ai` package)
 
-**Usage shape.** `generateText`/`streamText` return a `usage` object on the result (seen as `promptTokens`/`completionTokens`/`totalTokens` in older docs/third-party wrappers — https://revstack-dev-revstack-os.mintlify.app/sdks/ai; check current SDK version for `inputTokens`/`outputTokens` naming as the SDK evolves).
+**Usage shape.** `generateText`/`streamText` return a `usage` object (`LanguageModelUsage`). Current field names are `inputTokens`/`outputTokens`/`totalTokens`; `promptTokens`/`completionTokens` are legacy aliases seen in older docs/third-party wrappers (https://ai-sdk.dev, https://revstack-dev-revstack-os.mintlify.app/sdks/ai). Pin the shape to your installed SDK major version.
 
 **Default persistence.** None — plain in-process return value. OTel is fully opt-in per call via `experimental_telemetry: { isEnabled: true, recordInputs, recordOutputs }`, requiring an OTel SDK/exporter to be registered separately (e.g. `@vercel/otel`). When enabled it emits `ai.*` and `gen_ai.*` span attributes including token counts and is already supported out of the box by Pydantic Logfire, Sentry, SigNoz, Langfuse (https://pydantic.dev/articles/vercel-ai-sdk-logfire-otel, https://sentry.io/cookbook/vercel-ai-sdk-otel-sentry, https://signoz.io/blog/opentelemetry-vercel-ai-sdk).
 
@@ -158,10 +163,65 @@ This is the generic "receive one OTLP stream, cover many SDKs at once" path: a s
 
 ---
 
+## SDK-as-library persistence (the capture-for-free question)
+
+Follow-up question: when these three run **programmatically** (headless SDK call, not the interactive TUI), do they still write the same on-disk session file the existing collectors parse (`claude_code`, `codex`, `pi`), or does SDK use go invisible?
+
+### Claude Agent SDK → CAPTURED-FREE
+
+The official overview doc's own SDK-vs-Managed-Agents comparison table states it directly: **"Session state: JSONL on your filesystem"** for the Agent SDK (vs. "Anthropic-hosted event log" for Managed Agents) — https://code.claude.com/docs/en/agent-sdk/overview. This is the same JSONL-on-filesystem mechanism the `claude_code` collector already parses: the TS SDK "bundles a native Claude Code binary for your platform as an optional dependency" (i.e. it *is* the CLI binary, driven as a library) and the Python SDK drives the same binary. The doc's own Sessions example confirms the identifier used for resume is the same one written to disk: `query()`'s first `SystemMessage` (`subtype == "init"`) yields `message.data["session_id"]`, which is then passed back via `ClaudeAgentOptions(resume=session_id)` — this only works if that ID addresses a persisted transcript, i.e. `~/.claude/projects/<encoded-cwd>/<session_id>.jsonl`. No flag disables this; there is no ephemeral/no-persist mode documented for the SDK.
+
+One auth nuance that affects *which* traffic exists to capture, not persistence itself: the same doc states **"Unless previously approved, Anthropic does not allow third party developers to offer claude.ai login or rate limits for their products, including agents built on the Claude Agent SDK. Please use the API key authentication methods described in this document instead."** So SDK-driven usage (as opposed to a human's interactive `claude` session) is expected to run on `ANTHROPIC_API_KEY`, not subscription OAuth, in third-party products — doesn't change the file path, just the auth column for SDK-originated rows.
+
+**Relocation:** not explicitly covered in this pass; the CLI's own `CLAUDE_CONFIG_DIR` (documented elsewhere, not re-verified here) is the presumed lever if the collector needs to honor a moved store — flag for a follow-up check rather than assumed.
+
+### Codex SDK → CAPTURED-FREE, but the *official* doc is silent — verdict rests on third-party corroboration
+
+Fetching https://learn.chatgpt.com/docs/codex-sdk directly: **the official page does not state persistence behavior at all** — it shows `startThread()`/`run()`/`resumeThread(threadId)` usage but never says where a thread lives on disk or whether it's the same store as the CLI. Flagging that per the ask, rather than assuming from the API shape alone.
+
+The corroborating evidence, which is why the verdict still lands on CAPTURED-FREE:
+- A third-party guide states it in plain language: **"Sessions persist under `~/.codex/sessions`"** immediately under a `codex.startThread()` code sample (https://blakecrosley.com/guides/codex).
+- promptfoo's provider integration, which wraps the same `@openai/codex-sdk`, documents a `thread_id` config option as **"Resume existing thread from `~/.codex/sessions`"** (https://www.promptfoo.dev/docs/providers/openai-codex-sdk) — confirming the JS SDK reads/writes that exact CLI path, not a separate store.
+- The architecture is shared, not parallel: every SDK wrapper (including the third-party Elixir `codex_sdk`, built directly on the same underlying binary) describes itself as a thin client over a `CliSubprocess`/`Core.Session` that spawns **`codex-rs` — "OpenAI's Codex CLI"** as the actual execution engine (https://hexdocs.pm/codex_sdk). The SDK doesn't reimplement session storage; it drives the CLI binary, which writes rollout files by default the same way `codex exec` does.
+- promptfoo's own wrapper defaults to **"Ephemeral Threads (Default)"** — but read closely, that's promptfoo's own opinionated eval-harness default (new thread per eval, then discarded via its `persist_threads: false` config default), not a property of the raw `@openai/codex-sdk`. The SDK itself has no documented ephemeral-by-default behavior; ephemeral is something a caller opts into (mirroring `codex exec --ephemeral`).
+
+Net: `CODEX_HOME` (default `~/.codex`) is the same session store for CLI and SDK use, so **the existing `codex` collector already captures SDK-driven usage for free**, contingent on the SDK not being run with an explicit no-persist override — which the official doc doesn't name, because it doesn't document persistence at all.
+
+### Pi SDK → CAPTURED-FREE, and usage is confirmed present in the file
+
+Official docs (https://pi.dev/docs/latest/sdk, https://pi.dev/docs/latest/session-format, mirrored at https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/sdk.md) show the SDK's own basic usage example constructing a runtime with **`sessionManager: SessionManager.create(process.cwd())`** — the default, persistent session manager. The session-format doc gives the exact path, identical to what the CLI writes and what the `pi` collector already parses:
+```
+~/.pi/agent/sessions/<cwd-with-/-replaced-by-->/<file>.jsonl
+```
+The SDK doc's own `agentDir` description lists **"Sessions (`sessions/`)"** as one of the resources resolved under `agentDir` (default `~/.pi/agent/`) — the same directory tree, not a parallel one for SDK use.
+
+Usage is in the file: the session-format schema defines `AssistantMessage.usage: Usage` where
+```
+interface Usage {
+  input: number; output: number; cacheRead: number; cacheWrite: number;
+  totalTokens: number;
+  cost: { input: number; output: number; cacheRead: number; cacheWrite: number; total: number };
+}
+```
+— present on every assistant-turn entry, not just a session-level rollup. (`usage` only appears on `AssistantMessage`, not `UserMessage`/`ToolResultMessage`.)
+
+The **only** documented opt-out is explicit: `SessionManager.inMemory()` instead of `SessionManager.create(cwd)` disables persistence entirely. That's a caller choosing not to persist, not a default behavior — so default SDK use is captured by the existing collector for free. **Relocation lever:** not found in this pass (no env var documented for relocating `~/.pi/agent/`) — the collector's `home` override would need a manual path today; flag as a gap if Pi SDK users commonly rehome it.
+
+### Section verdict table
+
+| SDK | Writes same file the collector parses, by default? | Load-bearing evidence |
+|---|---|---|
+| Claude Agent SDK | **CAPTURED-FREE** | Official doc: "Session state: JSONL on your filesystem" (SDK-vs-Managed-Agents table); TS SDK bundles the actual CLI binary |
+| Codex SDK | **CAPTURED-FREE** (official doc silent; verdict rests on 3rd-party corroboration + shared `codex-rs` subprocess architecture) | blakecrosley.com: "Sessions persist under `~/.codex/sessions`"; promptfoo: `thread_id` resumes "from `~/.codex/sessions`"; Elixir `codex_sdk`: SDK is a client over the same CLI binary |
+| Pi SDK | **CAPTURED-FREE** (usage field confirmed in the persisted schema) | pi.dev SDK doc's own example uses `SessionManager.create(cwd)` (persistent default); session-format doc: identical path spec to CLI + `AssistantMessage.usage` schema |
+
+---
+
 ## Recommendation: 3 highest-leverage capture strategies
 
 1. **Tail the two default-on-disk transcripts first — Claude Code and Codex.** Both already write full JSONL session logs to disk with no setup (`~/.claude/projects/**/*.jsonl`, `~/.codex/sessions/**/rollout-*.jsonl` unless `--ephemeral`). This is free coverage for the two SDKs the user is most likely to run daily. Watch the two known field bugs: Claude Code's JSONL `output_tokens` is a placeholder (cross-check against the OTel metric or `cost-tracking` output if precision matters); Codex's `--json` stdout omits `reasoning_output_tokens` even though the rollout file has it — the rollout file is the accurate one.
 
 2. **Stand up one small local OTLP receiver for the opt-in-OTel cluster.** Claude Code, Codex, Vercel AI SDK, and Pydantic AI (via Logfire instrumentation) all speak the same `gen_ai.usage.*` semantic-convention names once their opt-in telemetry flag is flipped on. A single lightweight OTel Collector (or a minimal custom OTLP/HTTP receiver writing to a local file) captures all four with zero per-SDK parsing code — the highest-leverage single investment given how many SDKs already standardized on this wire format.
+   > **Privacy — capture tokens, not content, by default.** The same GenAI telemetry can carry prompts, responses, tool arguments, and source code (e.g. Vercel's `experimental_telemetry.recordInputs`/`recordOutputs`, https://ai-sdk.dev). A usage tracker only needs the `gen_ai.usage.*` counters. So: keep content-recording flags OFF; if a receiver is stood up, drop/redact message-body attributes at ingest, keep it bound to localhost/Tailscale, and apply the same short retention + access controls as the token store. Never export prompts or code off-box as a side effect of counting tokens.
 
 3. **Ship a tiny reusable `emit()` helper for the in-process-only stragglers.** OpenAI Agents SDK, Cursor Agent SDK, Google ADK, and CrewAI have no default on-disk artifact and no OTel path without extra instrumentation work. A ~5-line helper (take a normalized `{provider, model, input_tokens, output_tokens, ...}` dict, append one JSON line to a local log) that users wire into `RunHooks`/callbacks/`EventConverter` covers all four with the same shape. Treat ADK and CrewAI as needing this hook non-optionally: ADK explicitly strips `usage_metadata` from its persisted session schema by design, and CrewAI's usage fields are reported as unreliable/zero by its own community even before persistence is considered.

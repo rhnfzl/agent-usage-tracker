@@ -204,9 +204,68 @@ def test_cursor_sdk() -> None:
         e4 = next(e for e in ev if e.input_tokens == 7)
         assert e4.total_tokens == 15                             # 7 + 3 + 5, summed when total absent
         assert e1.event_id != e4.event_id
+    # two runs with NO index and NO run_id must still get distinct ids (append-order position)
+    with tempfile.TemporaryDirectory() as d2:
+        h2 = Path(d2)
+        mp2 = h2 / "x/.state/runs/T/manifest.json"
+        mp2.parent.mkdir(parents=True, exist_ok=True)
+        mp2.write_text(json.dumps({"ticket": "T", "runs": [
+            {"phase": "a", "model": "m", "finished_at": "2026-07-18T10:00:00+00:00",
+             "usage": {"input_tokens": 1, "output_tokens": 1}},
+            {"phase": "b", "model": "m", "finished_at": "2026-07-18T10:00:01+00:00",
+             "usage": {"input_tokens": 2, "output_tokens": 2}},
+        ]}))
+        cfg2 = _cfg(h2)
+        cfg2.cursor_sdk_manifests = str(h2 / "**/.state/runs/*/manifest.json")
+        ev2 = _drain(cursor_sdk.collect, cfg2)
+        assert len(ev2) == 2 and ev2[0].event_id != ev2[1].event_id, ev2
     # unset glob -> collector no-ops (opt-in)
     assert _drain(cursor_sdk.collect, _cfg(Path("/tmp"))) == []
     print("ok cursor_sdk")
+
+
+def test_export_drains_past_cap() -> None:
+    # aut export is one-shot ("from scratch"); it must return EVERY event even when a single file
+    # exceeds the per-scan _MAX_LINES cap (regression guard for the drain loop).
+    import io
+
+    from agent_usage_tracker import cli
+    from agent_usage_tracker.collectors import _util
+    orig = _util._MAX_LINES
+    _util._MAX_LINES = 2                      # tiny cap: 5 turns -> multiple passes
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            home = Path(d)
+            _write_jsonl(home / ".claude/projects/p/s.jsonl", [
+                {"type": "assistant", "uuid": f"u{i}", "timestamp": f"2026-07-18T10:00:0{i}Z",
+                 "message": {"model": "m", "usage": {"input_tokens": 1, "output_tokens": 1,
+                             "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}}}
+                for i in range(5)])
+            n, skipped = cli.run_export(_cfg(home), ["claude_code"], io.StringIO())
+            assert n == 5, (n, skipped)       # all 5 drained despite cap=2
+    finally:
+        _util._MAX_LINES = orig
+    print("ok export_drains_past_cap")
+
+
+def test_file_identity_reset() -> None:
+    # scan_file records (dev, ino) and re-reads from offset 0 when the file behind the path is
+    # replaced (rotation / inode reuse), so a replacement's opening lines are never skipped.
+    from agent_usage_tracker.collectors._util import scan_file
+    with tempfile.TemporaryDirectory() as d:
+        p = str(Path(d) / "f.jsonl")
+        Path(p).write_text("a\nb\n")
+        lines, s1 = scan_file(p, {})
+        assert [ln.strip() for ln in lines] == [b"a", b"b"]
+        assert "dev" in s1 and "ino" in s1 and s1["off"] == 4
+        lines, s2 = scan_file(p, s1)                 # unchanged -> nothing new
+        assert lines == [] and s2["off"] == 4
+        stale = dict(s1)
+        stale["ino"] = s1["ino"] + 1                 # pretend a different file now sits here
+        lines, s3 = scan_file(p, stale)
+        assert [ln.strip() for ln in lines] == [b"a", b"b"]   # reset to 0, full re-read
+        assert s3["ino"] == s1["ino"]                          # identity corrected to the real file
+    print("ok file_identity_reset")
 
 
 def test_cursor_db_path() -> None:
@@ -266,8 +325,10 @@ def test_sender_config() -> None:
         raise AssertionError("expected SystemExit for missing secret")
     except SystemExit:
         pass
-    # plaintext http:// (ANY case) to a non-local host must be refused (no secret in clear)
-    for url in ("http://evil.example/h", "HTTP://evil.example/h", "Http://evil.example/h"):
+    # Allowlist, not blocklist: plaintext http:// to a non-local host AND any non-http(s) scheme
+    # (ftp/file/no-scheme) must all be refused so the secret can't leak or misfire.
+    for url in ("http://evil.example/h", "HTTP://evil.example/h", "Http://evil.example/h",
+                "ftp://evil.example/h", "file:///etc/passwd", "//evil.example/h", "evil.example/h"):
         cc = Config(machine="t", agents=(), webhook_url=url, webhook_secret="s",
                     pg_dsn=None, home=Path("/tmp"))
         try:
@@ -288,6 +349,8 @@ def main() -> int:
     test_pi()
     test_cursor()
     test_cursor_sdk()
+    test_export_drains_past_cap()
+    test_file_identity_reset()
     test_cursor_db_path()
     test_non_object_lines()
     test_valid_ts()
