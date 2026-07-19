@@ -1,0 +1,79 @@
+"""Cursor-SDK collector: token usage from SDK-driven agents that persist a run manifest.
+
+Agents built on the Cursor Agent SDK don't write the CLI/IDE logs the other collectors read
+- the SDK hands per-run usage back in-process and the calling app saves it. The
+research-backend-tickets-orchestrator is the reference case: it writes a per-ticket
+`manifest.json` under `<root>/.state/runs/<TICKET>/` whose `runs[]` each carry
+`{input_tokens, output_tokens, total_tokens, cache_read_tokens}` (real shape; `total` already
+sums input+output+cache_read) plus the `model` and `phase`.
+
+Point config `cursor_sdk_manifests` at a glob of those manifest files (e.g.
+`~/proj/**/.state/runs/*/manifest.json`); unset -> this collector no-ops. Like the `cursor`
+collector we FULL-SCAN every manifest each run and dedup at the sink via `event_id` +
+ON CONFLICT: the manifest file is small and rewritten in place, but a run's `usage` is written
+once at finish and never changes, so re-emitting the same run is idempotent.
+
+LOWER BOUND: the orchestrator deletes a ticket's transcripts when its PR merges, so a ticket
+finished-and-merged between two scans is invisible. Runs are scoped to the manifest schema,
+so unrelated JSON matched by the glob is ignored (no `runs` list -> skipped).
+"""
+
+from __future__ import annotations
+
+import glob
+import json
+from typing import Callable, Iterator
+
+from ..config import Config
+from ..event import UsageEvent, make_event_id
+from ._util import safe_int
+
+NAME = "cursor_sdk"
+
+
+def _noop() -> None:
+    return None
+
+
+def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[UsageEvent], Callable[[], None]]]:
+    pattern = cfg.cursor_sdk_manifests
+    if not pattern:
+        return
+    events: list[UsageEvent] = []
+    for path in glob.glob(pattern, recursive=True):
+        try:
+            with open(path, encoding="utf-8") as fh:
+                m = json.load(fh)
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+            continue
+        if not isinstance(m, dict) or not isinstance(m.get("runs"), list):
+            continue
+        ticket = m.get("ticket") or path
+        project = m.get("project")
+        for r in m["runs"]:
+            if not isinstance(r, dict):
+                continue
+            u = r.get("usage")
+            if not isinstance(u, dict):
+                continue
+            inp = safe_int(u.get("input_tokens"))
+            out = safe_int(u.get("output_tokens"))
+            cr = safe_int(u.get("cache_read_tokens"))
+            cw = safe_int(u.get("cache_write_tokens"))
+            total = safe_int(u.get("total_tokens")) or (inp + out + cr + cw)
+            if total == 0:
+                continue
+            events.append(UsageEvent(
+                event_id=make_event_id(NAME, str(ticket), str(r.get("index")), r.get("run_id") or ""),
+                ts=r.get("finished_at") or r.get("started_at"),
+                agent=NAME,
+                model=r.get("model"),
+                provider="cursor",
+                input_tokens=inp,
+                output_tokens=out,
+                cache_read_tokens=cr,
+                cache_write_tokens=cw,
+                total_tokens=total,
+                project=project,
+            ))
+    yield events, _noop

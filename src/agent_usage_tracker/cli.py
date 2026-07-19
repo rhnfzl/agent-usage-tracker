@@ -145,7 +145,7 @@ def cmd_status(cfg: Config, agents: tuple[str, ...]) -> None:
     print("watermarks    :")
     for name in agents:
         wm = state.get("collectors", {}).get(name, {})
-        if name == "cursor":
+        if name in ("cursor", "cursor_sdk"):
             detail = "full-scan each run (no watermark)"
         elif "files" in wm:
             detail = f"{len(wm['files'])} files tracked"

@@ -5,6 +5,11 @@ logs **Claude Code, Codex CLI, Cursor, and Pi already write to disk**, normalize
 assistant turn into one event, and pushes to a self-hosted sink (an n8n webhook by
 default, or Postgres/TimescaleDB directly over Tailscale).
 
+It also has an opt-in `cursor_sdk` collector for **agents built on the Cursor Agent SDK**
+(which don't write those logs - the SDK returns usage in-process and the app persists it):
+point `cursor_sdk_manifests` at the run `manifest.json` files such an app writes and their
+per-run token usage flows through the same pipeline. Off unless configured.
+
 ## Why not a proxy?
 
 Because these agents log in with an **OAuth subscription, not an API key** (Claude Max/Pro,
@@ -38,7 +43,8 @@ Copy `config.example.toml` to `~/.config/agent-usage-tracker/config.toml` and ed
 
 ```toml
 machine = "laptop"                       # role-based label for this machine
-agents  = ["claude_code", "codex", "cursor", "pi"]
+agents  = ["claude_code", "codex", "cursor", "cursor_sdk", "pi"]
+# cursor_sdk_manifests = "/home/you/projects/**/.state/runs/*/manifest.json"  # opt-in, SDK agents
 
 [transport]
 webhook_url    = "https://n8n.example/webhook/llm-usage"

@@ -19,7 +19,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from agent_usage_tracker.config import Config  # noqa: E402
-from agent_usage_tracker.collectors import claude_code, codex, cursor, pi  # noqa: E402
+from agent_usage_tracker.collectors import claude_code, codex, cursor, cursor_sdk, pi  # noqa: E402
 
 
 def _cfg(home: Path) -> Config:
@@ -161,6 +161,54 @@ def test_cursor() -> None:
     print("ok cursor")
 
 
+def test_cursor_sdk() -> None:
+    # Synthetic orchestrator manifest (real schema, invented numbers). Exercises: finished-with-usage
+    # emitted, no-usage skipped, zero-total skipped, missing total_tokens -> summed fallback, and a
+    # glob-matched non-manifest JSON ignored (schema-scoped).
+    with tempfile.TemporaryDirectory() as d:
+        home = Path(d)
+        mpath = home / "proj/.state/runs/TEST-1/manifest.json"
+        mpath.parent.mkdir(parents=True, exist_ok=True)
+        mpath.write_text(json.dumps({
+            "ticket": "TEST-1", "project": "myrepo", "status": "in_review",
+            "runs": [
+                {"index": 1, "phase": "readiness-1", "model": "composer-2.5", "status": "completed",
+                 "started_at": "2026-07-18T10:00:00+00:00", "finished_at": "2026-07-18T10:00:42+00:00",
+                 "run_id": "r1",
+                 "usage": {"input_tokens": 100, "output_tokens": 20,
+                           "total_tokens": 220, "cache_read_tokens": 100}},
+                {"index": 2, "phase": "proposal-1", "model": "composer-2.5", "status": "running",
+                 "started_at": "2026-07-18T10:01:00+00:00"},                      # no usage -> skipped
+                {"index": 3, "phase": "judge", "model": "gpt-5.6", "status": "completed",
+                 "finished_at": "2026-07-18T10:02:00+00:00",
+                 "usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}},   # zero -> skipped
+                {"index": 4, "phase": "revise", "model": "composer-2.5", "status": "completed",
+                 "finished_at": "2026-07-18T10:03:00+00:00", "run_id": "r4",
+                 "usage": {"input_tokens": 7, "output_tokens": 3, "cache_read_tokens": 5}},  # no total
+            ],
+        }))
+        # a stray JSON matched by the same glob but NOT a manifest -> must be ignored, not crash
+        stray = home / "proj/.state/runs/other/manifest.json"
+        stray.parent.mkdir(parents=True, exist_ok=True)
+        stray.write_text(json.dumps({"foo": "bar"}))
+
+        cfg = _cfg(home)
+        cfg.cursor_sdk_manifests = str(home / "**/.state/runs/*/manifest.json")
+        ev = _drain(cursor_sdk.collect, cfg)
+        assert len(ev) == 2, ev                                  # index 1 + 4; 2 (no usage) & 3 (zero) out
+        e1 = next(e for e in ev if e.input_tokens == 100)
+        assert e1.output_tokens == 20 and e1.cache_read_tokens == 100 and e1.cache_write_tokens == 0
+        assert e1.total_tokens == 220                            # given total kept as-is
+        assert e1.model == "composer-2.5" and e1.provider == "cursor" and e1.agent == "cursor_sdk"
+        assert e1.project == "myrepo" and e1.ts == "2026-07-18T10:00:42+00:00"  # finished_at preferred
+        e4 = next(e for e in ev if e.input_tokens == 7)
+        assert e4.total_tokens == 15                             # 7 + 3 + 5, summed when total absent
+        assert e1.event_id != e4.event_id
+    # unset glob -> collector no-ops (opt-in)
+    assert _drain(cursor_sdk.collect, _cfg(Path("/tmp"))) == []
+    print("ok cursor_sdk")
+
+
 def test_cursor_db_path() -> None:
     from agent_usage_tracker.collectors.cursor import _cursor_db
     home = Path("/tmp/fakehome")
@@ -239,6 +287,7 @@ def main() -> int:
     test_codex()
     test_pi()
     test_cursor()
+    test_cursor_sdk()
     test_cursor_db_path()
     test_non_object_lines()
     test_valid_ts()

@@ -12,7 +12,7 @@ import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
-ALL_AGENTS = ("claude_code", "codex", "cursor", "pi")
+ALL_AGENTS = ("claude_code", "codex", "cursor", "cursor_sdk", "pi")
 
 
 def _config_path() -> Path:
@@ -37,7 +37,8 @@ class Config:
     webhook_secret: str | None
     pg_dsn: str | None
     home: Path
-    cursor_db_path: str | None = None    # override Cursor's state.vscdb location
+    cursor_db_path: str | None = None      # override Cursor's state.vscdb location
+    cursor_sdk_manifests: str | None = None  # glob of orchestrator manifest.json files (SDK usage)
 
     @property
     def has_webhook(self) -> bool:
@@ -77,4 +78,5 @@ def load_config() -> Config:
         pg_dsn=pg_dsn,
         home=Path(data.get("home") or Path.home()).expanduser(),
         cursor_db_path=_resolve(data.get("cursor_db_path")),
+        cursor_sdk_manifests=_resolve(data.get("cursor_sdk_manifests")),
     )

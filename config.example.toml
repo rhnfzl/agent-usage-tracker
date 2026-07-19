@@ -8,7 +8,8 @@
 machine = "laptop"
 
 # Which agents to collect. Omit to collect all installed ones.
-agents = ["claude_code", "codex", "cursor", "pi"]
+# cursor_sdk is included but no-ops until you set cursor_sdk_manifests below.
+agents = ["claude_code", "codex", "cursor", "cursor_sdk", "pi"]
 
 [transport]
 # Default transport: POST batches to the n8n ingest webhook (behind Cloudflare Access).
@@ -30,3 +31,9 @@ webhook_secret = "env:AUT_WEBHOOK_SECRET"      # shared secret sent as the X-AUT
 # Cursor's state.vscdb is auto-located per OS (macOS ~/Library/Application Support/Cursor/...,
 # Windows %APPDATA%/Cursor/..., Linux ~/.config/Cursor/...). Override only if yours is elsewhere:
 # cursor_db_path = "/custom/path/Cursor/User/globalStorage/state.vscdb"
+
+# cursor_sdk: usage from agents built on the Cursor Agent SDK, which don't write CLI/IDE logs -
+# the SDK hands usage back in-process and the app persists it. Point this at a glob of the run
+# manifest.json files those apps write (e.g. the tickets-orchestrator's per-ticket manifests).
+# Unset -> the cursor_sdk collector does nothing. Use a "**" recursive glob:
+# cursor_sdk_manifests = "/home/youruser/projects/**/.state/runs/*/manifest.json"
