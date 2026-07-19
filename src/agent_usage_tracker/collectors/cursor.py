@@ -56,7 +56,7 @@ def _connect_ro(path) -> sqlite3.Connection | None:
         con = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=5.0)
         con.execute("PRAGMA query_only = ON")
         return con
-    except sqlite3.OperationalError:
+    except sqlite3.DatabaseError:   # locked, corrupt, or not-a-database file
         return None
 
 
@@ -105,52 +105,57 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[UsageEvent], Callable[
                 except (json.JSONDecodeError, TypeError):
                     continue
                 comp[key.split(":", 1)[1]] = {
-                    "ts": o.get("createdAt") or o.get("lastUpdatedAt"),
+                    # createdAt only (stable). lastUpdatedAt changes on every composer update,
+                    # which would shift the event ts and defeat ON CONFLICT (event_id, ts).
+                    "ts": o.get("createdAt"),
                     "model": _model(o),
                 }
-        except sqlite3.OperationalError:
+        except sqlite3.DatabaseError:
             pass
 
         try:
             rows = cur.execute(
                 "SELECT key, value FROM cursorDiskKV WHERE key LIKE 'bubbleId:%'"
             )
-        except sqlite3.OperationalError as exc:
+        except sqlite3.DatabaseError as exc:
             print(f"aut: cursor bubbleId query failed ({exc}); skipping cursor", file=sys.stderr)
             return
 
         events: list[UsageEvent] = []
-        for key, val in rows:
-            try:
-                o = json.loads(val)
-                if not isinstance(o, dict):
+        try:
+            for key, val in rows:
+                try:
+                    o = json.loads(val)
+                    if not isinstance(o, dict):
+                        continue
+                    tc = o.get("tokenCount")
+                    if not isinstance(tc, dict):
+                        tc = {}
+                    inp = int(tc.get("inputTokens") or 0)
+                    out = int(tc.get("outputTokens") or 0)
+                except (json.JSONDecodeError, TypeError, ValueError, AttributeError, OverflowError):
                     continue
-                tc = o.get("tokenCount")
-                if not isinstance(tc, dict):
-                    tc = {}
-                inp = int(tc.get("inputTokens") or 0)
-                out = int(tc.get("outputTokens") or 0)
-            except (json.JSONDecodeError, TypeError, ValueError, AttributeError, OverflowError):
-                continue
-            if inp + out == 0:
-                continue
-            composer_id = key.split(":")[1]
-            bubble_id = o.get("bubbleId") or key.rsplit(":", 1)[-1]
-            meta = comp.get(composer_id) or {}
-            uid = o.get("usageUuid") or f"{composer_id}:{bubble_id}"
-            events.append(UsageEvent(
-                event_id=make_event_id(NAME, uid),
-                ts=_ts(o, meta),
-                agent=NAME,
-                model=_model(o) or meta.get("model"),
-                provider="cursor",
-                input_tokens=inp,
-                output_tokens=out,
-                total_tokens=inp + out,
-            ))
-            if len(events) >= _BATCH:
-                yield events, _noop
-                events = []
+                if inp + out == 0:
+                    continue
+                composer_id = key.split(":")[1]
+                bubble_id = o.get("bubbleId") or key.rsplit(":", 1)[-1]
+                meta = comp.get(composer_id) or {}
+                uid = o.get("usageUuid") or f"{composer_id}:{bubble_id}"
+                events.append(UsageEvent(
+                    event_id=make_event_id(NAME, uid),
+                    ts=_ts(o, meta),
+                    agent=NAME,
+                    model=_model(o) or meta.get("model"),
+                    provider="cursor",
+                    input_tokens=inp,
+                    output_tokens=out,
+                    total_tokens=inp + out,
+                ))
+                if len(events) >= _BATCH:
+                    yield events, _noop
+                    events = []
+        except sqlite3.DatabaseError as exc:   # corrupt DB can raise mid-iteration
+            print(f"aut: cursor row read failed ({exc}); emitting partial data", file=sys.stderr)
         yield events, _noop
     finally:
         con.close()

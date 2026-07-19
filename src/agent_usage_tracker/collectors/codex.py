@@ -21,7 +21,7 @@ from typing import Callable, Iterator
 
 from ..config import Config
 from ..event import UsageEvent, make_event_id
-from ._util import basename, read_new_lines
+from ._util import basename, read_new_lines, safe_int
 
 NAME = "codex"
 
@@ -48,7 +48,7 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[UsageEvent], Callable[
         # sink. Changing the id scheme itself would instead need a state-version bump.
         if not prev or prev.get("ino") != st.st_ino:
             prev = _fresh_state(st.st_ino)
-        off = int(prev.get("off", 0))
+        off = safe_int(prev.get("off"))
         if st.st_size < off:                            # truncated
             prev = _fresh_state(st.st_ino)
             off = 0

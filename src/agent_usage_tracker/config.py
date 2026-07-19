@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import os
 import socket
+import sys
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
@@ -61,12 +62,19 @@ def load_config() -> Config:
     if unknown:
         raise SystemExit(f"config: unknown agent(s) {unknown}; valid = {list(ALL_AGENTS)}")
 
+    webhook_secret = _resolve(transport.get("webhook_secret"))
+    pg_dsn = _resolve(transport.get("pg_dsn"))
+    # If the config holds a secret, warn when it is group/other-accessible (should be chmod 600).
+    if path.exists() and (webhook_secret or pg_dsn) and (path.stat().st_mode & 0o077):
+        print(f"aut: warning: {path} holds a secret but is group/other-accessible; "
+              f"run: chmod 600 {path}", file=sys.stderr)
+
     return Config(
         machine=machine,
         agents=agents,
         webhook_url=_resolve(transport.get("webhook_url")),
-        webhook_secret=_resolve(transport.get("webhook_secret")),
-        pg_dsn=_resolve(transport.get("pg_dsn")),
+        webhook_secret=webhook_secret,
+        pg_dsn=pg_dsn,
         home=Path(data.get("home") or Path.home()).expanduser(),
         cursor_db_path=_resolve(data.get("cursor_db_path")),
     )

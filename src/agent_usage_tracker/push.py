@@ -81,9 +81,10 @@ def make_sender(cfg: Config) -> Callable[[list[UsageEvent]], None]:
             "transport.webhook_url is set but webhook_secret is missing or unresolved; "
             "refusing to send unauthenticated. Set webhook_secret (or its env: value)."
         )
-    if cfg.has_webhook and cfg.webhook_url.startswith("http://"):
-        host = (urlparse(cfg.webhook_url).hostname or "").lower()
-        if host not in ("localhost", "127.0.0.1", "::1"):
+    if cfg.has_webhook:
+        parsed = urlparse(cfg.webhook_url)
+        host = (parsed.hostname or "").lower()
+        if parsed.scheme.lower() == "http" and host not in ("localhost", "127.0.0.1", "::1"):
             raise SystemExit(
                 f"refusing to send the webhook secret over plaintext http:// to '{host}'; "
                 "use https:// (http is allowed only for localhost testing)."

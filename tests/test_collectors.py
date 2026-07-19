@@ -218,6 +218,19 @@ def test_sender_config() -> None:
         raise AssertionError("expected SystemExit for missing secret")
     except SystemExit:
         pass
+    # plaintext http:// (ANY case) to a non-local host must be refused (no secret in clear)
+    for url in ("http://evil.example/h", "HTTP://evil.example/h", "Http://evil.example/h"):
+        cc = Config(machine="t", agents=(), webhook_url=url, webhook_secret="s",
+                    pg_dsn=None, home=Path("/tmp"))
+        try:
+            make_sender(cc)
+            raise AssertionError(f"expected SystemExit for {url}")
+        except SystemExit:
+            pass
+    # http://localhost (testing) and any https:// are allowed
+    for url in ("http://localhost:5678/h", "HTTPS://ok.example/h"):
+        make_sender(Config(machine="t", agents=(), webhook_url=url, webhook_secret="s",
+                           pg_dsn=None, home=Path("/tmp")))
     print("ok sender_config")
 
 

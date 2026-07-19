@@ -20,16 +20,22 @@ import json
 
 from ..config import Config
 from ..event import UsageEvent, make_event_id
-from ._util import read_new_lines
+from ._util import read_new_lines, safe_int
 
 NAME = "pi"
 
 
 def _cost_total(cost) -> float | None:
-    if isinstance(cost, dict):
-        v = cost.get("total")
-        return float(v) if isinstance(v, (int, float)) else None
-    return float(cost) if isinstance(cost, (int, float)) else None
+    v = cost.get("total") if isinstance(cost, dict) else cost
+    if not isinstance(v, (int, float)):
+        return None
+    try:
+        f = float(v)
+    except OverflowError:            # e.g. a huge int literal
+        return None
+    if f != f or abs(f) == float("inf"):   # drop NaN / inf (the sink numeric can't store them)
+        return None
+    return f
 
 
 def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[UsageEvent], Callable[[], None]]]:
@@ -44,9 +50,9 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[UsageEvent], Callable[
         except OSError:
             continue
         prev = files.get(path)
-        if not prev or prev.get("ino") != st.st_ino or st.st_size < int(prev.get("off", 0)):
+        if not prev or prev.get("ino") != st.st_ino or st.st_size < safe_int(prev.get("off")):
             prev = {"off": 0, "ino": st.st_ino, "model": None}
-        off = int(prev.get("off", 0))
+        off = safe_int(prev.get("off"))
         if st.st_size <= off:
             continue
 
