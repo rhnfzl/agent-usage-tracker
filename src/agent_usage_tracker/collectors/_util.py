@@ -75,11 +75,16 @@ def scan_file(path: str, fstate: dict) -> tuple[list[bytes], dict]:
     return lines, new_fstate
 
 
-def basename(path: str | None) -> str | None:
-    """Directory basename only (never a full path -> safe for a public-later repo)."""
-    if not path:
+def basename(path) -> str | None:
+    """Last path segment only (never a full path -> safe for a public-later repo). Handles BOTH
+    '/' and '\\' so a Windows path is reduced on POSIX too; rejects non-strings (returns None)
+    so a stray list/dict can't be str()-leaked as a 'project'."""
+    if not isinstance(path, str) or not path:
         return None
-    return os.path.basename(str(path).rstrip("/")) or None
+    seg = path.rstrip("/\\")
+    for sep in ("/", "\\"):
+        seg = seg.rsplit(sep, 1)[-1]
+    return seg or None
 
 
 def epoch_ms_to_iso(ms) -> str | None:

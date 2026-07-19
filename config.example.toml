@@ -7,13 +7,14 @@
 # Role-based label for this machine (avoid personal names). e.g. laptop, buildbox, workstation.
 machine = "laptop"
 
-# Which agents to collect. Omit to collect all installed ones. NOTE the three Cursor sources
+# Which agents to collect. Omit to collect all installed ones. IMPORTANT: the three Cursor sources
 # OVERLAP - enabling more than one double-counts the same Cursor usage under different event ids:
 #   cursor      = local IDE state.vscdb (a lower bound; no CLI, no model/cache attribution)
 #   cursor_sdk  = SDK-app run manifests  (needs cursor_sdk_manifests below)
 #   cursor_api  = Cursor dashboard API   (accurate; CLI + IDE; needs cursor_api = true below)
-# Prefer cursor_api alone if you have it; keep `cursor` only if you can't use the API.
-agents = ["claude_code", "codex", "cursor_api", "cursor_sdk", "pi"]
+# Pick ONE. The default below is cursor_api (the accurate source). If you instead want only SDK
+# manifest capture, swap cursor_api -> cursor_sdk here; if you can't use the API, use `cursor`.
+agents = ["claude_code", "codex", "cursor_api", "pi"]
 
 [transport]
 # Default transport: POST batches to the n8n ingest webhook (behind Cloudflare Access).

@@ -343,6 +343,9 @@ def test_cursor_api() -> None:
     assert not cursor_api._same_user(None, UID)
     assert not cursor_api._same_user("None", None)
     assert not cursor_api._same_user(UID, "")
+    assert not cursor_api._same_user([UID], [UID])           # equal containers must NOT match
+    assert not cursor_api._same_user({"id": UID}, {"id": UID})
+    assert not cursor_api._same_user(True, True)             # bool is an int subclass -> reject
     assert cursor_api._same_user(UID, UID) and cursor_api._same_user(str(UID), UID)
     assert cursor_api._map_event({**mine, "owningUser": ""}, "") is None   # empty both sides -> drop
     # non-str model coerced to None (no crash downstream)

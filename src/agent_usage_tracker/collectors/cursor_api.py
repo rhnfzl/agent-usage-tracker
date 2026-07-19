@@ -94,9 +94,12 @@ def _post(cookie: str, name: str, body: dict) -> Any:
 
 
 def _same_user(owner, uid) -> bool:
-    """True only when BOTH ids are present, non-empty scalars AND equal. Guards the privacy
-    boundary: an empty/missing owningUser must never match an empty/'None' uid on a team feed."""
-    if owner is None or uid is None:
+    """True only when BOTH ids are present, non-empty SCALARS and equal. Guards the privacy
+    boundary: a missing/empty owningUser must never match an empty/'None' uid, and a container
+    (list/dict) must never match another equal container via str() coercion."""
+    if not isinstance(owner, (str, int)) or not isinstance(uid, (str, int)):
+        return False                      # scalar-only (also excludes list/dict/None)
+    if isinstance(owner, bool) or isinstance(uid, bool):   # bool is an int subclass
         return False
     o, u = str(owner).strip(), str(uid).strip()
     return o != "" and u != "" and o.lower() != "none" and o == u
@@ -163,27 +166,28 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[UsageEvent], Callable[
             batch = data.get("usageEventsDisplay") if isinstance(data, dict) else None
             if not batch:
                 break
-            new_in_page = 0
+            fresh_rows = 0                  # rows AT/AFTER the watermark (whether or not we emit them)
             for raw in batch:
+                ms = safe_int(raw.get("timestamp"))
                 # SKIP (not break) rows older than the watermark: robust to a page that isn't
                 # perfectly newest-first, so a stray old row can't hide newer rows behind it.
-                if safe_int(raw.get("timestamp")) < since:
+                if ms < since:
                     continue
-                ev = _map_event(raw, uid)   # also drops teammates' events + zero-token rows
+                fresh_rows += 1             # count BEFORE _map_event so a page of teammate/zero rows
+                ev = _map_event(raw, uid)   # (dropped here) doesn't look like "nothing new" and halt.
                 if ev is None:
                     continue
-                new_in_page += 1
-                newest = max(newest, safe_int(raw.get("timestamp")))
+                newest = max(newest, ms)
                 events.append(ev)
-            if new_in_page == 0 or len(batch) < _PAGE:
-                break                       # a whole page had nothing new, or last page -> done
+            if fresh_rows == 0 or len(batch) < _PAGE:
+                break                       # a whole page was older than the watermark, or last page
         else:
             # loop ran the full cap without a natural stop: a very large window remains unread.
             # Never happens for 6h deltas; only a huge first backfill. Flag it (don't silently orphan).
             print(f"aut: cursor_api: reached the {_MAX_PAGES}-page cap; older events this window may "
                   "be unread -- shorten cursor_api_lookback_days or run again.", file=sys.stderr)
     except (urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError,
-            AttributeError, TypeError, OSError) as exc:
+            UnicodeDecodeError, AttributeError, TypeError, OSError) as exc:
         print(f"aut: cursor_api: usage fetch failed ({exc}); skipping this run", file=sys.stderr)
         return
 
