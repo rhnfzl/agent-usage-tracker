@@ -11,11 +11,14 @@ _MAX_LINES = 50000
 
 
 def safe_int(value, default: int = 0) -> int:
-    """int() that never raises (e.g. a corrupt state offset like 1e400 -> inf -> OverflowError)."""
+    """Non-negative int() that never raises. Guards a corrupt state offset (1e400 -> inf ->
+    OverflowError) AND a negative offset (which would make fh.seek() raise and wedge the scan);
+    every caller feeds a byte offset, which is always >= 0."""
     try:
-        return int(value)
+        parsed = int(value)
     except (TypeError, ValueError, OverflowError):
         return default
+    return parsed if parsed >= 0 else default
 
 
 def read_new_lines(path: str, offset: int) -> tuple[list[bytes], int]:

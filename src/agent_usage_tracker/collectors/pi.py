@@ -27,7 +27,7 @@ NAME = "pi"
 
 def _cost_total(cost) -> float | None:
     v = cost.get("total") if isinstance(cost, dict) else cost
-    if not isinstance(v, (int, float)):
+    if isinstance(v, bool) or not isinstance(v, (int, float)):   # bool is an int subclass
         return None
     try:
         f = float(v)
