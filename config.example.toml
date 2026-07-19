@@ -16,6 +16,13 @@ agents = ["claude_code", "codex", "cursor", "cursor_sdk", "pi"]
 webhook_url    = "https://n8n.example.tld/webhook/llm-usage"
 webhook_secret = "env:AUT_WEBHOOK_SECRET"      # shared secret sent as the X-AUT-Secret header
 
+# Cloudflare Access service token (Zero Trust -> Access -> Service Auth). Set BOTH halves to push
+# through Cloudflare Access from ANYWHERE - no VPN needed (this is CF's "Pattern 2" for CLI/cron).
+# Sent as CF-Access-Client-Id / CF-Access-Client-Secret headers. Omit on-LAN/Tailscale if you point
+# webhook_url straight at the internal n8n (e.g. http://n8n.internal:5678/webhook/llm-usage).
+# cf_access_client_id     = "env:CF_ACCESS_CLIENT_ID"
+# cf_access_client_secret = "env:CF_ACCESS_CLIENT_SECRET"
+
 # Optional fallback: direct Postgres over Tailscale. Only used if the webhook is
 # unreachable. Requires the [postgres] extra (uv tool install "agent-usage-tracker[postgres]").
 # pg_dsn = "env:AUT_PG_DSN"                     # e.g. postgresql://agents_writer@db.example:5432/agents

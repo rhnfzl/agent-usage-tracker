@@ -49,8 +49,14 @@ agents  = ["claude_code", "codex", "cursor", "cursor_sdk", "pi"]
 [transport]
 webhook_url    = "https://n8n.example/webhook/llm-usage"
 webhook_secret = "env:AUT_WEBHOOK_SECRET"
+# cf_access_client_id/secret = env:...  # sync from ANYWHERE through Cloudflare Access, no VPN
 # pg_dsn       = "env:AUT_PG_DSN"        # optional Tailscale fallback
 ```
+
+**Syncing from anywhere (no VPN).** If the webhook sits behind Cloudflare Access, set a service
+token (`cf_access_client_id` + `cf_access_client_secret`); the tracker sends them as
+`CF-Access-Client-Id`/`CF-Access-Client-Secret` so scheduled pushes clear Access from any network.
+On your LAN/Tailscale you can instead point `webhook_url` straight at the internal n8n and omit them.
 
 ## Use
 

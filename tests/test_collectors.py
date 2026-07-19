@@ -343,6 +343,44 @@ def test_sender_config() -> None:
     print("ok sender_config")
 
 
+def test_cf_access_headers() -> None:
+    from agent_usage_tracker import push
+    from agent_usage_tracker.config import Config
+    both = Config(machine="t", agents=(), webhook_url="https://x/h", webhook_secret="s",
+                  pg_dsn=None, home=Path("/tmp"),
+                  cf_access_client_id="id.abc", cf_access_client_secret="sec.xyz")
+    assert both.cf_access_headers == {"CF-Access-Client-Id": "id.abc",
+                                      "CF-Access-Client-Secret": "sec.xyz"}
+    # only one half set -> no headers (never send a lone token half)
+    partial = Config(machine="t", agents=(), webhook_url="https://x/h", webhook_secret="s",
+                     pg_dsn=None, home=Path("/tmp"), cf_access_client_id="id.abc")
+    assert partial.cf_access_headers == {}
+    # _post_webhook merges the extra headers onto the request alongside X-AUT-Secret
+    captured = {}
+
+    class _Resp:
+        status = 200
+        def __enter__(self):
+            return self
+        def __exit__(self, *a):
+            return False
+
+    class _Opener:
+        def open(self, req, timeout=0):
+            captured.update(req.headers)
+            return _Resp()
+
+    orig = push._OPENER
+    push._OPENER = _Opener()
+    try:
+        push._post_webhook("https://x/h", "sec", [], extra_headers=both.cf_access_headers)
+    finally:
+        push._OPENER = orig
+    keys = {k.lower() for k in captured}
+    assert {"cf-access-client-id", "cf-access-client-secret", "x-aut-secret"} <= keys, captured
+    print("ok cf_access_headers")
+
+
 def main() -> int:
     test_claude_code()
     test_codex()
@@ -355,6 +393,7 @@ def main() -> int:
     test_non_object_lines()
     test_valid_ts()
     test_sender_config()
+    test_cf_access_headers()
     print("\nALL PASS")
     return 0
 

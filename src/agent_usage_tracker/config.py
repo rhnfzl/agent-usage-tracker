@@ -39,6 +39,18 @@ class Config:
     home: Path
     cursor_db_path: str | None = None      # override Cursor's state.vscdb location
     cursor_sdk_manifests: str | None = None  # glob of orchestrator manifest.json files (SDK usage)
+    # Cloudflare Access service token (Pattern 2) so a machine can push through CF Access from
+    # anywhere - no VPN. Both set -> sent as CF-Access-Client-Id / CF-Access-Client-Secret headers.
+    cf_access_client_id: str | None = None
+    cf_access_client_secret: str | None = None
+
+    @property
+    def cf_access_headers(self) -> dict[str, str]:
+        """CF Access service-token headers, only when BOTH halves are present; else empty."""
+        if self.cf_access_client_id and self.cf_access_client_secret:
+            return {"CF-Access-Client-Id": self.cf_access_client_id,
+                    "CF-Access-Client-Secret": self.cf_access_client_secret}
+        return {}
 
     @property
     def has_webhook(self) -> bool:
@@ -65,8 +77,10 @@ def load_config() -> Config:
 
     webhook_secret = _resolve(transport.get("webhook_secret"))
     pg_dsn = _resolve(transport.get("pg_dsn"))
+    cf_id = _resolve(transport.get("cf_access_client_id"))
+    cf_secret = _resolve(transport.get("cf_access_client_secret"))
     # If the config holds a secret, warn when it is group/other-accessible (should be chmod 600).
-    if path.exists() and (webhook_secret or pg_dsn) and (path.stat().st_mode & 0o077):
+    if path.exists() and (webhook_secret or pg_dsn or cf_secret) and (path.stat().st_mode & 0o077):
         print(f"aut: warning: {path} holds a secret but is group/other-accessible; "
               f"run: chmod 600 {path}", file=sys.stderr)
 
@@ -79,4 +93,6 @@ def load_config() -> Config:
         home=Path(data.get("home") or Path.home()).expanduser(),
         cursor_db_path=_resolve(data.get("cursor_db_path")),
         cursor_sdk_manifests=_resolve(data.get("cursor_sdk_manifests")),
+        cf_access_client_id=cf_id,
+        cf_access_client_secret=cf_secret,
     )

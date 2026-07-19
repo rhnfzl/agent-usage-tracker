@@ -39,9 +39,12 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 _OPENER = urllib.request.build_opener(_NoRedirect)
 
 
-def _post_webhook(url: str, secret: str, batch: list[UsageEvent]) -> None:
+def _post_webhook(url: str, secret: str, batch: list[UsageEvent],
+                  extra_headers: dict[str, str] | None = None) -> None:
     body = json.dumps({"events": [e.to_dict() for e in batch]}).encode("utf-8")
     headers = {"Content-Type": "application/json", "X-AUT-Secret": secret}
+    if extra_headers:                    # e.g. CF-Access-Client-Id/Secret to clear Cloudflare Access
+        headers.update(extra_headers)
     req = urllib.request.Request(url, data=body, method="POST", headers=headers)
     try:
         with _OPENER.open(req, timeout=30) as resp:
@@ -100,7 +103,7 @@ def make_sender(cfg: Config) -> Callable[[list[UsageEvent]], None]:
         webhook_err: Exception | None = None
         if cfg.has_webhook:
             try:
-                _post_webhook(cfg.webhook_url, cfg.webhook_secret, batch)
+                _post_webhook(cfg.webhook_url, cfg.webhook_secret, batch, cfg.cf_access_headers)
                 return
             except (urllib.error.URLError, RuntimeError, OSError) as exc:
                 webhook_err = exc
