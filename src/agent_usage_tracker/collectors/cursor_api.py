@@ -33,7 +33,10 @@ from ..event import UsageEvent, make_event_id
 from ._util import epoch_ms_to_iso, safe_int
 from .cursor import _cursor_db
 
-NAME = "cursor_api"
+NAME = "cursor_api"      # registry / config key + event_id namespace (internal)
+_AGENT = "cursor"        # emitted agent label: this IS the accurate Cursor source, so it reads as
+                         # plain "cursor" in Grafana + reports (the local lower-bound collector is
+                         # kept out of the default agent set, so there is no clash).
 _BASE = "https://cursor.com/api/dashboard"
 _PAGE = 100
 _MAX_PAGES = 200                 # hard stop (200*100 = 20k events/scan) so a bug can't loop forever
@@ -109,7 +112,7 @@ def _map_event(e: dict, uid) -> UsageEvent | None:
         # no per-event id in the feed; (user, ts, conversation, model) is unique per event
         event_id=make_event_id(NAME, str(uid), str(ts_ms), conv, model or ""),
         ts=epoch_ms_to_iso(ts_ms),
-        agent=NAME,
+        agent=_AGENT,
         model=model,
         provider="cursor",
         input_tokens=inp,

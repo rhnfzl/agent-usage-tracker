@@ -335,7 +335,7 @@ def test_cursor_api() -> None:
             "tokenUsage": {"inputTokens": 0, "outputTokens": 0}}
     ev = cursor_api._map_event(mine, UID)
     assert ev is not None and ev.total_tokens == 620 and ev.cache_write_tokens == 0
-    assert ev.agent == "cursor_api" and ev.provider == "cursor" and ev.model == "composer-2.5"
+    assert ev.agent == "cursor" and ev.provider == "cursor" and ev.model == "composer-2.5"
     assert cursor_api._map_event(teammate, UID) is None      # SAFETY: never a teammate's event
     assert cursor_api._map_event(zero, UID) is None
     # non-str model coerced to None (no crash downstream)
@@ -366,7 +366,7 @@ def test_cursor_api() -> None:
             commit()
         # 2 of my events emitted (teammate filtered out); watermark = newest ts
         assert len(events) == 2, events
-        assert all(e.agent == "cursor_api" for e in events)
+        assert all(e.agent == "cursor" for e in events)
         assert wm["since_ms"] == 1784314315897, wm
         # a second scan with only-older events -> nothing new
         page1["usageEventsDisplay"] = [{"owningUser": UID, "timestamp": "1784314310000",
