@@ -417,6 +417,47 @@ def test_cursor_api() -> None:
     print("ok cursor_api")
 
 
+def test_hardening_edges() -> None:
+    # basename: cross-platform + non-str guard (Windows path reduced on POSIX, containers -> None)
+    from agent_usage_tracker.collectors._util import basename
+    assert basename("/home/u/repo") == "repo"
+    assert basename("C:\\Users\\a\\private\\proj") == "proj"     # windows path on posix
+    assert basename("repo/") == "repo" and basename("plain-name") == "plain-name"
+    assert basename(None) is None and basename(["x"]) is None and basename({"a": 1}) is None
+
+    # _as_bool: a quoted "false" in TOML must not silently enable a collector
+    from agent_usage_tracker.config import _as_bool
+    assert _as_bool(True) is True and _as_bool(False) is False
+    assert _as_bool("false") is False and _as_bool("0") is False and _as_bool("no") is False
+    assert _as_bool("true") is True and _as_bool("yes") is True and _as_bool("on") is True
+
+    # cursor_api pagination: a full page of zero-token (dropped) rows that are still RECENT must
+    # NOT halt paging - the next page's real events must still be reached.
+    from agent_usage_tracker.collectors import cursor_api
+    UID = 7
+    zero_recent = [{"owningUser": UID, "timestamp": str(1000 + i), "model": "m",
+                    "conversationId": f"z{i}", "tokenUsage": {"inputTokens": 0, "outputTokens": 0}}
+                   for i in range(cursor_api._PAGE)]                 # a full page, all zero-token
+    real = {"owningUser": UID, "timestamp": "2000", "model": "m", "conversationId": "r",
+            "tokenUsage": {"inputTokens": 5, "outputTokens": 5}}
+    pages = {1: {"usageEventsDisplay": zero_recent}, 2: {"usageEventsDisplay": [real]}}
+
+    def fake_post(cookie, name, body):
+        return {"userId": UID} if name == "get-me" else pages.get(body.get("page"), {"usageEventsDisplay": []})
+
+    cfg = _cfg(Path("/tmp"))
+    cfg.cursor_api = True
+    oa, op = cursor_api._auth, cursor_api._post
+    cursor_api._auth = lambda c: ("ck", 1)
+    cursor_api._post = fake_post
+    try:
+        evs = [e for batch, _ in cursor_api.collect(cfg, {}) for e in batch]
+    finally:
+        cursor_api._auth, cursor_api._post = oa, op
+    assert len(evs) == 1 and evs[0].input_tokens == 5, evs   # reached page 2 past the all-zero page
+    print("ok hardening_edges")
+
+
 def test_cursor_db_path() -> None:
     from agent_usage_tracker.collectors.cursor import _cursor_db
     home = Path("/tmp/fakehome")
@@ -538,6 +579,7 @@ def main() -> int:
     test_cursor()
     test_cursor_sdk()
     test_cursor_api()
+    test_hardening_edges()
     test_export_drains_past_cap()
     test_file_identity_reset()
     test_cursor_db_path()
