@@ -36,7 +36,13 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[UsageEvent], Callable[
         if not lines and new_fstate == fstate:
             continue
 
-        events: list[UsageEvent] = []
+        # Claude Code writes ONE JSONL line per content block of an assistant message (text +
+        # each tool_use), and every one of those lines repeats the SAME cumulative message.usage.
+        # Keying by uuid (unique per line) would count a 6-block message 6x. So dedup by
+        # (message.id, requestId) within the scan, keeping the max-total record (also correct if
+        # the repeats are cumulative-growing rather than identical), and derive event_id from that
+        # key so the sink dedups the same message across scans too.
+        best: dict[str, UsageEvent] = {}
         for raw in lines:
             try:
                 o = json.loads(raw)
@@ -58,9 +64,16 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[UsageEvent], Callable[
             total = inp + out + cr + cw
             if total == 0:
                 continue
-            uid = o.get("uuid") or o.get("requestId") or f"{path}:{o.get('timestamp')}"
-            events.append(UsageEvent(
-                event_id=make_event_id(NAME, uid),
+            msg_id = msg.get("id")
+            # message.id groups a message's blocks; requestId disambiguates a retried message.
+            # Fall back to uuid / path:ts only for old transcripts that lack message.id.
+            key = f"{msg_id}|{o.get('requestId')}" if msg_id else \
+                (o.get("uuid") or f"{path}:{o.get('timestamp')}")
+            prev = best.get(key)
+            if prev is not None and prev.total_tokens >= total:
+                continue                         # already have the fuller (or equal) record
+            best[key] = UsageEvent(
+                event_id=make_event_id(NAME, key),
                 ts=o.get("timestamp"),
                 agent=NAME,
                 model=msg.get("model"),
@@ -71,7 +84,8 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[UsageEvent], Callable[
                 cache_write_tokens=cw,
                 total_tokens=total,
                 project=basename(o.get("cwd")),
-            ))
+            )
+        events = list(best.values())
 
         def commit(p: str = path, s: dict = new_fstate) -> None:
             files[p] = s

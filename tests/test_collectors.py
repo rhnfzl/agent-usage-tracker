@@ -65,6 +65,36 @@ def test_claude_code() -> None:
     print("ok claude_code")
 
 
+def test_claude_code_multiblock_dedup() -> None:
+    # Claude Code writes one JSONL line per content block, each repeating the message's usage.
+    # The collector must emit ONE event per (message.id, requestId) - not one per line (6x bug).
+    with tempfile.TemporaryDirectory() as d:
+        home = Path(d)
+        blocks = [{"type": "assistant", "uuid": f"u{i}", "requestId": "req_1",
+                   "timestamp": "2026-07-18T10:00:00Z", "cwd": "/x/proj",
+                   "message": {"id": "msg_1", "model": "claude-opus-4-8", "usage": {
+                       "input_tokens": 10, "output_tokens": 20,
+                       "cache_read_input_tokens": 1000, "cache_creation_input_tokens": 5}}}
+                  for i in range(6)]                   # 6 blocks, identical usage, distinct uuids
+        _write_jsonl(home / ".claude/projects/p/s.jsonl", blocks)
+        ev = _drain(claude_code.collect, _cfg(home))
+        assert len(ev) == 1, ev                        # 6 lines -> ONE event
+        assert ev[0].total_tokens == 1035              # counted once, not 6 * 1035
+    # cumulative-growing repeats (same message.id) -> keep the max (final) total
+    with tempfile.TemporaryDirectory() as d:
+        home = Path(d)
+        recs = [{"type": "assistant", "uuid": f"g{i}", "requestId": "req_2",
+                 "timestamp": "2026-07-18T10:01:00Z",
+                 "message": {"id": "msg_2", "model": "m", "usage": {
+                     "input_tokens": 0, "output_tokens": out,
+                     "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}}}
+                for i, out in enumerate((100, 200, 300))]
+        _write_jsonl(home / ".claude/projects/p/s.jsonl", recs)
+        ev = _drain(claude_code.collect, _cfg(home))
+        assert len(ev) == 1 and ev[0].output_tokens == 300, ev   # keeps the final cumulative
+    print("ok claude_code_multiblock_dedup")
+
+
 def test_codex() -> None:
     with tempfile.TemporaryDirectory() as d:
         home = Path(d)
@@ -383,6 +413,7 @@ def test_cf_access_headers() -> None:
 
 def main() -> int:
     test_claude_code()
+    test_claude_code_multiblock_dedup()
     test_codex()
     test_pi()
     test_cursor()
