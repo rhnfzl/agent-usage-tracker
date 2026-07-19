@@ -80,7 +80,7 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[UsageEvent], Callable[
                 cr = int(u.get("cacheRead") or 0)
                 cw = int(u.get("cacheWrite") or 0)
                 total = int(u.get("totalTokens") or (inp + out + cr + cw))
-            except (ValueError, TypeError):
+            except (ValueError, TypeError, OverflowError):
                 continue
             if total == 0:
                 continue

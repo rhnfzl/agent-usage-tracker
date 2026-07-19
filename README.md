@@ -53,6 +53,7 @@ aut scan --dry-run     # parse + report, send NOTHING (also your accuracy check)
 aut scan               # push new usage since the last run, advance the watermark
 aut backfill           # reset the watermark, then push all history
 aut status             # config + watermark state
+aut export --out f.csv # write all usage as CSV (offline bulk-load / bridge)
 ```
 
 Run it on a timer (see `packaging/` for launchd + systemd units). Offline runs are safe:

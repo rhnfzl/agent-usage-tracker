@@ -183,7 +183,11 @@ def test_non_object_lines() -> None:
                             "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}}}
         path = home / ".claude/projects/p/s.jsonl"
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text('42\n[1,2,3]\n"a string"\n' + json.dumps(good) + "\n")
+        # 1e400 parses to inf -> int(inf) raises OverflowError; must also be skipped, not wedge
+        overflow = ('{"type":"assistant","uuid":"u3","timestamp":"2026-07-18T10:00:00Z",'
+                    '"message":{"model":"m","usage":{"input_tokens":1e400,"output_tokens":1,'
+                    '"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}')
+        path.write_text('42\n[1,2,3]\n"a string"\n' + overflow + "\n" + json.dumps(good) + "\n")
         ev = _drain(claude_code.collect, _cfg(home))
         assert len(ev) == 1 and ev[0].total_tokens == 2
     print("ok non_object_lines")

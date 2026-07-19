@@ -89,7 +89,7 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[UsageEvent], Callable[
                     out = int(last.get("output_tokens") or 0)
                     rea = int(last.get("reasoning_output_tokens") or 0)
                     total = int(last.get("total_tokens") or (inp + out))
-                except (ValueError, TypeError, AttributeError):
+                except (ValueError, TypeError, AttributeError, OverflowError):
                     continue
                 cur["tc_ord"] += 1
                 if inp + out + rea == 0:

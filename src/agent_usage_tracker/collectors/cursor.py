@@ -12,6 +12,10 @@ we full-scan every run (no watermark) and rely on event_id + ON CONFLICT to dedu
 sink. This is a LOWER BOUND: sessions with no local snapshot are invisible. For complete,
 model-attributed, timestamped data, use the Cursor dashboard API with the
 `cursorAuth/accessToken` cookie from ItemTable (documented follow-up, not in v1).
+
+Known limitation: the first NONZERO tokenCount seen for a bubble wins. If Cursor later
+rewrites that bubble to a different nonzero count, the sink's ON CONFLICT DO NOTHING keeps
+the original (a 0 -> nonzero fill-in is fine, since zero rows are skipped). Rare in practice.
 """
 
 from __future__ import annotations
@@ -82,6 +86,8 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[UsageEvent], Callable[
         return
     con = _connect_ro(db)
     if con is None:
+        print("aut: cursor state.vscdb exists but could not be opened (locked/corrupt); "
+              "skipping cursor this run", file=sys.stderr)
         return
     try:
         cur = con.cursor()
@@ -109,7 +115,8 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[UsageEvent], Callable[
             rows = cur.execute(
                 "SELECT key, value FROM cursorDiskKV WHERE key LIKE 'bubbleId:%'"
             )
-        except sqlite3.OperationalError:
+        except sqlite3.OperationalError as exc:
+            print(f"aut: cursor bubbleId query failed ({exc}); skipping cursor", file=sys.stderr)
             return
 
         events: list[UsageEvent] = []
@@ -123,7 +130,7 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[UsageEvent], Callable[
                     tc = {}
                 inp = int(tc.get("inputTokens") or 0)
                 out = int(tc.get("outputTokens") or 0)
-            except (json.JSONDecodeError, TypeError, ValueError, AttributeError):
+            except (json.JSONDecodeError, TypeError, ValueError, AttributeError, OverflowError):
                 continue
             if inp + out == 0:
                 continue

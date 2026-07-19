@@ -52,7 +52,8 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[UsageEvent], Callable[
                 out = int(u.get("output_tokens") or 0)
                 cr = int(u.get("cache_read_input_tokens") or 0)
                 cw = int(u.get("cache_creation_input_tokens") or 0)
-            except (json.JSONDecodeError, UnicodeDecodeError, ValueError, TypeError, AttributeError):
+            except (json.JSONDecodeError, UnicodeDecodeError, ValueError, TypeError,
+                    AttributeError, OverflowError):  # OverflowError: int(float('inf')) from 1e400
                 continue
             total = inp + out + cr + cw
             if total == 0:
