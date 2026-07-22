@@ -11,7 +11,11 @@ in USD per token.
 
 from __future__ import annotations
 
-from typing import Any
+import json
+import os
+import urllib.request
+from pathlib import Path
+from typing import Any, Callable
 
 _MODELS_DEV_PRICE_SCALE = 1_000_000  # models.dev prices are per-1M tokens
 
@@ -102,3 +106,79 @@ def _merge_models_dev(
             if cache_read is not None:
                 entry["cache_read_cost"] = cache_read / _MODELS_DEV_PRICE_SCALE
             rates[key] = entry
+
+
+LITELLM_URL = (
+    "https://raw.githubusercontent.com/BerriAI/litellm/main/"
+    "model_prices_and_context_window.json"
+)
+MODELS_DEV_URL = "https://models.dev/api.json"
+
+
+def _fetch_json(
+    url: str, timeout: int = 30
+) -> dict[str, Any] | None:
+    """GET a JSON dict via stdlib urllib (no third-party HTTP client).
+    None on any failure."""
+    req = urllib.request.Request(
+        url,
+        headers={
+            "Accept": "application/json",
+            "User-Agent": "agent-usage-tracker/price-sync",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def sync_prices(
+    out: str | Path,
+    *,
+    litellm_url: str = LITELLM_URL,
+    models_dev_url: str = MODELS_DEV_URL,
+    fetch: Callable[[str], dict[str, Any] | None] | None = None,
+) -> int:
+    """Fetch -> build -> atomic write. Returns the number of priced models. Raises
+    SystemExit if the primary source is unreachable or the map is empty, so a
+    good file is never overwritten with junk. `fetch` defaults to the network
+    fetcher; inject a fake in tests."""
+    fetch = fetch or _fetch_json
+    litellm = fetch(litellm_url)
+    if not litellm:
+        raise SystemExit(
+            "sync-prices: LiteLLM source unreachable; keeping the existing "
+            "price file."
+        )
+    rates = build_rate_map(litellm, fetch(models_dev_url))
+    if not rates:
+        raise SystemExit(
+            "sync-prices: built an empty rate map; keeping the existing "
+            "price file."
+        )
+    path = Path(out).expanduser()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # Atomic publish: write a sibling temp then os.replace (same-dir rename
+    # is atomic), so a concurrent reader never sees a half-written file.
+    # Mirrors the the registry sync script.
+    tmp = path.with_name(path.name + ".tmp")
+    try:
+        tmp.write_text(
+            json.dumps(rates, indent=2, sort_keys=True), encoding="utf-8"
+        )
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
+    return len(rates)
+
+
+def load_prices(path: str | Path) -> dict[str, dict[str, float]]:
+    """Load a price file; {} if absent (the report then degrades to
+    token-only metrics)."""
+    p = Path(path).expanduser()
+    if not p.exists():
+        return {}
+    return json.loads(p.read_text(encoding="utf-8"))

@@ -4,6 +4,7 @@ models.dev per-1M scaling, and the write/load roundtrip."""
 from __future__ import annotations
 
 import sys
+import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
@@ -41,6 +42,28 @@ def test_models_dev_fallback_scales_per_million() -> None:
     models_dev = {"openai": {"models": {"b": {"cost": {"input": 2.0, "output": 8.0}}}}}
     rates = pricing.build_rate_map(litellm, models_dev)
     assert rates["b"] == {"output_cost": 8.0 / 1_000_000, "input_cost": 2.0 / 1_000_000}
+
+
+def test_sync_and_load_roundtrip() -> None:
+    sample = {"claude-opus-4": {"litellm_provider": "anthropic",
+                                "input_cost_per_token": 1.5e-05,
+                                "output_cost_per_token": 7.5e-05}}
+    with tempfile.TemporaryDirectory() as d:
+        out = Path(d) / "sub" / "model_prices.json"
+        n = pricing.sync_prices(out, fetch=lambda url: sample)
+        assert n == 1
+        loaded = pricing.load_prices(out)
+        assert loaded["claude-opus-4"]["output_cost"] == 7.5e-05
+        assert pricing.load_prices(Path(d) / "gone.json") == {}
+
+
+def test_sync_prices_refuses_empty() -> None:
+    raised = False
+    try:
+        pricing.sync_prices("/tmp/should-not-write.json", fetch=lambda url: None)
+    except SystemExit:
+        raised = True
+    assert raised
 
 
 if __name__ == "__main__":
