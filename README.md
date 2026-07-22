@@ -75,6 +75,8 @@ aut scan               # push new usage since the last run, advance the watermar
 aut backfill           # reset the watermark, then push all history
 aut status             # config + watermark state
 aut export --out f.csv # write all usage as CSV (offline bulk-load / bridge)
+aut sync-prices        # refresh the API-equivalent model price map (LiteLLM -> models.dev)
+aut report             # compute showcase metrics from the sink -> metrics.json (needs [postgres])
 ```
 
 Run it on a timer (see `packaging/` for launchd + systemd units). Offline runs are safe:
@@ -92,3 +94,20 @@ dedups re-sends by `event_id`.
   `CONTRACT.md`.
 
 See `CONTRACT.md` for the event schema and webhook payload.
+
+## Showcase metrics (derived, opt-in)
+
+`aut report` reads the **unified sink** (via `transport.pg_dsn`, which doubles as the report's
+read source) and writes a small `metrics.json` for a personal-site showcase. It is a pure
+derivation over data you already have — the collector is unchanged, and **`project` is never
+read**, so no project name can leak into the output (aggregate-by-construction).
+
+- **Framing:** it reports *ratios and trends* (cache-hit %, output leverage, adoption timeline,
+  agent-turns-per-human-turn), not a token scoreboard. Volume appears once, framed as
+  API-equivalent work done on a flat-rate subscription.
+- **Pricing:** `aut sync-prices` maintains `model_prices.json` from LiteLLM (primary) and
+  models.dev (fallback) — both open source, extended to
+  carry the cache-read/write rates this tool needs. Every `$` figure is **notional /
+  API-equivalent**; a model missing from the map is reported under `priced_coverage`, never guessed.
+- **Sessions** are derived at report time by gap (default 30 min via `--idle-gap`), so the
+  count covers all history without any collector change.

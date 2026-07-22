@@ -33,8 +33,10 @@ webhook_secret = "env:AUT_WEBHOOK_SECRET"      # shared secret sent as the X-AUT
 # cf_access_client_id     = "env:CF_ACCESS_CLIENT_ID"
 # cf_access_client_secret = "env:CF_ACCESS_CLIENT_SECRET"
 
-# Optional fallback: direct Postgres over Tailscale. Only used if the webhook is
-# unreachable. Requires the [postgres] extra (uv tool install "agent-usage-tracker[postgres]").
+# pg_dsn is the optional direct-Postgres transport AND the read source for `aut report`
+# (the showcase-metrics command). Point it at the sink to enable `aut report`. Optional fallback
+# for webhook: only used if the webhook is unreachable. Requires the [postgres] extra
+# (uv tool install "agent-usage-tracker[postgres]").
 # pg_dsn = "env:AUT_PG_DSN"                     # e.g. postgresql://agents_writer@db.example:5432/agents
 
 # The home directory the collectors read from. Defaults to the RUNNING user's $HOME, so on a
