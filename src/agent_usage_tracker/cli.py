@@ -15,8 +15,9 @@ import argparse
 import json
 import sys
 
+from . import pricing
 from .collectors import REGISTRY
-from .config import Config, load_config
+from .config import Config, load_config, _config_path
 from .event import UsageEvent, valid_ts
 from .push import make_sender
 from .state import collector_wm, load_state, save_state
@@ -195,7 +196,18 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("status", help="show config + watermark state")
     p_export = sub.add_parser("export", help="write all usage as CSV (bulk load / offline bridge)")
     p_export.add_argument("--out", help="output CSV file (default: stdout)")
+    p_sync = sub.add_parser("sync-prices", help="refresh the API-equivalent model price map")
+    p_sync.add_argument("--out", help="output JSON (default: <config-dir>/model_prices.json)")
+    p_sync.add_argument("--litellm-url", default=pricing.LITELLM_URL)
+    p_sync.add_argument("--models-dev-url", default=pricing.MODELS_DEV_URL)
     args = parser.parse_args(argv)
+
+    if args.cmd == "sync-prices":
+        out = args.out or str(_config_path().parent / "model_prices.json")
+        n = pricing.sync_prices(out, litellm_url=args.litellm_url,
+                                models_dev_url=args.models_dev_url)
+        print(f"synced {n} model prices -> {out}", file=sys.stderr)
+        return 0
 
     cfg = load_config()
     agents = cfg.agents

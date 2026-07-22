@@ -66,6 +66,22 @@ def test_sync_prices_refuses_empty() -> None:
     assert raised
 
 
+def test_cli_sync_prices() -> None:
+    from agent_usage_tracker import cli
+    orig = pricing._fetch_json
+    pricing._fetch_json = lambda url, timeout=30: {
+        "claude-opus-4": {"output_cost_per_token": 7.5e-05}
+    }
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            out = str(Path(d) / "prices.json")
+            rc = cli.main(["sync-prices", "--out", out])
+            assert rc == 0
+            assert pricing.load_prices(out)["claude-opus-4"]["output_cost"] == 7.5e-05
+    finally:
+        pricing._fetch_json = orig
+
+
 if __name__ == "__main__":
     for _name, _fn in sorted(list(globals().items())):
         if _name.startswith("test_") and callable(_fn):
