@@ -200,6 +200,12 @@ def main(argv: list[str] | None = None) -> int:
     p_sync.add_argument("--out", help="output JSON (default: <config-dir>/model_prices.json)")
     p_sync.add_argument("--litellm-url", default=pricing.LITELLM_URL)
     p_sync.add_argument("--models-dev-url", default=pricing.MODELS_DEV_URL)
+    p_report = sub.add_parser("report",
+                              help="compute showcase metrics from the sink -> metrics.json")
+    p_report.add_argument("--out", help="output JSON (default: <config-dir>/metrics.json)")
+    p_report.add_argument("--prices", help="price map (default: <config-dir>/model_prices.json)")
+    p_report.add_argument("--idle-gap", type=int, default=1800,
+                          help="session idle-gap seconds (default 1800)")
     args = parser.parse_args(argv)
 
     if args.cmd == "sync-prices":
@@ -216,6 +222,17 @@ def main(argv: list[str] | None = None) -> int:
         bad = [a for a in agents if a not in REGISTRY]
         if bad:
             parser.error(f"unknown agent(s): {bad}; valid = {list(REGISTRY)}")
+
+    if args.cmd == "report":
+        from . import report as report_mod
+        out = args.out or str(_config_path().parent / "metrics.json")
+        prices = args.prices or str(_config_path().parent / "model_prices.json")
+        metrics = report_mod.run_report(cfg.pg_dsn, prices, out,
+                                        idle_gap_s=args.idle_gap)
+        cov = metrics["priced_coverage"]
+        print(f"wrote metrics -> {out}  (priced {cov['models_priced']} models, "
+              f"{cov['unpriced_token_share']:.0%} of tokens unpriced)", file=sys.stderr)
+        return 0
 
     if args.cmd == "status":
         cmd_status(cfg, agents)
