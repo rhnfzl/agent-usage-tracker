@@ -46,8 +46,11 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[UsageEvent], Callable[
         # New/rotated file (or a state-format upgrade whose old state lacks 'dev'/'ino') -> reset
         # and re-read. Safe because event_id is content-deterministic: re-emitted rows dedup at
         # the sink. Identity is (st_dev, st_ino); ino alone is only unique within a device.
-        if not prev or (prev.get("dev"), prev.get("ino")) != (st.st_dev, st.st_ino):
-            prev = _fresh_state(st.st_dev, st.st_ino)
+        if (not prev or (prev.get("dev"), prev.get("ino")) != (st.st_dev, st.st_ino)
+                or "um_ord" not in prev):   # state saved before um_ord existed -> re-read from
+            prev = _fresh_state(st.st_dev, st.st_ino)   # offset 0 so user_message ordinals (and
+            #                                            thus their event_ids) stay consistent if
+            #                                            the file is later reset and re-read.
         off = safe_int(prev.get("off"))
         if st.st_size < off:                            # truncated
             prev = _fresh_state(st.st_dev, st.st_ino)

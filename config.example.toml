@@ -12,8 +12,13 @@ machine = "laptop"
 #   cursor      = local IDE state.vscdb (a lower bound; no CLI, no model/cache attribution)
 #   cursor_sdk  = SDK-app run manifests  (needs cursor_sdk_manifests below)
 #   cursor_api  = Cursor dashboard API   (accurate; CLI + IDE; needs cursor_api = true below)
-# Pick ONE. The default below is cursor_api (the accurate source). If you instead want only SDK
-# manifest capture, swap cursor_api -> cursor_sdk here; if you can't use the API, use `cursor`.
+# Pick ONE token source. The default below is cursor_api (the accurate source). If you instead
+# want only SDK manifest capture, swap cursor_api -> cursor_sdk here; if you can't use the API,
+# use `cursor`. NOTE on human turns: only the local `cursor` collector emits human prompts (and
+# only at coarse conversation-level time); cursor_api / cursor_sdk have none. So with cursor_api
+# you get accurate tokens but no Cursor human turns - fine, human turns still come from
+# claude_code/codex/pi. Do NOT add `cursor` alongside cursor_api just for human turns: their
+# token counts would double up.
 agents = ["claude_code", "codex", "cursor_api", "pi"]
 
 [transport]
