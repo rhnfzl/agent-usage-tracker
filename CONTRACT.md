@@ -59,3 +59,11 @@ both transports, re-scans) never double-counts.
 | **codex** | `~/.codex/sessions/**/rollout-*.jsonl` `token_count` | `turn_context.model` | event `timestamp` | `input` includes cached; we split it. Captures `reasoning_tokens`. |
 | **pi** | `~/.pi/agent/sessions/**/*.jsonl` `message.usage` | `message.model` / `model_change` | record `timestamp` | Cleanest schema; older sessions may log zeros. |
 | **cursor** | `state.vscdb` `cursorDiskKV bubbleId:*` | **often null** (not in DB) | bubble `createdAt` or joined `composerData` | EXPERIMENTAL: a LOWER BOUND. For complete + model-attributed + costed data, use the dashboard API with `cursorAuth/accessToken` (follow-up, not in v1). Full-scans each run + dedups at the sink. |
+
+## Derived artifact: metrics.json (not part of the event contract)
+
+`aut report` produces `metrics.json` — an aggregate of the events above, never a passthrough.
+It is read from the sink with the `project` column deliberately excluded, so the published
+artifact aggregates to `agent × model × month × token-class (× kind)` and cannot carry a
+project name. `$` figures are notional / API-equivalent, computed from the synced price map
+(`aut sync-prices`), not from `est_cost_usd`.
