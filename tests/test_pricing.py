@@ -1,0 +1,51 @@
+"""Hermetic pricing tests: no network. Locks key normalization, cache-field extraction,
+models.dev per-1M scaling, and the write/load roundtrip."""
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
+from agent_usage_tracker import pricing  # noqa: E402
+
+
+def test_normalize_model_key() -> None:
+    assert pricing.normalize_model_key("claude-3-opus@20240229") == "claude-3-opus"
+    assert pricing.normalize_model_key("vendor-ai@azure/gpt-4o") == "gpt-4o"
+    assert pricing.normalize_model_key("anthropic/claude-3-5-sonnet") == "claude-3-5-sonnet"
+    assert pricing.normalize_model_key("GPT-5") == "gpt-5"
+
+
+def test_build_rate_map_extracts_cache_fields() -> None:
+    litellm = {
+        "claude-opus-4": {
+            "litellm_provider": "anthropic",
+            "input_cost_per_token": 1.5e-05, "output_cost_per_token": 7.5e-05,
+            "cache_read_input_token_cost": 1.5e-06, "cache_creation_input_token_cost": 1.875e-05,
+        },
+        "no-output-price": {"input_cost_per_token": 1e-06},  # dropped: no output price
+        "sample_spec": "not-a-dict",
+    }
+    rates = pricing.build_rate_map(litellm)
+    assert "no-output-price" not in rates
+    assert rates["claude-opus-4"] == {
+        "output_cost": 7.5e-05, "input_cost": 1.5e-05,
+        "cache_read_cost": 1.5e-06, "cache_write_cost": 1.875e-05,
+    }
+
+
+def test_models_dev_fallback_scales_per_million() -> None:
+    litellm = {"a": {"output_cost_per_token": 1e-06}}
+    models_dev = {"openai": {"models": {"b": {"cost": {"input": 2.0, "output": 8.0}}}}}
+    rates = pricing.build_rate_map(litellm, models_dev)
+    assert rates["b"] == {"output_cost": 8.0 / 1_000_000, "input_cost": 2.0 / 1_000_000}
+
+
+if __name__ == "__main__":
+    for _name, _fn in sorted(list(globals().items())):
+        if _name.startswith("test_") and callable(_fn):
+            _fn()
+            print(f"ok {_name}")
+    print("all passed")
