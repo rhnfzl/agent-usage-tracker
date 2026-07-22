@@ -12,7 +12,7 @@ from collections import defaultdict
 from datetime import datetime
 from typing import Iterable, NamedTuple
 
-from .pricing import normalize_model_key  # noqa: F401
+from .pricing import normalize_model_key
 
 
 class Row(NamedTuple):
@@ -48,3 +48,38 @@ def iter_sessions(rows: Iterable[Row], idle_gap_s: int):
             prev = t
         if session_start is not None:
             yield (agent, machine, session_start)
+
+
+def cost_of(row: Row, prices: dict[str, dict[str, float]]) -> float | None:
+    """API-equivalent cost of one row, or None if the model is not priced.
+    cache_read/write use their own rate when present, else fall back to the input rate.
+    Reasoning bills as output."""
+    p = prices.get(normalize_model_key(row.model or ""))
+    if not p:
+        return None
+    in_rate = p.get("input_cost", 0.0)
+    out_rate = p.get("output_cost", 0.0)
+    return (
+        row.input_tokens * in_rate
+        + row.output_tokens * out_rate
+        + row.cache_read_tokens * p.get("cache_read_cost", in_rate)
+        + row.cache_write_tokens * p.get("cache_write_cost", in_rate)
+        + (row.reasoning_tokens or 0) * out_rate
+    )
+
+
+def naive_cost_of(row: Row, prices: dict[str, dict[str, float]]) -> float | None:
+    """What the row WOULD cost with no cache discount: cache_read repriced at the full
+    input rate. sum(naive) / sum(actual) over priced rows is the cache-savings multiple."""
+    p = prices.get(normalize_model_key(row.model or ""))
+    if not p:
+        return None
+    in_rate = p.get("input_cost", 0.0)
+    out_rate = p.get("output_cost", 0.0)
+    return (
+        row.input_tokens * in_rate
+        + row.output_tokens * out_rate
+        + row.cache_read_tokens * in_rate
+        + row.cache_write_tokens * p.get("cache_write_cost", in_rate)
+        + (row.reasoning_tokens or 0) * out_rate
+    )
