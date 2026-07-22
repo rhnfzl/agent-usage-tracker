@@ -103,7 +103,7 @@ derivation over data you already have — the collector is unchanged, and **`pro
 read**, so no project name can leak into the output (aggregate-by-construction).
 
 - **Framing:** it reports *ratios and trends* (cache-hit %, output leverage, adoption timeline,
-  agent-turns-per-human-prompt), not a token scoreboard. Volume appears once, framed as
+  agent-turns-per-human-turn), not a token scoreboard. Volume appears once, framed as
   API-equivalent work done on a flat-rate subscription.
 - **Pricing:** `aut sync-prices` maintains `model_prices.json` from LiteLLM (primary) and
   models.dev (fallback) — both open source, extended to

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from datetime import datetime
-from typing import Iterable, NamedTuple
+from typing import Any, Iterable, NamedTuple
 
 from .pricing import normalize_model_key
 
@@ -32,7 +32,8 @@ class Row(NamedTuple):
 def iter_sessions(rows: Iterable[Row], idle_gap_s: int):
     """Yield (agent, machine, first_ts) per session. A session is a run of one
     agent+machine's events with <= idle_gap_s between consecutive events
-    (ordered by ts)."""
+    (ordered by ts). `rows` includes human turns, so a session/active_days span
+    a human prompt as activity too — not agent-only work time."""
     buckets: dict[tuple, list[datetime]] = defaultdict(list)
     for r in rows:
         buckets[(r.agent, r.machine)].append(r.ts)
@@ -101,7 +102,9 @@ def _safe_div(a: float, b: float) -> float:
     return a / b if b else 0.0
 
 
-def compute_metrics(rows, prices, *, idle_gap_s: int, now: datetime) -> dict:
+def compute_metrics(
+    rows: Iterable[Row], prices: dict[str, dict[str, float]], *, idle_gap_s: int, now: datetime
+) -> dict[str, Any]:
     """Derive the full showcase metric set. `rows` is any iterable of Row; `prices` may be {}
     (then $ metrics degrade to None while token-ratio metrics still compute)."""
     rows = list(rows)
@@ -133,6 +136,8 @@ def compute_metrics(rows, prices, *, idle_gap_s: int, now: datetime) -> dict:
         if r.model:
             priced_models.add(r.model)
 
+    # active_days/sessions span all rows, including human turns: a prompt counts as
+    # activity, so these are not agent-only work time.
     active_days = {r.ts.date() for r in rows}
     sessions = list(iter_sessions(rows, idle_gap_s))
     sessions_by_month: dict[str, int] = defaultdict(int)
@@ -144,7 +149,8 @@ def compute_metrics(rows, prices, *, idle_gap_s: int, now: datetime) -> dict:
     for r in rows:
         mb = by_month.setdefault(r.ts.strftime("%Y-%m"),
                                  {"tokens": 0, "in": 0, "cr": 0, "human": 0, "agent": 0,
-                                  "days": set(), "model_tokens": defaultdict(int)})
+                                  "days": set(), "model_tokens": defaultdict(int),
+                                  "out": 0, "reason": 0, "actual": 0.0, "naive": 0.0})
         mb["days"].add(r.ts.date())
         if r.kind == "human":
             mb["human"] += 1
@@ -154,6 +160,12 @@ def compute_metrics(rows, prices, *, idle_gap_s: int, now: datetime) -> dict:
         mb["in"] += r.input_tokens
         mb["cr"] += r.cache_read_tokens
         mb["model_tokens"][r.model or "unknown"] += r.total_tokens
+        mb["out"] += r.output_tokens
+        mb["reason"] += r.reasoning_tokens or 0
+        c = cost_of(r, prices)
+        if c is not None:
+            mb["actual"] += c
+            mb["naive"] += naive_cost_of(r, prices) or 0.0
 
     trends = []
     for month in sorted(by_month):
@@ -169,6 +181,11 @@ def compute_metrics(rows, prices, *, idle_gap_s: int, now: datetime) -> dict:
             "agent_turns": mb["agent"],
             "model_mix": {mdl: round(tok / denom, 4) for mdl, tok in
                           sorted(mb["model_tokens"].items(), key=lambda kv: -kv[1])},
+            "est_cost_usd": round(mb["actual"], 2) if mb["actual"] else None,
+            "cache_savings_multiple": round(_safe_div(mb["naive"], mb["actual"]), 2)
+                                      if mb["actual"] else None,
+            "output_leverage": round(_safe_div(mb["out"], mb["in"]), 4),
+            "reasoning_share": round(_safe_div(mb["reason"], mb["tokens"]), 4),
         })
 
     # Per-agent adoption span.

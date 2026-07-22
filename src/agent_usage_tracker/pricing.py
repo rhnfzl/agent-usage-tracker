@@ -181,4 +181,7 @@ def load_prices(path: str | Path) -> dict[str, dict[str, float]]:
     p = Path(path).expanduser()
     if not p.exists():
         return {}
-    return json.loads(p.read_text(encoding="utf-8"))
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except (ValueError, OSError) as exc:
+        raise SystemExit(f"price file {p} is unreadable/corrupt; re-run `aut sync-prices`: {exc}")

@@ -66,6 +66,29 @@ def test_sync_prices_refuses_empty() -> None:
     assert raised
 
 
+def test_sync_prices_refuses_empty_rate_map() -> None:
+    bad = {"m": {"input_cost_per_token": 1e-06}}  # no output price -> pruned -> empty map
+    raised = False
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            pricing.sync_prices(Path(d) / "x.json", fetch=lambda url: bad)
+    except SystemExit:
+        raised = True
+    assert raised
+
+
+def test_load_prices_raises_on_corrupt_file() -> None:
+    raised = False
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            bad = Path(d) / "prices.json"
+            bad.write_text("{not json", encoding="utf-8")
+            pricing.load_prices(bad)
+    except SystemExit:
+        raised = True
+    assert raised
+
+
 def test_cli_sync_prices() -> None:
     from agent_usage_tracker import cli
     orig = pricing._fetch_json

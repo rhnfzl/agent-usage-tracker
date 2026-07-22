@@ -41,6 +41,10 @@ def test_sessions_split_on_idle_gap() -> None:
     ]
     assert len(list(iter_sessions(rows, idle_gap_s=1800))) == 2
 
+    sessions = list(iter_sessions(rows, idle_gap_s=1800))
+    assert sessions[0] == ("claude_code", "laptop", _dt("2026-01-01T10:00:00"))
+    assert sessions[1] == ("claude_code", "laptop", _dt("2026-01-01T12:00:00"))
+
 
 def test_sessions_do_not_merge_across_agents() -> None:
     rows = [
@@ -70,6 +74,9 @@ def test_cost_and_naive() -> None:
     assert round(naive_cost_of(r, PRICES), 10) == round(
         0.0015 + 0.00075 + 0.015 + 0.0009375, 10
     )
+    r2 = _row("2026-01-01T10:00:00", reason=4)
+    # reasoning bills at the output rate
+    assert round(cost_of(r2, PRICES), 10) == round(4 * 7.5e-05, 10)
 
 
 def test_cost_none_for_unpriced_model() -> None:
@@ -99,6 +106,16 @@ def test_compute_metrics_end_to_end() -> None:
     assert m["volume"]["priced"] is True
     assert len(m["trends"]["by_month"]) == 2             # 2026-01 and 2026-02
     assert m["instrument"]["tracks_human_and_agent_turns"] is True
+
+    jan, feb = m["trends"]["by_month"][0], m["trends"]["by_month"][1]
+    assert jan["output_leverage"] == 0.5                 # out 50 / in 100
+    assert jan["est_cost_usd"] == 0.01                   # cost_of(claude row) = 0.0066 -> 0.01
+    assert jan["cache_savings_multiple"] == 2.84         # naive 0.01875 / actual 0.0066
+    assert jan["reasoning_share"] == 0.0                 # no reasoning tokens in Jan
+    assert feb["reasoning_share"] == round(30 / 330, 4)  # 0.0909
+    assert feb["est_cost_usd"] is None                   # unknown-x is unpriced
+    assert feb["cache_savings_multiple"] is None
+    assert feb["output_leverage"] == 0.5                 # out 100 / in 200
 
 
 def test_compute_metrics_unpriced_only_degrades_cleanly() -> None:

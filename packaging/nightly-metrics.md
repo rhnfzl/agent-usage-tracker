@@ -6,7 +6,7 @@ cron is deliberate.
 
 Install with the postgres extra:
 
-    uv tool install "git+https://github.com/rhnfzl/agent-usage-tracker[postgres]"
+    uv tool install "agent-usage-tracker[postgres] @ git+https://github.com/rhnfzl/agent-usage-tracker"
 
 Crontab (03:15 nightly), writing where the site build reads it:
 
