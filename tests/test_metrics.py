@@ -8,7 +8,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from agent_usage_tracker.metrics import Row, iter_sessions, cost_of, naive_cost_of  # noqa: E402
+from agent_usage_tracker.metrics import (  # noqa: E402
+    Row, iter_sessions, cost_of, naive_cost_of, compute_metrics,
+)
 
 
 def _dt(s: str) -> datetime:
@@ -73,6 +75,39 @@ def test_cost_and_naive() -> None:
 def test_cost_none_for_unpriced_model() -> None:
     assert cost_of(_row("2026-01-01T10:00:00", model="unknown-x"), PRICES) is None
     assert naive_cost_of(_row("2026-01-01T10:00:00", model=None), PRICES) is None
+
+
+def test_compute_metrics_end_to_end() -> None:
+    rows = [
+        _row("2026-01-05T10:00:00", inp=100, out=50, cr=900, cw=0, kind="agent"),
+        _row("2026-01-05T10:05:00", agent="claude_code", kind="human", model=None),
+        _row("2026-02-10T09:00:00", agent="codex", model="unknown-x",
+             inp=200, out=100, reason=30, total=330),
+    ]
+    m = compute_metrics(rows, PRICES, idle_gap_s=1800, now=_dt("2026-03-01T00:00:00"))
+
+    assert m["as_of"] == "2026-03-01"
+    assert m["collaboration"]["human_turns"] == 1
+    assert m["collaboration"]["agent_turns"] == 2
+    assert m["collaboration"]["agent_turns_per_human_turn"] == 2.0
+    # cache_hit_rate over agent rows = cr / (cr + input) = 900 / (900 + 300)
+    assert m["efficiency"]["cache_hit_rate"] == round(900 / 1200, 4)
+    assert m["fluency"]["active_days"] == 2              # 2026-01-05 and 2026-02-10
+    assert m["fluency"]["distinct_agents"] == 2
+    assert m["priced_coverage"]["models_priced"] == 1    # only the claude row is priced
+    assert "unknown-x" in m["priced_coverage"]["models_unpriced"]
+    assert m["volume"]["priced"] is True
+    assert len(m["trends"]["by_month"]) == 2             # 2026-01 and 2026-02
+    assert m["instrument"]["tracks_human_and_agent_turns"] is True
+
+
+def test_compute_metrics_unpriced_only_degrades_cleanly() -> None:
+    rows = [_row("2026-01-05T10:00:00", model="unknown-x", inp=10, out=5, total=15)]
+    m = compute_metrics(rows, PRICES, idle_gap_s=1800, now=_dt("2026-02-01T00:00:00"))
+    assert m["volume"]["priced"] is False
+    assert m["volume"]["est_cost_usd"] is None
+    assert m["efficiency"]["cache_savings_multiple"] is None
+    assert m["efficiency"]["output_leverage"] == round(5 / 10, 4)  # token ratios still work
 
 
 if __name__ == "__main__":
