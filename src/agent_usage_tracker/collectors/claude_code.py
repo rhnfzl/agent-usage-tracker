@@ -31,8 +31,10 @@ def _is_human_text(content: object) -> bool:
     if isinstance(content, str):
         return True
     if isinstance(content, list):
+        # A real prompt may mix text with pasted images; exclude only the tool_result
+        # block-lists Claude Code writes as role=user after each tool call.
         return bool(content) and all(
-            isinstance(b, dict) and b.get("type") == "text" for b in content)
+            isinstance(b, dict) and b.get("type") != "tool_result" for b in content)
     return False
 
 

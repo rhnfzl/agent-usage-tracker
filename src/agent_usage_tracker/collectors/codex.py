@@ -116,7 +116,8 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[UsageEvent], Callable[
                 # A human prompt (or a scripted `codex exec` prompt - indistinguishable here).
                 # No tokens; a stable per-session ordinal makes the id deterministic so a
                 # re-read (file reset) re-emits the same id and the sink dedups it.
-                cur["um_ord"] += 1
+                # .get(): per-file state persisted before this field existed lacks um_ord.
+                cur["um_ord"] = cur.get("um_ord", 0) + 1
                 ts = o.get("timestamp")
                 sid = cur["session_id"] or os.path.basename(path)
                 events.append(UsageEvent(
