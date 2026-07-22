@@ -135,22 +135,31 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[UsageEvent], Callable[
                     out = int(tc.get("outputTokens") or 0)
                 except (json.JSONDecodeError, TypeError, ValueError, AttributeError, OverflowError):
                     continue
-                if inp + out == 0:
-                    continue
                 composer_id = key.split(":")[1]
                 bubble_id = o.get("bubbleId") or key.rsplit(":", 1)[-1]
                 meta = comp.get(composer_id) or {}
-                uid = o.get("usageUuid") or f"{composer_id}:{bubble_id}"
-                events.append(UsageEvent(
-                    event_id=make_event_id(NAME, uid),
-                    ts=_ts(o, meta),
-                    agent=NAME,
-                    model=_model(o) or meta.get("model"),
-                    provider="cursor",
-                    input_tokens=inp,
-                    output_tokens=out,
-                    total_tokens=inp + out,
-                ))
+                if o.get("type") == 1:
+                    # A user bubble = a human prompt. No token count of its own, and no bubble
+                    # timestamp either, so ts falls back to the composer's createdAt (COARSE:
+                    # every prompt in a conversation shares one time). event_id is per-bubble.
+                    events.append(UsageEvent(
+                        event_id=make_event_id(NAME, "human", composer_id, bubble_id),
+                        ts=_ts(o, meta), agent=NAME, model=None, provider=None, kind="human",
+                    ))
+                elif inp + out > 0:
+                    uid = o.get("usageUuid") or f"{composer_id}:{bubble_id}"
+                    events.append(UsageEvent(
+                        event_id=make_event_id(NAME, uid),
+                        ts=_ts(o, meta),
+                        agent=NAME,
+                        model=_model(o) or meta.get("model"),
+                        provider="cursor",
+                        input_tokens=inp,
+                        output_tokens=out,
+                        total_tokens=inp + out,
+                    ))
+                else:
+                    continue
                 if len(events) >= _BATCH:
                     yield events, _noop
                     events = []

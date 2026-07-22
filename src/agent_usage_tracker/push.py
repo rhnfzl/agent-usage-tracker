@@ -24,7 +24,7 @@ from .event import UsageEvent
 
 # Column order shared with the homelab schema (agents.usage_event). Keep in sync.
 COLUMNS = (
-    "event_id", "ts", "machine", "agent", "model", "provider",
+    "event_id", "ts", "machine", "agent", "kind", "model", "provider",
     "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens",
     "reasoning_tokens", "total_tokens", "est_cost_usd", "project",
 )

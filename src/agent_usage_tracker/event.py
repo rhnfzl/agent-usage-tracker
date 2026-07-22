@@ -44,6 +44,7 @@ class UsageEvent:
     agent: str               # claude_code | codex | cursor | pi
     model: str | None
     provider: str | None
+    kind: str = "agent"      # 'agent' = an assistant turn (has tokens); 'human' = a user prompt (no tokens)
     input_tokens: int = 0
     output_tokens: int = 0
     cache_read_tokens: int = 0

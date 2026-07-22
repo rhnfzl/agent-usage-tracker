@@ -28,7 +28,7 @@ NAME = "codex"
 
 def _fresh_state(dev: int | None = None, ino: int | None = None) -> dict:
     return {"off": 0, "dev": dev, "ino": ino, "model": None, "provider": "openai",
-            "session_id": None, "cwd": None, "tc_ord": 0}
+            "session_id": None, "cwd": None, "tc_ord": 0, "um_ord": 0}
 
 
 def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[UsageEvent], Callable[[], None]]]:
@@ -111,6 +111,18 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[UsageEvent], Callable[
                     reasoning_tokens=rea,
                     total_tokens=total,
                     project=basename(cur["cwd"]),
+                ))
+            elif t == "event_msg" and p.get("type") == "user_message":
+                # A human prompt (or a scripted `codex exec` prompt - indistinguishable here).
+                # No tokens; a stable per-session ordinal makes the id deterministic so a
+                # re-read (file reset) re-emits the same id and the sink dedups it.
+                cur["um_ord"] += 1
+                ts = o.get("timestamp")
+                sid = cur["session_id"] or os.path.basename(path)
+                events.append(UsageEvent(
+                    event_id=make_event_id(NAME, "human", sid, ts or "", cur["um_ord"]),
+                    ts=ts, agent=NAME, model=None, provider=None,
+                    kind="human", project=basename(cur["cwd"]),
                 ))
         cur["off"] = new_off
 

@@ -191,6 +191,89 @@ def test_cursor() -> None:
     print("ok cursor")
 
 
+def test_human_turns() -> None:
+    # Human prompts are emitted as kind='human' with zero tokens; the load-bearing filters
+    # (tool_result / meta / sidechain for claude_code) keep injected non-prompts out.
+    with tempfile.TemporaryDirectory() as d:
+        home = Path(d)
+        _write_jsonl(home / ".claude/projects/p/s.jsonl", [
+            {"type": "user", "uuid": "h1", "timestamp": "2026-07-18T10:00:00Z", "cwd": "/x/proj",
+             "message": {"role": "user", "content": "fix the bug"}},                    # real prompt
+            {"type": "user", "uuid": "h2", "timestamp": "2026-07-18T10:00:01Z",
+             "message": {"role": "user", "content": [{"type": "tool_result", "content": "x"}]}},  # excluded
+            {"type": "user", "uuid": "h3", "isMeta": True,
+             "message": {"role": "user", "content": "meta"}},                           # excluded
+            {"type": "user", "uuid": "h4", "isSidechain": True,
+             "message": {"role": "user", "content": "subagent"}},                       # excluded
+            {"type": "assistant", "uuid": "a1", "timestamp": "2026-07-18T10:00:05Z",
+             "message": {"model": "m", "usage": {"input_tokens": 5, "output_tokens": 5,
+                 "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}}},
+        ])
+        ev = _drain(claude_code.collect, _cfg(home))
+        human = [e for e in ev if e.kind == "human"]
+        assert len(human) == 1, human                                  # tool_result/meta/sidechain out
+        assert human[0].ts == "2026-07-18T10:00:00Z" and human[0].project == "proj"
+        assert human[0].model is None and human[0].total_tokens == 0
+        assert sum(e.kind == "agent" for e in ev) == 1
+
+    # codex: an event_msg user_message becomes a human turn (distinct id from token_count turns)
+    with tempfile.TemporaryDirectory() as d:
+        home = Path(d)
+        _write_jsonl(home / ".codex/sessions/2026/07/18/rollout-a.jsonl", [
+            {"type": "session_meta", "payload": {"session_id": "s1", "cwd": "/x/repo"}},
+            {"type": "event_msg", "timestamp": "2026-07-18T10:00:00Z",
+             "payload": {"type": "user_message", "message": "hello"}},
+            {"type": "event_msg", "timestamp": "2026-07-18T10:00:02Z",
+             "payload": {"type": "token_count", "info": {"last_token_usage": {
+                 "input_tokens": 10, "cached_input_tokens": 0, "output_tokens": 5,
+                 "reasoning_output_tokens": 0, "total_tokens": 15}}}},
+        ])
+        ev = _drain(codex.collect, _cfg(home))
+        human = [e for e in ev if e.kind == "human"]
+        assert len(human) == 1 and human[0].ts == "2026-07-18T10:00:00Z", human
+        assert human[0].agent == "codex" and human[0].project == "repo"
+        assert sum(e.kind == "agent" for e in ev) == 1
+
+    # pi: a role==user message becomes a human turn
+    with tempfile.TemporaryDirectory() as d:
+        home = Path(d)
+        _write_jsonl(home / ".pi/agent/sessions/dir/s.jsonl", [
+            {"type": "message", "id": "u1", "timestamp": "2026-07-18T10:00:00Z",
+             "message": {"role": "user", "content": "hi"}},
+            {"type": "message", "id": "m1", "timestamp": "2026-07-18T10:00:02Z",
+             "message": {"role": "assistant", "usage": {"input": 5, "output": 5, "totalTokens": 10}}},
+        ])
+        ev = _drain(pi.collect, _cfg(home))
+        human = [e for e in ev if e.kind == "human"]
+        assert len(human) == 1 and human[0].ts == "2026-07-18T10:00:00Z", human
+        assert sum(e.kind == "agent" for e in ev) == 1
+
+    # cursor: a type==1 (user) bubble becomes a human turn with the coarse composer timestamp
+    with tempfile.TemporaryDirectory() as d:
+        home = Path(d)
+        db = home / "Library/Application Support/Cursor/User/globalStorage/state.vscdb"
+        db.parent.mkdir(parents=True, exist_ok=True)
+        con = sqlite3.connect(db)
+        con.execute("CREATE TABLE cursorDiskKV (key TEXT, value TEXT)")
+        con.execute("INSERT INTO cursorDiskKV VALUES (?, ?)",
+                    ("composerData:c1", json.dumps({"createdAt": 1700000000000})))
+        con.execute("INSERT INTO cursorDiskKV VALUES (?, ?)",
+                    ("bubbleId:c1:b1", json.dumps({"bubbleId": "b1", "type": 1})))       # user
+        con.execute("INSERT INTO cursorDiskKV VALUES (?, ?)",
+                    ("bubbleId:c1:b2", json.dumps({"bubbleId": "b2", "type": 2,
+                        "tokenCount": {"inputTokens": 10, "outputTokens": 5}})))          # assistant
+        con.commit()
+        con.close()
+        cfg = _cfg(home)
+        cfg.cursor_db_path = str(db)
+        ev = _drain(cursor.collect, cfg)
+        human = [e for e in ev if e.kind == "human"]
+        assert len(human) == 1 and human[0].ts is not None, human      # coarse composer ts
+        assert human[0].total_tokens == 0
+        assert sum(e.kind == "agent" for e in ev) == 1
+    print("ok human_turns")
+
+
 def test_cursor_sdk() -> None:
     # Synthetic orchestrator manifest (real schema, invented numbers). Exercises: finished-with-usage
     # emitted, no-usage skipped, zero-total skipped, missing total_tokens -> summed fallback, and a

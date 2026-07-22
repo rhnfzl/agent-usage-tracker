@@ -24,6 +24,18 @@ from ._util import basename, scan_file
 NAME = "claude_code"
 
 
+def _is_human_text(content: object) -> bool:
+    """True for a genuine typed prompt: a plain string (typed text or a slash command) or a
+    block list that is ALL text. False for the tool_result block-lists Claude Code writes as
+    role=user after each tool call, so those injections don't count as you prompting."""
+    if isinstance(content, str):
+        return True
+    if isinstance(content, list):
+        return bool(content) and all(
+            isinstance(b, dict) and b.get("type") == "text" for b in content)
+    return False
+
+
 def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[UsageEvent], Callable[[], None]]]:
     base = cfg.home / ".claude" / "projects"
     if not base.exists():
@@ -50,11 +62,34 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[UsageEvent], Callable[
         # message; same trust class as the other accepted lows (st_ino reuse, TOCTOU). Not worth a
         # persistent per-message ts cache to close.
         best: dict[str, UsageEvent] = {}
+        human: list[UsageEvent] = []
         for raw in lines:
             try:
                 o = json.loads(raw)
-                if not isinstance(o, dict) or o.get("type") != "assistant":
+            except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
+                continue
+            if not isinstance(o, dict):
+                continue
+            typ = o.get("type")
+            if typ == "user":
+                # A real human prompt: string content (typed text or a slash command) or an
+                # all-text block list. Skip the tool_result user-lines Claude Code injects after
+                # every tool call (they dominate the raw "user" count), plus synthetic
+                # meta/compact/sidechain lines - none of those are you prompting.
+                if o.get("isMeta") or o.get("isCompactSummary") or o.get("isSidechain"):
                     continue
+                m = o.get("message")
+                if isinstance(m, dict) and _is_human_text(m.get("content")):
+                    uid = o.get("uuid") or f"{path}:{o.get('timestamp')}"
+                    human.append(UsageEvent(
+                        event_id=make_event_id(NAME, "human", uid),
+                        ts=o.get("timestamp"), agent=NAME, model=None, provider=None,
+                        kind="human", project=basename(o.get("cwd")),
+                    ))
+                continue
+            if typ != "assistant":
+                continue
+            try:
                 msg = o.get("message")
                 if not isinstance(msg, dict):
                     continue
@@ -65,8 +100,8 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[UsageEvent], Callable[
                 out = int(u.get("output_tokens") or 0)
                 cr = int(u.get("cache_read_input_tokens") or 0)
                 cw = int(u.get("cache_creation_input_tokens") or 0)
-            except (json.JSONDecodeError, UnicodeDecodeError, ValueError, TypeError,
-                    AttributeError, OverflowError):  # OverflowError: int(float('inf')) from 1e400
+            except (ValueError, TypeError, AttributeError,
+                    OverflowError):  # OverflowError: int(float('inf')) from 1e400
                 continue
             total = inp + out + cr + cw
             if total == 0:
@@ -92,7 +127,7 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[UsageEvent], Callable[
                 total_tokens=total,
                 project=basename(o.get("cwd")),
             )
-        events = list(best.values())
+        events = list(best.values()) + human
 
         def commit(p: str = path, s: dict = new_fstate) -> None:
             files[p] = s

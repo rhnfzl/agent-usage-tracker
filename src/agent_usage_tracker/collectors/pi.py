@@ -78,6 +78,14 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[UsageEvent], Callable[
                 continue
             if t != "message":
                 continue
+            if msg.get("role") == "user":
+                # A human prompt: plain text, no usage block. Emit as a human turn.
+                events.append(UsageEvent(
+                    event_id=make_event_id(NAME, "human", o.get("id") or f"{path}:{o.get('timestamp')}"),
+                    ts=o.get("timestamp"), agent=NAME, model=None, provider=None,
+                    kind="human", project=None,
+                ))
+                continue
             u = msg.get("usage")
             if not isinstance(u, dict):
                 continue

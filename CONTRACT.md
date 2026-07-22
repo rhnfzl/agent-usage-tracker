@@ -1,8 +1,9 @@
 # Data contract
 
-One normalized row per assistant turn. The collector emits it, the n8n webhook validates
-it, and the sink stores it. Keep this file and `push.py::COLUMNS` and the homelab
-`agents.usage_event` schema in sync.
+One normalized row per turn: an **assistant turn** (`kind:"agent"`, carries tokens) or a
+**human turn** (`kind:"human"`, a prompt you sent, zero tokens). The collector emits it, the
+n8n webhook validates it, and the sink stores it. Keep this file and `push.py::COLUMNS` and
+the homelab `agents.usage_event` schema in sync.
 
 ## Event
 
@@ -12,6 +13,7 @@ it, and the sink stores it. Keep this file and `push.py::COLUMNS` and the homela
   "ts": "2026-07-18T20:11:04Z",            // ISO-8601, from the source log line (NOT NULL)
   "machine": "laptop",                      // role-based label, stamped by the runner
   "agent": "claude_code|codex|cursor|pi",
+  "kind": "agent",                          // 'agent' = assistant turn (tokens); 'human' = a prompt you sent (0 tokens, model null)
   "model": "claude-opus-4-8",               // may be null (esp. cursor)
   "provider": "anthropic|openai|cursor|...",
   "input_tokens": 0,                        // FRESH (non-cached) prompt tokens

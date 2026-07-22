@@ -36,12 +36,15 @@ def _wm_fp(wm: dict) -> str:
 
 
 def _blank_agg() -> dict:
-    return {"events": 0, "input": 0, "output": 0, "cache_read": 0,
+    return {"events": 0, "human": 0, "input": 0, "output": 0, "cache_read": 0,
             "cache_write": 0, "reasoning": 0, "total": 0, "skipped_no_ts": 0,
             "by_model": {}}
 
 
 def _add(agg: dict, e: UsageEvent) -> None:
+    if e.kind == "human":            # a user prompt: no tokens, kept out of the token/model rollup
+        agg["human"] += 1
+        return
     agg["events"] += 1
     agg["input"] += e.input_tokens
     agg["output"] += e.output_tokens
@@ -107,16 +110,19 @@ def _print_report(cfg: Config, report: dict, dry_run: bool) -> None:
     print(f"\naut {mode}  machine={cfg.machine}\n" + "=" * 60)
     grand = 0
     for name, agg in report.items():
-        if agg["events"] == 0 and agg["skipped_no_ts"] == 0:
+        if agg["events"] == 0 and agg["human"] == 0 and agg["skipped_no_ts"] == 0:
             print(f"{name:<12} -  no new usage")
             continue
         grand += agg["total"]
-        print(f"{name:<12} {agg['events']:>6} turns  {agg['total']:>12,} tokens "
-              f"(in {agg['input']:,} / out {agg['output']:,} / "
-              f"cacheR {agg['cache_read']:,} / cacheW {agg['cache_write']:,}"
-              + (f" / reason {agg['reasoning']:,}" if agg['reasoning'] else "") + ")")
-        for model, mv in sorted(agg["by_model"].items(), key=lambda kv: -kv[1]["total"]):
-            print(f"    {model:<28} {mv['events']:>5} turns  {mv['total']:>12,} tokens")
+        if agg["events"] or agg["total"]:
+            print(f"{name:<12} {agg['events']:>6} turns  {agg['total']:>12,} tokens "
+                  f"(in {agg['input']:,} / out {agg['output']:,} / "
+                  f"cacheR {agg['cache_read']:,} / cacheW {agg['cache_write']:,}"
+                  + (f" / reason {agg['reasoning']:,}" if agg['reasoning'] else "") + ")")
+            for model, mv in sorted(agg["by_model"].items(), key=lambda kv: -kv[1]["total"]):
+                print(f"    {model:<28} {mv['events']:>5} turns  {mv['total']:>12,} tokens")
+        if agg["human"]:
+            print(f"{name:<12} {agg['human']:>6} human turns (prompts you sent)")
         if agg["skipped_no_ts"]:
             print(f"    (skipped {agg['skipped_no_ts']} records with missing/invalid timestamp)")
     print("-" * 60)
