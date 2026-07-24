@@ -98,8 +98,8 @@ Expected: FAIL — `ModuleNotFoundError: No module named 'agent_usage_tracker.pr
 # src/agent_usage_tracker/pricing.py
 """API-equivalent model price map, synced from LiteLLM (primary) -> models.dev (fallback).
 
-Mirrors the usual price-registry sync pattern, EXTENDED to also extract the
-two cache-cost fields that script skips (cache_read_input_token_cost /
+Follows the usual price-registry sync pattern, EXTENDED to also extract the
+two cache-cost fields such syncs normally skip (cache_read_input_token_cost /
 cache_creation_input_token_cost), which the tracker needs for its cache-savings metric.
 Zero runtime deps: the fetch uses stdlib urllib. Prices are NOTIONAL / API-equivalent.
 
@@ -1131,7 +1131,7 @@ read**, so no project name can leak into the output (aggregate-by-construction).
   agent-turns-per-human-prompt), not a token scoreboard. Volume appears once, framed as
   API-equivalent work done on a flat-rate subscription.
 - **Pricing:** `aut sync-prices` maintains `model_prices.json` from LiteLLM (primary) and
-  models.dev (fallback) — both open source, extended to
+  models.dev (fallback), both open source, extended to
   carry the cache-read/write rates this tool needs. Every `$` figure is **notional /
   API-equivalent**; a model missing from the map is reported under `priced_coverage`, never guessed.
 - **Sessions** are derived at report time by gap (default 30 min via `--idle-gap`), so the

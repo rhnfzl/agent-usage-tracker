@@ -106,8 +106,8 @@ v1; recorded here so the choice is explicit.
 
 ## 6. Price map — synced from LiteLLM
 
-Reuses the pattern in `the usual price-registry sync pattern`, **extended**
-to also extract the two cache-cost fields that script skips.
+Reuses the usual price-registry sync pattern, **extended**
+to also extract the two cache-cost fields such syncs normally skip.
 
 - **Source:** LiteLLM `model_prices_and_context_window.json` (raw GitHub, primary) →
   `models.dev/api.json` (fallback). Confirmed to carry, per model, `input_cost_per_token`,

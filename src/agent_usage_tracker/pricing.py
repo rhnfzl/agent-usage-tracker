@@ -1,7 +1,7 @@
 """API-equivalent model price map, synced from LiteLLM (primary) -> models.dev (fallback).
 
-Mirrors the usual price-registry sync pattern, EXTENDED to also extract
-the two cache-cost fields that script skips (cache_read_input_token_cost /
+Follows the usual price-registry sync pattern, EXTENDED to also extract the two cache-cost
+fields such syncs normally skip (cache_read_input_token_cost /
 cache_creation_input_token_cost), which the tracker needs for its cache-savings metric.
 Zero runtime deps: the fetch uses stdlib urllib. Prices are NOTIONAL / API-equivalent.
 
@@ -29,8 +29,8 @@ _FIELD_MAP = (
 
 def normalize_model_key(model_id: str) -> str:
     """Lowercase; strip a trailing version suffix (model@20240229), an alias prefix
-    (alias@model), then a provider path (provider/model). Mirrors the shared normalizer so a
-    tracker model string and a LiteLLM key reduce to the same token."""
+    (alias@model), then a provider path (provider/model), so a tracker model string and a
+    LiteLLM key reduce to the same token."""
     key = model_id.strip().lower()
     if "@" in key:
         head, _, tail = key.rpartition("@")
