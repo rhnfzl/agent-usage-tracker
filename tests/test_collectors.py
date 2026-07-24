@@ -345,16 +345,22 @@ def test_cursor_sdk() -> None:
     mp3.write_text(json.dumps({"ticket": "H", "runs": [
         {"index": 1, "model": "m", "finished_at": "2026-07-18T10:00:00+00:00",
          "usage": {"input_tokens": 4, "output_tokens": 1}}]}))
-    old = _os.environ.get("HOME")
-    _os.environ["HOME"] = tempfile.gettempdir()
+    # expanduser reads HOME on POSIX but USERPROFILE on Windows; set both so this runs everywhere
+    _home_vars = ("HOME", "USERPROFILE")
+    old = {k: _os.environ.get(k) for k in _home_vars}
+    for _k in _home_vars:
+        _os.environ[_k] = tempfile.gettempdir()
     try:
         cfg3 = _cfg(Path("/tmp"))
         cfg3.cursor_sdk_manifests = "~/aut_cursor_sdk_hometest/.state/runs/*/manifest.json"
         ev3 = _drain(cursor_sdk.collect, cfg3)
         assert len(ev3) == 1 and ev3[0].input_tokens == 4, ev3   # ~ expanded and matched
     finally:
-        if old is not None:
-            _os.environ["HOME"] = old
+        for _k, _v in old.items():
+            if _v is not None:
+                _os.environ[_k] = _v
+            else:
+                _os.environ.pop(_k, None)
         import shutil as _sh
         _sh.rmtree(fake_home, ignore_errors=True)
     # unset glob -> collector no-ops (opt-in)
@@ -392,7 +398,7 @@ def test_file_identity_reset() -> None:
     from agent_usage_tracker.collectors._util import scan_file
     with tempfile.TemporaryDirectory() as d:
         p = str(Path(d) / "f.jsonl")
-        Path(p).write_text("a\nb\n")
+        Path(p).write_bytes(b"a\nb\n")   # bytes, not text: Windows would translate \n to \r\n
         lines, s1 = scan_file(p, {})
         assert [ln.strip() for ln in lines] == [b"a", b"b"]
         assert "dev" in s1 and "ino" in s1 and s1["off"] == 4
@@ -546,10 +552,11 @@ def test_cursor_db_path() -> None:
     home = Path("/tmp/fakehome")
     override = _cfg(home)
     object.__setattr__(override, "cursor_db_path", "/custom/state.vscdb")
-    assert str(_cursor_db(override)) == "/custom/state.vscdb"
+    # compare Paths, not strings: Windows renders the same path with backslashes
+    assert _cursor_db(override) == Path("/custom/state.vscdb")
     p = _cursor_db(_cfg(home))
     assert p is not None
-    assert str(p).endswith("Cursor/User/globalStorage/state.vscdb")   # same subpath every OS
+    assert p.parts[-4:] == ("Cursor", "User", "globalStorage", "state.vscdb")  # same subpath every OS
     assert str(home) in str(p) or "AppData" in str(p)
     print("ok cursor_db_path")
 
