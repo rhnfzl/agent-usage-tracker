@@ -1,5 +1,11 @@
 # agent-usage-tracker (`aut`)
 
+[![CI](https://github.com/rhnfzl/agent-usage-tracker/actions/workflows/ci.yml/badge.svg)](https://github.com/rhnfzl/agent-usage-tracker/actions/workflows/ci.yml)
+[![Python](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/downloads/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+![Runtime dependencies](https://img.shields.io/badge/runtime%20deps-0-brightgreen)
+![Platforms](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey)
+
 Coding agents on a subscription do not tell you what they cost. There is no per-session
 invoice line, no dashboard that adds up across tools, and the flat monthly fee hides
 everything underneath it.
