@@ -1,23 +1,68 @@
 #!/bin/bash
-# Optional wrapper for the launchd timer. Runs `aut scan` and leaves a marker file behind when
-# the push could not be delivered, which is what dev.aut.retry.plist watches: while the marker
-# exists launchd re-runs this every ThrottleInterval, so usage missed with the VPN down lands as
-# soon as the sink is reachable instead of waiting out the full StartInterval.
+# Timer wrapper for `aut scan`. Optional on every platform -- the bare `aut scan` in the shipped
+# launchd/systemd units is still fine if you need none of this.
 #
-# Only worth wiring up if your scan interval is long, or the sink sits behind a VPN/tunnel that
-# is often unavailable. On the stock 15-minute timer the marker buys you almost nothing.
+# It adds three things `aut scan` cannot do for itself:
 #
-# Point dev.aut.scan.plist's ProgramArguments at this script instead of `aut scan` directly.
+#   1. Opens an SSH tunnel first, for a sink that is not directly reachable (a homelab Postgres
+#      behind Tailscale, say). Reuses a tunnel that is already up and only tears down its own.
+#   2. Leaves a marker file behind when the push fails, which dev.aut.retry.plist watches, so a
+#      scan missed with the VPN down lands as soon as the network is back instead of waiting out
+#      the whole timer interval.
+#   3. Timestamps both into one log you can diagnose from afterwards.
+#
+# Per-machine settings live in ~/.config/agent-usage-tracker/scan.env, sourced if it exists, so
+# this file is identical on every machine and stays a single thing to maintain:
+#
+#   AUT_BIN=/path/to/aut                     # default: ~/.local/bin/aut
+#   AUT_TUNNEL_HOST=user@host                # unset (the default) means no tunnel, scan direct
+#   AUT_TUNNEL_SPEC=15432:10.0.0.5:5432      # ssh -L argument; required with AUT_TUNNEL_HOST
+#
+# The env file exists because launchd and systemd do not inherit your shell environment. Keep
+# secrets out of it: they belong in config.toml, which is already chmod 600.
 set -u
 
-AUT="${AUT_BIN:-$HOME/.local/bin/aut}"          # override: AUT_BIN=/path/to/aut
-MARK="$HOME/.config/agent-usage-tracker/retry-pending"
+CONF="$HOME/.config/agent-usage-tracker"
+LOG="$CONF/scan.log"
+MARK="$CONF/retry-pending"
+[ -f "$CONF/scan.env" ] && . "$CONF/scan.env"
 
-"$AUT" scan
+AUT="${AUT_BIN:-$HOME/.local/bin/aut}"
+HOST="${AUT_TUNNEL_HOST:-}"
+SPEC="${AUT_TUNNEL_SPEC:-}"
+ts() { date "+%Y-%m-%dT%H:%M:%S"; }
+
+opened=""
+if [ -n "$HOST" ]; then
+  if [ -z "$SPEC" ]; then
+    # Misconfiguration, not an outage. Fail loudly and do NOT arm the marker, or the retry job
+    # would spin on it forever.
+    echo "$(ts) AUT_TUNNEL_HOST is set but AUT_TUNNEL_SPEC is not; refusing to scan" >>"$LOG"
+    exit 2
+  fi
+  port="${SPEC%%:*}"
+  if ! nc -z localhost "$port" 2>/dev/null; then
+    if ssh -f -N -o ExitOnForwardFailure=yes -o ConnectTimeout=15 -L "$SPEC" "$HOST" 2>>"$LOG"
+    then
+      opened=1
+      sleep 2
+    else
+      echo "$(ts) tunnel FAILED; armed retry-pending (retries until the host is reachable)" >>"$LOG"
+      touch "$MARK"
+      exit 0        # an unreachable host is not a scan failure; the retry job owns the next try
+    fi
+  fi
+fi
+
+echo "$(ts) scan start" >>"$LOG"
+"$AUT" scan >>"$LOG" 2>&1
 rc=$?
+echo "$(ts) scan done (exit $rc)" >>"$LOG"
 
 # `aut scan` exits non-zero when delivery fails: push.py raises, and neither run_scan() nor
 # main() swallows it. The watermark is not advanced for the undelivered batch, so the retry
 # re-sends it and the sink discards the repeat on event_id.
 if [ "$rc" -eq 0 ]; then rm -f "$MARK"; else touch "$MARK"; fi
+
+[ -n "$opened" ] && pkill -f "$SPEC" 2>/dev/null
 exit "$rc"

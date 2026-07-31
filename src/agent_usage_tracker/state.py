@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import tempfile
 from pathlib import Path
 
@@ -22,16 +23,36 @@ def _state_path() -> Path:
     return Path(base) / "agent-usage-tracker" / "state.json"
 
 
+def _warn_unusable(path: Path, reason: str) -> None:
+    """Starting clean is the right recovery, but doing it silently is not: losing the watermark
+    means the next scan re-reads every log from byte 0 and re-pushes all history. The sink dedups
+    that on event_id, so nothing breaks, but on a busy machine it is a multi-minute scan and a
+    lot of redundant rows -- and if the state keeps going bad, silence hides it happening every
+    single run. Copy the file aside first, because save_state() overwrites it at the end of this
+    same run and would otherwise destroy the only evidence of what went wrong."""
+    kept = path.with_suffix(".corrupt")
+    try:
+        kept.write_bytes(path.read_bytes())     # copy, not move: save_state still wants the path
+        detail = f"a copy is at {kept}"
+    except OSError as exc:
+        detail = f"could not copy it aside ({exc})"
+    print(f"aut: warning: the watermark at {path} is unusable ({reason}); {detail}. Starting "
+          "clean, so this run re-reads and re-pushes ALL history. The sink will dedup it, but "
+          "expect a slow scan.", file=sys.stderr)
+
+
 def load_state() -> dict:
     path = _state_path()
     if not path.exists():
-        return {"collectors": {}}
+        return {"collectors": {}}       # first run on this machine: genuinely nothing yet
     try:
         obj = json.loads(path.read_text())
-    except (json.JSONDecodeError, OSError):
+    except (json.JSONDecodeError, OSError) as exc:
+        _warn_unusable(path, str(exc))
         return {"collectors": {}}
     if not isinstance(obj, dict) or not isinstance(obj.get("collectors"), dict):
-        return {"collectors": {}}   # corrupt / unexpected shape -> start clean
+        _warn_unusable(path, f"unexpected shape: {type(obj).__name__}")
+        return {"collectors": {}}
     return obj
 
 
