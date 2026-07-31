@@ -30,6 +30,28 @@ def test_run_report_writes_json_matching_return() -> None:
         assert m["volume"]["priced"] is True
 
 
+def test_dedup_by_event_keeps_the_complete_row() -> None:
+    # One message can land twice under different timestamps: the sink's key is (event_id, ts) and
+    # has to stay that way (hypertable partitioning), so a scan that saw only part of a re-logged
+    # message inserts a second, partial row. Token counts are cumulative per message, so the
+    # largest total is the complete one and the smaller row is a prefix that would double-count.
+    t1 = datetime(2026, 7, 31, 12, 15, 34, tzinfo=timezone.utc)
+    t2 = datetime(2026, 7, 31, 12, 20, 52, tzinfo=timezone.utc)
+    recs = [
+        ("evt_a", t1, "claude_code", "mbp", "claude-opus-5", "agent", 10, 20, 30, 40, 0, 100),
+        ("evt_a", t2, "claude_code", "mbp", "claude-opus-5", "agent", 15, 25, 35, 45, 0, 120),
+        ("evt_b", t1, "claude_code", "mbp", "claude-opus-5", "agent", 1, 2, 3, 4, 0, 10),
+    ]
+    rows = report.dedup_by_event(recs)
+    assert len(rows) == 2, rows
+    assert sorted(r.total_tokens for r in rows) == [10, 120]   # 100 dropped, not summed to 220
+    kept = next(r for r in rows if r.total_tokens == 120)
+    assert kept.ts == t2 and kept.agent == "claude_code"
+    assert isinstance(kept, Row)                               # event_id stripped back off
+    # arrival order must not decide the winner
+    assert sorted(r.total_tokens for r in report.dedup_by_event(list(reversed(recs)))) == [10, 120]
+
+
 def test_run_report_requires_dsn() -> None:
     raised = False
     try:
