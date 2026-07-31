@@ -53,6 +53,44 @@ Claude Code, Codex, and Cursor all work on Windows: their logs live under `%USER
 (`~/.claude`, `~/.codex`) and `%APPDATA%\Cursor\...`, which the collector locates
 automatically. The config lives at `C:\Users\<you>\.config\agent-usage-tracker\config.toml`.
 
+## Retrying as soon as the sink comes back (optional)
+
+A scan that fires while the sink is unreachable — laptop off the VPN, tunnel down — is safe,
+but it then waits out the whole interval before trying again. On the stock 15-minute timer
+that is fine. If you run a long interval, or push through a VPN/tunnel, you can have the
+missed scan land the moment the network returns instead.
+
+`aut scan` already exits non-zero on a delivery failure, so both platforms key off that.
+
+**Linux** needs nothing extra: `agent-usage-tracker.service` ships with `Restart=on-failure`
+and `RestartSec=120`.
+
+**macOS** has no equivalent, so a marker file stands in for one:
+
+```bash
+cp packaging/launchd/aut-scan.sh ~/.config/agent-usage-tracker/
+chmod +x ~/.config/agent-usage-tracker/aut-scan.sh
+
+# point the existing scan job at the wrapper, so a failed push arms the marker
+/usr/libexec/PlistBuddy \
+  -c "Delete :ProgramArguments" \
+  -c "Add :ProgramArguments array" \
+  -c "Add :ProgramArguments:0 string /bin/bash" \
+  -c "Add :ProgramArguments:1 string $HOME/.config/agent-usage-tracker/aut-scan.sh" \
+  ~/Library/LaunchAgents/dev.aut.scan.plist
+
+cp packaging/launchd/dev.aut.retry.plist ~/Library/LaunchAgents/
+sed -i '' "s#/Users/CHANGEME#$HOME#g" ~/Library/LaunchAgents/dev.aut.retry.plist
+launchctl unload ~/Library/LaunchAgents/dev.aut.scan.plist
+launchctl load  ~/Library/LaunchAgents/dev.aut.scan.plist
+launchctl load  ~/Library/LaunchAgents/dev.aut.retry.plist
+```
+
+`aut-scan.sh` finds `aut` at `~/.local/bin/aut`; set `AUT_BIN` if yours lives elsewhere.
+
+The retry job uses `KeepAlive`/`PathState`, so launchd runs it *only* while the marker exists
+and stops the moment a scan succeeds. A healthy machine never wakes it.
+
 ## First run
 
 Do a one-time backfill of history (optional; on a heavy machine this can be a lot of

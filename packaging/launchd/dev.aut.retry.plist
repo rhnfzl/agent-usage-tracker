@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  OPTIONAL companion to dev.aut.scan.plist. Install only if your scan interval is long, or the
+  sink is behind a VPN/tunnel that is regularly unreachable.
+
+  KeepAlive/PathState runs aut-scan.sh ONLY while the retry-pending marker exists, relaunching
+  every ThrottleInterval until a scan succeeds and the script deletes the marker. When the last
+  scan was healthy this job costs nothing: launchd never wakes it.
+
+    cp packaging/launchd/aut-scan.sh ~/.config/agent-usage-tracker/
+    chmod +x ~/.config/agent-usage-tracker/aut-scan.sh
+    cp packaging/launchd/dev.aut.retry.plist ~/Library/LaunchAgents/
+    sed -i '' "s#/Users/CHANGEME#$HOME#g" ~/Library/LaunchAgents/dev.aut.retry.plist
+    launchctl load ~/Library/LaunchAgents/dev.aut.retry.plist
+
+  Point dev.aut.scan.plist at the same aut-scan.sh, otherwise the marker is never armed.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+ "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>dev.aut.retry</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>/Users/CHANGEME/.config/agent-usage-tracker/aut-scan.sh</string>
+  </array>
+  <key>KeepAlive</key>
+  <dict>
+    <key>PathState</key>
+    <dict>
+      <key>/Users/CHANGEME/.config/agent-usage-tracker/retry-pending</key>
+      <true/>
+    </dict>
+  </dict>
+  <key>ThrottleInterval</key>
+  <integer>120</integer>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>StandardOutPath</key>
+  <string>/tmp/aut.log</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/aut.err</string>
+</dict>
+</plist>
