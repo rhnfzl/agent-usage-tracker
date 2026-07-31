@@ -57,15 +57,25 @@ def read_new_lines(path: str, offset: int) -> tuple[list[bytes], int]:
 def scan_file(path: str, fstate: dict) -> tuple[list[bytes], dict]:
     """Inode-aware tail. `fstate` carries {'dev','ino','off'} (empty on first sight). Resets the
     offset to 0 when the file behind the path changes (rotated/replaced) so the beginning of a
-    replacement file is never skipped. Identity is (st_dev, st_ino): an inode number alone is
-    only unique within a device, so a path that moves across filesystems could otherwise collide.
-    Returns (complete_lines, new_fstate)."""
+    replacement file is never skipped. Returns (complete_lines, new_fstate).
+
+    Identity is st_ino ALONE, deliberately not (st_dev, st_ino). st_dev is assigned at mount,
+    not intrinsic to the volume: macOS/APFS hands out a different number after every reboot. Any
+    watermark holding st_dev therefore goes stale on restart, every tracked path looks replaced,
+    and the whole history is re-read and re-pushed. (Idempotent at the sink, but on a heavy
+    machine that is a multi-minute scan and ~500k redundant rows per reboot.)
+
+    What dropping it costs: an inode is only unique within a device, so a path that migrates to
+    another filesystem could collide with a same-numbered inode there and be resumed mid-file.
+    That needs a tracked path to change volumes AND collide, and it undercounts rather than
+    double-counts. A guaranteed re-push every reboot is the worse trade. st_dev is still recorded
+    for diagnostics. Truncation-in-place is caught separately by read_new_lines (size < offset)."""
     try:
         st = os.stat(path)
     except OSError:
         return [], fstate
     off = safe_int(fstate.get("off"))
-    if (fstate.get("dev"), fstate.get("ino")) != (st.st_dev, st.st_ino):  # different file at path
+    if fstate.get("ino") != st.st_ino:            # different file at this path (rotated/replaced)
         off = 0
     lines, new_off = read_new_lines(path, off)
     new_fstate = dict(fstate)

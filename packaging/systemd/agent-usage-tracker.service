@@ -8,3 +8,10 @@ Type=oneshot
 # ~/.config/agent-usage-tracker/config.toml (or the environment via env: values).
 ExecStart=%h/.local/bin/aut scan
 Nice=10
+# `aut scan` exits non-zero when the sink is unreachable, and the watermark is not advanced for
+# the undelivered batch, so nothing is lost. Retry every 2 minutes instead of waiting out the
+# timer: usage missed while a VPN was down then lands as soon as it is back. Type=oneshot
+# rejects Restart=always and Restart=on-success, but on-failure is allowed. Retries are spaced
+# wider than the default start-limit window (5 starts / 10s), so they cannot trip it.
+Restart=on-failure
+RestartSec=120

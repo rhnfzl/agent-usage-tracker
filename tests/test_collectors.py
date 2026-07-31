@@ -409,6 +409,15 @@ def test_file_identity_reset() -> None:
         lines, s3 = scan_file(p, stale)
         assert [ln.strip() for ln in lines] == [b"a", b"b"]   # reset to 0, full re-read
         assert s3["ino"] == s1["ino"]                          # identity corrected to the real file
+
+        # Regression: st_dev is a mount-time number, not a property of the file. macOS renumbers
+        # it on reboot, which used to invalidate every watermark and re-push all history. A
+        # changed dev with the same inode is the SAME file -> keep the offset, read nothing.
+        rebooted = dict(s1)
+        rebooted["dev"] = s1["dev"] + 4              # what a restart does to every tracked path
+        lines, s4 = scan_file(p, rebooted)
+        assert lines == [] and s4["off"] == 4        # no re-read
+        assert s4["dev"] == s1["dev"]                # dev still refreshed for diagnostics
     print("ok file_identity_reset")
 
 
