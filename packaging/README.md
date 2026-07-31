@@ -86,10 +86,38 @@ launchctl load  ~/Library/LaunchAgents/dev.aut.scan.plist
 launchctl load  ~/Library/LaunchAgents/dev.aut.retry.plist
 ```
 
-`aut-scan.sh` finds `aut` at `~/.local/bin/aut`; set `AUT_BIN` if yours lives elsewhere.
-
 The retry job uses `KeepAlive`/`PathState`, so launchd runs it *only* while the marker exists
 and stops the moment a scan succeeds. A healthy machine never wakes it.
+
+### Per-machine settings: `scan.env`
+
+`aut-scan.sh` is meant to be byte-identical everywhere; anything machine-specific goes in
+`~/.config/agent-usage-tracker/scan.env`, which it sources if present. Timer jobs do not
+inherit your shell environment, which is why this file exists rather than an `export` in your
+profile. **Keep secrets out of it** — those belong in `config.toml`, which is already `chmod 600`.
+
+```bash
+cat > ~/.config/agent-usage-tracker/scan.env <<'EOF'
+AUT_BIN=/opt/homebrew/bin/aut          # default: ~/.local/bin/aut
+EOF
+```
+
+### Sinks behind SSH
+
+If the sink is not directly reachable — a homelab Postgres on Tailscale, say — the wrapper can
+open the tunnel first. Set both variables; leaving `AUT_TUNNEL_HOST` unset means no tunnel:
+
+```bash
+cat >> ~/.config/agent-usage-tracker/scan.env <<'EOF'
+AUT_TUNNEL_HOST=user@tailscale-host
+AUT_TUNNEL_SPEC=15432:192.168.1.3:5432    # the ssh -L argument
+EOF
+```
+
+Then point `transport.pg_dsn` at `localhost:15432`. The wrapper reuses a tunnel that is already
+up and only tears down one it opened itself, so it is safe to run alongside an interactive
+session. An unreachable host arms the retry marker rather than counting as a scan failure —
+which is exactly the case this pairs with, since a laptop off the VPN cannot reach the host at all.
 
 ## First run
 
