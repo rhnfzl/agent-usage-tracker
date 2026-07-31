@@ -65,6 +65,87 @@ def test_claude_code() -> None:
     print("ok claude_code")
 
 
+def test_claude_code_human_turn_classification() -> None:
+    # "human turns" is the denominator of agent_turns_per_human_turn, so anything the harness
+    # writes as role=user but nobody typed has to stay out of it.
+    with tempfile.TemporaryDirectory() as d:
+        home = Path(d)
+        _write_jsonl(home / ".claude/projects/p/s.jsonl", [
+            {"type": "user", "uuid": "h1", "timestamp": "2026-07-18T10:00:00Z",
+             "entrypoint": "cli", "message": {"role": "user", "content": "fix the parser"}},
+            # a slash command IS you: kept
+            {"type": "user", "uuid": "h2", "timestamp": "2026-07-18T10:00:01Z",
+             "entrypoint": "cli", "message": {"role": "user",
+             "content": "<command-name>/review</command-name>"}},
+            # harness-injected role=user turns: not typed by anyone
+            {"type": "user", "uuid": "x1", "timestamp": "2026-07-18T10:00:02Z",
+             "entrypoint": "cli", "message": {"role": "user",
+             "content": "<task-notification>\n<task-id>abc</task-id>\n</task-notification>"}},
+            {"type": "user", "uuid": "x2", "timestamp": "2026-07-18T10:00:03Z",
+             "entrypoint": "cli", "message": {"role": "user",
+             "content": "<local-command-stdout>Goodbye!</local-command-stdout>"}},
+            {"type": "user", "uuid": "x3", "timestamp": "2026-07-18T10:00:04Z",
+             "entrypoint": "cli", "message": {"role": "user",
+             "content": "[Request interrupted by user for tool use]"}},
+            # an SDK program driving the session, not a person
+            {"type": "user", "uuid": "x4", "timestamp": "2026-07-18T10:00:05Z",
+             "entrypoint": "sdk-py", "message": {"role": "user",
+             "content": "Review this change for security vulnerabilities."}},
+            {"type": "user", "uuid": "x5", "timestamp": "2026-07-18T10:00:06Z",
+             "entrypoint": "sdk-cli", "message": {"role": "user", "content": "Analyse the repo."}},
+            # unknown entrypoint stays counted: only drop what is positively a program
+            {"type": "user", "uuid": "h3", "timestamp": "2026-07-18T10:00:07Z",
+             "message": {"role": "user", "content": "and now ship it"}},
+        ])
+        human = [e for e in _drain(claude_code.collect, _cfg(home)) if e.kind == "human"]
+        assert len(human) == 3, [e.ts for e in human]
+        assert {e.ts for e in human} == {"2026-07-18T10:00:00Z",    # typed
+                                         "2026-07-18T10:00:01Z",    # slash command
+                                         "2026-07-18T10:00:07Z"}    # unknown entrypoint
+    print("ok claude_code_human_turn_classification")
+
+
+def test_codex_human_turn_classification() -> None:
+    # Same question for codex, but the signal is structural: session_meta records who is driving.
+    def _session(meta: dict, messages: list[str]) -> list[dict]:
+        recs: list[dict] = [{"type": "session_meta", "payload": {
+            "session_id": meta.get("id", "s"), "model_provider": "openai",
+            "cwd": "/x/repo", **meta}}]
+        for i, msg in enumerate(messages):
+            recs.append({"type": "event_msg", "timestamp": f"2026-07-18T10:0{i}:00Z",
+                         "payload": {"type": "user_message", "message": msg}})
+        return recs
+
+    with tempfile.TemporaryDirectory() as d:
+        home = Path(d)
+        root = home / ".codex/sessions/2026/07/18"
+        # a person in the interactive TUI -> both count
+        _write_jsonl(root / "rollout-tui.jsonl", _session(
+            {"id": "s1", "originator": "codex-tui", "source": "cli"},
+            ["why is this failing?", "now fix it"]))
+        # a thread another agent spawned
+        _write_jsonl(root / "rollout-sub.jsonl", _session(
+            {"id": "s2", "originator": "codex-tui",
+             "source": {"subagent": {"thread_spawn": {"depth": 1}}}}, ["go review this"]))
+        # scripted `codex exec`, and a programmatic MCP call
+        _write_jsonl(root / "rollout-exec.jsonl", _session(
+            {"id": "s3", "originator": "codex_exec", "source": "exec"}, ["orchestrate a review"]))
+        _write_jsonl(root / "rollout-mcp.jsonl", _session(
+            {"id": "s4", "originator": "codex_cli_rs", "source": "mcp"}, ["answer this"]))
+        # another coding agent driving codex through its integration
+        _write_jsonl(root / "rollout-cc.jsonl", _session(
+            {"id": "s5", "originator": "Claude Code", "source": "vscode"}, ["<task>review</task>"]))
+        # Codex Desktop: a scheduled automation, then a real message in the same session
+        _write_jsonl(root / "rollout-desk.jsonl", _session(
+            {"id": "s6", "originator": "Codex Desktop", "source": "vscode"},
+            ["Automation: Standup summary\nAutomation ID: standup-summary\nmemory: ...",
+             "Automation is the topic I want to discuss"]))   # NOT an automation preamble
+
+        human = [e for e in _drain(codex.collect, _cfg(home)) if e.kind == "human"]
+        assert len(human) == 3, [(e.event_id, e.ts) for e in human]
+    print("ok codex_human_turn_classification")
+
+
 def test_claude_code_multiblock_dedup() -> None:
     # Claude Code writes one JSONL line per content block, each repeating the message's usage.
     # The collector must emit ONE event per (message.id, requestId) - not one per line (6x bug).
@@ -673,6 +754,8 @@ def test_cf_access_headers() -> None:
 def main() -> int:
     test_claude_code()
     test_claude_code_multiblock_dedup()
+    test_claude_code_human_turn_classification()
+    test_codex_human_turn_classification()
     test_codex()
     test_pi()
     test_cursor()

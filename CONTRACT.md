@@ -5,6 +5,29 @@ One normalized row per turn: an **assistant turn** (`kind:"agent"`, carries toke
 n8n webhook validates it, and the sink stores it. Keep this file and `push.py::COLUMNS` and
 the homelab `agents.usage_event` schema in sync.
 
+### What counts as a human turn
+
+`kind:"human"` means **a person typed this**, not merely "the log recorded it under the user
+role". Both agents write a great deal of machine-generated text into that role, and counting it
+inflates the denominator of `agent_turns_per_human_turn`, which silently understates leverage.
+Excluded:
+
+| Agent | Excluded | Signal |
+|---|---|---|
+| Claude Code | tool results, sidechains (subagent transcripts), meta and compaction records | `isSidechain` / `isMeta` / `isCompactSummary`, `tool_result` blocks |
+| Claude Code | background-task notifications, slash-command stdout, interrupt notices | text opens with `<task-notification>`, `<local-command-stdout>`, `[Request interrupted` |
+| Claude Code | SDK programs driving a session | `entrypoint` in `sdk-py`, `sdk-cli` |
+| Codex | agent-spawned threads, scripted `codex exec`, MCP calls, another agent's integration | `session_meta.source` (`subagent` key / `exec` / `mcp`), `originator` |
+| Codex | Codex Desktop scheduled automations | message opens with `Automation:` **and** contains `Automation ID:` |
+
+A typed slash command (`/review`) **is** a human turn. An unknown or absent `entrypoint` stays
+counted: only positively-identified programs are dropped.
+
+Note this is a **classification change, not a schema change** — `kind` still takes the same two
+values. Rows already in a sink keep the classification they were written with, because
+`event_id` + `ON CONFLICT` makes re-scanning a no-op. Reclassifying history means deleting the
+`kind='human'` rows and re-pushing.
+
 ## Event
 
 ```jsonc

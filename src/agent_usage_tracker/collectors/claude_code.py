@@ -38,6 +38,35 @@ def _is_human_text(content: object) -> bool:
     return False
 
 
+# entrypoint values that mean an SDK program is driving the session, not a person at a terminal.
+# Their prompts are ordinary role=user text and pass every other check, so entrypoint is the only
+# thing separating "you asked for a security review" from "a harness asked for one 700 times".
+_PROGRAM_ENTRYPOINTS = {"sdk-py", "sdk-cli"}
+
+# Machine-generated text Claude Code injects AS a role=user turn. These are not tool_results, so
+# _is_human_text accepts them, but nobody typed them.
+_INJECTED_PREFIXES = (
+    "<task-notification>",      # a background task reporting completion back into the session
+    "<local-command-stdout>",   # output of a slash command echoed back ("Goodbye!")
+    "[Request interrupted",     # the harness noting you pressed escape -- an action, not a prompt
+)
+
+
+def _is_injected(text: str) -> bool:
+    """True for harness-generated role=user turns. A `<command-name>` slash-command expansion is
+    deliberately NOT here: you typed the slash command, so it stays a human turn."""
+    return text.lstrip().startswith(_INJECTED_PREFIXES)
+
+
+def _text_of(content: object) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "\n".join(b.get("text", "") for b in content
+                         if isinstance(b, dict) and b.get("type") == "text")
+    return ""
+
+
 def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[UsageEvent], Callable[[], None]]]:
     base = cfg.home / ".claude" / "projects"
     if not base.exists():
@@ -80,8 +109,13 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[UsageEvent], Callable[
                 # meta/compact/sidechain lines - none of those are you prompting.
                 if o.get("isMeta") or o.get("isCompactSummary") or o.get("isSidechain"):
                     continue
+                # An SDK program driving the session is not a person prompting. Unknown/absent
+                # entrypoints stay counted: only drop what is positively identified as a program.
+                if o.get("entrypoint") in _PROGRAM_ENTRYPOINTS:
+                    continue
                 m = o.get("message")
-                if isinstance(m, dict) and _is_human_text(m.get("content")):
+                if (isinstance(m, dict) and _is_human_text(m.get("content"))
+                        and not _is_injected(_text_of(m.get("content")))):
                     uid = o.get("uuid") or f"{path}:{o.get('timestamp')}"
                     human.append(UsageEvent(
                         event_id=make_event_id(NAME, "human", uid),

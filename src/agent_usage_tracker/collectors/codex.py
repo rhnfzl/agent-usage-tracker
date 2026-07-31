@@ -28,7 +28,46 @@ NAME = "codex"
 
 def _fresh_state(dev: int | None = None, ino: int | None = None) -> dict:
     return {"off": 0, "dev": dev, "ino": ino, "model": None, "provider": "openai",
-            "session_id": None, "cwd": None, "tc_ord": 0, "um_ord": 0}
+            "session_id": None, "cwd": None, "tc_ord": 0, "um_ord": 0,
+            "originator": None, "source": None}
+
+
+# session_meta.source values that mean the thread was started by software, not by a person:
+# 'exec' is a scripted `codex exec`, 'mcp' is a programmatic MCP call, and a dict carrying
+# 'subagent' is a thread another agent spawned (whose opening prompt is the parent agent
+# talking, and which would double-count the human prompt that started the parent anyway).
+_PROGRAM_SOURCES = {"exec", "mcp"}
+
+
+def _is_driven_by_a_program(originator: object, source: object) -> bool:
+    """True when this session's user_messages come from software rather than a person.
+
+    Without this every user_message counts as 'a prompt you sent', which on a machine that runs
+    scheduled automations, `codex exec` harnesses and agent-spawned subagents overstates human
+    input several-fold -- and since the showcase reports agent_turns_per_human_turn, an inflated
+    denominator silently understates leverage.
+
+    Structural signals only. Deciding this from the message text would be guesswork; originator
+    and source are recorded by codex itself."""
+    if isinstance(source, dict):
+        return "subagent" in source
+    if isinstance(source, str) and source in _PROGRAM_SOURCES:
+        return True
+    # Another coding agent driving codex through its own integration (the rescue/review flows).
+    return isinstance(originator, str) and originator.strip().lower() == "claude code"
+
+
+def _is_scheduled_automation(message: object) -> bool:
+    """True for the preamble Codex Desktop puts on a scheduled automation run.
+
+    Text-based, unlike _is_driven_by_a_program, because these arrive over the same originator and
+    source as a person typing in the desktop app -- there is no structural flag to read. Both
+    markers are required so an ordinary message that merely opens with the word 'Automation'
+    is not swallowed."""
+    if not isinstance(message, str):
+        return False
+    head = message.lstrip()[:200]
+    return head.startswith("Automation:") and "Automation ID:" in head
 
 
 def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[UsageEvent], Callable[[], None]]]:
@@ -43,10 +82,13 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[UsageEvent], Callable[
         except OSError:
             continue
         prev = files.get(path)
-        # New/rotated file (or a state-format upgrade whose old state lacks 'dev'/'ino') -> reset
-        # and re-read. Safe because event_id is content-deterministic: re-emitted rows dedup at
-        # the sink. Identity is (st_dev, st_ino); ino alone is only unique within a device.
-        if (not prev or (prev.get("dev"), prev.get("ino")) != (st.st_dev, st.st_ino)
+        # New/rotated file (or a state-format upgrade whose old state lacks 'ino') -> reset and
+        # re-read. Safe because event_id is content-deterministic: re-emitted rows dedup at the
+        # sink. Identity is st_ino ALONE, deliberately not (st_dev, st_ino) -- st_dev is assigned
+        # at mount, so macOS/APFS renumbers it on reboot and every file would look rotated. See
+        # the long note in _util.scan_file; this collector keeps its own copy of the check because
+        # it also tracks per-session ordinals, so keep the two rules in step.
+        if (not prev or prev.get("ino") != st.st_ino
                 or "um_ord" not in prev):   # state saved before um_ord existed -> re-read from
             prev = _fresh_state(st.st_dev, st.st_ino)   # offset 0 so user_message ordinals (and
             #                                            thus their event_ids) stay consistent if
@@ -76,6 +118,10 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[UsageEvent], Callable[
                 cur["session_id"] = p.get("session_id") or p.get("id") or cur["session_id"]
                 cur["provider"] = p.get("model_provider") or cur["provider"]
                 cur["cwd"] = p.get("cwd") or cur["cwd"]
+                # Who is driving this session. Recorded so user_message can tell a person typing
+                # from a program prompting -- see _is_driven_by_a_program.
+                cur["originator"] = p.get("originator")
+                cur["source"] = p.get("source")
             elif t == "turn_context":
                 if p.get("model"):
                     cur["model"] = p.get("model")
@@ -116,9 +162,18 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[UsageEvent], Callable[
                     project=basename(cur["cwd"]),
                 ))
             elif t == "event_msg" and p.get("type") == "user_message":
-                # A human prompt (or a scripted `codex exec` prompt - indistinguishable here).
+                # A prompt someone typed. Sessions a program drives (subagent threads, `codex
+                # exec`, MCP calls, another agent's integration) and Codex Desktop's scheduled
+                # automations emit the same event, so screen those out rather than counting them
+                # as human input.
+                if _is_driven_by_a_program(cur.get("originator"), cur.get("source")):
+                    continue
+                if _is_scheduled_automation(p.get("message")):
+                    continue
                 # No tokens; a stable per-session ordinal makes the id deterministic so a
-                # re-read (file reset) re-emits the same id and the sink dedups it.
+                # re-read (file reset) re-emits the same id and the sink dedups it. The ordinal
+                # advances only for kept messages, which is fine: it just has to be stable for a
+                # given file, and the screening above is deterministic from the same bytes.
                 # .get(): per-file state persisted before this field existed lacks um_ord.
                 cur["um_ord"] = cur.get("um_ord", 0) + 1
                 ts = o.get("timestamp")
