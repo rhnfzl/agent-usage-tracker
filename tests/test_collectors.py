@@ -65,6 +65,44 @@ def test_claude_code() -> None:
     print("ok claude_code")
 
 
+def test_duplicate_session_paths_counted_once() -> None:
+    # Claude Code re-encodes a project directory, so one session file can sit at two paths and
+    # be globbed twice. Both copies emit the same event_ids, so the sink stores one -- the scan
+    # report and the CSV export have to agree with the sink, not with the raw emit count.
+    import io
+
+    from agent_usage_tracker.cli import run_export, run_scan
+    records = [
+        {"type": "user", "uuid": "h1", "timestamp": "2026-07-18T10:00:00Z",
+         "entrypoint": "cli", "message": {"role": "user", "content": "do the thing"}},
+        {"type": "assistant", "uuid": "a1", "requestId": "req_1",
+         "timestamp": "2026-07-18T10:00:01Z", "cwd": "/x/proj",
+         "message": {"id": "msg_1", "model": "claude-opus-5", "usage": {
+             "input_tokens": 10, "output_tokens": 20,
+             "cache_read_input_tokens": 30, "cache_creation_input_tokens": 40}}},
+    ]
+    with tempfile.TemporaryDirectory() as d:
+        home = Path(d)
+        # the same session id under two encodings of ONE project -- byte-identical, as on disk
+        _write_jsonl(home / ".claude/projects/-Users-me-proj/sess-abc.jsonl", records)
+        _write_jsonl(home / ".claude/projects/pre---Users-me-proj/sess-abc.jsonl", records)
+        cfg = _cfg(home)
+
+        report = run_scan(cfg, ["claude_code"], dry_run=True)["claude_code"]
+        assert report["events"] == 1, report          # not 2
+        assert report["human"] == 1, report           # not 2
+        assert report["total"] == 100, report         # not 200
+        assert report["duplicates"] == 2, report      # both repeats surfaced, not hidden
+        assert report["by_model"]["claude-opus-5"]["events"] == 1
+
+        buf = io.StringIO()
+        written, _skipped = run_export(cfg, ["claude_code"], buf)
+        assert written == 2, written                  # 1 human + 1 assistant, each once
+        ids = [ln.split(",")[0] for ln in buf.getvalue().strip().splitlines()[1:]]
+        assert len(ids) == len(set(ids)), ids         # a COPY load has no ON CONFLICT to save it
+    print("ok duplicate_session_paths_counted_once")
+
+
 def test_claude_code_human_turn_classification() -> None:
     # "human turns" is the denominator of agent_turns_per_human_turn, so anything the harness
     # writes as role=user but nobody typed has to stay out of it.
@@ -754,6 +792,7 @@ def test_cf_access_headers() -> None:
 def main() -> int:
     test_claude_code()
     test_claude_code_multiblock_dedup()
+    test_duplicate_session_paths_counted_once()
     test_claude_code_human_turn_classification()
     test_codex_human_turn_classification()
     test_codex()

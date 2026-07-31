@@ -39,7 +39,7 @@ def _wm_fp(wm: dict) -> str:
 def _blank_agg() -> dict:
     return {"events": 0, "human": 0, "input": 0, "output": 0, "cache_read": 0,
             "cache_write": 0, "reasoning": 0, "total": 0, "skipped_no_ts": 0,
-            "by_model": {}}
+            "duplicates": 0, "by_model": {}}
 
 
 def _add(agg: dict, e: UsageEvent) -> None:
@@ -67,6 +67,12 @@ def run_scan(cfg: Config, agents: list[str], dry_run: bool) -> dict:
         collect = REGISTRY[name]
         wm = collector_wm(state, name)
         agg = report.setdefault(name, _blank_agg())
+        # The same session can sit at two paths -- Claude Code re-encodes a project directory
+        # (e.g. '-Users-me-proj' and 'prefix---Users-me-proj'), so one session file is globbed
+        # twice and every turn in it is emitted twice. Both copies produce the same event_id, so
+        # the sink stores one and the numbers there are right; without this set the PRINTED tally
+        # counted both and overstated the scan. Per-agent, discarded when the agent finishes.
+        seen: set[str] = set()
         buf_events: list[UsageEvent] = []
         buf_commits: list = []
 
@@ -87,7 +93,14 @@ def run_scan(cfg: Config, agents: list[str], dry_run: bool) -> dict:
                         if not valid_ts(e.ts):
                             agg["skipped_no_ts"] += 1
                             continue
-                        _add(agg, e)
+                        if e.event_id in seen:
+                            agg["duplicates"] += 1      # counted once, above
+                        else:
+                            seen.add(e.event_id)
+                            _add(agg, e)
+                        # Still queued for the sink either way: deduping the PUSH would mean a
+                        # copy whose batch failed could not be re-sent from the other path, and
+                        # ON CONFLICT already makes the repeat free.
                         if not dry_run:
                             buf_events.append(e)
                     buf_commits.append(commit)
@@ -111,7 +124,8 @@ def _print_report(cfg: Config, report: dict, dry_run: bool) -> None:
     print(f"\naut {mode}  machine={cfg.machine}\n" + "=" * 60)
     grand = 0
     for name, agg in report.items():
-        if agg["events"] == 0 and agg["human"] == 0 and agg["skipped_no_ts"] == 0:
+        if (agg["events"] == 0 and agg["human"] == 0 and agg["skipped_no_ts"] == 0
+                and agg["duplicates"] == 0):
             print(f"{name:<12} -  no new usage")
             continue
         grand += agg["total"]
@@ -126,6 +140,9 @@ def _print_report(cfg: Config, report: dict, dry_run: bool) -> None:
             print(f"{name:<12} {agg['human']:>6} human turns (prompts you sent)")
         if agg["skipped_no_ts"]:
             print(f"    (skipped {agg['skipped_no_ts']} records with missing/invalid timestamp)")
+        if agg["duplicates"]:
+            print(f"    (counted once: {agg['duplicates']:,} repeat records from sessions stored "
+                  "under more than one project path)")
     print("-" * 60)
     print(f"{'TOTAL':<12} {grand:>32,} tokens")
 
@@ -144,6 +161,10 @@ def run_export(cfg: Config, agents: list[str], out) -> tuple[int, int]:
     n = skipped = 0
     for name in agents:
         wm: dict = {}
+        # Must dedup here, unlike the push path: this CSV is meant to be loaded with COPY, which
+        # has no ON CONFLICT to fall back on, so a session stored under two project paths would
+        # land twice in the target table. See the note in run_scan.
+        seen: set[str] = set()
         for _ in range(_MAX_DRAIN_PASSES):    # drain past the per-file line cap (one-shot command)
             before = _wm_fp(wm)
             for events, commit in REGISTRY[name](cfg, wm):
@@ -152,6 +173,9 @@ def run_export(cfg: Config, agents: list[str], out) -> tuple[int, int]:
                     if not valid_ts(e.ts):
                         skipped += 1
                         continue
+                    if e.event_id in seen:
+                        continue
+                    seen.add(e.event_id)
                     d = e.to_dict()
                     writer.writerow(["" if d[c] is None else d[c] for c in COLUMNS])
                     n += 1

@@ -5,6 +5,20 @@ One normalized row per turn: an **assistant turn** (`kind:"agent"`, carries toke
 n8n webhook validates it, and the sink stores it. Keep this file and `push.py::COLUMNS` and
 the homelab `agents.usage_event` schema in sync.
 
+### One session, two paths
+
+A session file can sit at more than one path: Claude Code encodes the project directory into
+the name, and the same repo reached two ways (`-Users-me-proj` and `prefix---Users-me-proj`)
+gets a byte-identical copy under both. The glob then reads it twice and emits every turn twice.
+
+That is harmless for stored data — both copies derive the same `event_id`, so the sink keeps
+one. It is **not** harmless for anything that counts before the sink sees it, so `aut scan`
+tallies each `event_id` once (and prints how many repeats it collapsed) and `aut export` writes
+each row once, since its CSV is loaded with `COPY`, which has no `ON CONFLICT` to fall back on.
+
+Dedup is by `event_id`, never by file: copies can and do diverge (one path keeps receiving
+turns after the other stops), so skipping a file outright would drop real usage.
+
 ### What counts as a human turn
 
 `kind:"human"` means **a person typed this**, not merely "the log recorded it under the user
