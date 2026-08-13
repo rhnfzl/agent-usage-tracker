@@ -47,6 +47,7 @@ class Config:
     pg_dsn: str | None
     home: Path
     cursor_db_path: str | None = None      # override Cursor's state.vscdb location
+    cursor_human_only: bool = False        # `cursor` emits prompts only -> safe beside cursor_api
     cursor_sdk_manifests: str | None = None  # glob of orchestrator manifest.json files (SDK usage)
     cursor_api: bool = False               # opt-in: pull accurate usage from Cursor's dashboard API
     cursor_api_lookback_days: int = 90     # first-scan window when there is no watermark yet
@@ -103,6 +104,7 @@ def load_config() -> Config:
         pg_dsn=pg_dsn,
         home=Path(data.get("home") or Path.home()).expanduser(),
         cursor_db_path=_resolve(data.get("cursor_db_path")),
+        cursor_human_only=_as_bool(data.get("cursor_human_only", False)),
         cursor_sdk_manifests=_resolve(data.get("cursor_sdk_manifests")),
         cursor_api=_as_bool(data.get("cursor_api", False)),
         cursor_api_lookback_days=int(data.get("cursor_api_lookback_days") or 90),
