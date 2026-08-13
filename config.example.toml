@@ -17,9 +17,19 @@ machine = "laptop"
 # use `cursor`. NOTE on human turns: only the local `cursor` collector emits human prompts (and
 # only at coarse conversation-level time); cursor_api / cursor_sdk have none. So with cursor_api
 # you get accurate tokens but no Cursor human turns - fine, human turns still come from
-# claude_code/codex/pi. Do NOT add `cursor` alongside cursor_api just for human turns: their
-# token counts would double up.
+# claude_code/codex/pi. To add `cursor` alongside cursor_api JUST for human turns, set
+# cursor_human_only = true below - without it their token counts double up.
 agents = ["claude_code", "codex", "cursor_api", "pi"]
+
+# Emit ONLY human prompts from the local `cursor` collector, dropping its token rows. This is the
+# one safe way to run `cursor` and `cursor_api` together: cursor_api's feed is token usage and
+# carries no prompt records at all, so human turns are the one thing it can never give you, and a
+# human turn holds zero tokens - so nothing can double-count. The dropped token rows are the
+# inferior copy regardless (no cache attribution, IDE only, no cursor-agent CLI).
+# Also worth knowing: cursor_api_lookback_days bounds the FIRST scan only, so the API cannot reach
+# back before the day you enabled it. The local DB is the only source for Cursor history older
+# than that, and the only source of Cursor human turns at any date.
+# cursor_human_only = true
 
 [transport]
 # Default transport: POST batches to the n8n ingest webhook (behind Cloudflare Access).

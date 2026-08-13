@@ -307,6 +307,21 @@ def test_cursor() -> None:
         e2 = next(e for e in ev if e.input_tokens == 5)
         assert e2.ts == "2026-01-02T09:30:07.621Z"               # ISO string kept as-is
         assert all(e.provider == "cursor" for e in ev)
+
+        # cursor_human_only: keep the prompts, drop the token rows. This is what makes `cursor`
+        # safe to run beside cursor_api -- the token rows are the ones that would double up.
+        con = sqlite3.connect(db)
+        con.execute("INSERT INTO cursorDiskKV VALUES (?, ?)",
+                    ("bubbleId:c1:b4", json.dumps({"bubbleId": "b4", "type": 1})))  # a prompt
+        con.commit()
+        con.close()
+        both = _drain(cursor.collect, cfg)
+        assert sorted(e.kind for e in both) == ["agent", "agent", "human"], both
+
+        cfg.cursor_human_only = True
+        only = _drain(cursor.collect, cfg)
+        assert [e.kind for e in only] == ["human"], only
+        assert only[0].total_tokens == 0 and only[0].ts is not None   # inherits composer ts
     print("ok cursor")
 
 

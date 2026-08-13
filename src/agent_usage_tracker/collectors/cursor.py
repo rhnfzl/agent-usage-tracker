@@ -146,6 +146,12 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[UsageEvent], Callable[
                         event_id=make_event_id(NAME, "human", composer_id, bubble_id),
                         ts=_ts(o, meta), agent=NAME, model=None, provider=None, kind="human",
                     ))
+                elif cfg.cursor_human_only:
+                    # Human-turns-only mode: the token rows are exactly what would double-count
+                    # against cursor_api, and they are the inferior copy anyway (no cache
+                    # attribution, no CLI usage). Drop them and keep the prompts, which
+                    # cursor_api's feed does not carry at all.
+                    continue
                 elif inp + out > 0:
                     uid = o.get("usageUuid") or f"{composer_id}:{bubble_id}"
                     events.append(UsageEvent(

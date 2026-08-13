@@ -117,7 +117,24 @@ both transports, re-scans) never double-counts.
 | **claude_code** | `~/.claude/projects/**/*.jsonl` `assistant.message.usage` | yes | record `timestamp` | Most tokens are in the **cache** fields; summing only `input_tokens` undercounts ~460x. Globs all files (20k+); an inode+offset watermark reads only changed ones. |
 | **codex** | `~/.codex/sessions/**/rollout-*.jsonl` `token_count` | `turn_context.model` | event `timestamp` | `input` includes cached; we split it. Captures `reasoning_tokens`. |
 | **pi** | `~/.pi/agent/sessions/**/*.jsonl` `message.usage` | `message.model` / `model_change` | record `timestamp` | Cleanest schema; older sessions may log zeros. |
-| **cursor** | `state.vscdb` `cursorDiskKV bubbleId:*` | **often null** (not in DB) | bubble `createdAt` or joined `composerData` | EXPERIMENTAL: a LOWER BOUND. For complete + model-attributed + costed data, use the dashboard API with `cursorAuth/accessToken` (follow-up, not in v1). Full-scans each run + dedups at the sink. |
+| **cursor** | `state.vscdb` `cursorDiskKV bubbleId:*` | **often null** (not in DB) | bubble `createdAt` or joined `composerData` | EXPERIMENTAL: a LOWER BOUND on tokens. For complete + model-attributed + costed data use `cursor_api`. Full-scans each run + dedups at the sink. **The only source of Cursor human turns** — see below. |
+
+### The two Cursor sources are complementary, not redundant
+
+They overlap on tokens and must not both be counted, which is why `config.example.toml` says to
+pick one. But each holds something the other structurally cannot:
+
+| | `cursor` (local `state.vscdb`) | `cursor_api` |
+|---|---|---|
+| human turns | **yes** | **none** — the feed is token usage, it has no prompt records |
+| cache read/write tokens | always 0 | yes, and they dominate Cursor's totals |
+| `cursor-agent` CLI usage | no, IDE only | yes |
+| history older than first scan | yes, whatever the DB still holds | **no** — `cursor_api_lookback_days` bounds only the FIRST scan, so the API can never reach back past the day it was enabled |
+
+`cursor_human_only = true` makes the combination safe: the local collector emits prompts and drops
+its token rows, so the double-count the warning guards against cannot happen — a human turn carries
+zero tokens by construction. Use it when you want `cursor_api`'s accurate tokens *and* Cursor human
+turns, or when the local DB is the only place your older Cursor history still exists.
 
 ## Derived artifact: metrics.json (not part of the event contract)
 
