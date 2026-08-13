@@ -642,6 +642,23 @@ def test_hardening_edges() -> None:
     assert basename("repo/") == "repo" and basename("plain-name") == "plain-name"
     assert basename(None) is None and basename(["x"]) is None and basename({"a": 1}) is None
 
+    # A git worktree is the SAME repo: collapse it onto the main checkout, or one repo worked on
+    # across N branches reports as N projects and no per-project total is real.
+    assert basename("/w/repo/.claude/worktrees/feat-x") == "repo"     # Claude Code's own layout
+    assert basename("/w/repo/.worktrees/feat-x") == "repo"            # hand-rolled
+    assert basename("/w/repo/.claude-worktrees/feat-x") == "repo"     # any .*worktrees container
+    assert basename("C:\\w\\repo\\.worktrees\\feat-x") == "repo"      # same on a windows path
+    # A monorepo package inside a worktree stays attributed to the PACKAGE, not the branch.
+    assert basename("/w/mono/.worktrees/R8-1/pkg") == "pkg"
+    assert basename("/w/mono/.claude/worktrees/R8-1/pkg") == "pkg"
+    # Must not fire on ordinary paths, incl. dot-dirs that are not worktree containers.
+    assert basename("/home/u/.claude/projects") == "projects"
+    assert basename("/home/u/.config/repo") == "repo"
+    assert basename("/home/u/worktrees/repo") == "repo"     # no dot -> not a container
+    # Degenerate: the container itself, with no branch under it, is left exactly as it was.
+    assert basename("/w/repo/.worktrees") == ".worktrees"
+    assert basename("/.worktrees/feat-x") == "feat-x"       # nothing left to attribute to
+
     # _as_bool: a quoted "false" in TOML must not silently enable a collector
     from agent_usage_tracker.config import _as_bool
     assert _as_bool(True) is True and _as_bool(False) is False

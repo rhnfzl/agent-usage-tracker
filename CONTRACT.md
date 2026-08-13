@@ -60,9 +60,31 @@ values. Rows already in a sink keep the classification they were written with, b
   "reasoning_tokens": null,                 // codex only; null elsewhere
   "total_tokens": 0,
   "est_cost_usd": null,                     // NOTIONAL / API-equivalent (subs are flat-rate)
-  "project": "agent-usage-tracker"          // working-dir basename only, never a full path
+  "project": "agent-usage-tracker"          // repo dir basename only, never a full path
 }
 ```
+
+### One repo, many worktrees
+
+`project` is the working directory's basename, so before this rule a git worktree reported as a
+project of its own: a repo worked on across 50 branches showed up as 50 projects and no
+per-project total was real. A worktree is the same repo, so `<repo>/<container>/<branch>/sub`
+is normalized to `<repo>/sub` before the basename is taken — which also keeps a monorepo's inner
+package attributed to that package rather than to the branch it was checked out on.
+
+Only the two conventional layouts are recognised, and both require a **dot**-directory so an
+ordinary project folder can never trip the rule:
+
+| Layout | Example | `project` |
+|---|---|---|
+| `<repo>/.claude/worktrees/<branch>` | Claude Code's own | `repo` |
+| `<repo>/.worktrees/<branch>` (any `.*worktrees`) | hand-rolled | `repo` |
+| `<repo>/.worktrees/<branch>/<pkg>` | monorepo package | `pkg` |
+
+`git worktree add ../repo-wt` is indistinguishable from a sibling repo by path alone, so it is
+left as-is. Like the `kind` rule above this is a **classification change, not a schema change**:
+`ON CONFLICT` makes a re-scan a no-op, so rows already in a sink keep the project they were
+written with until you re-export and UPDATE them by `event_id`.
 
 ## Webhook payload
 
