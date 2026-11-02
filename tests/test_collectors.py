@@ -134,12 +134,47 @@ def test_claude_code_human_turn_classification() -> None:
             # unknown entrypoint stays counted: only drop what is positively a program
             {"type": "user", "uuid": "h3", "timestamp": "2026-07-18T10:00:07Z",
              "message": {"role": "user", "content": "and now ship it"}},
+            # turnOrigin is authoritative when present: only "human" is a person
+            {"type": "user", "uuid": "h4", "timestamp": "2026-07-18T10:00:08Z",
+             "entrypoint": "cli", "turnOrigin": "human", "promptSource": "typed",
+             "message": {"role": "user", "content": "looks good"}},
+            {"type": "user", "uuid": "h5", "timestamp": "2026-07-18T10:00:09Z",
+             "entrypoint": "cli", "turnOrigin": "human", "promptSource": "suggestion_accepted",
+             "message": {"role": "user", "content": "run the tests"}},
+            {"type": "user", "uuid": "x6", "timestamp": "2026-07-18T10:00:10Z",
+             "entrypoint": "cli", "turnOrigin": "peer", "promptSource": "system",
+             "message": {"role": "user", "content": "please rebase"}},
+            {"type": "user", "uuid": "x7", "timestamp": "2026-07-18T10:00:11Z",
+             "entrypoint": "cli", "turnOrigin": "scheduled",
+             "message": {"role": "user", "content": "<command-message>loop</command-message>"}},
+            {"type": "user", "uuid": "x8", "timestamp": "2026-07-18T10:00:12Z",
+             "entrypoint": "cli", "turnOrigin": "auto_continuation",
+             "message": {"role": "user", "content": "continue"}},
+            {"type": "user", "uuid": "x9", "timestamp": "2026-07-18T10:00:13Z",
+             "entrypoint": "cli", "promptSource": "system",
+             "message": {"role": "user", "content": "status update"}},
+            # peer and harness text with no origin fields at all (older and some current files)
+            {"type": "user", "uuid": "x10", "timestamp": "2026-07-18T10:00:14Z",
+             "entrypoint": "cli", "message": {"role": "user",
+             "content": "Another Claude session sent a message:\n<cross-session>hi</cross-session>"}},
+            {"type": "user", "uuid": "x11", "timestamp": "2026-07-18T10:00:15Z",
+             "entrypoint": "cli", "message": {"role": "user",
+             "content": "[Cross-session idle notice] worker went idle"}},
+            {"type": "user", "uuid": "x12", "timestamp": "2026-07-18T10:00:16Z",
+             "entrypoint": "cli", "message": {"role": "user",
+             "content": "<bash-stdout>ok</bash-stdout><bash-stderr></bash-stderr>"}},
+            # the `!` command you typed stays a human turn; only its echoed output is dropped
+            {"type": "user", "uuid": "h6", "timestamp": "2026-07-18T10:00:17Z",
+             "entrypoint": "cli", "message": {"role": "user",
+             "content": "<bash-input>git status</bash-input>"}},
         ])
         human = [e for e in _drain(claude_code.collect, _cfg(home)) if e.kind == "human"]
-        assert len(human) == 3, [e.ts for e in human]
         assert {e.ts for e in human} == {"2026-07-18T10:00:00Z",    # typed
                                          "2026-07-18T10:00:01Z",    # slash command
-                                         "2026-07-18T10:00:07Z"}    # unknown entrypoint
+                                         "2026-07-18T10:00:07Z",    # unknown entrypoint
+                                         "2026-07-18T10:00:08Z",    # turnOrigin human, typed
+                                         "2026-07-18T10:00:09Z",    # accepted suggestion
+                                         "2026-07-18T10:00:17Z"}, sorted(e.ts for e in human)
     print("ok claude_code_human_turn_classification")
 
 

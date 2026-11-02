@@ -43,12 +43,31 @@ def _is_human_text(content: object) -> bool:
 # thing separating "you asked for a security review" from "a harness asked for one 700 times".
 _PROGRAM_ENTRYPOINTS = {"sdk-py", "sdk-cli"}
 
+# Newer Claude Code stamps who started each turn. turnOrigin is authoritative when present: any
+# value but "human" (task_notification, peer, scheduled, system, sdk, auto_continuation) is
+# positively not a person typing. promptSource backs it up on records that carry only that field.
+_NON_HUMAN_PROMPT_SOURCES = {"system", "sdk"}
+
+
+def _origin_not_human(o: dict) -> bool:
+    origin = o.get("turnOrigin")
+    if isinstance(origin, str) and origin != "human":
+        return True
+    return o.get("promptSource") in _NON_HUMAN_PROMPT_SOURCES
+
+
 # Machine-generated text Claude Code injects AS a role=user turn. These are not tool_results, so
-# _is_human_text accepts them, but nobody typed them.
+# _is_human_text accepts them, but nobody typed them. Still needed after turnOrigin: older files
+# lack it, and even current ones write some peer messages without it.
 _INJECTED_PREFIXES = (
     "<task-notification>",      # a background task reporting completion back into the session
     "<local-command-stdout>",   # output of a slash command echoed back ("Goodbye!")
     "[Request interrupted",     # the harness noting you pressed escape -- an action, not a prompt
+    "Another Claude session sent a message",   # a peer session messaging this one
+    "[Cross-session idle notice]",             # the harness reporting another session went idle
+    "This session is being continued from a previous",  # compaction summary without its flag
+    "<bash-stdout>",            # output of a `!` shell command (the typed `<bash-input>` stays)
+    "<bash-stderr>",
 )
 
 
@@ -116,7 +135,7 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[UsageEvent], Callable[
                     continue
                 # An SDK program driving the session is not a person prompting. Unknown/absent
                 # entrypoints stay counted: only drop what is positively identified as a program.
-                if o.get("entrypoint") in _PROGRAM_ENTRYPOINTS:
+                if o.get("entrypoint") in _PROGRAM_ENTRYPOINTS or _origin_not_human(o):
                     continue
                 m = o.get("message")
                 if (isinstance(m, dict) and _is_human_text(m.get("content"))
