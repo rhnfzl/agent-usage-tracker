@@ -305,11 +305,33 @@ def test_sessions_only_backfill() -> None:
     print("ok sessions_only_backfill")
 
 
+def test_turn_carries_across_scans() -> None:
+    # The file grows between scans: the assistant record in the 2nd scan answers turn P1 from the
+    # 1st. A project dir literally named `subagents` is still a main session.
+    with tempfile.TemporaryDirectory() as d:
+        home = Path(d)
+        f = home / ".claude/projects/subagents/S1.jsonl"
+        _write_jsonl(f, [_user("h1", "P1", "do the thing", sessionId="S1", entrypoint="cli")])
+        wm: dict = {}
+        for _events, commit in claude_code.collect(_cfg(home), wm):
+            commit()
+        with f.open("a") as fh:
+            fh.write(json.dumps(_asst("m9", sessionId="S1", entrypoint="cli")) + "\n")
+        evs = {}
+        for events, commit in claude_code.collect(_cfg(home), wm):
+            evs.update({e.event_id: e for e in events})
+            commit()
+        s = _by_msg(evs, "m9")
+        assert (s.turn_id, s.run_origin, s.parent_session_id) == ("P1", "interactive", None), s
+    print("ok turn_carries_across_scans")
+
+
 def main() -> int:
     test_session_rules()
     test_pg_one_transaction()
     test_webhook_skips_sessions_once()
     test_sessions_only_backfill()
+    test_turn_carries_across_scans()
     print("\nALL PASS")
     return 0
 

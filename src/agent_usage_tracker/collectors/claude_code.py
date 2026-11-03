@@ -106,8 +106,8 @@ def _file_identity(base: Path, path: str) -> tuple[bool, str, str | None]:
     <parent>/subagents/[workflows/<wf>/]agent-<id>.jsonl; a main session at <sessionId>.jsonl."""
     parts = Path(path).relative_to(base).parts
     stem = Path(path).stem
-    if "subagents" in parts[:-1]:
-        i = parts.index("subagents")
+    if "subagents" in parts[1:-1]:       # parts[0] is the project dir, whatever its name
+        i = parts.index("subagents", 1)
         return True, stem.removeprefix("agent-"), parts[i - 1] if i else None
     return False, stem, None
 
@@ -161,9 +161,11 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[UsageEvent], Callable[
         ident = _file_identity(base, path)
         # turn_id: promptId of the latest user record (tool_results carry it too); a subagent keeps
         # its first one, the parent turn that spawned it.
-        # shortcut: tracked per scan chunk, so a record whose turn began in an earlier chunk gets
-        # NULL; `aut backfill --sessions-only` re-reads whole files and fills it.
-        turn: str | None = None
+        # Carried across chunks in the file's watermark entry, so a turn that began in an earlier
+        # scan is not lost. Dropped when the path now holds a different file (rotated/replaced).
+        # shortcut: files first read before this existed start at NULL until their next user record.
+        turn: str | None = (_str(fstate.get("turn"))
+                            if fstate.get("ino") == new_fstate.get("ino") else None)
         for raw in lines:
             try:
                 o = json.loads(raw)
@@ -243,6 +245,10 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[UsageEvent], Callable[
                 session=_session_of(o, ident, turn),
             )
         events = list(best.values()) + human
+        if turn:
+            new_fstate["turn"] = turn
+        else:
+            new_fstate.pop("turn", None)
 
         def commit(p: str = path, s: dict = new_fstate) -> None:
             files[p] = s

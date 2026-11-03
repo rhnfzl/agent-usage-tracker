@@ -173,8 +173,9 @@ event it emits, agent and human turns alike; the other collectors do not yet.
 | `turn_id` | the user turn this event answers: the `promptId` of the most recent user record earlier in the same file, tool_result records included (they carry the current turn's `promptId`). A subagent keeps its FIRST user record's `promptId`, the parent turn that spawned it. NULL when no user record was seen yet |
 
 `promptId` only appears on user records, never on assistant records, which is why the turn is
-carried forward in file order. `turn_id` is worked out per scan chunk, so an event whose turn began
-in an earlier scan gets NULL; the sessions-only backfill below re-reads whole files and fills it.
+carried forward in file order, and saved with the file's read position so the next scan of that
+file picks up the same turn. A session row is never rewritten once stored (the writer is INSERT
+only), so a row stored with NULL `turn_id` stays NULL.
 
 Delivery: over `transport.pg_dsn`, usage rows and session rows are written on one connection in
 **one transaction** (`ON CONFLICT (event_id) DO NOTHING` for sessions), so a failure stores
