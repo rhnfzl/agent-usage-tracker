@@ -290,6 +290,34 @@ def test_no_local_text_reaches_the_rows():
     print("ok no_local_text_reaches_the_rows")
 
 
+def test_review_findings_edge_cases():
+    d = review._Digest("x")
+    d.shell("gh pr create --fill && docker run -t myimage", "", False)
+    d.shell("git commit -q --no-edit && python -m pytest", "", False)
+    d.shell("git commit -m 'a; b' && echo -m nope", "", False)
+    d.titles.append("fix token=" + SECRET)
+    d.branches.append("b-" + SECRET)
+    v = d.view()
+    assert (v["prs"], v["commits"]) == ([], ["a; b"]), v
+    assert SECRET not in json.dumps(v), v
+    assert review.clip(review._BLOCK.sub(" ", "<user_info>OS Version: darwin 25</user_info> fix it")) \
+        == "fix it"
+    with tempfile.TemporaryDirectory() as t:
+        home = Path(t)
+        sid = "0b1c2d3e-0000-4000-8000-000000000001"
+        _jsonl(home / ".pi" / "agent" / "sessions" / "-p" / f"2001_{sid}.jsonl", [
+            {"type": "session", "id": sid, "timestamp": "2001-01-05T09:00:00Z", "cwd": "/w/p"},
+            {"type": "message", "timestamp": "2001-01-05T09:01:00Z", "message": {
+                "role": "user", "content": '<skill name="tidy">long SKILL.md body</skill> now'}}])
+        _jsonl(home / ".codex" / "sessions" / "2001" / "rollout-2001-cx2.jsonl", [
+            {"type": "session_meta", "payload": {"id": "cx2"}}, {"payload": {}},
+            {"type": "event_msg", "payload": {"type": "user_message", "message": "hello"}}])
+        info = review.local_info(home, {sid, "cx2"})
+    assert info[sid]["first"] == "/tidy now", info
+    assert info["cx2"]["first"] == "hello", info
+    print("ok review_findings_edge_cases")
+
+
 def main() -> int:
     for name, fn in list(globals().items()):
         if name.startswith("test_") and callable(fn):

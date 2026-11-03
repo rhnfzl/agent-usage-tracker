@@ -57,6 +57,10 @@ _Q = r"""(?:"((?:[^"\\]|\\.)*)"|'([^']*)'|(\S+))"""
 _GIT_COMMIT = re.compile(r"\bgit\b[^\n;&|]*?\scommit\b")
 _MSG = re.compile(rf"\s(?:-m|--message)(?:=|\s+){_Q}")
 _PR_TITLE = re.compile(rf"\s(?:-t|--title)(?:=|\s+){_Q}")
+# a command up to its first unquoted `&&`, `||`, `;`, `|` or newline
+_SEGMENT = re.compile(r"""(?:"(?:[^"\\]|\\.)*"|'[^']*'|&(?!&)|[^"'&;|\n])*""")
+# Cursor text with no <user_query>: every tagged block in it is harness context
+_BLOCK = re.compile(r"<([\w-]+)[^<>]*>.*?</\1>", re.S)
 _EDIT_TOOLS = {"Edit", "MultiEdit", "Write", "NotebookEdit", "StrReplace", "edit", "write"}
 
 
@@ -81,8 +85,8 @@ def clip(text: str, n: int = _TEXT_MAX) -> str:
 
 def _quoted(rx: re.Pattern, cmd: str, at: int) -> str | None:
     """First line of the quoted argument rx finds after `at`; for -m "$(cat <<EOF ...)" the
-    heredoc's first line."""
-    m = rx.search(cmd, at)
+    heredoc's first line. Only the command segment at `at` is searched."""
+    m = rx.search(cmd[:_SEGMENT.match(cmd, at).end()], at)
     if not m:
         return None
     v = next(g for g in m.groups() if g is not None)
@@ -157,8 +161,9 @@ class _Digest:
                 "last": clip(self.prompts[-1]) if len(self.prompts) > 1 else "",
                 "commits": [clip(c, 120) for c in _uniq(self.commits)][:5],
                 "prs": [clip(t, 120) for t in _uniq(self.prs)][:3],
-                "files": [self._file(p) for p, _n in self.files.most_common(3)],
-                "titles": _uniq(self.titles), "branches": _uniq(self.branches)}
+                "files": [clean_title(self._file(p)) for p, _n in self.files.most_common(3)],
+                "titles": [clean_title(t) for t in _uniq(self.titles)],
+                "branches": [clean_title(b) for b in _uniq(self.branches)]}
 
 
 def _claude(f: str, d: _Digest) -> None:
@@ -216,7 +221,7 @@ def _codex(f: str, d: _Digest) -> None:
     # a fork opens with a copy of its parent's history (the collector's rule)
     skip = max(safe_int(meta.get("subagent_history_start_ordinal")) - 1, 0) \
         if meta.get("forked_from_id") else 0
-    has_um = any(o["type"] == "event_msg" and o["payload"].get("type") == "user_message"
+    has_um = any(o.get("type") == "event_msg" and o["payload"].get("type") == "user_message"
                  for o in recs)
     for i, o in enumerate(recs):
         if 0 < i <= skip:
@@ -255,7 +260,10 @@ def _pi_log(f: str, hdr: dict, d: _Digest) -> None:
             d.at(o.get("timestamp"))
             role, content = m.get("role"), m.get("content")
             if role == "user":
-                d.prompts.append(text_of(content))
+                text = text_of(content)
+                sk = _pi._SKILL.match(text)     # a skill invocation: its name, not SKILL.md
+                d.prompts.append(f"/{sk[1]} {text.partition('</skill>')[2]}".strip() if sk
+                                 else text)
             elif role == "assistant" and isinstance(content, list):
                 for b in content:
                     if isinstance(b, dict) and b.get("type") == "toolCall":
@@ -287,7 +295,8 @@ def _cursor_chat(f: str, d: _Digest) -> None:
             q = _cu._QUERY.search(text)
             ts = _cu._prompt_ts(text, created)
             d.at(ts)
-            prompts[r] = (str(_when(ts) or ""), (q[1] if q else text))
+            prompts[r] = (_when(ts) or datetime.min.replace(tzinfo=timezone.utc),
+                          q[1] if q else _BLOCK.sub(" ", text))
         for b in m.get("content") if isinstance(m.get("content"), list) else ():
             if isinstance(b, dict) and b.get("type") == "tool-call":
                 calls[b.get("toolCallId")] = b.get("args")
@@ -341,6 +350,9 @@ def local_info(home: Path, sessions: set[str]) -> dict[str, dict]:
                 digests[sid].titles.insert(0, names.get(sid, ""))
     for f in glob.glob(str(home / ".pi" / "agent" / "sessions" / "**" / "*.jsonl"),
                        recursive=True):
+        u = _pi._uuid_in(f)
+        if u and u not in sessions:
+            continue
         first = first_record(f) or {}
         hdr = _pi._header(first if first.get("type") == "session" else {}, f)
         if hdr["id"] in sessions:
