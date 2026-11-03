@@ -32,6 +32,7 @@ RULES = {   # agents.episode_link(): the latest manual outcome wins, else git in
     "no_code": "no commits: research or review work",
 }
 _SHA = re.compile(r"[0-9a-f]{7,40}")
+_EP_PREFIX = re.compile(r"[0-9a-f-]{4,36}")
 _EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 _SHOW = 25   # rows per list on the page; a giant episode would otherwise render megabytes
 
@@ -44,17 +45,30 @@ def _day_bounds(day: str) -> tuple[datetime, datetime]:
     return d.astimezone(), (d + timedelta(days=1)).astimezone()   # local midnights, DST-safe
 
 
+def _episode_prefix(episode: str) -> str:
+    """An episode id or prefix: uuid characters only, so no LIKE wildcard gets through."""
+    ep = episode.strip().lower()
+    if not _EP_PREFIX.fullmatch(ep):
+        raise SystemExit("inspect: --episode is an episode id or prefix (4 or more of 0-9a-f-)")
+    return ep
+
+
 def fetch(dsn: str, episode: str | None = None, day: str | None = None,
           label: str | None = None) -> dict:
     """Raw rows for one view. Read-only; every SELECT is ids, keys, enums and numbers."""
     import psycopg  # optional dependency; install with the [postgres] extra
 
     start = end = _EPOCH
-    if episode:
-        where, params = "e.episode_id::text LIKE %s", (episode.strip().lower() + "%",)
-    elif day:
+    if episode is not None:
+        where, params = "e.episode_id::text LIKE %s", (_episode_prefix(episode) + "%",)
+    elif day is not None:
         start, end = _day_bounds(day)
-        where, params = "e.first_ts < %s AND e.last_ts >= %s", (end, start)
+        # a member row that day, as agents.episode_activity_day counts it (not span overlap)
+        where = ("EXISTS (SELECT 1 FROM agents.episode_member em JOIN agents.activity_event a "
+                 "ON a.session_id = em.session_id WHERE em.episode_id = e.episode_id AND a.kind "
+                 "IN ('steer', 'link', 'commit', 'pr') AND a.ts >= %s AND a.ts < %s "
+                 "AND a.ts BETWEEN e.first_ts AND e.last_ts)")
+        params = (start, end)
     else:   # the label's own episode (episode, episode_day) or its steer's session's episodes
         where = ("e.episode_id::text = %s OR e.episode_id IN (SELECT m.episode_id FROM "
                  "agents.episode_member m JOIN agents.activity_event a ON a.session_id = "
@@ -241,7 +255,7 @@ machine's logs and are never sent.</p>"""]
             shared = {v: ss for v, ss in vals.items() if len(ss) > 1}
             top = sorted(shared.items(), key=lambda kv: (-len(kv[1]), kv[0]))[:_SHOW]
             parts.append(f"<li>{e(name)}: {len(vals)} keys, {len(shared)} shared" + "".join(
-                f"<br><code>{e(_short(v))}</code> in " + ", ".join(_short(s) for s in sorted(ss))
+                f"<br><code>{e(_short(v))}</code> in " + ", ".join(e(_short(s)) for s in sorted(ss))
                 for v, ss in top) + "</li>")
         parts.append("</ul><h3>Labels</h3>")
         if ep["labels"]:
@@ -280,7 +294,10 @@ def run_inspect(cfg: Config, episode: str | None = None, day: str | None = None,
                 label: str | None = None, fetch_fn=fetch, serve_fn=review.serve) -> dict:
     if not cfg.has_pg:
         raise SystemExit("inspect needs transport.pg_dsn")
-    title = f"Episode {episode}" if episode else f"Day {day}" if day else f"Label {label}"
+    if episode is not None:
+        episode = _episode_prefix(episode)
+    title = f"Episode {episode}" if episode is not None else \
+        f"Day {day}" if day is not None else f"Label {label}"
     view = build(fetch_fn(cfg.pg_dsn, episode=episode, day=day, label=label))
     if not view["episodes"] and not view["labels"]:
         raise SystemExit(f"inspect: nothing found for {title.lower()}")

@@ -117,8 +117,10 @@ def test_latest_labels_matches_label_latest():
 def test_page_escapes_and_serves_read_only_with_correction_link():
     view = inspector.build(_raw())
     info = {"s1": {"titles": ["<script>x</script>"], "branches": ["a&b"]}}
+    view["episodes"][0]["anchors"]["branch key"]["bk9"] = {"<b>x", "s1"}   # sink-set ids
     page = inspector.render(view, info, "tok", "Label st3", label="st3")
     assert "<script>x" not in page and "&lt;script&gt;x" in page and "a&amp;b" in page
+    assert "<b>x" not in page and "&lt;b&gt;x" in page
     assert 'href="/tok/correct"' in page and "Every label row of" in page
     assert "<form" not in page                                    # the inspector writes nothing
     written: list = []
@@ -169,12 +171,54 @@ def test_run_inspect_passes_mode_and_stops_on_empty():
                                                  "label": None}
         empty = {k: [] for k in _raw()}
         try:
-            inspector.run_inspect(cfg, episode="nope", fetch_fn=lambda dsn, **kw: empty)
+            inspector.run_inspect(cfg, episode="0f0f", fetch_fn=lambda dsn, **kw: empty)
         except SystemExit as exc:
             assert "nothing found" in str(exc)
         else:
             raise AssertionError("no SystemExit")
     print("ok run_inspect_passes_mode_and_stops_on_empty")
+
+
+def test_fetch_checks_episode_and_day_uses_activity_rows():
+    import types
+    sqls: list = []
+
+    class Conn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def execute(self, sql, params):
+            sqls.append((sql, params))
+            return types.SimpleNamespace(fetchall=lambda: [])
+    fake = types.ModuleType("psycopg")
+    fake.connect = lambda *a, **k: Conn()
+    old = sys.modules.get("psycopg")
+    sys.modules["psycopg"] = fake
+    try:
+        for bad in (" ", "", "0f_f", "0f%", "nope", "0f0"):
+            try:
+                inspector.fetch("dsn", episode=bad)
+            except SystemExit as exc:
+                assert "episode id or prefix" in str(exc)
+            else:
+                raise AssertionError(f"accepted --episode {bad!r}")
+        assert sqls == []
+        inspector.fetch("dsn", episode=" 0F0F ")
+        assert sqls[0][1] == ("0f0f%",)
+        sqls.clear()
+        inspector.fetch("dsn", day="2001-01-05")
+        sql, params = sqls[0]
+        assert "EXISTS" in sql and "'steer', 'link', 'commit', 'pr'" in sql
+        assert "last_ts >= " not in sql and params == inspector._day_bounds("2001-01-05")
+    finally:
+        if old is None:
+            sys.modules.pop("psycopg")
+        else:
+            sys.modules["psycopg"] = old
+    print("ok fetch_checks_episode_and_day_uses_activity_rows")
 
 
 def test_day_bounds_are_local_midnights():

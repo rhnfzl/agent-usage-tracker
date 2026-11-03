@@ -499,7 +499,7 @@ def main(argv: list[str] | None = None) -> int:
     p_ins = sub.add_parser("inspect", help="why an episode, a day or a label exists (local page)")
     ins = p_ins.add_mutually_exclusive_group(required=True)
     ins.add_argument("--episode", help="episode id (a prefix is enough)")
-    ins.add_argument("--day", help="local YYYY-MM-DD: the episodes active that day")
+    ins.add_argument("--day", help="local YYYY-MM-DD: the episodes with a member row that day")
     ins.add_argument("--label", help="a label's unit_id (steer event id, <episode>:<date>, ...)")
     from .label.tasks import TASK_NAMES
     p_lab = sub.add_parser("label", help="local model labels (optional extra aut[label])")
