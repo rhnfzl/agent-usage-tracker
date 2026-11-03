@@ -13,7 +13,9 @@ States (a commit moves through them by new rows; readers take the latest):
   open        reachable from a branch only
   abandoned   unreachable, no twin, no merged PR
   superseded  a pre-amend SHA (unreachable, and the session's next commit was an amend)
-  undecided   younger than 14 days (from the merge, or from the commit row when not merged)
+  undecided   younger than 14 days (from the merge, or from the commit row when not merged), or
+              not decidable this run (default ref older than merge + 14 days, gh failed)
+A run that cannot see or decide a commit never replaces its stored state.
 
 `aut outcome <shipped|ruled-out|open>`: the manual outcome of the newest interactive session of
 the current project, written to agents.manual_outcome.
@@ -25,12 +27,16 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
+import time
 from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from glob import escape as glob_escape
+from glob import glob
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -69,16 +75,17 @@ class Clone:
     path: str                 # a worktree of the repo (held in memory only)
     key: str | None           # repo_key of its origin
     gh: str | None            # owner/repo when origin is on github.com (for gh)
-    default: str | None       # origin/HEAD's target ref, or a main/master/develop fallback
+    default: str | None       # origin/HEAD's target ref, or an origin main/master/develop
+    fetched_at: float = 0.0   # when origin was last fetched (FETCH_HEAD, or this run's fetch)
 
 
 def _default_ref(path: str) -> str | None:
+    """origin's default branch; never a local branch, so unpushed work is never merged."""
     ref = (_git(path, "symbolic-ref", "-q", "refs/remotes/origin/HEAD") or "").strip()
     if ref:
         return ref
     for cand in ("refs/remotes/origin/main", "refs/remotes/origin/master",
-                 "refs/remotes/origin/develop", "refs/heads/main", "refs/heads/master",
-                 "refs/heads/develop"):
+                 "refs/remotes/origin/develop"):
         if _git(path, "rev-parse", "--verify", "-q", cand) is not None:
             return cand
     return None
@@ -107,21 +114,50 @@ def find_clones(roots: list[str], keys: RepoKeys) -> list[Clone]:
                                 if ident.startswith("github.com/") else None
                         except ValueError:
                             pass
-                    out.append(Clone(dirpath, key, gh, _default_ref(dirpath)))
+                    heads = glob(os.path.join(glob_escape(common), "FETCH_HEAD")) + glob(
+                        os.path.join(glob_escape(common), "worktrees", "*", "FETCH_HEAD"))
+                    out.append(Clone(dirpath, key, gh, _default_ref(dirpath),
+                                     max((os.path.getmtime(h) for h in heads), default=0.0)))
             dirnames[:] = [] if depth >= _MAX_DEPTH else \
                 [n for n in dirnames if n not in _SKIP_DIRS]
     return out
+
+
+def _fetch(path: str) -> bool:
+    """Fetch origin's refs and nothing else: no gc or maintenance (it could prune objects later
+    runs need), no FETCH_HEAD, no submodules, no prompt. On timeout SIGTERM the process group so
+    git removes its lock files, then SIGKILL."""
+    cmd = ["git", "-C", path, "-c", "gc.auto=0", "-c", "maintenance.auto=false", "fetch",
+           "--quiet", "--no-tags", "--no-auto-maintenance", "--no-write-fetch-head",
+           "--no-recurse-submodules", "origin"]
+    try:
+        p = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL, start_new_session=True,
+                             env=dict(os.environ, GIT_TERMINAL_PROMPT="0"))
+    except OSError:
+        return False
+    try:
+        return p.wait(timeout=FETCH_TIMEOUT_S) == 0
+    except subprocess.TimeoutExpired:
+        for sig, wait in ((signal.SIGTERM, 5), (signal.SIGKILL, None)):
+            try:
+                os.killpg(p.pid, sig)
+                p.wait(timeout=wait)
+                break
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+        return False
 
 
 def fetch_clones(clones: list[Clone]) -> tuple[int, int]:
     """`git fetch` each clone, FETCH_TIMEOUT_S each; (ok, failed). A failure is skipped."""
     ok = failed = 0
     for c in clones:
-        if _git(c.path, "fetch", "--quiet", "--no-tags", "origin",
-                timeout=FETCH_TIMEOUT_S) is None:
-            failed += 1
-        else:
+        if _fetch(c.path):
+            c.fetched_at = time.time()
             ok += 1
+        else:
+            failed += 1
     return ok, failed
 
 
@@ -168,8 +204,26 @@ class _Repo:
 
     def __init__(self, clone: Clone, since: int, off_default: list[str]) -> None:
         d, path = clone.default, clone.path
-        log = (_git(path, "log", "--format=%H %ct", d) or "") if d else ""
-        self.on_default = {h: int(t) for h, t in (x.split() for x in log.splitlines() if x)}
+        log = (_git(path, "log", "--format=%H %ct %P", d) or "") if d else ""
+        par, ct = {}, {}
+        for line in log.splitlines():
+            h, t, *ps = line.split()
+            par[h], ct[h] = ps, int(t)
+        self.tip_t = ct[log.split(None, 1)[0]] if log else 0
+        # on_default: commit -> when it landed = committer time of the first-parent commit of the
+        # default branch that brought it in (oldest first, so each commit gets its first landing)
+        fp, h = [], log.split(None, 1)[0] if log else None
+        while h in par:
+            fp.append(h)
+            h = par[h][0] if par[h] else None
+        self.on_default: dict[str, int] = {}
+        for f in reversed(fp):
+            stack = [f]
+            while stack:
+                x = stack.pop()
+                if x not in self.on_default:
+                    self.on_default[x] = ct[f]
+                    stack.extend(q for q in par.get(x, ()) if q in par)
         branches = _git(path, "rev-list", "--branches", "--remotes", *([f"^{d}"] if d else []))
         self.on_branch = set((branches or "").split())
         self.twin: dict[str, str] = {}            # off-default full sha -> its twin on default
@@ -201,7 +255,7 @@ def _survival(clone: Clone, target: str, merge_t: float) -> float | None:
     parents = (_git(path, "rev-list", "--parents", "-n", "1", target) or "").split()
     if len(parents) != 2:
         return None
-    base = (_git(path, "rev-list", "-1", f"--before=@{int(merge_t + DECIDE_S)}",
+    base = (_git(path, "rev-list", "-1", "--first-parent", f"--before=@{int(merge_t + DECIDE_S)}",
                  clone.default) or "").strip()
     raw = _git(path, "show", "--numstat", "-z", "--no-renames", "--format=", target)
     if not base or raw is None:
@@ -252,32 +306,40 @@ def evaluate(rows: list[dict], clones: list[Clone], now: float, cache: dict,
         a["ts"] = min(a["ts"], r["ts"])
         by_session[r["session_id"]].append((r["ts"], r["amend"], (sha, r["repo_key"])))
     for seq in by_session.values():
-        seq.sort(key=lambda x: x[0])
+        seq.sort(key=lambda x: (x[0], bool(x[1]), x[2][0]))   # an amend sorts after a tie
         for (_, _, k), (_, amend, _) in zip(seq, seq[1:]):
             anchors[k]["amended"] |= bool(amend)
     stats["anchors"] = len(anchors)
 
     shas = sorted({s for s, _ in anchors})
     held = {i: _lookup(c, shas) for i, c in enumerate(clones)} if shas else {}
-    picked: dict[tuple, tuple[int, str]] = {}            # anchor -> (clone index, full sha)
+    found: dict[tuple, list[tuple[int, str]]] = {}      # anchor -> [(clone index, full sha)]
     for (sha, key), a in anchors.items():
         cands = [(i, held[i][sha][0]) for i in held
                  if sha in held[i] and abs(held[i][sha][1] - a["ts"]) <= DAY]
         own = [c for c in cands if key and clones[c[0]].key == key]
         cands = own or sorted(cands, key=lambda c: clones[c[0]].key is None)
         if cands:
-            picked[(sha, key)] = cands[0]
-            stats["found"] += 1
-            stats["null_key_resolved"] += key is None and clones[cands[0][0]].key is not None
+            found[(sha, key)] = cands
         else:
             stats["not_found"] += 1
     per_clone: dict[int, list[str]] = defaultdict(list)
-    for i, full in picked.values():
-        per_clone[i].append(full)
+    for cands in found.values():
+        for i, full in cands:
+            per_clone[i].append(full)
     repos = {}
     for i, fulls in per_clone.items():
-        cts = [held[i][s][1] for (s, _), (j, _) in picked.items() if j == i]
+        cts = [held[i][s][1] for (s, _), cands in found.items() for j, _ in cands if j == i]
         repos[i] = _Repo(clones[i], int(min(cts)) - 2 * DAY, fulls)
+
+    def advance(c: tuple[int, str]) -> int:       # merged < open < unreachable, per clone
+        rp, full = repos[c[0]], c[1]
+        return 0 if full in rp.on_default or full in rp.twin else 1 if full in rp.on_branch else 2
+    picked = {}                                   # anchor -> the clone that knows most of it
+    for k, cands in found.items():
+        picked[k] = min(cands, key=advance)
+        stats["found"] += 1
+        stats["null_key_resolved"] += k[1] is None and clones[picked[k][0]].key is not None
 
     outs, jobs, gh_jobs = [], [], []
     for (sha, key), a in anchors.items():
@@ -287,8 +349,9 @@ def evaluate(rows: list[dict], clones: list[Clone], now: float, cache: dict,
         if (sha, key) not in picked:
             # shortcut: a commit no local clone holds counts as abandoned after day 14; right for
             # work never pushed, wrong for a repo not cloned on this machine. Upgrade with an
-            # 'unknown' state in commit_outcome if that share grows.
-            o["state"] = "undecided" if young else "abandoned"
+            # 'unknown' state in commit_outcome (and the linker) if that share grows. sticky:
+            # a commit that later goes missing (clone moved, pre-amend SHA pruned) keeps its state.
+            o["state"], o["sticky"] = ("undecided" if young else "abandoned"), True
             stats["abandoned_not_found"] += not young
             continue
         i, full = picked[(sha, key)]
@@ -296,17 +359,21 @@ def evaluate(rows: list[dict], clones: list[Clone], now: float, cache: dict,
         o["repo_key"] = key or c.key or ""
         target = full if full in rp.on_default else rp.twin.get(full)
         if target:
-            # shortcut: the merge time is the (twin) commit's committer time, not the time it
-            # reached the default branch; upgrade with --ancestry-path if merges lag commits.
-            merge_t = rp.on_default[target]
+            merge_t = rp.on_default[target]            # when it landed on the default branch
             rv = rp.revert_time(full) or rp.revert_time(target)
             if now - merge_t < DECIDE_S:
                 pass
             elif rv is not None and rv - merge_t <= DECIDE_S:
                 o["state"] = "reverted"
-            else:
+            elif target in cache or max(rp.tip_t, c.fetched_at) >= merge_t + DECIDE_S:
                 o["state"] = "merged"
                 jobs.append((o, c, target, merge_t))
+            else:
+                # shortcut: the default ref was last updated before merge + 14 d, so survival
+                # cannot be measured yet; a repo nobody fetches stays undecided. Upgrade with a
+                # per-repo "inactive" signal if that holds months back.
+                o["sticky"] = True
+                stats["stale_default"] += 1
         elif full not in rp.on_branch and a["amended"]:
             o["state"] = "superseded"
         elif young:
@@ -323,9 +390,12 @@ def evaluate(rows: list[dict], clones: list[Clone], now: float, cache: dict,
         if k not in cache:
             ans = _gh_merged(c.gh, full)
             looked, failed = 1, ans is None
-            if ans or (ans is False and now - ts >= _GH_STABLE_S):
+            if ans is None:             # gh could not answer: decide nothing, keep what is stored
+                o["sticky"] = True
+                return looked, 1
+            if ans or now - ts >= _GH_STABLE_S:
                 cache[k] = ans          # a merge never undoes itself; an old "no" stays no
-            merged = bool(ans)
+            merged = ans
         else:
             merged = bool(cache[k])
         o["state"] = "merged" if merged else "open" if on_branch else "abandoned"
@@ -355,8 +425,12 @@ def evaluate(rows: list[dict], clones: list[Clone], now: float, cache: dict,
 
 
 def pending(outs: list[dict], stored: dict[tuple[str, str], tuple]) -> list[dict]:
-    """The outcomes whose (state, survival) differs from the latest stored row."""
-    return [o for o in outs if stored.get((o["sha"], o["repo_key"])) != (o["state"], o["survival"])]
+    """The outcomes whose (state, survival) differs from the latest stored row. A sticky outcome
+    (this run could not see the commit or decide it) never replaces a stored row of its sha,
+    under any repo_key: readers match on the sha alone."""
+    have = {sha for sha, _ in stored}
+    return [o for o in outs if not (o.get("sticky") and o["sha"] in have)
+            and stored.get((o["sha"], o["repo_key"])) != (o["state"], o["survival"])]
 
 
 def _cache_path() -> Path:
@@ -441,13 +515,15 @@ def run_outcomes(cfg: Config, fetch: bool, dry_run: bool, now: float | None = No
         cache = _load_cache()
         outs, ev = evaluate(rows, clones, now, cache, gh=fetch)
         stats.update(ev)
+        if not dry_run:
+            _save_cache(cache)          # before the sink: a failing write never redoes the blame
         todo = pending(outs, _load_stored(cfg.pg_dsn))
         stats["to_write"] = len(todo)
         if not dry_run:
             decided = datetime.fromtimestamp(now, timezone.utc)
-            _insert(cfg.pg_dsn, [dict(o, decided_at=decided) for o in todo])
+            _insert(cfg.pg_dsn, [{"sha": o["sha"], "repo_key": o["repo_key"], "state": o["state"],
+                                  "survival": o["survival"], "decided_at": decided} for o in todo])
             written = len(todo)
-            _save_cache(cache)
         return stats
     except BaseException as exc:
         status, error = "error", scrub_error(exc)

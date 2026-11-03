@@ -10,6 +10,9 @@ Locks the rules:
     committer time is within a day of the row;
   - survival is computed once and cached, a fetch that fails or times out is skipped and counted;
   - only changed states are written, a dry run writes nothing, a real run sends the heartbeat;
+  - the merge time is when the commit landed (first parent), survival waits for a default ref
+    newer than merge + 14 days, the furthest-along clone wins, a commit gone missing or a failed
+    gh lookup never replaces a stored state, fetch never runs gc and is terminated on timeout;
   - the manual outcome picks the newest interactive session of the current project.
 """
 
@@ -222,20 +225,7 @@ def test_fetch_failure_and_timeout_are_counted():
         clones = oc.find_clones([str(Path(d) / "projects")], RepoKeys(SALT))
         assert len(clones) == 2
         assert oc.fetch_clones(clones) == (1, 1)
-        real = oc.subprocess.run
-        seen = []
-
-        def slow(cmd, **kw):
-            if "fetch" in cmd:
-                seen.append(kw.get("timeout"))
-                raise subprocess.TimeoutExpired(cmd, kw.get("timeout"))
-            return real(cmd, **kw)
-        oc.subprocess.run = slow
-        try:
-            assert oc.fetch_clones(clones) == (0, 2)
-        finally:
-            oc.subprocess.run = real
-        assert seen == [oc.FETCH_TIMEOUT_S] * 2 and oc.FETCH_TIMEOUT_S == 30
+        assert sum(c.fetched_at > 0 for c in clones) == 1 and oc.FETCH_TIMEOUT_S == 30
         print("ok fetch_failure_and_timeout_are_counted")
 
 
@@ -289,6 +279,194 @@ def test_run_outcomes_dry_run_writes_nothing():
             (oc._load_rows, oc._load_stored, oc._insert, oc.send_scan_rows) = saved
             os.environ.pop("AUT_STATE")
         print("ok run_outcomes_dry_run_writes_nothing")
+
+
+def test_merge_time_is_when_it_landed_and_base_is_first_parent():
+    """A side-branch commit merged long after it was written: the 14 days run from the merge,
+    and survival is measured on the first-parent line, never on an unmerged side commit."""
+    with tempfile.TemporaryDirectory() as d:
+        origin, work = Path(d) / "origin.git", Path(d) / "projects" / "work"
+        subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(origin)], check=True)
+        work.mkdir(parents=True)
+        _g(work, "init", "-q", "-b", "main")
+        _g(work, "remote", "add", "origin", str(origin))
+        _commit(work, "base.txt", "base\n", 60)
+        _g(work, "checkout", "-q", "-b", "side1")
+        x = _commit(work, "x.txt", _lines("x"), 40)
+        _g(work, "checkout", "-q", "main")
+        _commit(work, "m.txt", _lines("m"), 30)
+        _g(work, "merge", "-q", "--no-ff", "-m", "merge one", "side1", age=20)
+        _g(work, "checkout", "-q", "-b", "side2", "HEAD~1")         # from before the merge
+        w = _commit(work, "w.txt", _lines("w"), 16)                  # newer than X's merge
+        _g(work, "checkout", "-q", "main")
+        _g(work, "merge", "-q", "--no-ff", "-m", "merge two", "side2", age=1)
+        _g(work, "push", "-q", "origin", "main")
+        _g(work, "remote", "set-head", "origin", "main")
+        key = _key(str(origin))
+        clones = oc.find_clones([str(Path(d) / "projects")], RepoKeys(SALT))
+        outs, _ = oc.evaluate([_row(x, key, 40), _row(w, key, 16)], clones, NOW, cache={})
+        got = _states(outs)
+        assert got[x[:9]][:2] == ("merged", 1.0), got               # was 0.0: base lacked X
+        assert got[w[:9]][0] == "undecided", got                    # merged a day ago
+        print("ok merge_time_is_when_it_landed_and_base_is_first_parent")
+
+
+def test_final_state_is_kept_when_the_commit_goes_missing():
+    outs, _ = oc.evaluate([_row("abcdef1234", None, 40, short=10)], [], NOW, cache={})
+    assert outs[0]["state"] == "abandoned" and outs[0]["sticky"], outs
+    for st in ("merged", "superseded", "reworked", "undecided"):
+        stored = {("abcdef1234", "somekey"): (st, None)}            # scored under a clone key
+        assert oc.pending(outs, stored) == [], st
+    assert oc.pending(outs, {}) == outs                             # never seen: written once
+    print("ok final_state_is_kept_when_the_commit_goes_missing")
+
+
+def test_gh_failure_leaves_the_commit_undecided():
+    with tempfile.TemporaryDirectory() as d:
+        work, s = _world(Path(d))
+        url = "https://github.com/owner/repo.git"
+        _g(work, "remote", "set-url", "origin", url)
+        bindir = Path(d) / "bin"
+        bindir.mkdir()
+        (bindir / "gh").write_text("#!/bin/sh\necho 'rate limited' >&2\nexit 1\n")
+        (bindir / "gh").chmod(0o755)
+        clones = oc.find_clones([str(Path(d) / "projects")], RepoKeys(SALT))
+        old = os.environ["PATH"]
+        os.environ["PATH"] = f"{bindir}{os.pathsep}{old}"
+        cache: dict = {}
+        try:
+            outs, stats = oc.evaluate([_row(s["F"], _key(url), 25)], clones, NOW, cache=cache,
+                                      gh=True)
+        finally:
+            os.environ["PATH"] = old
+        assert (outs[0]["state"], outs[0]["sticky"]) == ("undecided", True), outs
+        assert stats["gh_failed"] == 1 and cache == {}, (stats, cache)
+        print("ok gh_failure_leaves_the_commit_undecided")
+
+
+def test_stale_default_ref_defers_survival():
+    with tempfile.TemporaryDirectory() as d:
+        work, s = _world(Path(d))
+        key = _key(str(Path(d) / "origin.git"))
+        _g(work, "update-ref", "refs/remotes/origin/main", s["A"])   # last pulled at A's time
+        clones = oc.find_clones([str(Path(d) / "projects")], RepoKeys(SALT))
+        cache: dict = {}
+        outs, stats = oc.evaluate([_row(s["A"], key, 30)], clones, NOW, cache=cache)
+        assert (outs[0]["state"], outs[0]["sticky"]) == ("undecided", True), outs
+        assert cache == {} and stats["stale_default"] == 1, (cache, stats)
+        clones[0].fetched_at = NOW                                  # fetched this run: current
+        outs, _ = oc.evaluate([_row(s["A"], key, 30)], clones, NOW, cache=cache)
+        assert (outs[0]["state"], outs[0]["survival"]) == ("merged", 1.0), outs
+        print("ok stale_default_ref_defers_survival")
+
+
+def test_most_advanced_clone_wins():
+    with tempfile.TemporaryDirectory() as d:
+        work, s = _world(Path(d))
+        stale = Path(d) / "projects" / "stale"
+        subprocess.run(["git", "clone", "-q", str(Path(d) / "origin.git"), str(stale)], check=True)
+        _g(stale, "update-ref", "refs/remotes/origin/main", s["D"])  # never pulled since
+        _g(stale, "branch", "-q", "topic", s["A"])                   # A only on a branch here
+        clones = oc.find_clones([str(Path(d) / "projects")], RepoKeys(SALT))
+        assert len(clones) == 2
+        clones.sort(key=lambda c: c.path != str(stale))              # the stale clone first
+        clones[0].fetched_at = clones[1].fetched_at = NOW
+        outs, _ = oc.evaluate([_row(s["A"], _key(str(Path(d) / "origin.git")), 30)], clones,
+                              NOW, cache={})
+        assert outs[0]["state"] == "merged", outs
+        print("ok most_advanced_clone_wins")
+
+
+def test_local_branch_is_never_the_default():
+    with tempfile.TemporaryDirectory() as d:
+        work = Path(d) / "projects" / "solo"
+        work.mkdir(parents=True)
+        _g(work, "init", "-q", "-b", "main")
+        a = _commit(work, "a.txt", _lines("a"), 30)
+        clones = oc.find_clones([str(Path(d) / "projects")], RepoKeys(SALT))
+        assert clones[0].default is None, clones
+        outs, _ = oc.evaluate([_row(a, None, 30)], clones, NOW, cache={})
+        assert outs[0]["state"] == "open", outs                     # never pushed: not merged
+        print("ok local_branch_is_never_the_default")
+
+
+def test_amend_with_the_same_ts_is_ordered_after_the_commit():
+    with tempfile.TemporaryDirectory() as d:
+        work, s = _world(Path(d))
+        key = _key(str(Path(d) / "origin.git"))
+        clones = oc.find_clones([str(Path(d) / "projects")], RepoKeys(SALT))
+        rows = [_row(s["G2"], key, 25, "sg", amend=True), _row(s["G"], key, 25, "sg")]
+        outs, _ = oc.evaluate(rows, clones, NOW, cache={})            # same ts, amend listed first
+        assert _states(outs)[s["G"][:9]][0] == "superseded", outs
+        print("ok amend_with_the_same_ts_is_ordered_after_the_commit")
+
+
+def test_outcome_repo_roots_must_be_a_list_of_strings():
+    from agent_usage_tracker import config
+    with tempfile.TemporaryDirectory() as d:
+        conf = Path(d) / "config.toml"
+        os.environ["AUT_CONFIG"] = str(conf)
+        try:
+            conf.write_text('machine = "t"\noutcome_repo_roots = "~/code"\n')
+            assert config.load_config().outcome_repo_roots == ("~/code",)
+            conf.write_text('machine = "t"\noutcome_repo_roots = 3\n')
+            try:
+                config.load_config()
+            except SystemExit as exc:
+                assert "outcome_repo_roots" in str(exc)
+            else:
+                raise AssertionError("a non-list must refuse")
+        finally:
+            os.environ.pop("AUT_CONFIG")
+        print("ok outcome_repo_roots_must_be_a_list_of_strings")
+
+
+def test_fetch_leaves_the_repo_alone_and_terminates_on_timeout():
+    seen: list = []
+    real = oc.subprocess.Popen
+
+    def fake(cmd, **kw):
+        if "fetch" in cmd:
+            seen.append((cmd, kw.get("env", {}).get("GIT_TERMINAL_PROMPT")))
+            return real(["sleep", "30"], **kw)                       # hangs like a dead remote
+        return real(cmd, **kw)
+    oc.subprocess.Popen, timeout = fake, oc.FETCH_TIMEOUT_S
+    oc.FETCH_TIMEOUT_S = 0.3
+    try:
+        t = time.time()
+        assert oc.fetch_clones([oc.Clone("/nonexistent", None, None, None)]) == (0, 1)
+        assert time.time() - t < 10
+    finally:
+        oc.subprocess.Popen, oc.FETCH_TIMEOUT_S = real, timeout
+    cmd, prompt = seen[0]
+    for flag in ("gc.auto=0", "--no-auto-maintenance", "--no-write-fetch-head",
+                 "--no-recurse-submodules", "--no-tags"):
+        assert flag in cmd, (flag, cmd)
+    assert prompt == "0" and "--prune" not in cmd
+    print("ok fetch_leaves_the_repo_alone_and_terminates_on_timeout")
+
+
+def test_cache_is_saved_before_the_sink_is_written():
+    with tempfile.TemporaryDirectory() as d:
+        work, s = _world(Path(d))
+        key = _key(str(Path(d) / "origin.git"))
+        os.environ["AUT_STATE"] = str(Path(d) / "state" / "state.json")
+        saved = (oc._load_rows, oc._load_stored, oc.send_scan_rows)
+        oc._load_rows = lambda dsn: [_row(s["D"], key, 40)]
+        oc._load_stored = lambda dsn: (_ for _ in ()).throw(RuntimeError("no table"))
+        oc.send_scan_rows = lambda cfg, rows: None
+        try:
+            try:
+                oc.run_outcomes(_cfg(Path(d), (str(Path(d) / "projects"),)), fetch=False,
+                                dry_run=False, now=NOW)
+            except RuntimeError:
+                pass
+            cache = json.loads((Path(d) / "state" / oc.CACHE_NAME).read_text())
+            assert cache == {s["D"]: 0.0}, cache
+        finally:
+            (oc._load_rows, oc._load_stored, oc.send_scan_rows) = saved
+            os.environ.pop("AUT_STATE")
+        print("ok cache_is_saved_before_the_sink_is_written")
 
 
 def _claude_session(proj: Path, sid: str, entrypoint: str, mtime: float) -> None:

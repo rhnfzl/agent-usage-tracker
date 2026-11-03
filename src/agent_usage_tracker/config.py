@@ -121,6 +121,10 @@ def load_config() -> Config:
                 re.compile(pat)
             except re.error as exc:     # the pattern itself may name a bank: never echo it
                 raise SystemExit(f"config: {key}[{i}] is not a valid regex ({exc.msg})") from None
+    roots = data.get("outcome_repo_roots") or ["~/projects"]
+    roots = [roots] if isinstance(roots, str) else roots
+    if not isinstance(roots, list) or not all(isinstance(r, str) and r for r in roots):
+        raise SystemExit("config: outcome_repo_roots must be a list of directory strings")
     # 0 (the default) keeps titles for good; a number of days turns the limit on.
     aw_days = int(data.get("activitywatch_title_days") or 0)
     if aw_days < 0:
@@ -159,6 +163,6 @@ def load_config() -> Config:
         activitywatch_deny_titles=aw_titles["activitywatch_deny_titles"],
         activitywatch_work_titles=aw_titles["activitywatch_work_titles"],
         activitywatch_categories=aw_cats,
-        outcome_repo_roots=tuple(str(r) for r in data.get("outcome_repo_roots") or ("~/projects",)),
+        outcome_repo_roots=tuple(roots),
         outcome_fetch=_as_bool(data.get("outcome_fetch", False)),
     )

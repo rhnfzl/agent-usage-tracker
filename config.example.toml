@@ -52,7 +52,8 @@ agents = ["claude_code", "codex", "cursor_api", "cursor_cli", "pi"]
 # activitywatch_categories = { "My Tool" = "docs" }        # editor terminal agent dev browser comms docs design media other
 
 # `aut outcomes`: the directories holding your git clones (searched 6 levels deep, node_modules and
-# virtualenvs skipped), and whether to `git fetch` them and ask `gh` about merged PRs first.
+# virtualenvs skipped), and whether to `git fetch` them and ask `gh` about merged PRs first (turn it
+# on where the nightly job runs: without it squash-merged GitHub PRs count as abandoned).
 # outcome_repo_roots = ["~/projects"]
 # outcome_fetch = true
 

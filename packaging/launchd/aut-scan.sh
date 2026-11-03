@@ -67,12 +67,15 @@ if [ "$rc" -eq 0 ]; then rm -f "$MARK"; else touch "$MARK"; fi
 
 # Once a day after a delivered scan: `aut outcomes` (commit outcomes from the local clones). A
 # separate step with its own heartbeat (collector `outcomes`), so it never changes the scan's exit
-# code; a failed run is retried on the next scan. outcome_fetch = true in config.toml fetches first.
+# code. One attempt a day, failed or not: a failure is in its heartbeat row and the log, and
+# retrying it after every scan would redo the whole clone pass all day. outcome_fetch = true in
+# config.toml fetches first.
 DAYMARK="$CONF/outcomes-day"
 if [ "$rc" -eq 0 ] && [ "$(cat "$DAYMARK" 2>/dev/null)" != "$(date +%F)" ]; then
+  date +%F >"$DAYMARK"
   echo "$(ts) outcomes start" >>"$LOG"
-  if "$AUT" outcomes >>"$LOG" 2>&1; then date +%F >"$DAYMARK"; fi
-  echo "$(ts) outcomes done" >>"$LOG"
+  "$AUT" outcomes >>"$LOG" 2>&1
+  echo "$(ts) outcomes done (exit $?)" >>"$LOG"
 fi
 
 [ -n "$opened" ] && pkill -f "$SPEC" 2>/dev/null
