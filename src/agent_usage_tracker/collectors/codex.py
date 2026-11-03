@@ -83,6 +83,10 @@ def _set_meta(cur: dict, p: dict, keys: RepoKeys) -> None:
     cur["meta"] = {"id": _str(p.get("id")), "parent": _str(p.get("parent_thread_id")),
                    "origin": _run_origin(p)}
     cur["cwd"] = p.get("cwd") or cur.get("cwd")
+    cur["meta"]["link"] = _meta_link(p, keys)
+
+
+def _meta_link(p: dict, keys: RepoKeys) -> dict:
     g = p.get("git") if isinstance(p.get("git"), dict) else {}
     rk = keys.of_cwd(p.get("cwd"))
     if not rk and isinstance(g.get("repository_url"), str):
@@ -94,7 +98,7 @@ def _set_meta(cur: dict, p: dict, keys: RepoKeys) -> None:
     # turn's cwd if Codex threads start moving between repos
     link = Link(keys, {})
     link.place(2, rk, g.get("branch"))
-    cur["meta"]["link"] = link.s
+    return link.s
 
 
 def _session(cur: dict, path: str) -> EventSession:
@@ -240,11 +244,15 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list, Callable[[], None]]]:
         lines, new_off = read_new_lines(path, off)
         # A deep copy: only commit() may publish this chunk's state into the watermark.
         cur = copy.deepcopy(prev)
-        if off and "meta" not in cur:     # resumed from a state saved before identity was kept
+        # resumed from a state saved before identity (or its link fields) was kept
+        if off and "link" not in (cur.get("meta") or {}):
             first = first_record(path)
             if first and first.get("type") == "session_meta" \
                     and isinstance(first.get("payload"), dict):
-                _set_meta(cur, first["payload"], keys)
+                if cur.get("meta"):           # identity stays as it was first read
+                    cur["meta"]["link"] = _meta_link(first["payload"], keys)
+                else:
+                    _set_meta(cur, first["payload"], keys)
         recs = []
         # A forked child's file opens with a copy of its parent's history: lines before the first
         # meta's subagent_history_start_ordinal (0-based). `skip` is how many copied lines are

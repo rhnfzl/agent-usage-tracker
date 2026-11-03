@@ -252,7 +252,7 @@ identity rules above; `ts` is the source record's own timestamp; `event_id` is
 | `turn` | `system` `turn_duration` record | uuid | `duration_ms`, `message_count`, `tool_calls`, `tool_errors`, `by_tool`, `hook_blocks`, `max_identical_run`, `retry_flag`, `runaway_flag` |
 | `compaction` | `system` `compact_boundary` record | uuid | `trigger` when present |
 | `invoke` | `Skill` tool_use | tool_use_id | `skill` (`mcp` for an MCP name) |
-| `link` | closed turn: a `turn_duration` record, else (a subagent or scripted file, or a final turn with no `turn_duration`) the file once read to its end and idle for an hour | the turn's uuid, else the last record's uuid | `repo_key`, `branch_key`, `ticket_keys`, `sha_refs`, `pr_keys`, `role` (see Link rows below) |
+| `link` | closed turn: a `turn_duration` record, else (a subagent or scripted file, or a final turn with no `turn_duration`) the file once read to its end and idle for an hour, or the next record an hour or more after the turn's last one | the turn's uuid, else the last record's uuid | `repo_key`, `branch_key`, `ticket_keys`, `sha_refs`, `pr_keys`, `role` (see Link rows below) |
 
 Rules worth knowing:
 
@@ -274,9 +274,12 @@ Rules worth knowing:
   assignment or `git add` came before), else the last `ok <sha>` line. The branch is not stored:
   branch names are free text (the link row carries it as `branch_key`).
 - A commit's `repo_key` comes from the directory the command moved to (`cd X && git commit`,
-  `git -C X commit`, relative to the record's `cwd`), else the session's worktree
-  (`worktree-state.originalCwd`), else the record's `cwd`; NULL when none resolves. A move through
-  a variable (`cd $DIR`) is not followed.
+  `git -C X commit`, relative to the record's `cwd`; a relative move with no `cwd` is ignored),
+  else the record's `cwd`, else the session's worktree (`worktree-state.originalCwd`, for a `cwd`
+  that is gone); NULL when none resolves. A move through a variable (`cd $DIR`) is not followed.
+  These rules apply to rows first sent by this version: a backfill re-sends a stored commit row
+  with the same `(event_id, ts)`, so the sink keeps the key it first got, and a turn's stored
+  commit row and its link row can name different repos. Consumers must not assume they agree.
 - `repo_key` = HMAC-SHA256 of `host/owner/repo` (lowercased; credentials, port and `.git`
   dropped) under a per-install salt, from `git remote get-url origin` in the record's `cwd` (2 s
   timeout, cached per cwd per pass), NULL when the directory or remote is gone. A PR's key uses
@@ -307,9 +310,9 @@ machine. Keys are HMAC-SHA256 under the same salt as `repo_key`.
 | attr | value |
 |---|---|
 | `repo_key` | the turn's repo, by source: the commit's own directory (rules above), the worktree's original checkout, the record's `cwd`, Codex `session_meta.git.repository_url` (normalised like a remote) |
-| `branch_key` | `HMAC(repo_key \|\| branch)` paired with the repo of its own source: git's `[branch sha]` commit line, `worktree-state.worktreeBranch`, Codex `session_meta.git.branch`, the record's `gitBranch`. `main`, `master`, `develop`, `trunk` and `HEAD` get none |
+| `branch_key` | `HMAC(repo_key \|\| branch)` from, in order, git's `[branch sha]` commit line, `worktree-state.worktreeBranch`, Codex `session_meta.git.branch`, the record's `gitBranch`, taken only from a source in the same repo as `repo_key` (a branch key never pairs one repo with another's branch). `main`, `master`, `develop`, `trunk` and `HEAD` get none, and a source that names one ends the search (a commit on `main` does not borrow the record's `gitBranch`) |
 | `ticket_keys` | up to 5 `HMAC(ticket)` for strict ids `[A-Z][A-Z0-9]{1,9}-\d+` (not inside a longer word; `UTF-8`, `SHA-256`, `ISO-8601` and similar standards excluded) in the turn's branches, commit subjects and Claude Code session titles (`ai-title`, `custom-title`) |
-| `sha_refs` | up to 20 commit-like SHAs quoted in the turn's tool output or message text: 7 to 40 lowercase hex with at least one digit and one letter, not part of a longer word, uuid or hash |
+| `sha_refs` | up to 50 commit-like SHAs quoted in the turn's tool output or message text: 7 to 40 lowercase hex with at least one digit and one letter, not part of a longer word, uuid or hash, kept as their first 12 hex (match them to commits by prefix; a hex secret that passes the filter is never kept whole) |
 | `pr_keys` | up to 10 `HMAC(host/owner/repo\|number)` from GitHub `https://github.com/<o>/<r>/pull/<n>` and Bitbucket `https://bitbucket.org/<ws>/<repo>/pull-requests/<n>` URLs in the same text, plus the turn's `pr-link` records (the same PR gives the same key either way) |
 | `role` | `child` for a subagent or a scripted run (`run_origin` subagent or automated), else `seed` |
 
@@ -317,10 +320,17 @@ Turn close per agent: Claude Code as in the table above; Codex `task_complete` o
 `turn_aborted` (seed `session_id|turn_id`); Pi the derived turn (seed `session_id|<prompt id>`);
 Cursor CLI each emitted turn (seed `session_id|requestId`), SDK runs get none. A Claude Code
 worktree holds for every turn until `worktree-state` reports it left. Codex takes the repo and
-branch from the first `session_meta` (its `cwd`, else the remote URL) for every turn. Seeds are
-deterministic, so `aut backfill --activity-only` fills history and a live scan split anywhere
-gives the same rows as one full read; the dry run prints the link rows per role and how many
-carry each key.
+branch from the first `session_meta` (its `cwd`, else the remote URL) for every turn. A Claude
+Code turn with no `turn_duration` closes at its last record once the file sits idle for an hour,
+or, read in one go, once the next record is an hour or more later, so both cut the same place.
+Seeds are deterministic, so `aut backfill --activity-only` fills history and a live scan split
+anywhere gives the same rows as one full read (assuming a record reaches the file within the
+hour of its timestamp); the dry run prints the link rows per role and how many carry each key.
+Turns already open when this version is first deployed are the exception: their link row is
+built from the records read after the upgrade only (a Claude Code worktree entered before it is
+not seen until the next `worktree-state`), and it lands before a backfill's complete row with
+the same `(event_id, ts)`, so the partial row stays. A Codex watermark from before link fields
+existed gets its `session_meta` link fields rebuilt from the file's first record.
 
 ### Codex and Pi activity
 

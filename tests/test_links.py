@@ -6,9 +6,11 @@ Locks the rules:
   - the source order for repo and branch (commit line and its directory, worktree, session meta,
     record) and the default-branch exclusion;
   - the strict ticket pattern, the sha_refs filter, the PR URL forms, the caps;
-  - commit rows find their repo from the commit's directory or the worktree before giving up;
-  - a subagent or scripted file closes its link turn once complete and idle, and a scan split
-    anywhere gives the same rows as one full read;
+  - a branch_key never pairs one repo with another repo's branch;
+  - commit rows find their repo from the commit's directory, the cwd, then the worktree;
+  - a subagent or scripted file closes its link turn once complete and idle, an hour-long gap
+    between records closes it too, and a scan split anywhere gives the same rows as one full read;
+  - a Codex watermark from before link fields existed still gets the session's repo and branch;
   - nothing but keys, SHAs, enums and ints reaches attrs.
 """
 
@@ -74,15 +76,21 @@ def test_ticket_pattern() -> None:
 
 def test_sha_refs_filter() -> None:
     link = ac.Link(_keys(), {})
-    keep = ["abc1234", "0123456789abcdef0123456789abcdef01234567", "deadbee5"]
+    keep = ["abc1234", "0123456789abcdef0123456789abcdef01234567"[:ac.SHA_REF_LEN], "deadbee5"]
     drop = ["abc123", "facade", "decade0"[:6], "deadbeef", "1234567", "a" * 41 + "1",
             "0123456789abcdef" * 4, "550e8400-e29b-41d4-a716-446655440000", "ABC1234",
             "abc1234_x", "x_abc1234", "abc1234g", "zabc1234"]
     link.text(" ".join(drop) + "\n" + " ".join(keep) + " abc1234")
     assert link.s["shas"] == keep, link.s
     many = ac.Link(_keys(), {})
-    many.text(" ".join(f"{i:07x}a" for i in range(30)))
+    many.text(" ".join(f"{i:07x}a" for i in range(ac.MAX_SHAS + 10)))
     assert len(many.s["shas"]) == ac.MAX_SHAS
+    # a 32- or 40-hex secret passes the SHA filter: only a prefix is kept, never the whole value
+    secret = "9f3c1e0b7a6d5c4b3a291807f6e5d4c3"
+    leak = ac.Link(_keys(), {})
+    leak.text(f'webhook_secret = "{secret}"\nhttps://{secret}@o1.ingest.example.com/1 '
+              f"tok={secret}0a1b2c3d")
+    assert leak.s["shas"] == [secret[:ac.SHA_REF_LEN]], leak.s
     print("ok sha_refs_filter")
 
 
@@ -130,6 +138,46 @@ def test_default_branches_get_no_key() -> None:
     assert ac.branch_key(keys, K1, "feat/x") == _bk(K1, "feat/x")
     assert ac.branch_key(keys, K1, "feat/x") != ac.branch_key(keys, K2, "feat/x")
     print("ok default_branches_get_no_key")
+
+
+def test_branch_never_crosses_repos() -> None:
+    # the branch_key comes from the rank that gave the repo_key, or a lower one of the same repo
+    keys = _keys()
+
+    def attrs(rk, out):
+        link = ac.Link(keys, {})
+        link.place(3, K1, "feat/x")                    # the record: repo one on feat/x
+        link.commit(rk, out)
+        return link.attrs("interactive")["repo_key"], link.attrs("interactive")["branch_key"]
+    assert attrs(K2, "ok abc1234") == (K2, None)                  # no branch line: not one's
+    assert attrs(K2, "[feat/y abc1234] x") == (K2, _bk(K2, "feat/y"))
+    assert attrs(K1, "[main abc1234] x") == (K1, None)    # a default branch stops the fallback
+    assert attrs(K1, "ok abc1234") == (K1, _bk(K1, "feat/x"))     # same repo: the record's
+    assert attrs(None, "[feat/y abc1234] x") == (K1, _bk(K1, "feat/x"))
+    old = ac.Link(keys, {"at": {"0": [K2, None], "3": [K1, _bk(K1, "feat/x")]}})  # older state
+    assert (old.attrs(None)["repo_key"], old.attrs(None)["branch_key"]) == (K2, None)
+    print("ok branch_never_crosses_repos")
+
+
+def test_commit_repo_order() -> None:
+    # the command's own directory, then the record's cwd, then the worktree's original checkout
+    with tempfile.TemporaryDirectory() as d:
+        one, two = _repos(Path(d))
+        keys = _keys()
+        assert ac.commit_repo(keys, str(one), str(two), None) == K2
+        assert ac.commit_repo(keys, str(two), None, K1) == K2         # cwd resolves: cwd wins
+        assert ac.commit_repo(keys, "/gone/wt", None, K1) == K1       # else the worktree
+        assert ac.commit_repo(keys, "/gone/wt", "/gone/x", None) is None
+        # with no cwd a relative target means nothing (never the aut process's own directory)
+        here = os.getcwd()
+        try:
+            os.chdir(d)
+            rel = os.path.relpath(one, d)
+            assert ac.commit_repo(_keys(), None, rel, None) is None
+            assert ac.commit_repo(_keys(), None, str(one), None) == K1
+        finally:
+            os.chdir(here)
+    print("ok commit_repo_order")
 
 
 # ---------------------------------------------------------------- Claude Code sources
@@ -288,6 +336,43 @@ def test_claude_backfill_determinism() -> None:
     print("ok claude_backfill_determinism")
 
 
+def test_claude_idle_gap_split_is_deterministic() -> None:
+    # A turn left open for an hour or more closes at its last record whether a live scan saw the
+    # file idle or a full read only sees the gap between record timestamps.
+    t0, t1 = "2026-07-18T10:00:00Z", "2026-07-18T12:00:00Z"
+    with tempfile.TemporaryDirectory() as d:
+        home = Path(d)
+        one, _two = _repos(home)
+        c1 = str(one)
+        main = home / ".claude/projects/-p/S1.jsonl"
+        recs = [
+            _user("h1", f"go {SHA_A}", cwd=c1, timestamp=t0),
+            _tools("m1", {"type": "text", "text": "waiting"}, cwd=c1, timestamp=t0),
+            _result("r1", "x", f"back {SHA_B}", cwd=c1, timestamp=t1),
+            _tools("m2", {"type": "text", "text": "done"}, cwd=c1, timestamp=t1),
+            _turn_end("td1", 5, 3) | {"timestamp": t1},
+        ]
+
+        def view(evs):
+            return sorted((e.event_id, e.ts, json.dumps(e.attrs, sort_keys=True))
+                          for e in _links(evs))
+        _write_jsonl(main, recs)
+        full = view(_collect(home))
+        assert [r[0] for r in full] == sorted([make_event_id("claude_code", "link", "a-m1"),
+                                               make_event_id("claude_code", "link", "td1")]), full
+        for idle in (True, False):
+            _write_jsonl(main, recs[:2])
+            if idle:
+                os.utime(main, (OLD, OLD))          # a scan ran while the file sat idle
+            wm: dict = {}
+            live = _collect(home, wm)
+            with main.open("a") as fh:
+                fh.writelines(json.dumps(r) + "\n" for r in recs[2:])
+            live += _collect(home, wm)
+            assert view(live) == full, (idle, view(live), full)
+    print("ok claude_idle_gap_split_is_deterministic")
+
+
 def test_link_attrs_carry_no_text() -> None:
     with tempfile.TemporaryDirectory() as d:
         home = Path(d)
@@ -381,6 +466,35 @@ def test_codex_link() -> None:
         commit = [e for e in _run_mod(codex, home) if getattr(e, "kind", "") == "commit"]
         assert [e.attrs["repo_key"] for e in commit] == [K2]
     print("ok codex_link")
+
+
+def test_codex_link_from_older_watermark() -> None:
+    # a watermark saved before link fields existed has meta but no meta link: rebuilt from the
+    # file's first record, so later turns still carry the session's repo and branch
+    with tempfile.TemporaryDirectory() as d:
+        home = Path(d)
+        one, _two = _repos(home)
+        f = home / ".codex/sessions/2026/07/18/rollout-a.jsonl"
+        recs = [{"timestamp": "2026-07-18T10:00:00Z", "type": "session_meta",
+                 "payload": {"id": "T1", "cwd": str(one), "source": "cli",
+                             "git": {"branch": "feat/x"}}},
+                {"timestamp": "2026-07-18T10:00:01Z", "type": "event_msg",
+                 "payload": {"type": "task_started", "turn_id": "u1"}}]
+        _write_jsonl(f, recs)
+        wm: dict = {}
+        for _events, commit in codex.collect(_cfg(home), wm):
+            commit()
+        assert wm["files"][str(f)]["meta"].pop("link") is not None
+        with f.open("a") as fh:
+            fh.write(json.dumps({"timestamp": "2026-07-18T10:00:02Z", "type": "event_msg",
+                                 "payload": {"type": "task_complete", "turn_id": "u1"}}) + "\n")
+        out = []
+        for events, commit in codex.collect(_cfg(home), wm):
+            out.extend(events)
+            commit()
+        [lk] = _links(out)
+        assert (lk.attrs["repo_key"], lk.attrs["branch_key"]) == (K1, _bk(K1, "feat/x")), lk.attrs
+    print("ok codex_link_from_older_watermark")
 
 
 def test_pi_link() -> None:

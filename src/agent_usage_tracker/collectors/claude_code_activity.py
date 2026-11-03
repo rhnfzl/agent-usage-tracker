@@ -15,8 +15,8 @@ from urllib.parse import urlparse
 from ..event import ActivityEvent, EventSession, make_event_id
 # repo_identity and _GIT_COMMIT are re-exported for the tests that lock them
 from ._activity_common import _GIT_COMMIT, RepoKeys, repo_identity  # noqa: F401
-from ._activity_common import (Link, add_call, blank_agg, branch_key, commit_call, commit_dir,
-                               commit_repo, commit_shas, turn_attrs)
+from ._activity_common import (IDLE_S, Link, add_call, blank_agg, commit_call, commit_dir,
+                               commit_repo, commit_shas, ms_between, turn_attrs)
 from ._activity_common import h as _h
 from ._activity_common import text_of as _text
 from ._activity_common import tool_key as _tool
@@ -114,6 +114,14 @@ class Activity:
 
     def _record(self, o: dict, sess: EventSession) -> None:
         typ = o.get("type")
+        # A record IDLE_S or more after the open link turn's last one: that turn closed there,
+        # as a live scan that saw the file idle in between closed it, so any split of scans and
+        # one full read cut the same place. shortcut: assumes a record reaches the file within
+        # IDLE_S of its timestamp (a synced log that lags longer can split differently); upgrade
+        # if synced files show split-vs-full drift.
+        gap = ms_between(self.lo["ts"], o.get("timestamp")) if self.lo else None
+        if gap is not None and gap >= IDLE_S * 1000:
+            self.finish()
         if typ in ("assistant", "user"):
             self.lo = {"uid": self._uid(o), "ts": o.get("timestamp"), "sid": sess.session_id,
                        "turn": sess.turn_id, "origin": sess.run_origin}
@@ -135,8 +143,7 @@ class Activity:
             if isinstance(ws, dict):
                 rk = self.keys.of_cwd(ws.get("originalCwd")) \
                     or self.keys.of_cwd(ws.get("worktreePath"))
-                self.wt = [rk, branch_key(self.keys, rk, ws.get("worktreeBranch"))]
-                self.link.tickets(ws.get("worktreeBranch"))
+                self.wt = self.link.source(rk, ws.get("worktreeBranch"))
             else:                        # the session left its worktree
                 self.wt = None
         elif typ in ("ai-title", "custom-title"):

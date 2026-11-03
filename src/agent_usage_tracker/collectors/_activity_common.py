@@ -49,7 +49,12 @@ _NOT_TICKET = {"UTF", "SHA", "ISO", "RFC", "CVE", "PEP", "HTTP", "TLS", "SSL", "
 _PR_URL = re.compile(r"https?://(?:www\.)?(?:(github\.com)/([\w.-]+)/([\w.-]+)/pull"
                      r"|(bitbucket\.org)/([\w.-]+)/([\w.-]+)/pull-requests)/(\d+)")
 _DEFAULT_BRANCHES = {"main", "master", "develop", "trunk", "HEAD"}
-MAX_SHAS, MAX_PRS, MAX_TICKETS = 20, 10, 5
+# 20 SHAs (first come) filled up on 7% of Claude Code and 26% of Cursor turns that quote any,
+# pushing out a commit quoted late in the turn; 50 is cheap at 12 hex each
+MAX_SHAS, MAX_PRS, MAX_TICKETS = 50, 10, 5
+# a quoted SHA is kept as its first 12 hex: enough to prefix-match a commit, and a hex secret
+# that passes the SHA filter (a 32-hex API key, a 40-hex token) cannot be read back from it
+SHA_REF_LEN = 12
 IDLE_S = 3600        # a file untouched this long is complete: its open link turn closes
 
 
@@ -204,13 +209,14 @@ def commit_dir(cmd: str) -> str | None:
 
 
 def commit_repo(keys: RepoKeys, cwd: object, target: object, fallback: str | None) -> str | None:
-    """A commit's repo_key: the directory the command moved to, else `fallback` (the worktree's
-    original checkout), else the record's cwd."""
-    if isinstance(target, str):
+    """A commit's repo_key: the directory the command moved to, else the record's cwd, else
+    `fallback` (the worktree's original checkout, for a cwd that is gone). A relative target
+    with no cwd is not resolved: it would be relative to aut's own directory."""
+    if isinstance(target, str) and (isinstance(cwd, str) or os.path.isabs(target)):
         k = keys.of_cwd(os.path.join(cwd, target) if isinstance(cwd, str) else target)
         if k:
             return k
-    return fallback or keys.of_cwd(cwd)
+    return keys.of_cwd(cwd) or fallback
 
 
 def branch_key(keys: RepoKeys, repo_key: str | None, branch: object) -> str | None:
@@ -233,14 +239,21 @@ class Link:
     """One turn's link fields (activity kind `link`). The state dict `s` is mutated in place and
     rides in the watermark, so it holds keys and SHAs only, never a branch, ticket, URL or path.
     s["at"]: source rank -> [repo_key, branch_key]; rank 0 the commit (`[branch sha]` line and the
-    commit's own directory), 1 the worktree, 2 the session meta (Codex git), 3 the record."""
+    commit's own directory), 1 the worktree, 2 the session meta (Codex git), 3 the record.
+    branch_key is False where the source names a default branch: it has no key, and a lower rank
+    may not stand in for it."""
 
     def __init__(self, keys: RepoKeys, s: dict) -> None:
         self.keys, self.s = keys, s
 
-    def place(self, rank: int, repo_key: str | None, branch: object = None) -> None:
+    def source(self, repo_key: str | None, branch: object = None) -> list:
+        """[repo_key, branch_key] of one source (its branch's tickets go to this turn)."""
         self.tickets(branch)
-        self.s.setdefault("at", {})[str(rank)] = [repo_key, branch_key(self.keys, repo_key, branch)]
+        named = repo_key and isinstance(branch, str) and branch in _DEFAULT_BRANCHES
+        return [repo_key, False if named else branch_key(self.keys, repo_key, branch)]
+
+    def place(self, rank: int, repo_key: str | None, branch: object = None) -> None:
+        self.s.setdefault("at", {})[str(rank)] = self.source(repo_key, branch)
 
     def _add(self, field: str, value: str | None, cap: int) -> bool:
         got = self.s.setdefault(field, [])
@@ -269,7 +282,8 @@ class Link:
         if len(self.s.get("shas", ())) < MAX_SHAS:
             for m in _SHA_REF.finditer(text):
                 v = m[0]
-                if not v.isdigit() and not v.isalpha() and not self._add("shas", v, MAX_SHAS):
+                if not v.isdigit() and not v.isalpha() \
+                        and not self._add("shas", v[:SHA_REF_LEN], MAX_SHAS):
                     break
         if "/pull" in text and len(self.s.get("prs", ())) < MAX_PRS:
             for m in _PR_URL.finditer(text):
@@ -283,8 +297,11 @@ class Link:
 
     def attrs(self, origin: str | None) -> dict:
         at = [self.s["at"][k] for k in sorted(self.s.get("at", {}))]
-        return {"repo_key": next((r for r, _b in at if r), None),
-                "branch_key": next((b for _r, b in at if b), None),
+        # the repo of the first source that has one; its branch from that source, or from a lower
+        # one in the SAME repo (a branch edge must never join two repos)
+        rk = next((r for r, _b in at if r), None)
+        bk = next((b for r, b in at if r == rk and b is not None), None) if rk else None
+        return {"repo_key": rk, "branch_key": bk or None,
                 "ticket_keys": list(self.s.get("tix", ())), "sha_refs": list(self.s.get("shas", ())),
                 "pr_keys": list(self.s.get("prs", ())),
                 # subagents and scripted runs attach to an episode, never start one
