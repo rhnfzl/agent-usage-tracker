@@ -72,6 +72,9 @@ class Config:
     activitywatch_deny_titles: tuple[str, ...] = ()    # regexes (case-insensitive), dropped entirely
     activitywatch_work_titles: tuple[str, ...] = ()    # regexes that make a browser row web-work
     activitywatch_categories: dict[str, str] = field(default_factory=dict)   # lowercased app -> cat
+    # `aut outcomes`: where the local clones live, and whether it fetches them (and asks gh) first.
+    outcome_repo_roots: tuple[str, ...] = ("~/projects",)
+    outcome_fetch: bool = False
 
     @property
     def cf_access_headers(self) -> dict[str, str]:
@@ -156,4 +159,6 @@ def load_config() -> Config:
         activitywatch_deny_titles=aw_titles["activitywatch_deny_titles"],
         activitywatch_work_titles=aw_titles["activitywatch_work_titles"],
         activitywatch_categories=aw_cats,
+        outcome_repo_roots=tuple(str(r) for r in data.get("outcome_repo_roots") or ("~/projects",)),
+        outcome_fetch=_as_bool(data.get("outcome_fetch", False)),
     )

@@ -10,6 +10,12 @@
   aut status            show config + watermark state
   aut time add --start <local> --end <local> | --minutes N [--at <local end>] [--not-relevant]
                         record a manual active-time interval (needs transport.pg_dsn)
+  aut outcomes [--fetch] [--dry-run]
+                        score every commit row against the local clones -> agents.commit_outcome
+  aut outcome <shipped|ruled-out|open> [--session ID]
+                        the manual outcome of this project's newest interactive session
+  aut episodes review [--month YYYY-MM]
+                        hand-check a month's episodes on a local page -> agents.episode_correction
 
 The dry-run report doubles as the accuracy check: it prints per-agent, per-model token
 sums straight from your real logs.
@@ -443,6 +449,17 @@ def main(argv: list[str] | None = None) -> int:
     p_tadd.add_argument("--at", help="local end for --minutes (default: now)")
     p_tadd.add_argument("--not-relevant", action="store_true",
                         help="not work-relevant (default: relevant)")
+    p_outs = sub.add_parser("outcomes", help="score commit rows against the local clones")
+    p_outs.add_argument("--fetch", action="store_true",
+                        help="git fetch the clones and ask gh first (config: outcome_fetch)")
+    p_outs.add_argument("--dry-run", action="store_true", help="count states, write nothing")
+    p_out = sub.add_parser("outcome", help="mark this project's newest session's outcome")
+    p_out.add_argument("outcome", choices=["shipped", "ruled-out", "open"])
+    p_out.add_argument("--session", help="the session id (default: newest interactive here)")
+    p_eps = sub.add_parser("episodes", help="episodes")
+    eps_sub = p_eps.add_subparsers(dest="eps_cmd", required=True)
+    p_rev = eps_sub.add_parser("review", help="hand-check one month's episodes (local page)")
+    p_rev.add_argument("--month", help="YYYY-MM (default: the last completed month)")
     args = parser.parse_args(argv)
 
     if args.cmd == "sync-prices":
@@ -477,6 +494,31 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.cmd == "time":
         cmd_time_add(cfg, args)
+        return 0
+
+    if args.cmd == "outcomes":
+        from . import outcomes
+        st = outcomes.run_outcomes(cfg, args.fetch or cfg.outcome_fetch, args.dry_run)
+        states = {k[6:]: v for k, v in sorted(st.items()) if k.startswith("state_")}
+        rest = {k: v for k, v in sorted(st.items()) if not k.startswith("state_")}
+        print(f"outcomes {'DRY-RUN (nothing written)' if args.dry_run else 'written'}: "
+              f"states {json.dumps(states)}, {json.dumps(rest)}")
+        return 0
+
+    if args.cmd == "outcome":
+        import os
+
+        from . import outcomes
+        if not cfg.has_pg:
+            raise SystemExit("outcome needs transport.pg_dsn")
+        row = outcomes.build_manual_outcome(cfg, args.outcome, os.getcwd(), args.session)
+        outcomes.insert_manual(cfg.pg_dsn, row)
+        print(f"marked session {row['session_id'][:8]} {row['outcome']}")
+        return 0
+
+    if args.cmd == "episodes":
+        from . import review
+        review.run_review(cfg, args.month)
         return 0
 
     if args.cmd == "export":

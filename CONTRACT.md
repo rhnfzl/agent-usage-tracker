@@ -392,6 +392,52 @@ them with the same one-line note as session rows. History: `aut backfill --activ
 sends usage rows. For `cursor_cli` the first normal `aut scan` also sends its human rows, which no
 collector sent before.
 
+## Outcomes: agents.commit_outcome, manual_outcome, episode_correction
+
+Written by three commands on the machine that holds the clones and the logs. Every value is a
+SHA, a key, a session id, an enum, a number or a time; no URL, path, branch, title, subject or
+file name is stored. All three tables are insert-only: readers take the latest row.
+
+`aut outcomes [--fetch] [--dry-run]` reads the `commit` rows and the git clones under
+`outcome_repo_roots` (one per git common dir; repo_key -> clone is held in memory for the run)
+and writes `agents.commit_outcome (sha, repo_key, state, survival, decided_at)` only when a
+commit's `(state, survival)` differs from its latest stored row.
+
+| state | rule |
+|---|---|
+| `merged` | ancestor of `origin/HEAD` (fallback `main`/`master`/`develop`), or a single-commit patch-id twin on it, or (with `--fetch`) a merged GitHub PR that `gh pr list --search <sha>` finds; `survival` = share (0..1, 4 decimals) of its added lines that `git blame` still attributes to it (or its twin) on the default branch 14 days after the merge, first 30 files, NULL for a merge commit, a commit adding no lines or a gh-only merge |
+| `reverted` | merged, and a commit on any branch says `This reverts commit X` for it or its twin within 14 days of the merge |
+| `reworked` | merged and `survival < 0.5` |
+| `open` | reachable from a local or remote branch, not from the default branch |
+| `abandoned` | reachable from no branch, no twin, no merged PR; also a commit no local clone holds |
+| `superseded` | reachable from no branch and the session's next commit row was an `--amend` (the pre-amend SHA) |
+| `undecided` | under 14 days since the merge (merged) or since the commit row (everything else) |
+
+- `sha` is the commit row's form (often abbreviated); `repo_key` is the row's, else the key of the
+  clone that holds the SHA, else `''`. A clone counts as holding a SHA only when its committer
+  time is within a day of the row, so a short SHA never matches another repo's commit.
+- The merge time is the (twin) commit's committer time. Survival is computed once and cached by
+  full SHA in `outcomes_cache.json` next to the state file, with gh answers (a "no" only once the
+  commit is 60 days old).
+- `--fetch` (or `outcome_fetch = true`) runs `git fetch --quiet --no-tags origin` in each clone
+  that holds a commit or has a commit row's key (30 s each; failures are skipped and counted) and
+  turns on the gh lookup. A dry run reads the sink and the clones and writes nothing: no rows, no
+  cache, no heartbeat. A real run sends one `agents.collector_scan` row, collector `outcomes`.
+
+`aut outcome <shipped|ruled-out|open> [--session ID]` writes `agents.manual_outcome (session_id,
+outcome, ts, repo_key)` for the newest interactive (entrypoint `cli`) Claude Code session whose
+project directory is the current directory or a parent up to the repo top level; `repo_key` is
+the current directory's. `packaging/claude/commands/outcome.md` wraps it as `/outcome`.
+
+`aut episodes review [--month YYYY-MM]` serves the month's `agents.episode` rows (default: the
+last completed month) on `127.0.0.1` at a random port and token, with each seed session's titles
+and branch names read from the local Claude Code and Codex logs. The page and its text never
+leave the machine. Answers become `agents.episode_correction (id, ts, action, a_session,
+b_session, attrs)`: right -> `confirm`, should split -> one `split` per session taken out, should
+merge with #n -> `merge` (b = that episode's first seed session), not an episode -> `reject`;
+`attrs` holds `repo_keys` (and `b_repo_keys`) copied from `episode_member`. It prints the share
+of reviewed episodes marked right.
+
 ## Active time: agents.time_interval
 
 One row per span a person was at the keyboard (`source='aw'`, from ActivityWatch) or said they

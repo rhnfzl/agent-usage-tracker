@@ -89,6 +89,9 @@ aut status             # config + watermark state
 aut export --out f.csv # write all usage as CSV (offline bulk-load / bridge)
 aut sync-prices        # refresh the API-equivalent model price map (LiteLLM -> models.dev)
 aut report             # compute showcase metrics from the sink -> metrics.json (needs [postgres])
+aut outcomes --dry-run # what became of each agent commit (merged, reverted, open, ...); counts only
+aut outcome shipped    # manual outcome of this project's newest session (also: ruled-out, open)
+aut episodes review    # hand-check last month's episodes on a page served on 127.0.0.1
 ```
 
 Run it on a timer. See `packaging/` for launchd, systemd, and Task Scheduler units.
