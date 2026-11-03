@@ -31,6 +31,7 @@ Excluded:
 | Claude Code | tool results, sidechains (subagent transcripts), meta and compaction records | `isSidechain` / `isMeta` / `isCompactSummary`, `tool_result` blocks |
 | Claude Code | background-task notifications, slash-command stdout, interrupt notices | text opens with `<task-notification>`, `<local-command-stdout>`, `[Request interrupted` |
 | Claude Code | SDK programs driving a session | `entrypoint` in `sdk-py`, `sdk-cli` |
+| Claude Code | Stop hook verdicts, turns made only of context blocks, sessions that only ran `/usage` | text opens with `Stop hook feedback:`; nothing left after removing `<system-reminder>`, `<ide_selection>`, `<ide_opened_file>` blocks; a scan chunk with no model call whose every prompt is `/usage` (ported from AgentsView, MIT) |
 | Codex | agent-spawned threads, scripted `codex exec`, MCP calls, another agent's integration | `session_meta.source` (`subagent` key / `exec` / `mcp`), `originator` |
 | Codex | Codex Desktop scheduled automations | message opens with `Automation:` **and** contains `Automation ID:` |
 
@@ -188,8 +189,51 @@ session rows. It never re-sends usage: a full re-read can emit an `(event_id, ts
 from the stored one, which would land as a new duplicate. Safe to re-run. `--dry-run` prints counts
 (rows by `run_origin`, rows with NULL `turn_id`, subagent rows without a parent) and sends nothing.
 
-`agents.activity_event` (non-token activity) exists in the sink for an upcoming step. `aut` does
-not write it yet.
+## Activity: agents.activity_event
+
+Non-token activity from Claude Code, one row per thing that happened. `attrs` (jsonb) holds
+counts, flags, short enums, ids and hashes only, **never** prompt text, tool output, file paths,
+titles, commit messages, URLs or repository names. `session_id` / `turn_id` follow the session
+identity rules above; `ts` is the source record's own timestamp; `event_id` is
+`make_event_id("claude_code", kind, seed)`.
+
+| kind | one row per | seed | attrs |
+|---|---|---|---|
+| `steer` | human turn (1:1 with `kind='human'`) | the human turn's uuid | `via` (typed, suggestion_accepted, queued, slash_command, bash_input, skill), `words`, `chars`, `after_interrupt` |
+| `interrupt` | `[Request interrupted` user record in a main session (a subagent's copy is the same keypress) | uuid | `during_tool` |
+| `rejection` | errored tool_result opening `The user doesn't want to proceed` | tool_use_id | none |
+| `commit` | SHA printed by a Bash `git commit` (not `--dry-run`), paired by tool_use_id | tool_use_id + sha | `sha`, `branch`, `repo_key`, `amend` |
+| `pr` | distinct (session, PR number) from `pr-link` records | sessionId + prNumber | `number`, `host` (github, bitbucket, other), `repo_key` |
+| `turn` | `system` `turn_duration` record | uuid | `duration_ms`, `message_count`, `tool_calls`, `tool_errors`, `by_tool`, `hook_blocks`, `max_identical_run`, `retry_flag`, `runaway_flag` |
+| `compaction` | `system` `compact_boundary` record | uuid | `trigger` when present |
+| `invoke` | `Skill` tool_use | tool_use_id | `skill` |
+
+Rules worth knowing:
+
+- `via=queued`: `promptSource == "queued"`, or (no `promptSource`, older files) the same text was
+  enqueued earlier in the scan chunk by a `queue-operation` or a `queued_command` attachment.
+  Slash, bash and skill prefixes win over the prompt source.
+- `after_interrupt`: the previous non-meta user record in the file was an interrupt.
+- Hook denials (`PreToolUse:... hook error`) are not rejections; they count in the turn's
+  `hook_blocks` (and in `tool_errors`, which counts every errored tool_result).
+- Commit SHAs come from git's `[branch sha]` line; failing that (and only for a successful call)
+  from Claude Code's structured `gitOperation.commit`, or a condensed first line `ok <sha>` /
+  `<sha> <subject>` as printed by a command-output proxy. Branch falls back to the record's
+  `gitBranch`.
+- `repo_key` = sha256 of `host/owner/repo` (lowercased; credentials, port and `.git` dropped),
+  from `git remote get-url origin` in the record's `cwd` (2 s timeout, cached per cwd per pass),
+  NULL when the directory or remote is gone. A PR's key hashes its URL host plus `prRepository`
+  the same way, so commits and PRs of one repo share a key.
+- Turn aggregates cover the records since the previous turn end in the same file, carried across
+  scans in the file's watermark entry. `retry_flag` = `max_identical_run >= 3` (same tool and
+  same input in a row); `runaway_flag` = `tool_errors >= 6`, or `>= 3` while one tool ran 10+
+  times. Both rules come from AgentsView (MIT).
+
+Delivery: over `transport.pg_dsn` in the same transaction as the usage and session rows of that
+batch, `ON CONFLICT (event_id, ts) DO NOTHING` (the writer has INSERT only). The webhook skips
+them with the same one-line note as session rows. History: `aut backfill --activity-only
+[--dry-run]` works exactly like `--sessions-only` (both flags may be given together) and never
+sends usage rows.
 
 ## Derived artifact: metrics.json (not part of the event contract)
 

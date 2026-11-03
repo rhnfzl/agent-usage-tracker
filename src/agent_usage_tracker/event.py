@@ -82,3 +82,17 @@ class UsageEvent:
         return (self.input_tokens + self.output_tokens
                 + self.cache_read_tokens + self.cache_write_tokens
                 + (self.reasoning_tokens or 0) + self.total_tokens) > 0
+
+
+@dataclass(slots=True)
+class ActivityEvent:
+    """One agents.activity_event row: a non-token thing that happened (a steer, a commit, a turn).
+    attrs holds counts, flags, ids and hashes only: never prompt text, output, paths or titles."""
+    event_id: str
+    ts: str | None
+    agent: str
+    kind: str                        # steer | interrupt | rejection | commit | pr | turn | ...
+    session_id: str | None
+    turn_id: str | None
+    attrs: dict
+    machine: str | None = None       # stamped by the runner, like UsageEvent.machine

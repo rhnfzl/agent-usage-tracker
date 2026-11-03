@@ -21,7 +21,7 @@ from typing import Callable
 from urllib.parse import urlparse
 
 from .config import Config
-from .event import UsageEvent
+from .event import ActivityEvent, UsageEvent
 
 # Column order shared with the homelab schema (agents.usage_event). Keep in sync.
 COLUMNS = (
@@ -43,6 +43,10 @@ SESSION_COLUMNS = (
     "event_id", "machine", "agent", "session_id", "parent_session_id", "run_origin", "turn_id",
 )
 SESSION_TABLE = "agents.event_session"
+
+# One row per non-token activity (agents.activity_event): steers, commits, turns. attrs is jsonb.
+ACTIVITY_COLUMNS = ("event_id", "ts", "machine", "agent", "kind", "session_id", "turn_id", "attrs")
+ACTIVITY_TABLE = "agents.activity_event"
 _SESSION_NOTE_SHOWN = False
 _ERROR_MAX = 300
 
@@ -80,18 +84,48 @@ def _session_rows(batch: list[UsageEvent]) -> list[tuple]:
     return [tuple(r[c] for c in SESSION_COLUMNS) for r in map(UsageEvent.session_row, batch) if r]
 
 
-def _insert_pg(dsn: str, batch: list[UsageEvent]) -> None:
-    """Usage rows and their session rows in ONE transaction: either both land or neither does,
-    so a raise leaves the watermark where it was and the batch is re-sent whole."""
+def _activity_rows(acts: list[ActivityEvent]) -> list[tuple]:
+    return [(a.event_id, a.ts, a.machine, a.agent, a.kind, a.session_id, a.turn_id,
+             json.dumps(a.attrs, sort_keys=True)) for a in acts]
+
+
+_ACTIVITY_SQL = _insert_sql(ACTIVITY_TABLE, ACTIVITY_COLUMNS, "event_id, ts").replace(
+    "%s)", "%s::jsonb)")                 # the last placeholder is attrs
+
+
+def _split(batch: list) -> tuple[list[UsageEvent], list[ActivityEvent]]:
+    usage = [e for e in batch if isinstance(e, UsageEvent)]
+    return usage, [e for e in batch if isinstance(e, ActivityEvent)]
+
+
+def _insert_pg(dsn: str, batch: list) -> None:
+    """Usage rows, their session rows and the activity rows of the batch in ONE transaction: all
+    land or none does, so a raise leaves the watermark where it was and the batch is re-sent."""
     import psycopg  # optional dependency; install with the [postgres] extra
 
-    rows = [tuple(e.to_dict()[c] for c in COLUMNS) for e in batch]
-    sessions = _session_rows(batch)
+    usage, acts = _split(batch)
+    rows = [tuple(e.to_dict()[c] for c in COLUMNS) for e in usage]
+    sessions = _session_rows(usage)
     with psycopg.connect(dsn, connect_timeout=15) as conn:
         with conn.cursor() as cur:
-            cur.executemany(_insert_sql(TABLE, COLUMNS, "event_id, ts"), rows)
+            if rows:
+                cur.executemany(_insert_sql(TABLE, COLUMNS, "event_id, ts"), rows)
             if sessions:
                 cur.executemany(_insert_sql(SESSION_TABLE, SESSION_COLUMNS, "event_id"), sessions)
+            if acts:
+                cur.executemany(_ACTIVITY_SQL, _activity_rows(acts))
+        conn.commit()
+
+
+def send_activity_rows(dsn: str, acts: list[ActivityEvent]) -> None:
+    """Activity rows only (the activity backfill). Idempotent on (event_id, ts); raises on failure."""
+    if not acts:
+        return
+    import psycopg  # optional dependency; install with the [postgres] extra
+
+    with psycopg.connect(dsn, connect_timeout=15) as conn:
+        with conn.cursor() as cur:
+            cur.executemany(_ACTIVITY_SQL, _activity_rows(acts))
         conn.commit()
 
 
@@ -108,14 +142,14 @@ def send_session_rows(dsn: str, rows: list[dict]) -> None:
         conn.commit()
 
 
-def _note_sessions_skipped(batch: list[UsageEvent]) -> None:
+def _note_sessions_skipped(batch: list) -> None:
     global _SESSION_NOTE_SHOWN
-    if _SESSION_NOTE_SHOWN or not any(e.session for e in batch):
+    if _SESSION_NOTE_SHOWN or not any(isinstance(e, ActivityEvent) or e.session for e in batch):
         return
     _SESSION_NOTE_SHOWN = True
     # shortcut: the webhook carries usage only; upgrade when a machine runs webhook-only (until
-    # then `aut backfill --sessions-only` over pg_dsn fills the gap).
-    print("aut: note: session rows not sent over the webhook (needs transport.pg_dsn)",
+    # then `aut backfill --sessions-only` / `--activity-only` over pg_dsn fills the gap).
+    print("aut: note: session/activity rows not sent over the webhook (needs transport.pg_dsn)",
           file=sys.stderr)
 
 
@@ -151,7 +185,10 @@ def make_sender(cfg: Config) -> Callable[[list[UsageEvent]], None]:
         webhook_err: Exception | None = None
         if cfg.has_webhook:
             try:
-                _post_webhook(cfg.webhook_url, cfg.webhook_secret, batch, cfg.cf_access_headers)
+                usage = _split(batch)[0]
+                if usage:
+                    _post_webhook(cfg.webhook_url, cfg.webhook_secret, usage,
+                                  cfg.cf_access_headers)
                 _note_sessions_skipped(batch)
                 return
             except (urllib.error.URLError, RuntimeError, OSError) as exc:
