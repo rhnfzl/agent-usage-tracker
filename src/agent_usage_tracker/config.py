@@ -66,7 +66,7 @@ class Config:
     repo_key_salt: str | None = None
     # activitywatch (opt-in): local aw-server, title retention there, and the guards' extensions.
     activitywatch_url: str = "http://localhost:5600"
-    activitywatch_title_days: int = 180
+    activitywatch_title_days: int = 0                  # 0: keep titles for good (no purge)
     activitywatch_titles: bool = True                  # false: intervals and categories, no titles
     activitywatch_deny_apps: tuple[str, ...] = ()      # lowercased app names, dropped entirely
     activitywatch_deny_titles: tuple[str, ...] = ()    # regexes (case-insensitive), dropped entirely
@@ -118,9 +118,10 @@ def load_config() -> Config:
                 re.compile(pat)
             except re.error as exc:     # the pattern itself may name a bank: never echo it
                 raise SystemExit(f"config: {key}[{i}] is not a valid regex ({exc.msg})") from None
-    aw_days = int(data.get("activitywatch_title_days") or 180)
-    if aw_days < 1:
-        raise SystemExit("config: activitywatch_title_days must be at least 1")
+    # 0 (the default) keeps titles for good; a number of days turns the limit on.
+    aw_days = int(data.get("activitywatch_title_days") or 0)
+    if aw_days < 0:
+        raise SystemExit("config: activitywatch_title_days must be 0 (keep) or a number of days")
 
     webhook_secret = _resolve(transport.get("webhook_secret"))
     pg_dsn = _resolve(transport.get("pg_dsn"))

@@ -9,7 +9,8 @@ Nothing leaves the machine before these guards run, in this order:
      (matched on the title and the URL) are dropped entirely (no interval, no app, no title);
   3. titles are redacted (keys, tokens, JWTs, long hex/base64 runs, password=..., URL
      credentials, emails) and cut to 300 chars; `activitywatch_titles = false` sends none, and
-     a title older than activitywatch_title_days is never sent.
+     when activitywatch_title_days is set, a title older than that is never sent (default 0:
+     titles are kept for good).
 
 Category and work relevance come from an app mapping (config over code defaults); a browser row
 is 'web-work' when its title or URL matches a work pattern, else 'web'. A scan never fails
@@ -214,7 +215,8 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[TimeInterval], Callabl
         return
 
     rows: list[TimeInterval] = []
-    title_from = _now() - timedelta(days=cfg.activitywatch_title_days)
+    days = cfg.activitywatch_title_days
+    title_from = _now() - timedelta(days=days) if days else None
     denied_n, denied_s, idle_s = 0, 0.0, 0.0
     for ev in raw:
         try:
@@ -236,7 +238,7 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[TimeInterval], Callabl
             denied_n, denied_s = denied_n + 1, denied_s + secs
             continue
         category, relevant, rule = classify(cfg, app, title, str(data.get("url") or ""))
-        keep = cfg.activitywatch_titles and s >= title_from   # an old history sends no old titles
+        keep = cfg.activitywatch_titles and (title_from is None or s >= title_from)
         sent = (clean_title(title) or None) if keep else None
         s_iso, e_iso = s.astimezone(timezone.utc).isoformat(), e.astimezone(timezone.utc).isoformat()
         # No title in the id: only one window has focus at a time, and an id must not let anyone
@@ -259,8 +261,10 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[TimeInterval], Callabl
 def purge(cfg: Config) -> int:
     """Delete aw-server's own window events older than activitywatch_title_days, in batches of
     _PURGE_BATCH until none is left or _PURGE_BUDGET seconds pass. Best effort: it never raises,
-    and logs a count only."""
+    and logs a count only. activitywatch_title_days = 0 (the default) keeps everything."""
     n = 0
+    if cfg.activitywatch_title_days <= 0:
+        return 0
     deadline = time.monotonic() + _PURGE_BUDGET
     try:
         found = _buckets(cfg)

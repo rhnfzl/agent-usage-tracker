@@ -46,7 +46,7 @@ CREATED = datetime(2026, 10, 1, 8, 0, tzinfo=timezone.utc)
 
 def _cfg(**kw) -> Config:
     base = dict(machine="test", agents=("activitywatch",), webhook_url=None, webhook_secret=None,
-                pg_dsn=None, home=Path(tempfile.gettempdir()))
+                pg_dsn=None, home=Path(tempfile.gettempdir()), activitywatch_title_days=180)
     return Config(**{**base, **kw})
 
 
@@ -144,7 +144,7 @@ def test_default_agents_exclude_activitywatch() -> None:
             cfg = load_config()
             assert cfg.agents == ("activitywatch",)
             assert cfg.activitywatch_url == "http://localhost:5600"
-            assert cfg.activitywatch_title_days == 180 and cfg.activitywatch_titles is True
+            assert cfg.activitywatch_title_days == 0 and cfg.activitywatch_titles is True
             assert cfg.activitywatch_deny_apps == ("example vault",)
             assert cfg.activitywatch_categories == {"my editor": "editor"}
             path.write_text('activitywatch_categories = { "X" = "games" }\n')
@@ -495,6 +495,20 @@ def test_delivery_one_transaction_and_webhook_note() -> None:
     print("ok delivery_one_transaction_and_webhook_note")
 
 
+def test_titles_kept_for_good_by_default() -> None:
+    # activitywatch_title_days = 0 (the default): nothing is purged and old titles are sent
+    now = CREATED + timedelta(days=400)
+    old = _ev(1, CREATED + timedelta(hours=1), 60, "Code", "an old window")
+    fake = FakeAW([old])
+    cfg = _cfg(activitywatch_title_days=0)
+    rows = _rows(cfg, {"end": CREATED.isoformat()}, fake, now)[0][0][0]
+    assert [r.title for r in rows] == ["an old window"], rows
+    with _patched(fake, now), contextlib.redirect_stderr(io.StringIO()):
+        assert aw.purge(cfg) == 0
+    assert not [c for c in fake.calls if c[0] == "DELETE"], fake.calls
+    print("ok titles_kept_for_good_by_default")
+
+
 def main() -> int:
     test_default_agents_exclude_activitywatch()
     test_range_and_watermark()
@@ -504,6 +518,7 @@ def main() -> int:
     test_titles_switch_and_redacted_title_sent()
     test_mapping()
     test_purge_bounded_and_not_on_dry_run()
+    test_titles_kept_for_good_by_default()
     test_time_add_validation()
     test_delivery_one_transaction_and_webhook_note()
     print("\nALL PASS")

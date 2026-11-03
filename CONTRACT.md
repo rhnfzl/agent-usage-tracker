@@ -372,13 +372,13 @@ so parallel agents never count twice; agent runtime is never human time.
 
 **Titles are private.** They are never in a public view (the read-only role sees
 `agents.time_interval_public`, every column but `title` and `event_id`; event_id is built from
-machine, app, start and end only, never the title), the sink nulls them after 180 days
-(category and interval are kept), and the collector deletes ActivityWatch's own window events
-older than `activitywatch_title_days` (default 180) through its REST API, in batches of 500
-until none is left or 20 s pass (a long backlog drains over several scans), never failing the
-scan and logging a count only. The event that spans the cutoff is kept until it is wholly older.
-A dry run purges nothing. A title older than `activitywatch_title_days` is never sent, so the
-first scan of a long history sends no stale titles.
+machine, app, start and end only, never the title). **Retention is off by default: titles are
+kept for good**, in the sink and in ActivityWatch. Setting `activitywatch_title_days = N` turns a
+limit on: the collector then deletes ActivityWatch's own window events older than N days through
+its REST API, in batches of 500 until none is left or 20 s pass (a long backlog drains over
+several scans), never failing the scan and logging a count only; the event that spans the cutoff
+is kept until it is wholly older; a dry run purges nothing; and a title older than N days is
+never sent. The sink side (nulling stored titles) is a separate homelab job, off for now.
 
 The `activitywatch` collector is **opt-in**: it is in the valid agent list but not in the default
 used when the config has no `agents`. It reads THIS host's window and AFK buckets with
