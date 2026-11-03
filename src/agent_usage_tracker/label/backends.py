@@ -7,9 +7,15 @@ and are imported on first use, so the base install and every test run without th
 
 from __future__ import annotations
 
+import hashlib
+import json
+import math
+import re
 from pathlib import Path
 
-from .core import Choice, Request, letter_distribution
+from .core import Choice, Request, data_dir, letter_distribution, softmax
+
+ENCODER_DIM = 1 << 18
 
 # Short names a config or choice may use. pplx-decider-flash-v1.2 keeps its slot: on 2026-11-03
 # perplexity-ai/pplx-decider-flash-v1.2 (revision 9ff7cf9838e59df461c276b7699d56b244d2af58) ships
@@ -26,6 +32,7 @@ class LetterBackend:
     softmax over the letter tokens, original and reversed order averaged."""
     model_id: str = ""
     model_rev: str = ""
+    size_mb: float | None = None     # what `aut label choose` ranks by: the smallest that passes
 
     def letter_logits(self, prompt: str, letters: list[str]) -> list[float]:
         raise NotImplementedError
@@ -57,6 +64,8 @@ class MlxLetter(LetterBackend):
                                  f"({type(exc).__name__}); fetch it once with "
                                  f"`hf download {self.model_id}`") from None
             self.model_rev = Path(path).name
+            self.size_mb = round(sum(f.stat().st_size for f in Path(path).rglob("*")
+                                     if f.is_file()) / 1e6)
             self._m = load(path)
         return self._m
 
@@ -80,17 +89,70 @@ class MlxLetter(LetterBackend):
                         verbose=False)
 
 
+def encoder_path(task: str) -> Path:
+    return data_dir() / "label" / "encoder" / f"{task}.json"
+
+
+def features(state: dict) -> list[int]:
+    """Hashed binary features of a unit's state: words and word pairs of each text field (per
+    field name), and the other facts as name=value (numbers in log2 buckets). Bucket ids only:
+    the trained file holds weights, never a word."""
+    toks: set[str] = set()
+    for k, v in state.items():
+        if isinstance(v, (str, list)):
+            for t in [v] if isinstance(v, str) else [x for x in v if isinstance(x, str)]:
+                w = re.findall(r"\w+", t.lower())
+                toks.update(f"{k}:{x}" for x in w)
+                toks.update(f"{k}:{a} {b}" for a, b in zip(w, w[1:]))
+        elif isinstance(v, dict):
+            toks.update(f"{k}.{x}" for x in v)
+        elif isinstance(v, bool) or v is None:
+            toks.add(f"{k}={v}")
+        elif isinstance(v, (int, float)):
+            toks.add(f"{k}~{int(math.log2(abs(v) + 1))}")
+    toks.add("bias")
+    return sorted({int.from_bytes(hashlib.blake2b(t.encode(), digest_size=4).digest(), "big")
+                   % ENCODER_DIM for t in toks})
+
+
 class Encoder:
-    """Slot for the small classifier trained on the labels (`aut label train-encoder`) for the
-    closed-list, high-volume tasks (steer_intent, aw_title_relevance). Until one is trained,
-    choosing it fails loudly instead of guessing."""
+    """A small classifier trained on the labels (`aut label train-encoder`) for the closed-list,
+    high-volume tasks: multinomial logistic regression over hashed features (stdlib only).
+    shortcut: not a fine-tuned transformer encoder; upgrade if it loses the bake-off clearly.
+    Until one is trained, choosing it fails loudly instead of guessing."""
 
     def __init__(self, task: str, model_id: str | None = None, model_rev: str | None = None):
-        self.task, self.model_id, self.model_rev = task, model_id or f"encoder/{task}", \
-            model_rev or ""
+        self.task, self.model_id, self._m = task, model_id or f"encoder/{task}", None
+        p = encoder_path(task)
+        rev = hashlib.sha256(p.read_bytes()).hexdigest()[:12] if p.exists() else ""
+        if model_rev and rev and model_rev != rev:
+            raise SystemExit(f"label: the {task} encoder was retrained after it was chosen; "
+                             "run `aut label eval` and `aut label choose` again")
+        self.model_rev = rev or model_rev or ""
+        self.size_mb = round(p.stat().st_size / 1e6, 3) if p.exists() else None
+
+    def _load(self) -> dict:
+        if self._m is None:
+            try:
+                self._m = json.loads(encoder_path(self.task).read_text())
+            except (OSError, ValueError):
+                raise SystemExit(f"label: no encoder is trained for {self.task} yet") from None
+        return self._m
 
     def distribution(self, req: Request) -> dict[str, float]:
-        raise SystemExit(f"label: no encoder is trained for {self.task} yet")
+        m = self._load()
+        if m.get("task_ver") != req.task_ver:
+            raise SystemExit(f"label: the {self.task} encoder is for another task version; "
+                             "run `aut label train-encoder` again")
+        w, labels = m["w"], m["labels"]
+        z = [0.0] * len(labels)
+        for f in features(req.state):
+            for k, x in enumerate(w.get(str(f), ())):
+                z[k] += x
+        p = dict(zip(labels, softmax(z)))
+        out = {c["id"]: p.get(c["id"], 0.0) for c in req.candidates}
+        s = sum(out.values()) or 1.0
+        return {k: v / s for k, v in out.items()}
 
 
 def make_backend(task: str, choice: Choice, default_model: str):

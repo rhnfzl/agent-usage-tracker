@@ -9,9 +9,9 @@ logs at run time, is redacted, and is never stored or logged.
   backends  mlx_letter (an instruct model read through answer-letter logits) and the encoder slot
   tasks     the closed candidate lists, questions and unit builders per task
   run       `aut label run` / `aut label backfill`: watermark, time budget, delivery, heartbeat
-
-Seams for what comes next: a teacher (`aut label teach`) and the gold page (`aut label review`)
-build core.Request through tasks.units() and write under core.data_dir() / "eval"; the bake-off
-(`aut label eval` / `choose`) uses core.fit_temperature / core.fit_tau and writes the winner per
-task to core.choice_path(), which run.py reads; `train-encoder` fills backends.Encoder.
+  evalset   the silver, gold and eval files under core.data_dir() / "eval", the shared unit
+            order and the once-only day split
+  teach     `aut label teach`: silver labels (local model always, Sonnet for Claude Code units)
+  gold      `aut label review`: the gold page on 127.0.0.1
+  bakeoff   `aut label eval` / `choose` / `train-encoder`: metrics, the winner into label.json
 """

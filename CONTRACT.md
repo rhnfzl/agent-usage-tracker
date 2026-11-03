@@ -546,7 +546,8 @@ time, so it does not send time.
 --days N` (optional extra `aut[label]`, Apple silicon) let a local model answer one closed
 question per unit. The text it reads (Claude Code prompts, ActivityWatch titles) comes from this
 machine's logs at run time, goes through the ActivityWatch redaction, and is never stored, sent
-or logged; only the answer is. One `agents.activity_event` row per decision, `agent = 'label'`,
+or logged; only the answer is (the one exception: `aut label teach` asks Claude Sonnet about
+Claude Code text, which already lives with Anthropic; see below). One `agents.activity_event` row per decision, `agent = 'label'`,
 `ts` = the unit's own time, `session_id`/`turn_id` null:
 
 | task | unit (`unit_id`) | candidates |
@@ -578,6 +579,54 @@ in `label_tasks`, incrementally from a watermark in the state file (`collectors.
 sends one `agents.collector_scan` row, collector `label`. `daily_note` drafts one private note per
 past day from counts only (that day's confident labels and episode facts, never text) into
 `agents.daily_note (day, text, model_id, created_at)`, first draft kept. A dry run writes nothing.
+
+### The eval set and the bake-off (`aut label teach | review | eval | choose | train-encoder`)
+
+Three local files per task under `~/.local/share/aut/eval/` (`$XDG_DATA_HOME/aut/eval/`), never
+sent and never holding text; a unit's text is rebuilt from this machine's logs when needed:
+
+| file | row |
+|---|---|
+| `<task>.silver.jsonl` | `unit_id`, `teacher` (a model id), `dist` (probability per candidate), `date`, `task_ver` |
+| `<task>.jsonl` (gold) | `unit_id`, `gold` (a candidate), `labeller` (`human`), `date`, `task_ver`; a later row for a unit wins |
+| `<task>.eval.jsonl` | one bake-off record per backend (below), with its `ts` |
+
+`aut label teach --task T --n N [--budget-usd X] [--days D]` gives up to N units of the last D
+days (default 90; stratified by unit type and day) the local model's raw distribution, and, for
+units whose text comes from Claude Code logs only (`steer`, `episode_day`, `episode`; never an
+ActivityWatch unit), Claude Sonnet's (`claude-sonnet-5-5`) through the local `claude -p` (no
+tools, no saved session, no user settings or MCP servers), asked for a probability per candidate.
+Sonnet spend stops at X USD (default 5) per run; a rerun adds only the missing (unit, teacher)
+rows.
+
+`aut label review [--task T] [--days D]` serves one unit at a time on 127.0.0.1 (random port,
+random token) with its redacted local text and the candidates: keys 1-9 answer, s skips, u undoes,
+q ends. The teachers' answers show only after the answer. Units come round-robin over their silver
+stratum (the teachers' common top label, `disagree`, or `unlabelled`), so rare labels and teacher
+disagreement come up as often as common labels; the page shows gold per label against the floor
+(30 per label; `soft_outcome` 30; `aw_title_relevance` 150 per class; target 50 where it differs).
+
+`aut label eval --task T [--days D]` scores every backend (each local model with an official MLX
+build, and the encoder once trained) on the gold units. Gold is split once by the unit's local
+day: one half fits the temperature and tau, the other half reports. The record (in
+`<task>.eval.jsonl`, and as one `agents.activity_event` row per backend, `agent = 'label'`,
+`kind = 'eval'`, `ts` = the eval time) holds numbers and model ids only:
+
+`task`, `task_ver`, `backend`, `model_id`, `model_rev`, `size_mb`, `prompt_ver`, `calib_ver`,
+`temperature`, `n`, `n_cal`, `n_held`, `macro_f1`, `kappa` (Cohen's, vs gold), `ece_raw`, `ece_cal`
+(before and after temperature scaling), `coverage` (share of reported units at or above their
+label's tau), `s_per_decision`, and `per_label: {<label>: {n, precision, recall, f1, tau, coverage,
+precision_at_tau, precision_lb, share_error_pp}}`. `precision_lb` is the 95% Wilson lower bound at
+tau; `share_error_pp` compares the label's share among units at or above tau with its share in
+gold, both re-weighted from the stratified sample to the silver label mix.
+
+`aut label choose --task T` takes each model's newest record and writes the smallest (`size_mb`)
+that passes the bar into `label.json`: a held-out report, `coverage` at least `label_coverage`
+(default 0.75), and no `share_error_pp` above 5. Labels without a tau stay unknown. `aut label
+train-encoder --task T` fits the `encoder` backend (logistic regression over hashed word and fact
+features, stdlib only) on gold (three times the weight) and silver, never on a held-out gold unit,
+and reports its held-out accuracy; its file (`~/.local/share/aut/label/encoder/<task>.json`) holds
+bucket ids and weights, no words.
 
 ## Derived artifact: metrics.json (not part of the event contract)
 

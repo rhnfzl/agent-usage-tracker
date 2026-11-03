@@ -93,6 +93,8 @@ aut outcomes --dry-run # what became of each agent commit (merged, reverted, ope
 aut outcome shipped    # manual outcome of this project's newest session (also: ruled-out, open)
 aut episodes review    # hand-check last month's episodes on a page served on 127.0.0.1
 aut label run --dry-run  # a local model labels steers, work time, window titles (extra aut[label])
+aut label review       # label gold answers one at a time on a page served on 127.0.0.1
+aut label eval --task steer_intent  # bake-off on your gold labels; `label choose` keeps the winner
 ```
 
 Run it on a timer. See `packaging/` for launchd, systemd, and Task Scheduler units.

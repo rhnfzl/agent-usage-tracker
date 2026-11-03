@@ -159,6 +159,7 @@ def test_label_row_has_no_text_and_a_stable_id():
 
 def test_choice_file_and_backend_slots(tmp_path, monkeypatch):
     monkeypatch.setenv("AUT_CONFIG", str(tmp_path / "config.toml"))
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))   # no trained encoder here
     assert core.load_choice("steer_intent") == core.Choice()
     (tmp_path / "label.json").write_text(json.dumps({"tasks": {"steer_intent": {
         "backend": "mlx_letter", "model_id": "gemma-4-31b", "temperature": 1.4,
