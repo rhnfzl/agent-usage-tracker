@@ -130,8 +130,13 @@ def _activity(o: dict, t: object, p: dict, a: dict, sess: EventSession, keys: Re
     if t == "response_item":
         name = p.get("name")
         if p.get("type") in ("function_call", "custom_tool_call") and isinstance(name, str):
-            # an MCP namespace is a server label (free text); other namespaces are codex's own
-            mcp = isinstance(p.get("namespace"), str) and p["namespace"].startswith("mcp__")
+            # an MCP namespace is a server label (free text); other namespaces are codex's own.
+            # Older CLI files name MCP tools `<server>__<tool>` with no namespace; codex's own
+            # tool names never contain `__`.
+            ns = p.get("namespace")
+            mcp = (isinstance(ns, str) and ns.startswith("mcp__")) or "__" in name
+            if mcp:     # Desktop may log the same call again as an McpToolCall item
+                agg.setdefault("mcp_ids", []).append(p.get("call_id"))
             add_call(agg, "mcp" if mcp else name, p.get("arguments", p.get("input")))
         return
     if t != "event_msg":
@@ -163,8 +168,12 @@ def _activity(o: dict, t: object, p: dict, a: dict, sess: EventSession, keys: Re
                 for sha in found:
                     emit("commit", f"{it.get('id')}|{sha}",
                          {"sha": sha, "repo_key": key, "amend": call[0]})
-        elif typ == "McpToolCall" and it.get("status") == "failed":
-            agg["errors"] += 1
+        elif typ == "McpToolCall":
+            # Desktop logs most MCP calls only as this item; one that pairs (same id) with an
+            # MCP function_call of the turn was already counted
+            if it.get("id") not in agg.get("mcp_ids", ()):
+                add_call(agg, "mcp", it.get("arguments"))
+            agg["errors"] += it.get("status") == "failed"
         elif typ == "ContextCompaction":
             emit("compaction", str(it.get("id") or ts), {})
 
@@ -210,22 +219,33 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list, Callable[[], None]]]:
                     and isinstance(first.get("payload"), dict):
                 _set_meta(cur, first["payload"])
         recs = []
-        for raw in lines:
+        # A forked child's file opens with a copy of its parent's history: lines before the first
+        # meta's subagent_history_start_ordinal (0-based). `skip` is how many copied lines are
+        # still unread. Only a fork: a spawned child can carry an ordinal too, with no copy.
+        skip = cur.pop("skip", 0)
+        for i, raw in enumerate(lines):
+            copied, skip = skip > 0, max(skip - 1, 0)
             try:
                 o = json.loads(raw)
             except (json.JSONDecodeError, UnicodeDecodeError):
                 continue
             p = o.get("payload") if isinstance(o, dict) else None
             if isinstance(p, dict):
-                recs.append((o, o.get("type"), p))
+                if not off and not i and o.get("type") == "session_meta" \
+                        and p.get("forked_from_id"):
+                    skip = max(safe_int(p.get("subagent_history_start_ordinal")) - 1, 0)
+                    copied = True
+                recs.append((o, o.get("type"), p, copied))
+        if skip:
+            cur["skip"] = skip
         # shortcut: judged per chunk (plus earlier chunks of the file), so an older-format turn
         # split exactly between its UserMessage item and its user_message counts twice; older
         # files are complete on disk and read in one chunk, upgrade if that changes.
-        if any(t == "event_msg" and p.get("type") == "user_message" for _o, t, p in recs):
+        if any(t == "event_msg" and p.get("type") == "user_message" for _o, t, p, _c in recs):
             cur["has_um"] = True
         a: dict = cur.setdefault("act", {})
         events: list = []
-        for o, t, p in recs:
+        for o, t, p, copied in recs:
             if t == "session_meta":
                 # the usage event_id seed keeps its old rule (payload.session_id, any meta line),
                 # so stored usage rows never change id; session rows use the thread id instead
@@ -238,7 +258,7 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list, Callable[[], None]]]:
                     cur["model"] = p.get("model")
                 if p.get("cwd"):
                     cur["cwd"] = p.get("cwd")
-            elif t == "event_msg" and p.get("type") == "task_started":
+            elif t == "event_msg" and p.get("type") == "task_started" and not copied:
                 cur["turn"] = _str(p.get("turn_id")) or cur.get("turn")
             elif t == "event_msg" and p.get("type") == "token_count":
                 try:
@@ -277,6 +297,8 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list, Callable[[], None]]]:
                     project=basename(cur["cwd"]),
                     session=_session(cur, path),
                 ))
+                continue
+            if copied:      # the parent's turns, not this thread's (usage above is unchanged)
                 continue
             prompt = _prompt(t, p, bool(cur.get("has_um")))
             if prompt is not None:

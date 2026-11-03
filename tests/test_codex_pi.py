@@ -121,14 +121,20 @@ def _codex_fixture(home: Path, repo: Path) -> None:
         _ev(T(1), type="user_message", message=TYPED, local_images=["/a.png"], local_audio=[]),
         *[_call(T(2 + i), "exec_command", '{"cmd": "ls"}') for i in range(3)],
         _call(T(5), "lookup", '{"q": "clientname"}', namespace="mcp__acmecorp_internal"),
+        # Desktop also logs that call as an McpToolCall item with the same id: not a second call
+        _item(T(5), "T1", type="McpToolCall", id="c-" + T(5), server="acmecorp", tool="lookup",
+              arguments={"q": "clientname"}, status="completed"),
+        # an older CLI MCP name, `<server>__<tool>` with no namespace: the label is free text
+        _call(T(5), "acmecorp__lookup", '{"q": "x"}', call_id="c-old"),
         _item(T(6), "T1", type="CommandExecution", id="ce1", cwd=cwd, exit_code=0,
               status="completed",
               command=["/bin/zsh", "-lc", "git add -A && git commit -m 'tidy'"],
               aggregated_output="[feature/ABC-1-clientname 1a2b3c4] tidy\n 1 file changed"),
         _item(T(7), "T1", type="CommandExecution", id="ce2", cwd=cwd, exit_code=1,
               status="failed", command=["/bin/zsh", "-lc", "false"], aggregated_output=""),
+        # a Desktop MCP call logged only as an item (no function_call): a call and an error
         _item(T(8), "T1", type="McpToolCall", id="mc1", server="acmecorp", tool="x",
-              status="failed"),
+              arguments={"q": "clientname"}, status="failed"),
         _tok(T(8)),
         _ev(T(9), type="task_complete", turn_id="T1"),           # no duration_ms: the gap
         _ev(T(10), type="task_started", turn_id="T2"),
@@ -222,7 +228,7 @@ def test_codex_activity() -> None:
         t1 = turns["T1"]
         assert (t1["duration_ms"], t1["tool_calls"], t1["tool_errors"], t1["by_tool"],
                 t1["max_identical_run"], t1["retry_flag"], t1["runaway_flag"]) == \
-            (9000, 4, 2, {"exec_command": 3, "mcp": 1}, 3, True, False), t1
+            (9000, 6, 2, {"exec_command": 3, "mcp": 3}, 3, True, False), t1
         assert "hook_blocks" not in t1 and "message_count" not in t1
         assert (turns["T3"]["duration_ms"], turns["T3"]["tool_calls"]) == (500, 0)
         assert turns["ET1"]["duration_ms"] == 42
@@ -266,6 +272,56 @@ def test_codex_carries_across_scans() -> None:
             ("S1", "interactive", "T1"), u.session
         assert "act" not in next(iter(wm["files"].values())), "nothing left to carry"
     print("ok codex_carries_across_scans")
+
+
+def test_codex_fork_copy_is_not_activity() -> None:
+    # A forked child starts with a copy of its parent's history: lines before
+    # subagent_history_start_ordinal (0-based) are the parent's turn, including a turn_aborted
+    # codex writes at the fork point. None of it is the child's activity or turn. The copy is
+    # split across two scans to check the count carries. A spawned (not forked) child also has an
+    # ordinal, equal to its line count, and must not be skipped.
+    with tempfile.TemporaryDirectory() as d:
+        home = Path(d)
+        root = home / ".codex/sessions/2026/07/18"
+        f = root / "rollout-f.jsonl"
+        copied = [
+            _meta("F1", parent_thread_id="P9", forked_from_id="P9",
+                  subagent_history_start_ordinal=7,
+                  source={"subagent": {"thread_spawn": {"parent_thread_id": "P9"}}}),
+            _meta("P9", originator="Codex Desktop", source="vscode"),
+            _ev(T(0), type="task_started", turn_id="PT"),
+            _call(T(0), "exec_command", '{"cmd": "ls"}'),
+            _item(T(0), "PT", type="CommandExecution", id="pc", cwd="/x", exit_code=0,
+                  command=["sh", "-c", "git commit -m x"], aggregated_output="[main 9f9f9f9] x"),
+            _ev(T(0), type="task_complete", turn_id="PT"),
+            _ev(T(0), type="turn_aborted", turn_id="PT", reason="interrupted"),
+        ]
+        own = [
+            _ev(T(1), type="thread_settings_applied"),
+            _ev(T(1), type="task_started", turn_id="FT1"),
+            _call(T(2), "exec_command", '{"cmd": "pwd"}'),
+            _tok(T(3)),
+            _ev(T(4), type="task_complete", turn_id="FT1"),
+        ]
+        _write_jsonl(f, copied[:4])
+        _write_jsonl(root / "rollout-s.jsonl", [
+            _meta("S2", parent_thread_id="P9", subagent_history_start_ordinal=4,
+                  source={"subagent": {"thread_spawn": {"parent_thread_id": "P9"}}}),
+            _ev(T(0), type="task_started", turn_id="ST1"),
+            _tok(T(1)),
+            _ev(T(2), type="task_complete", turn_id="ST1"),
+        ])
+        wm: dict = {}
+        evs = _collect(codex, home, wm)
+        _append(f, copied[4:] + own)
+        evs += _collect(codex, home, wm)
+        assert not _acts(evs, "interrupt") and not _acts(evs, "commit"), _acts(evs)
+        assert sorted((e.session_id, e.turn_id, e.attrs["tool_calls"])
+                      for e in _acts(evs, "turn")) == [("F1", "FT1", 1), ("S2", "ST1", 0)]
+        assert sorted((u.session.session_id, u.session.turn_id) for u in _usage(evs)) == [
+            ("F1", "FT1"), ("S2", "ST1")]
+        assert all("skip" not in s for s in wm["files"].values()), "nothing left to carry"
+    print("ok codex_fork_copy_is_not_activity")
 
 
 def test_codex_activity_errors_never_block_usage() -> None:
@@ -510,6 +566,7 @@ def main() -> int:
     test_codex_sessions()
     test_codex_activity()
     test_codex_carries_across_scans()
+    test_codex_fork_copy_is_not_activity()
     test_codex_activity_errors_never_block_usage()
     test_pi_usage_and_sessions()
     test_pi_activity()

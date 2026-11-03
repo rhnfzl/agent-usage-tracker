@@ -278,7 +278,11 @@ Rules worth knowing:
 ### Codex and Pi activity
 
 Same kinds and attrs as Claude Code where the source has them. Seeds start with the session id
-(`session_id|...`). The commit rules (command segments, SHA parsing, `repo_key`) and the turn
+(`session_id|...`). A forked Codex child (first `session_meta` has `forked_from_id`) opens with a
+copy of its parent's history, the lines before `subagent_history_start_ordinal` (0-based); they
+give no activity rows and no `turn_id` (the copy ends in a `turn_aborted` that is not a real
+interrupt). A spawned child without `forked_from_id` can carry an ordinal too (measured: equal to its line count, with no copy): it is
+read in full. The commit rules (command segments, SHA parsing, `repo_key`) and the turn
 aggregates (`by_tool` with the MCP collapse, `max_identical_run`, `retry_flag`, `runaway_flag`)
 are the shared code in `collectors/_activity_common.py`.
 
@@ -286,7 +290,7 @@ are the shared code in `collectors/_activity_common.py`.
 |---|---|---|
 | `steer` | each prompt counted as human (seeded like it); `via` always `typed`; `words`, `chars`, `images` (attached images), `after_interrupt` (an interrupt since the previous prompt) | each user message: `via` `skill` (text opens `<skill name="`), `queued` (the previous message is a toolResult: typed while the agent ran), else `typed`; `words`, `chars`, `after_interrupt` (the previous assistant record was aborted) |
 | `interrupt` | `turn_aborted` with reason `interrupted`; no attrs | assistant `stopReason == "aborted"`; `during_tool` (the entry before it is a toolResult) |
-| `turn` | `task_complete`: `duration_ms` from the record, else `task_started` to `task_complete`; `tool_calls` and `by_tool` from the model's tool calls (`function_call`, `custom_tool_call`; an `mcp__` namespace counts as `mcp`); `tool_errors` from `CommandExecution` items with `exit_code != 0` and `McpToolCall` items with status `failed` (command items run inside a tool call, so they are not counted as calls) | derived: one per user message, from it to the first `stop` / `aborted` / `length` assistant record, else to the last entry before the next user message (an `error` followed by another assistant record is a retry, not an end); `duration_ms` = end ts minus prompt ts, `message_count` (the prompt, assistant and toolResult messages), tool aggregates from `toolCall` blocks, `tool_errors` from `toolResult.isError`. The last open turn of a file is emitted on a later scan |
+| `turn` | `task_complete`: `duration_ms` from the record, else `task_started` to `task_complete`; `tool_calls` and `by_tool` from the model's tool calls (`function_call`, `custom_tool_call`; an `mcp__` namespace or a name containing `__`, the older CLI form, counts as `mcp`) plus `McpToolCall` items whose id matches no MCP call of the turn (Codex Desktop logs most MCP calls only as items); `tool_errors` from `CommandExecution` items with `exit_code != 0` and `McpToolCall` items with status `failed` (command items run inside a tool call, so they are not counted as calls) | derived: one per user message, from it to the first `stop` / `aborted` / `length` assistant record, else to the last entry before the next user message (an `error` followed by another assistant record is a retry, not an end); `duration_ms` = end ts minus prompt ts, `message_count` (the prompt, assistant and toolResult messages), tool aggregates from `toolCall` blocks, `tool_errors` from `toolResult.isError`. The last open turn of a file is emitted on a later scan |
 | `commit` | `CommandExecution` item: its shell script and `aggregated_output`, `repo_key` from the item's `cwd` | `bash` toolCall paired with its toolResult by `toolCallId`; `repo_key` from the header `cwd` |
 | `compaction` | `ContextCompaction` item; no attrs | `compaction` record: `tokens_before` |
 | `invoke` | not possible (no skill tool; reading a skill file is a guess) | a user message opening `<skill name="X">`: `skill` = X |
