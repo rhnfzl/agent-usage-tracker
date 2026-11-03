@@ -178,6 +178,39 @@ def test_claude_code_human_turn_classification() -> None:
     print("ok claude_code_human_turn_classification")
 
 
+def test_claude_code_old_loop_repeats() -> None:
+    # Before turnOrigin existed, each /loop firing was written exactly like the /loop you typed.
+    # Newer records show every repeat is scheduled, so a file keeps only its first /loop.
+    loop = "<command-message>loop</command-message>\n<command-name>/loop</command-name>"
+    with tempfile.TemporaryDirectory() as d:
+        home = Path(d)
+        _write_jsonl(home / ".claude/projects/p/old.jsonl", [
+            {"type": "user", "uuid": f"l{i}", "timestamp": f"2026-05-01T10:0{i}:00Z",
+             "entrypoint": "cli", "message": {"role": "user", "content": loop}}
+            for i in range(3)
+        ] + [
+            # other repeated commands are mostly typed by hand: all kept
+            {"type": "user", "uuid": f"b{i}", "timestamp": f"2026-05-01T11:0{i}:00Z",
+             "entrypoint": "cli", "message": {"role": "user",
+             "content": "<command-message>pr-babysit</command-message>"}}
+            for i in range(2)
+        ])
+        # a new file: turnOrigin decides, the repeat rule does not apply
+        _write_jsonl(home / ".claude/projects/p/new.jsonl", [
+            {"type": "user", "uuid": "n1", "timestamp": "2026-11-01T10:00:00Z",
+             "entrypoint": "cli", "turnOrigin": "human", "message": {"role": "user", "content": loop}},
+            {"type": "user", "uuid": "n2", "timestamp": "2026-11-01T10:05:00Z",
+             "entrypoint": "cli", "turnOrigin": "human", "message": {"role": "user", "content": loop}},
+        ])
+        human = [e for e in _drain(claude_code.collect, _cfg(home)) if e.kind == "human"]
+        assert sorted(e.ts for e in human) == ["2026-05-01T10:00:00Z",   # first old /loop
+                                               "2026-05-01T11:00:00Z",   # pr-babysit x2
+                                               "2026-05-01T11:01:00Z",
+                                               "2026-11-01T10:00:00Z",   # both new, typed
+                                               "2026-11-01T10:05:00Z"], sorted(e.ts for e in human)
+    print("ok claude_code_old_loop_repeats")
+
+
 def test_codex_human_turn_classification() -> None:
     # Same question for codex, but the signal is structural: session_meta records who is driving.
     def _session(meta: dict, messages: list[str]) -> list[dict]:
@@ -861,6 +894,7 @@ def main() -> int:
     test_claude_code_multiblock_dedup()
     test_duplicate_session_paths_counted_once()
     test_claude_code_human_turn_classification()
+    test_claude_code_old_loop_repeats()
     test_codex_human_turn_classification()
     test_codex()
     test_pi()

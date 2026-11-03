@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import glob
 import json
+import re
 from typing import Callable, Iterator
 
 from ..config import Config
@@ -71,6 +72,15 @@ _INJECTED_PREFIXES = (
 )
 
 
+_LOOP_RE = re.compile(r"<command-(?:message>(?:[\w-]+:)?loop</command-message|name>/loop</command-name)>")
+
+
+def _is_old_loop(o: dict, text: str) -> bool:
+    """A /loop record from before Claude Code wrote turnOrigin. Then, every scheduled firing
+    looked exactly like the /loop you typed; newer files mark all repeats `scheduled`."""
+    return "turnOrigin" not in o and bool(_LOOP_RE.search(text))
+
+
 def _is_injected(text: str) -> bool:
     """True for harness-generated role=user turns. A `<command-name>` slash-command expansion is
     deliberately NOT here: you typed the slash command, so it stays a human turn."""
@@ -118,6 +128,9 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[UsageEvent], Callable[
         # event_id (counts are cumulative, so the largest is the complete one).
         best: dict[str, UsageEvent] = {}
         human: list[UsageEvent] = []
+        # shortcut: counted per scan chunk, so an old file read in two chunks keeps two /loops;
+        # harmless while old files are complete on disk and scanned once.
+        old_loops = 0
         for raw in lines:
             try:
                 o = json.loads(raw)
@@ -140,6 +153,10 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[UsageEvent], Callable[
                 m = o.get("message")
                 if (isinstance(m, dict) and _is_human_text(m.get("content"))
                         and not _is_injected(_text_of(m.get("content")))):
+                    if _is_old_loop(o, _text_of(m.get("content"))):
+                        old_loops += 1
+                        if old_loops > 1:        # you typed the first; the rest are firings
+                            continue
                     uid = o.get("uuid") or f"{path}:{o.get('timestamp')}"
                     human.append(UsageEvent(
                         event_id=make_event_id(NAME, "human", uid),
