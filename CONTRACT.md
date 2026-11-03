@@ -465,6 +465,15 @@ should merge with #n -> `merge` (b = that episode's first seed session), not bui
 `reject`; `attrs` holds `repo_keys` (and `b_repo_keys`) copied from `episode_member`. It prints
 the share of reviewed episodes marked right.
 
+`aut inspect --episode ID | --day YYYY-MM-DD | --label UNIT_ID` is the read-only evidence page
+for the same episodes, served the same way (127.0.0.1, random port and token, local titles and
+branch names). Per episode it shows the member sessions, the seed sessions' link keys by type
+(commit, pr, branch, ticket; a key two sessions share is what joined them), each commit's latest
+`commit_outcome`, the outcome rule of `episode_link()` that fired, the current label per unit (as
+`label_latest` picks it, below-tau labels shown as unknown) and the `episode_correction` rows of
+its sessions. `--label` also lists every label row of that unit. Its only write is the
+`aut episodes review` form it links to, for the episodes on the page.
+
 ## Active time: agents.time_interval
 
 One row per span a person was at the keyboard (`source='aw'`, from ActivityWatch) or said they
@@ -635,10 +644,17 @@ features, stdlib only) on gold (three times the weight) and silver, never on a h
 and reports its held-out accuracy; its file (`~/.local/share/aut/label/encoder/<task>.json`) holds
 bucket ids and weights, no words.
 
-## Derived artifact: metrics.json (not part of the event contract)
+## Re-logged messages: one event_id, several rows (read-side rule)
 
-`aut report` produces `metrics.json` — an aggregate of the events above, never a passthrough.
-It is read from the sink with the `project` column deliberately excluded, so the published
-artifact aggregates to `agent × model × month × token-class (× kind)` and cannot carry a
-project name. `$` figures are notional / API-equivalent, computed from the synced price map
-(`aut sync-prices`), not from `est_cost_usd`.
+The sink's key for usage rows is `(event_id, ts)` and cannot be `event_id` alone: it is a
+TimescaleDB hypertable, so the partitioning column must be in the unique index. Claude Code logs
+the same message more than once, sometimes a thousand-plus lines later in the same file, sometimes
+minutes apart, and a scan that sees only part of that spread takes the timestamp from the lines it
+read. A later scan can then insert a second row with the same `event_id`, another `ts` and a
+partial token total. Token counts per message are cumulative, so readers keep, per `event_id`, the
+row with the largest `total_tokens` (the sink's `agents.usage_event_dedup`); any smaller row is a
+prefix of it. The collector cannot settle this per scan (which lines a scan sees is what varies)
+and cannot clean up (its role holds INSERT and SELECT only).
+
+`aut report` and `metrics.json` are retired: aggregates are the sink's private database views.
+`aut report` still runs for one release, prints that note and writes nothing.

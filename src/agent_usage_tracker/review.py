@@ -512,13 +512,18 @@ def corrections(form: dict[str, list[str]], episodes: list[dict],
 
 
 def serve(episodes: list[dict], info: dict, month: str, write, open_browser: bool = True,
-          on_ready=None, now: datetime | None = None, answered: int = 0) -> dict:
+          on_ready=None, now: datetime | None = None, answered: int = 0, front=None) -> dict:
     """Serve the page on 127.0.0.1 (random port) until the answers are posted; write(rows)
-    stores them. /<token> is the sample, /<token>?all=1 every episode. Returns {reviewed,
-    right}."""
+    stores them. /<token> is the sample, /<token>?all=1 every episode. With front(token) -> html
+    (`aut inspect`), that page is served at /<token> and the form for every shown episode at
+    /<token>/correct. Returns {reviewed, right}."""
     token = secrets.token_urlsafe(16)
-    pages = {f"/{token}": render(episodes, info, token, month, sample(episodes), answered),
-             f"/{token}?all=1": render(episodes, info, token, month, None, answered)}
+    if front:
+        pages = {f"/{token}": front(token),
+                 f"/{token}/correct": render(episodes, info, token, month, None, answered)}
+    else:
+        pages = {f"/{token}": render(episodes, info, token, month, sample(episodes), answered),
+                 f"/{token}?all=1": render(episodes, info, token, month, None, answered)}
     pages = {k: v.encode() for k, v in pages.items()}
     result: dict = {"reviewed": 0, "right": 0}
 
@@ -557,7 +562,7 @@ def serve(episodes: list[dict], info: dict, month: str, write, open_browser: boo
     if on_ready:
         on_ready(url)
     if open_browser:
-        print(f"aut: review page at {url} (Ctrl-C to stop without saving)", file=sys.stderr)
+        print(f"aut: local page at {url} (Ctrl-C to stop without saving)", file=sys.stderr)
         webbrowser.open(url)
     try:
         srv.serve_forever()
@@ -584,18 +589,24 @@ def load_month(dsn: str, start: datetime, end: datetime) -> list[dict]:
     import psycopg  # optional dependency; install with the [postgres] extra
 
     with psycopg.connect(dsn, connect_timeout=15) as conn:
-        rows = conn.execute(
-            "SELECT e.episode_id::text, e.first_ts, e.last_ts, e.n_sessions, e.n_seed_sessions, "
-            "e.n_commits, e.n_prs, e.outcome, m.session_id, m.role, m.repo_keys "
-            "FROM agents.episode e JOIN agents.episode_member m USING (episode_id) "
-            "WHERE e.first_ts >= %s AND e.first_ts < %s "
-            "ORDER BY e.first_ts, e.episode_id, m.role DESC, m.session_id",
-            (start, end)).fetchall()
+        return load_episodes(conn, "e.first_ts >= %s AND e.first_ts < %s", (start, end))
+
+
+def load_episodes(conn, where: str, params: tuple) -> list[dict]:
+    """Episodes matching `where` (over agents.episode e), each with its members."""
+    rows = conn.execute(
+        "SELECT e.episode_id::text, e.first_ts, e.last_ts, e.n_sessions, e.n_seed_sessions, "
+        "e.n_commits, e.n_prs, e.outcome, m.session_id, m.role, m.repo_keys, e.n_steers, "
+        "e.outcome_source, e.confirmed "
+        "FROM agents.episode e JOIN agents.episode_member m USING (episode_id) "
+        f"WHERE {where} "
+        "ORDER BY e.first_ts, e.episode_id, m.role DESC, m.session_id", params).fetchall()
     eps: dict[str, dict] = {}
-    for eid, f, last, ns, nseed, nc, npr, out, sid, role, keys in rows:
+    for eid, f, last, ns, nseed, nc, npr, out, sid, role, keys, nst, src, conf in rows:
         ep = eps.setdefault(eid, {"id": eid, "first_ts": f.astimezone(), "last_ts":
                                   last.astimezone(), "n_sessions": ns, "n_seed_sessions": nseed,
-                                  "n_commits": nc, "n_prs": npr, "outcome": out, "members": []})
+                                  "n_commits": nc, "n_prs": npr, "outcome": out, "n_steers": nst,
+                                  "outcome_source": src, "confirmed": conf, "members": []})
         ep["members"].append({"session_id": sid, "role": role, "repo_keys": list(keys or [])})
     return list(eps.values())
 

@@ -185,8 +185,8 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[UsageEvent], Callable[
         #
         # Not fixable here: which lines a scan sees is exactly what varies, so no per-chunk rule is
         # invariant, and closing it would need a per-message ts cache in the watermark for every
-        # tracked file. report.dedup_by_event settles it instead, keeping the largest total per
-        # event_id (counts are cumulative, so the largest is the complete one).
+        # tracked file. The sink's agents.usage_event_dedup view settles it instead, keeping the
+        # largest total per event_id (counts are cumulative, so the largest is the complete one).
         best: dict[str, UsageEvent] = {}
         human: list[UsageEvent] = []
         # shortcut: counted per scan chunk, so an old file read in two chunks keeps two /loops;
