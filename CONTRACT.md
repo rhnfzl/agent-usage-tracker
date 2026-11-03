@@ -252,6 +252,7 @@ identity rules above; `ts` is the source record's own timestamp; `event_id` is
 | `turn` | `system` `turn_duration` record | uuid | `duration_ms`, `message_count`, `tool_calls`, `tool_errors`, `by_tool`, `hook_blocks`, `max_identical_run`, `retry_flag`, `runaway_flag` |
 | `compaction` | `system` `compact_boundary` record | uuid | `trigger` when present |
 | `invoke` | `Skill` tool_use | tool_use_id | `skill` (`mcp` for an MCP name) |
+| `link` | closed turn: a `turn_duration` record, else (a subagent or scripted file, or a final turn with no `turn_duration`) the file once read to its end and idle for an hour, or the next record an hour or more after the turn's last one | the turn's uuid, else the last record's uuid | `repo_key`, `branch_key`, `ticket_keys`, `sha_refs`, `commit_keys`, `pr_keys`, `role` (see Link rows below) |
 
 Rules worth knowing:
 
@@ -271,7 +272,14 @@ Rules worth knowing:
   the first line (`ok <sha>` / `<sha> <subject>`) when nothing ahead of the commit could have
   printed (only `cd`, `pushd`, `set`, `export`, `true`, `mkdir`, `rm`, `cat > file`, a variable
   assignment or `git add` came before), else the last `ok <sha>` line. The branch is not stored:
-  branch names are free text.
+  branch names are free text (the link row carries it as `branch_key`).
+- A commit's `repo_key` comes from the directory the command moved to (`cd X && git commit`,
+  `git -C X commit`, relative to the record's `cwd`; a relative move with no `cwd` is ignored),
+  else the record's `cwd`, else the session's worktree (`worktree-state.originalCwd`, for a `cwd`
+  that is gone); NULL when none resolves. A move through a variable (`cd $DIR`) is not followed.
+  These rules apply to rows first sent by this version: a backfill re-sends a stored commit row
+  with the same `(event_id, ts)`, so the sink keeps the key it first got, and a turn's stored
+  commit row and its link row can name different repos. Consumers must not assume they agree.
 - `repo_key` = HMAC-SHA256 of `host/owner/repo` (lowercased; credentials, port and `.git`
   dropped) under a per-install salt, from `git remote get-url origin` in the record's `cwd` (2 s
   timeout, cached per cwd per pass), NULL when the directory or remote is gone. A PR's key uses
@@ -293,6 +301,38 @@ Rules worth knowing:
   same input in a row); `runaway_flag` = `tool_errors >= 6`, or `>= 3` while one tool ran 10+
   times. Both rules come from AgentsView (MIT).
 
+### Link rows (`link`, all four agents)
+
+One row per closed turn, the raw material for linking sessions into episodes. Every value is a
+key, an enum or a list of those (no raw SHA: a quoted hex string can be a secret); branch names, ticket ids, URLs and paths stay on the
+machine. Keys are HMAC-SHA256 under the same salt as `repo_key`.
+
+| attr | value |
+|---|---|
+| `repo_key` | the turn's repo, by source: the commit's own directory (rules above), the worktree's original checkout, the record's `cwd`, Codex `session_meta.git.repository_url` (normalised like a remote) |
+| `branch_key` | `HMAC(repo_key \|\| branch)` from, in order, git's `[branch sha]` commit line, `worktree-state.worktreeBranch`, Codex `session_meta.git.branch`, the record's `gitBranch`, taken only from a source in the same repo as `repo_key` (a branch key never pairs one repo with another's branch). `main`, `master`, `develop`, `trunk` and `HEAD` get none, and a source that names one ends the search (a commit on `main` does not borrow the record's `gitBranch`) |
+| `ticket_keys` | up to 5 `HMAC(ticket)` for strict ids `[A-Z][A-Z0-9]{1,9}-\d+` (not inside a longer word; `UTF-8`, `SHA-256`, `ISO-8601` and similar standards excluded) in the turn's branches, commit subjects and Claude Code session titles (`ai-title`, `custom-title`) |
+| `sha_refs` | up to 50 commit-like SHAs quoted in the turn's tool output or message text: 7 to 40 lowercase hex with at least one digit and one letter, not part of a longer word, uuid or hash, each kept only as `sha_key = HMAC("sha7:" + first 7 hex, lowercased)` (none without a salt), so a hex secret that passes the filter is never kept, not even a prefix |
+| `commit_keys` | the `sha_key` of every commit the turn's commit calls printed (the SHAs the `commit` rows carry: git's `[branch sha]` line, else the structured or condensed form); a quoted SHA meets a commit where its `sha_refs` key is in some turn's `commit_keys` |
+| `pr_keys` | up to 10 `HMAC(host/owner/repo\|number)` from GitHub `https://github.com/<o>/<r>/pull/<n>` and Bitbucket `https://bitbucket.org/<ws>/<repo>/pull-requests/<n>` URLs in the same text, plus the turn's `pr-link` records (the same PR gives the same key either way) |
+| `role` | `child` for a subagent or a scripted run (`run_origin` subagent or automated), else `seed` |
+
+Turn close per agent: Claude Code as in the table above; Codex `task_complete` or
+`turn_aborted` (seed `session_id|turn_id`); Pi the derived turn (seed `session_id|<prompt id>`);
+Cursor CLI each emitted turn (seed `session_id|requestId`), SDK runs get none. A Claude Code
+worktree holds for every turn until `worktree-state` reports it left. Codex takes the repo and
+branch from the first `session_meta` (its `cwd`, else the remote URL) for every turn. A Claude
+Code turn with no `turn_duration` closes at its last record once the file sits idle for an hour,
+or, read in one go, once the next record is an hour or more later, so both cut the same place.
+Seeds are deterministic, so `aut backfill --activity-only` fills history and a live scan split
+anywhere gives the same rows as one full read (assuming a record reaches the file within the
+hour of its timestamp); the dry run prints the link rows per role and how many carry each key.
+Turns already open when this version is first deployed are the exception: their link row is
+built from the records read after the upgrade only (a Claude Code worktree entered before it is
+not seen until the next `worktree-state`), and it lands before a backfill's complete row with
+the same `(event_id, ts)`, so the partial row stays. A Codex watermark from before link fields
+existed gets its `session_meta` link fields rebuilt from the file's first record.
+
 ### Codex and Pi activity
 
 Same kinds and attrs as Claude Code where the source has them. Seeds start with the session id
@@ -309,7 +349,7 @@ are the shared code in `collectors/_activity_common.py`.
 | `steer` | each prompt counted as human (seeded like it); `via` always `typed`; `words`, `chars`, `images` (attached images), `after_interrupt` (an interrupt since the previous prompt) | each user message: `via` `skill` (text opens `<skill name="`), `queued` (the previous message is a toolResult: typed while the agent ran), else `typed`; `words`, `chars`, `after_interrupt` (the previous assistant record was aborted) |
 | `interrupt` | `turn_aborted` with reason `interrupted`; no attrs | assistant `stopReason == "aborted"`; `during_tool` (the entry before it is a toolResult) |
 | `turn` | `task_complete`: `duration_ms` from the record, else `task_started` to `task_complete`; `tool_calls` and `by_tool` from the model's tool calls (`function_call`, `custom_tool_call`; an `mcp__` namespace or a name containing `__`, the older CLI form, counts as `mcp`) plus `McpToolCall` items whose id matches no MCP call of the turn (Codex Desktop logs most MCP calls only as items); `tool_errors` from `CommandExecution` items with `exit_code != 0` and `McpToolCall` items with status `failed` (command items run inside a tool call, so they are not counted as calls) | derived: one per user message, from it to the first `stop` / `aborted` / `length` assistant record, else to the last entry before the next user message (an `error` followed by another assistant record is a retry, not an end); `duration_ms` = end ts minus prompt ts, `message_count` (the prompt, assistant and toolResult messages), tool aggregates from `toolCall` blocks, `tool_errors` from `toolResult.isError`. The last open turn of a file is emitted on a later scan |
-| `commit` | `CommandExecution` item: its shell script and `aggregated_output`, `repo_key` from the item's `cwd` | `bash` toolCall paired with its toolResult by `toolCallId`; `repo_key` from the header `cwd` |
+| `commit` | `CommandExecution` item: its shell script and `aggregated_output`, `repo_key` from the command's own directory, else the item's `cwd` | `bash` toolCall paired with its toolResult by `toolCallId`; `repo_key` from the command's own directory, else the header `cwd` |
 | `compaction` | `ContextCompaction` item; no attrs | `compaction` record: `tokens_before` |
 | `invoke` | not possible (no skill tool; reading a skill file is a guess) | a user message opening `<skill name="X">`: `skill` = X |
 | `rejection` | not possible: no user approval decisions are logged (an automatic reviewer decides) | not possible: Pi has no permission prompt |
@@ -333,7 +373,7 @@ requestIds), when a later prompt follows it or the chat has been idle for an hou
 | kind | Cursor CLI | Cursor SDK |
 |---|---|---|
 | `steer` | each human row (seed: requestId; a later prompt sent during the running turn reuses that requestId and gets its own human and steer row, seeded with its blob id too, at its own timestamp); `via` always `typed`; `words` and `chars` of the `<user_query>` text, `images` (image blocks) | not possible: run prompts are app input |
-| `commit` | a `Shell` tool-call whose command is a commit call, paired by `toolCallId` with its result (`Exit code: N` then `Command output:`); the shared SHA parser; `repo_key` from the call's `working_directory`, else NULL | none |
+| `commit` | a `Shell` tool-call whose command is a commit call, paired by `toolCallId` with its result (`Exit code: N` then `Command output:`); the shared SHA parser; `repo_key` from the command's own directory (relative to the call's `working_directory`), else the `working_directory`, else NULL | none |
 | `rejection` | a `SwitchMode` result `Mode switch was rejected by the user` (seed: toolCallId) | none |
 | `turn` | one per requestId: `tool_calls`, `by_tool` (Cursor's tool names; `mcp_<server>_<tool>` and `CallMcpTool` count as `mcp`, a name that is not a plain identifier as `other`), `tool_errors` (tool results with `highLevelToolCallResult.isError`), `hook_blocks` (Shell results opening `Rejected: Hook blocked`, also errors), `max_identical_run`, `retry_flag`, `runaway_flag`, `run_origin` (and `parent_session_id` in a subagent chat); no `duration_ms`. A tool call counts once per turn by `toolCallId`, even when a rewritten blob in another root lists it again | one per run that ended: `status` (`finished`, `cancelled`, `error`), `duration_ms` = `finished_at - started_at` (NULL without both), `run_origin` `automated`; `turn_id` = `run_id`, `session_id` = `agent_id`. Queued and running runs are sent once they end (a row is insert-only). `error_code` and `result` are free text and never read |
 | `interrupt` | not possible: no record in the store. The transcript's `turn_ended` carries a status but no id or timestamp, and its count does not line up with the prompts, so it is not joined | a cancelled run is `turn` with `status` `cancelled` |
@@ -352,6 +392,71 @@ them with the same one-line note as session rows. History: `aut backfill --activ
 [--dry-run]` works exactly like `--sessions-only` (both flags may be given together) and never
 sends usage rows. For `cursor_cli` the first normal `aut scan` also sends its human rows, which no
 collector sent before.
+
+## Outcomes: agents.commit_outcome, manual_outcome, episode_correction
+
+Written by three commands on the machine that holds the clones and the logs. Every value is a
+SHA, a key, a session id, an enum, a number or a time; no URL, path, branch, title, subject or
+file name is stored. All three tables are insert-only: readers take the latest row.
+
+`aut outcomes [--fetch] [--dry-run]` reads the `commit` rows and the git clones under
+`outcome_repo_roots` (one per git common dir; repo_key -> clone is held in memory for the run)
+and writes `agents.commit_outcome (sha, repo_key, state, survival, decided_at)` only when a
+commit's `(state, survival)` differs from its latest stored row.
+
+| state | rule |
+|---|---|
+| `merged` | ancestor of `origin/HEAD` (fallback `origin/main`/`master`/`develop`, never a local branch), or a single-commit patch-id twin on it, or (with `--fetch`) a merged GitHub PR that `gh pr list --search <sha>` finds; `survival` = share (0..1, 4 decimals) of its added lines that `git blame` still attributes to it (or its twin) on the default branch 14 days after the merge, first 30 files, NULL for a merge commit, a commit adding no lines or a gh-only merge |
+| `reverted` | merged, and a commit on any branch says `This reverts commit X` for it or its twin within 14 days of the merge |
+| `reworked` | merged and `survival < 0.5` |
+| `open` | reachable from a local or remote branch, not from the default branch |
+| `abandoned` | reachable from no branch, no twin, no merged PR; also a commit no local clone holds |
+| `superseded` | reachable from no branch and the session's next commit row was an `--amend` (the pre-amend SHA) |
+| `undecided` | under 14 days since the merge (merged) or since the commit row (everything else); also a merged commit whose default ref was last updated before merge + 14 days, and a commit gh could not answer for |
+
+- `sha` is the commit row's form (often abbreviated); `repo_key` is the row's, else the key of the
+  clone that holds the SHA, else `''`. A clone counts as holding a SHA only when its committer
+  time is within a day of the row, so a short SHA never matches another repo's commit.
+- The merge time is when the commit (or its twin) landed: the committer time of the first-parent
+  commit of the default branch that brought it in. Survival is blamed at the newest first-parent
+  commit before merge + 14 days, only once the default ref was updated after that time (its tip
+  is newer, its FETCH_HEAD is newer, or this run fetched it). It is computed once and cached by
+  full SHA in `outcomes_cache.json` next to the state file (saved before the sink is written),
+  with gh answers (a "no" only once the commit is 60 days old).
+- When several clones hold a commit, the one where it is furthest along wins (on the default
+  branch, then on a branch, then unreachable).
+- A commit this run cannot see or decide (no clone holds it any more, gh failed, a stale default
+  ref) never replaces a stored row of its sha: decided states stay decided.
+- `--fetch` (or `outcome_fetch = true`) runs `git fetch --upload-pack=git-upload-pack --quiet
+  --no-tags --no-auto-maintenance --no-write-fetch-head --no-recurse-submodules origin` only in
+  a clone whose origin's repo_key a commit row carries (30 s
+  each, then SIGTERM so git removes its locks; failures are skipped and counted) and turns on the
+  gh lookup. Without it, a commit whose GitHub PR was squash-merged ends `abandoned`, so set
+  `outcome_fetch = true` on the machine that runs the nightly job. A dry run reads the sink and the clones and writes nothing: no rows, no
+  cache, no heartbeat. A real run sends one `agents.collector_scan` row, collector `outcomes`.
+
+- Every git command aut runs (here, and `git remote get-url origin` for repo keys) goes through
+  `git_safe`: `-c core.fsmonitor= -c core.hooksPath=/dev/null -c protocol.ext.allow=never
+  -c diff.external= -c core.sshCommand=ssh -c core.askPass= -c gc.auto=0
+  -c maintenance.auto=false`, `--no-textconv --no-ext-diff` on `log`/`show`/`diff`,
+  `--no-textconv` on `blame`, with `GIT_CONFIG_NOSYSTEM=1` and `GIT_TERMINAL_PROMPT=0`, so a
+  clone's own config, attributes or hooks never make git run a command. The user's global config
+  (HOME) still applies, so fetch keeps their ssh and credential setup.
+
+`aut outcome <shipped|ruled-out|open> [--session ID]` writes `agents.manual_outcome (session_id,
+outcome, ts, repo_key)` for `--session ID`, else the newest interactive (entrypoint `cli`) Claude
+Code session whose project directory is the current directory or a parent up to the repo top
+level; `repo_key` is the current directory's. `packaging/claude/commands/outcome.md` wraps it as
+`/outcome` and passes the invoking session's id.
+
+`aut episodes review [--month YYYY-MM]` serves the month's `agents.episode` rows (default: the
+last completed month) on `127.0.0.1` at a random port and token, with each seed session's titles
+and branch names read from the local Claude Code and Codex logs. The page and its text never
+leave the machine. Answers become `agents.episode_correction (id, ts, action, a_session,
+b_session, attrs)`: right -> `confirm`, should split -> one `split` per session taken out, should
+merge with #n -> `merge` (b = that episode's first seed session), not an episode -> `reject`;
+`attrs` holds `repo_keys` (and `b_repo_keys`) copied from `episode_member`. It prints the share
+of reviewed episodes marked right.
 
 ## Active time: agents.time_interval
 

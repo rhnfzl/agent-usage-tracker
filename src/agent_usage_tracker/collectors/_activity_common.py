@@ -1,5 +1,5 @@
-"""Activity helpers shared by the collectors: commit detection and SHA parsing, repo keys, and the
-per-turn tool aggregates. attrs built from these carry counts, flags, short enums and hashes only.
+"""Activity helpers shared by the collectors: commit detection and SHA parsing, repo keys, the
+per-turn tool aggregates and the per-turn link fields. attrs built from these carry counts, flags, short enums and hashes only.
 
 The turn aggregates' retry and runaway rules are ported from AgentsView
 (github.com/kenn-io/agentsview, MIT licence, (c) its authors).
@@ -18,6 +18,7 @@ import sys
 from datetime import datetime
 from urllib.parse import urlparse
 
+from ..git_safe import git_argv, git_env
 from ..state import _state_path
 
 _SEGMENTS = re.compile(r"&&|\|\||[;|\n]")
@@ -35,7 +36,25 @@ _COMMIT_OUT = re.compile(r"^\[[^\]\s]+(?: \(root-commit\))? (?P<sha>[0-9a-f]{7,4
 # The condensed form a command proxy prints instead of git's own "[branch sha]" line: "ok <sha>"
 # or "<sha> <subject>" on the FIRST line. Most commits on a machine with such a proxy look like this.
 _CONDENSED = re.compile(r"(?:ok )?(?P<sha>[0-9a-f]{7,40})(?:\s|$)")
+_HEX_SHA = re.compile(r"[0-9a-f]{7,40}")
 _OK_LINE = re.compile(r"^ok (?P<sha>[0-9a-f]{7,40})\s*$", re.M)
+# git's commit line with its branch and subject, for the link row (both are text: hashed or dropped)
+_COMMIT_LINE = re.compile(
+    r"^\[(?P<br>[^\]\s]+)(?: \(root-commit\))? [0-9a-f]{7,40}\] ?(?P<subj>[^\n]*)", re.M)
+_CD = re.compile(rf"^\s*[({{]?\s*(?:cd|pushd)\s+({_ARG})\s*$")
+_DASH_C = re.compile(rf"\s-C\s+({_ARG})")
+# link fields: a commit-like SHA (7 to 40 hex, not inside a longer word, a uuid or a 64-hex hash),
+# a strict ticket id, a GitHub or Bitbucket PR URL
+_SHA_REF = re.compile(r"(?<![\w-])[0-9a-f]{7,40}(?![\w-])")
+_TICKET = re.compile(r"(?<![A-Za-z0-9])[A-Z][A-Z0-9]{1,9}-\d+(?![A-Za-z0-9])")
+_NOT_TICKET = {"UTF", "SHA", "ISO", "RFC", "CVE", "PEP", "HTTP", "TLS", "SSL", "WCAG"}
+_PR_URL = re.compile(r"https?://(?:www\.)?(?:(github\.com)/([\w.-]+)/([\w.-]+)/pull"
+                     r"|(bitbucket\.org)/([\w.-]+)/([\w.-]+)/pull-requests)/(\d+)")
+_DEFAULT_BRANCHES = {"main", "master", "develop", "trunk", "HEAD"}
+# 20 SHAs (first come) filled up on 7% of Claude Code and 26% of Cursor turns that quote any,
+# pushing out a commit quoted late in the turn; 50 is cheap at one key each
+MAX_SHAS, MAX_PRS, MAX_TICKETS = 50, 10, 5
+IDLE_S = 3600        # a file untouched this long is complete: its open link turn closes
 
 
 def text_of(content: object) -> str:
@@ -146,8 +165,8 @@ class RepoKeys:
             self._cwd[cwd] = None
             if os.path.isdir(cwd):
                 try:
-                    r = subprocess.run(["git", "-C", cwd, "remote", "get-url", "origin"],
-                                       capture_output=True, timeout=2)
+                    r = subprocess.run(git_argv(cwd, "remote", "get-url", "origin"),
+                                       capture_output=True, timeout=2, env=git_env())
                     url = r.stdout.decode("utf-8", "replace").strip()
                     if r.returncode == 0 and url:
                         self._cwd[cwd] = self.of(repo_identity(url))
@@ -167,6 +186,149 @@ def commit_call(cmd: str) -> tuple[bool, bool] | None:
         return None
     return (any("--amend" in segs[i].split() for i in hits),
             not all(_SILENT.match(x) for x in segs[:hits[0]]))
+
+
+def commit_dir(cmd: str) -> str | None:
+    """Where the first commit call runs when the command moves there itself (`cd X && git commit`,
+    `git -C X commit`), relative to the record's cwd unless absolute; None when it does not move
+    or the move is not knowable (a variable, a command substitution)."""
+    d = None
+    for x in [x for x in _SEGMENTS.split(_HEREDOC.sub(r"\3", cmd)) if x.strip()]:
+        m, g = _CD.match(x), _GIT_COMMIT.match(x)
+        if not (m or (g and "--dry-run" not in x.split())):
+            continue
+        # a cd moves the shell for the segments after it; a -C only the commit itself
+        for arg in [m[1]] if m else [c[1] for c in _DASH_C.finditer(g[0])]:
+            if "$" in arg or "`" in arg:
+                return None
+            d = os.path.join(d or "", os.path.expanduser(arg.strip("\"'")))
+        if g:
+            return d
+    return None
+
+
+def commit_repo(keys: RepoKeys, cwd: object, target: object, fallback: str | None) -> str | None:
+    """A commit's repo_key: the directory the command moved to, else the record's cwd, else
+    `fallback` (the worktree's original checkout, for a cwd that is gone). A relative target
+    with no cwd is not resolved: it would be relative to aut's own directory."""
+    if isinstance(target, str) and (isinstance(cwd, str) or os.path.isabs(target)):
+        k = keys.of_cwd(os.path.join(cwd, target) if isinstance(cwd, str) else target)
+        if k:
+            return k
+    return keys.of_cwd(cwd) or fallback
+
+
+def branch_key(keys: RepoKeys, repo_key: str | None, branch: object) -> str | None:
+    """HMAC(repo_key || branch) for a non-default branch; a branch name is never stored."""
+    if not repo_key or not isinstance(branch, str) or not branch \
+            or branch in _DEFAULT_BRANCHES:
+        return None
+    return keys.of(repo_key + branch)
+
+
+def pr_key(keys: RepoKeys, host: str, repo: str, number: object) -> str | None:
+    try:
+        identity = repo_identity(f"https://{host}/{repo.strip('/')}")
+    except ValueError:
+        return None
+    return keys.of(f"{identity}|{number}")
+
+
+def sha_key(keys: RepoKeys, sha: str) -> str | None:
+    """HMAC of a SHA's first 7 hex: a quoted SHA and a printed commit meet on it, and a hex secret
+    that passes the SHA filter (a 32-hex API key, a 40-hex token) is never kept, not even a
+    prefix of it. None without a salt, and None for anything that is not 7 to 40 hex (a structured
+    sha of '1' would otherwise key every session that printed it into one episode)."""
+    sha = sha.lower()
+    return keys.of("sha7:" + sha[:7]) if _HEX_SHA.fullmatch(sha) else None
+
+
+class Link:
+    """One turn's link fields (activity kind `link`). The state dict `s` is mutated in place and
+    rides in the watermark, so it holds keys only, never a SHA, branch, ticket, URL or path.
+    s["at"]: source rank -> [repo_key, branch_key]; rank 0 the commit (`[branch sha]` line and the
+    commit's own directory), 1 the worktree, 2 the session meta (Codex git), 3 the record.
+    branch_key is False where the source names a default branch: it has no key, and a lower rank
+    may not stand in for it."""
+
+    def __init__(self, keys: RepoKeys, s: dict) -> None:
+        self.keys, self.s = keys, s
+        if s.get("shas"):     # a watermark from before sha_refs were keyed held raw hex: drop it
+            s["shas"] = [v for v in s["shas"] if len(v) == 64]
+
+    def source(self, repo_key: str | None, branch: object = None) -> list:
+        """[repo_key, branch_key] of one source (its branch's tickets go to this turn)."""
+        self.tickets(branch)
+        named = repo_key and isinstance(branch, str) and branch in _DEFAULT_BRANCHES
+        return [repo_key, False if named else branch_key(self.keys, repo_key, branch)]
+
+    def place(self, rank: int, repo_key: str | None, branch: object = None) -> None:
+        self.s.setdefault("at", {})[str(rank)] = self.source(repo_key, branch)
+
+    def _add(self, field: str, value: str | None, cap: int) -> bool:
+        got = self.s.setdefault(field, [])
+        if value and value not in got and len(got) < cap:
+            got.append(value)
+        return len(got) < cap
+
+    def tickets(self, text: object) -> None:
+        if isinstance(text, str) and "-" in text:
+            for m in _TICKET.finditer(text):
+                if m[0].split("-")[0] not in _NOT_TICKET \
+                        and not self._add("tix", self.keys.of(m[0]), MAX_TICKETS):
+                    break
+
+    def commit(self, repo_key: str | None, text: str, shas: list[str]) -> None:
+        """A commit call's output: its repo, the commits it printed (`commit_shas`), and the
+        branch and subject of git's commit line."""
+        for sha in shas:
+            self._add("cks", sha_key(self.keys, sha), MAX_SHAS)
+        m = _COMMIT_LINE.search(text)
+        self.place(0, repo_key, m["br"] if m else None)
+        for m in _COMMIT_LINE.finditer(text):
+            self.tickets(m["subj"])
+
+    def text(self, text: object) -> None:
+        """Tool output or message text: SHAs it quotes and the PRs it links."""
+        if not isinstance(text, str):
+            return
+        if len(self.s.get("shas", ())) < MAX_SHAS:
+            for m in _SHA_REF.finditer(text):
+                v = m[0]
+                if not v.isdigit() and not v.isalpha() \
+                        and not self._add("shas", sha_key(self.keys, v), MAX_SHAS):
+                    break
+        if "/pull" in text and len(self.s.get("prs", ())) < MAX_PRS:
+            for m in _PR_URL.finditer(text):
+                host, o, r = (m[1], m[2], m[3]) if m[1] else (m[4], m[5], m[6])
+                if not self._add("prs", pr_key(self.keys, host, f"{o}/{r}", int(m[7])), MAX_PRS):
+                    break
+
+    def pr(self, host: str, repo: object, number: object) -> None:
+        if host and isinstance(repo, str):
+            self._add("prs", pr_key(self.keys, host, repo, number), MAX_PRS)
+
+    def attrs(self, origin: str | None) -> dict:
+        at = [self.s["at"][k] for k in sorted(self.s.get("at", {}))]
+        # the repo of the first source that has one; its branch from that source, or from a lower
+        # one in the SAME repo (a branch edge must never join two repos)
+        rk = next((r for r, _b in at if r), None)
+        bk = next((b for r, b in at if r == rk and b is not None), None) if rk else None
+        return {"repo_key": rk, "branch_key": bk or None,
+                "ticket_keys": list(self.s.get("tix", ())), "sha_refs": list(self.s.get("shas", ())),
+                "commit_keys": list(self.s.get("cks", ())), "pr_keys": list(self.s.get("prs", ())),
+                # subagents and scripted runs attach to an episode, never start one
+                "role": "child" if origin in ("subagent", "automated") else "seed"}
+
+    def merge(self, other: dict) -> None:
+        """Add a session-level source (ranks it lacks, its tickets) to this turn."""
+        for k, v in (other.get("at") or {}).items():
+            self.s.setdefault("at", {}).setdefault(k, v)
+        for t in other.get("tix") or ():
+            self._add("tix", t, MAX_TICKETS)
+
+    def reset(self) -> None:
+        self.s.clear()
 
 
 def commit_shas(text: str, err: bool, before: bool, structured: str | None = None) -> list[str]:

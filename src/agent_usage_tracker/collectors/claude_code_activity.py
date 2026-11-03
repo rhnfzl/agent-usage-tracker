@@ -15,7 +15,8 @@ from urllib.parse import urlparse
 from ..event import ActivityEvent, EventSession, make_event_id
 # repo_identity and _GIT_COMMIT are re-exported for the tests that lock them
 from ._activity_common import _GIT_COMMIT, RepoKeys, repo_identity  # noqa: F401
-from ._activity_common import add_call, blank_agg, commit_call, commit_shas, turn_attrs
+from ._activity_common import (IDLE_S, Link, add_call, blank_agg, commit_call, commit_dir,
+                               commit_repo, commit_shas, ms_between, turn_attrs)
 from ._activity_common import h as _h
 from ._activity_common import text_of as _text
 from ._activity_common import tool_key as _tool
@@ -53,6 +54,10 @@ class Activity:
         # shortcut: per chunk only. An enqueue in an earlier scan is not seen; upgrade if the
         # queued split drifts from a full re-read.
         self.queued: set[str] = set()
+        self.link = Link(keys, s.get("link") or {})
+        self.wt = s.get("wt")      # [repo_key, branch_key] of the worktree the session is in
+        self.lo = s.get("lo")      # the open link turn: last record's uid, ts, session and origin
+        self._at3: tuple | None = None     # the (cwd, gitBranch) last placed in this turn
 
     def state(self) -> dict:
         s: dict = {}
@@ -65,6 +70,9 @@ class Activity:
             s["pend"] = self.pend
         if self.open_ids and not self.subagent:
             s["seen"] = self.open_ids[-_SEEN_MAX:]
+        for k, v in (("link", self.link.s), ("wt", self.wt), ("lo", self.lo)):
+            if v:
+                s[k] = v
         return s
 
     def _emit(self, kind: str, o: dict, seed: object, sess: EventSession, attrs: dict) -> None:
@@ -84,8 +92,43 @@ class Activity:
         except Exception:
             self.errors += 1
 
+    def finish(self) -> None:
+        """The file is complete (read to its end and idle for IDLE_S): close its open link turn.
+        A subagent or scripted file never gets a turn_duration to close it."""
+        try:
+            if self.lo:
+                lo = self.lo
+                self._close_link(lo["uid"], lo["ts"], lo["sid"], lo["turn"], lo["origin"])
+        except Exception:
+            self.errors += 1
+
+    def _close_link(self, seed: object, ts: object, sid: object, turn: object,
+                    origin: object) -> None:
+        if self.wt:
+            self.link.s.setdefault("at", {}).setdefault("1", self.wt)
+        self.events.append(ActivityEvent(
+            event_id=make_event_id(self.agent, "link", seed), ts=ts, agent=self.agent,
+            kind="link", session_id=sid, turn_id=turn, attrs=self.link.attrs(origin)))
+        self.link.reset()
+        self.lo, self._at3 = None, None
+
     def _record(self, o: dict, sess: EventSession) -> None:
         typ = o.get("type")
+        # A record IDLE_S or more after the open link turn's last one: that turn closed there,
+        # as a live scan that saw the file idle in between closed it, so any split of scans and
+        # one full read cut the same place. shortcut: assumes a record reaches the file within
+        # IDLE_S of its timestamp (a synced log that lags longer can split differently); upgrade
+        # if synced files show split-vs-full drift.
+        gap = ms_between(self.lo["ts"], o.get("timestamp")) if self.lo else None
+        if gap is not None and gap >= IDLE_S * 1000:
+            self.finish()
+        if typ in ("assistant", "user"):
+            self.lo = {"uid": self._uid(o), "ts": o.get("timestamp"), "sid": sess.session_id,
+                       "turn": sess.turn_id, "origin": sess.run_origin}
+            at3 = (o.get("cwd"), o.get("gitBranch"))
+            if at3 != self._at3:
+                self._at3 = at3
+                self.link.place(3, self.keys.of_cwd(at3[0]), at3[1])
         if typ == "queue-operation":
             if o.get("operation") == "enqueue" and isinstance(o.get("content"), str):
                 self.queued.add(_h(o["content"]))
@@ -95,6 +138,16 @@ class Activity:
                 self.queued.add(_h(_text(a.get("prompt"))))
         elif typ == "pr-link":
             self._pr(o, sess)
+        elif typ == "worktree-state":
+            ws = o.get("worktreeSession")
+            if isinstance(ws, dict):
+                rk = self.keys.of_cwd(ws.get("originalCwd")) \
+                    or self.keys.of_cwd(ws.get("worktreePath"))
+                self.wt = self.link.source(rk, ws.get("worktreeBranch"))
+            else:                        # the session left its worktree
+                self.wt = None
+        elif typ in ("ai-title", "custom-title"):
+            self.link.tickets(o.get("aiTitle") or o.get("customTitle"))
         elif typ == "system" and o.get("subtype") == "turn_duration":
             self._turn(o, sess)
         elif typ == "system" and o.get("subtype") == "compact_boundary":
@@ -110,7 +163,13 @@ class Activity:
                 for b in blocks:
                     if b.get("type") == "tool_use":
                         self._tool_use(o, b, sess)
+                    elif b.get("type") == "text":
+                        # shortcut: a re-logged text block is read again (its SHAs and PRs are
+                        # the session's own, so only the next turn's lists grow); dedup by uuid
+                        # if that skews the link lists
+                        self.link.text(b.get("text"))
                 return
+            self.link.text(_text(content))
             for b in blocks:
                 if b.get("type") == "tool_result":
                     self._tool_result(o, b, sess)
@@ -166,7 +225,7 @@ class Activity:
         cmd = inp.get("command")
         call = commit_call(cmd) if name == "Bash" and isinstance(cmd, str) else None
         if call:
-            self.pend[tid] = list(call)
+            self.pend[tid] = [*call, commit_dir(cmd)]
 
     def _tool_result(self, o: dict, b: dict, sess: EventSession) -> None:
         tid = b.get("tool_use_id")
@@ -176,6 +235,7 @@ class Activity:
         self.open_ids.append("r" + tid)
         err = b.get("is_error") is True
         text = _text(b.get("content")).lstrip()
+        self.link.text(text)
         if err:
             self.agg["errors"] += 1
             if text.startswith(_REJECTED):
@@ -183,17 +243,21 @@ class Activity:
             elif text.startswith("PreToolUse:") and "hook error" in text[:200]:
                 self.agg["hooks"] += 1          # a hook denied it, not the user
         if tid in self.pend:
-            amend, before = self.pend.pop(tid)
-            self._commits(o, tid, bool(amend), bool(before), text, err, sess)
+            amend, before, *target = self.pend.pop(tid)    # older state has no target
+            self._commits(o, tid, bool(amend), bool(before), text, err, sess,
+                          target[0] if target else None)
 
     def _commits(self, o: dict, tid: str, amend: bool, before: bool, text: str, err: bool,
-                 sess: EventSession) -> None:
+                 sess: EventSession, target: object = None) -> None:
         tr = o.get("toolUseResult")
         g = tr.get("gitOperation") if isinstance(tr, dict) else None
         c = g.get("commit") if isinstance(g, dict) else None
         sha = c.get("sha") if isinstance(c, dict) and isinstance(c.get("sha"), str) else None
         found = commit_shas(text, err, before, sha)
-        key = self.keys.of_cwd(o.get("cwd")) if found else None
+        if not found:
+            return
+        key = commit_repo(self.keys, o.get("cwd"), target, self.wt[0] if self.wt else None)
+        self.link.commit(key, text, found)
         for sha in found:
             self._emit("commit", o, f"{tid}|{sha}", sess,
                        {"sha": sha, "repo_key": key, "amend": amend})
@@ -209,6 +273,7 @@ class Activity:
         kind = "github" if "github" in host else "bitbucket" if "bitbucket" in host else "other"
         key = self.keys.of(f"{host}/{repo.strip('/')}".lower()) \
             if host and isinstance(repo, str) else None
+        self.link.pr(host, repo, num)
         # One row per pr-link record (its ts never depends on how much of the file a scan read);
         # distinct PRs are counted in SQL. Real pr-link records carry no uuid, so the fallback seed
         # is session + number + the record's own ts: a re-logged copy maps to the same row.
@@ -225,3 +290,5 @@ class Activity:
         self.agg = blank_agg()
         self.pend.clear()                # a commit call still unanswered at turn end never will be
         self.open_ids = []
+        self._close_link(self._uid(o), o.get("timestamp"), sess.session_id, sess.turn_id,
+                         sess.run_origin)

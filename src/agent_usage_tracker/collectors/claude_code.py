@@ -15,13 +15,16 @@ from __future__ import annotations
 
 import glob
 import json
+import os
 import re
 import sys
+import time
 from pathlib import Path
 from typing import Callable, Iterator
 
 from ..config import Config
 from ..event import EventSession, UsageEvent, make_event_id
+from ._activity_common import IDLE_S
 from ._util import basename, safe_int, scan_file
 from .claude_code_activity import Activity, RepoKeys
 from .claude_code_activity import _text as _text_of
@@ -124,6 +127,15 @@ def _session_of(o: dict, ident: tuple[bool, str, str | None], turn: str | None) 
     return EventSession(_str(o.get("sessionId")) or sid, None, origin, turn)
 
 
+def _complete(path: str, off: int) -> bool:
+    """Read to its end and untouched for IDLE_S: no more records will follow."""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return False
+    return off >= st.st_size and time.time() - st.st_mtime >= IDLE_S
+
+
 def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[UsageEvent], Callable[[], None]]]:
     base = cfg.home / ".claude" / "projects"
     if not base.exists():
@@ -135,7 +147,8 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[UsageEvent], Callable[
     for path in glob.glob(str(base / "**" / "*.jsonl"), recursive=True):
         fstate = files.get(path, {})
         lines, new_fstate = scan_file(path, fstate)
-        if not lines and new_fstate == fstate:
+        # a file with an open link turn is looked at again once it went idle, to close it
+        if not lines and new_fstate == fstate and not (fstate.get("act") or {}).get("lo"):
             continue
 
         # Claude Code writes ONE JSONL line per content block of an assistant message (text +
@@ -255,6 +268,8 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[UsageEvent], Callable[
                 project=basename(o.get("cwd")),
                 session=_session_of(o, ident, turn),
             )
+        if _complete(path, safe_int(new_fstate.get("off"))):
+            act.finish()
         # A session that only ran /usage (no model call, every prompt a /usage) was nobody working
         # (AgentsView, MIT). Judged only on a read from byte 0, so a /usage typed mid-session and
         # caught alone by a live scan is kept, as a full re-read keeps it. shortcut: a file whose

@@ -307,6 +307,7 @@ _ENUMS = {
     "skill": {"my-skill", "mcp"},              # the fixture's own skill names
     "status": {"finished", "cancelled", "error", "queued", "running"},
     "run_origin": {"interactive", "subagent", "automated"},
+    "role": {"seed", "child"},
 }
 _TOOLS = {"Bash", "Read", "Edit", "Write", "Skill", "Agent", "Task", "WebSearch", "WebFetch",
           "Glob", "Grep", "mcp", "exec_command", "bash", "read", "Shell", "SwitchMode",
@@ -321,6 +322,8 @@ def _plain_value(key: str, v) -> bool:
     if isinstance(v, str):
         ok = v in _ENUMS.get(key, ()) or _HEX.match(v) or _UUID.match(v)
         return bool(ok) and not any(c in v for c in "/@ ")
+    if isinstance(v, list):          # the link row's key lists: lowercase hex only
+        return all(isinstance(x, str) and _HEX.match(x) for x in v)
     if isinstance(v, dict):
         return all(t in _TOOLS and isinstance(n, int) and not isinstance(n, bool)
                    for t, n in v.items())
@@ -353,7 +356,7 @@ def test_attrs_carry_no_text() -> None:
         _adversarial(home, repo)
         evs = _acts(_collect(home))
         assert {e.kind for e in evs} == {"steer", "interrupt", "rejection", "commit", "pr", "turn",
-                                         "compaction", "invoke"}
+                                         "compaction", "invoke", "link"}
         for e in evs:
             for k, v in e.attrs.items():
                 assert _plain_value(k, v), (e.kind, k, v)
@@ -369,6 +372,14 @@ def test_attrs_carry_no_text() -> None:
         for bad in ("free text here", "/abs/path", "src/pkg/m.py", "user@corp.com", "a-b-c"):
             assert not _plain_value("skill", bad) and not _plain_value("sha", bad), bad
         assert not _plain_value("by_tool", {"mcp__corp__x": 1})
+        assert not _plain_value("sha_refs", ["ABC-1"]) and not _plain_value("role", "lead")
+        [lv] = [e for e in evs if e.kind == "link" and e.session_id == "S3"]
+        assert lv.attrs["ticket_keys"] == [_key("ABC-1")] and lv.attrs["branch_key"], lv.attrs
+        # a quoted or printed SHA reaches the link row only as a keyed hash, never as raw hex
+        assert lv.attrs["commit_keys"] and lv.attrs["sha_refs"], lv.attrs
+        for k in ("sha_refs", "commit_keys"):
+            assert all(re.fullmatch(r"[0-9a-f]{64}", v) for v in lv.attrs[k]), (k, lv.attrs)
+        assert "abc1234" not in json.dumps(lv.attrs), lv.attrs
     _run(check)
     print("ok attrs_carry_no_text")
 

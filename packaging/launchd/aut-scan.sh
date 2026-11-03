@@ -2,7 +2,7 @@
 # Timer wrapper for `aut scan`. Optional on every platform -- the bare `aut scan` in the shipped
 # launchd/systemd units is still fine if you need none of this.
 #
-# It adds three things `aut scan` cannot do for itself:
+# It adds four things `aut scan` cannot do for itself:
 #
 #   1. Opens an SSH tunnel first, for a sink that is not directly reachable (a homelab Postgres
 #      behind Tailscale, say). Reuses a tunnel that is already up and only tears down its own.
@@ -10,6 +10,7 @@
 #      scan missed with the VPN down lands as soon as the network is back instead of waiting out
 #      the whole timer interval.
 #   3. Timestamps both into one log you can diagnose from afterwards.
+#   4. Runs `aut outcomes` once a day after a delivered scan.
 #
 # Per-machine settings live in ~/.config/agent-usage-tracker/scan.env, sourced if it exists, so
 # this file is identical on every machine and stays a single thing to maintain:
@@ -63,6 +64,19 @@ echo "$(ts) scan done (exit $rc)" >>"$LOG"
 # main() swallows it. The watermark is not advanced for the undelivered batch, so the retry
 # re-sends it and the sink discards the repeat on event_id.
 if [ "$rc" -eq 0 ]; then rm -f "$MARK"; else touch "$MARK"; fi
+
+# Once a day after a delivered scan: `aut outcomes` (commit outcomes from the local clones). A
+# separate step with its own heartbeat (collector `outcomes`), so it never changes the scan's exit
+# code. One attempt a day, failed or not: a failure is in its heartbeat row and the log, and
+# retrying it after every scan would redo the whole clone pass all day. outcome_fetch = true in
+# config.toml fetches first.
+DAYMARK="$CONF/outcomes-day"
+if [ "$rc" -eq 0 ] && [ "$(cat "$DAYMARK" 2>/dev/null)" != "$(date +%F)" ]; then
+  date +%F >"$DAYMARK"
+  echo "$(ts) outcomes start" >>"$LOG"
+  "$AUT" outcomes >>"$LOG" 2>&1
+  echo "$(ts) outcomes done (exit $?)" >>"$LOG"
+fi
 
 [ -n "$opened" ] && pkill -f "$SPEC" 2>/dev/null
 exit "$rc"

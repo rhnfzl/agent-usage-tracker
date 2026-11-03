@@ -24,8 +24,9 @@ from typing import Callable, Iterator
 
 from ..config import Config
 from ..event import ActivityEvent, EventSession, UsageEvent, make_event_id
-from ._activity_common import (RepoKeys, add_call, blank_agg, commit_call, commit_shas,
-                               first_record, ms_between, text_of, tool_key, turn_attrs)
+from ._activity_common import (Link, RepoKeys, add_call, blank_agg, commit_call, commit_dir,
+                               commit_repo, commit_shas, first_record, ms_between, text_of,
+                               tool_key, turn_attrs)
 from ._util import basename, read_new_lines, safe_int
 
 NAME = "pi"
@@ -88,6 +89,9 @@ class _Activity:
         self._emit("turn", end, t["id"], t["id"], {
             "duration_ms": ms_between(t["ts"], end), "message_count": t["n"],
             **turn_attrs(self.a.get("agg") or blank_agg())})
+        link = Link(self.keys, self.a.pop("link", {}))
+        link.place(3, self.keys.of_cwd(self.cwd))
+        self._emit("link", end, t["id"], t["id"], link.attrs("interactive"))
         self.a.pop("agg", None)
         self.a.pop("pend", None)       # a commit call unanswered at turn end never will be
 
@@ -103,6 +107,9 @@ class _Activity:
             return
         role, content = m.get("role"), m.get("content")
         open_ = a.get("open")
+        link = Link(self.keys, a.setdefault("link", {}))
+        if role != "user":           # a prompt's text belongs to the turn it opens, below
+            link.text(text_of(content))
         if role == "user":
             if open_:
                 self._close(open_["last"])
@@ -116,6 +123,7 @@ class _Activity:
             if skill:
                 self._emit("invoke", ts, str(eid), sess.turn_id, {"skill": tool_key(skill[1])})
             a["open"] = {"id": eid, "ts": ts, "n": 1, "last": ts}
+            Link(self.keys, a.setdefault("link", {})).text(text)
             a["agg"] = blank_agg()
         elif role in ("assistant", "toolResult"):
             if open_:
@@ -132,7 +140,7 @@ class _Activity:
                         call = commit_call(cmd) if b["name"] == "bash" and isinstance(cmd, str) \
                             else None
                         if call and isinstance(b.get("id"), str):
-                            a.setdefault("pend", {})[b["id"]] = list(call)
+                            a.setdefault("pend", {})[b["id"]] = [*call, commit_dir(cmd)]
                 stop = m.get("stopReason")
                 a["intr"] = stop == "aborted"
                 if stop == "aborted":
@@ -146,9 +154,12 @@ class _Activity:
                 tid = m.get("toolCallId")
                 pend = a.get("pend") or {}
                 if isinstance(tid, str) and tid in pend:
-                    amend, before = pend.pop(tid)
+                    amend, before, *target = pend.pop(tid)     # older state has no target
                     found = commit_shas(text_of(content), err, bool(before))
-                    key = self.keys.of_cwd(self.cwd) if found else None
+                    key = commit_repo(self.keys, self.cwd, target[0] if target else None,
+                                      None) if found else None
+                    if found:
+                        link.commit(key, text_of(content), found)
                     for sha in found:
                         self._emit("commit", ts, f"{tid}|{sha}", sess.turn_id,
                                    {"sha": sha, "repo_key": key, "amend": bool(amend)})
@@ -271,6 +282,8 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list, Callable[[], None]]]:
         cur["off"] = new_off
         # shortcut: the last open turn of a file is emitted only when a later scan reads its end
         # (or the next prompt); a session left on an error or a tool call keeps it open for good.
+        if not cur["act"].get("link"):
+            cur["act"].pop("link", None)
         if not cur["act"]:
             del cur["act"]
 

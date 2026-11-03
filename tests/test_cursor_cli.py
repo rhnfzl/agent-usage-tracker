@@ -284,7 +284,8 @@ def test_open_turn_waits_and_counts_once() -> None:
             e, UsageEvent) else e.session_id) == C]
         # q1 is closed by q2; q2 is still open on a fresh store, so nothing of it yet
         assert sorted((type(e).__name__, getattr(e, "kind", "")) for e in first) == [
-            ("ActivityEvent", "steer"), ("ActivityEvent", "turn"), ("UsageEvent", "human")], first
+            ("ActivityEvent", "link"), ("ActivityEvent", "steer"), ("ActivityEvent", "turn"),
+            ("UsageEvent", "human")], first
         assert {e.turn_id if isinstance(e, ActivityEvent) else e.session.turn_id
                 for e in first} == {"q1"}
         snap = json.dumps(wm, sort_keys=True)
@@ -293,11 +294,12 @@ def test_open_turn_waits_and_counts_once() -> None:
         p = home / ".cursor/chats/0123abcd" / C / "store.db"
         os.utime(p, (OLD, OLD))                      # the chat went idle: q2 is done
         # an uncommitted scan (a failed push) leaves the watermark alone
-        assert sum(len(evs) for evs, _c in cursor_cli.collect(_cfg(home), wm)) == 3
+        assert sum(len(evs) for evs, _c in cursor_cli.collect(_cfg(home), wm)) == 4
         assert json.dumps(wm, sort_keys=True) == snap
         later = _collect(home, wm)
         assert sorted((e.kind, e.turn_id if isinstance(e, ActivityEvent) else e.session.turn_id)
-                      for e in later) == [("human", "q2"), ("steer", "q2"), ("turn", "q2")], later
+                      for e in later) == [("human", "q2"), ("link", "q2"), ("steer", "q2"),
+                                          ("turn", "q2")], later
         [t2] = _acts(later, "turn")
         assert t2.attrs["tool_calls"] == 1
         assert _collect(home, wm) == []
@@ -372,7 +374,7 @@ def test_unlisted_prompt_waits_while_active() -> None:
                                                   ("e3", "Grep", {}))]])
         later = _rows(_collect(home, wm), C)
         q2 = sorted(e.kind for e in later if _tid(e) == "q2")
-        assert q2 == ["human", "steer", "turn"], q2
+        assert q2 == ["human", "link", "steer", "turn"], q2
         [t] = [e for e in _acts(later, "turn") if e.turn_id == "q2"]
         assert t.attrs["tool_calls"] == 2, t.attrs
     _run(check)
@@ -401,7 +403,7 @@ def test_sdk_runs() -> None:
 def test_attrs_carry_no_text() -> None:
     def check(home, repo):
         evs = _acts(_collect(home))
-        assert {e.kind for e in evs} == {"steer", "commit", "rejection", "turn"}
+        assert {e.kind for e in evs} == {"steer", "commit", "rejection", "turn", "link"}
         for e in evs:
             for k, v in e.attrs.items():
                 assert _plain_value(k, v), (e.kind, k, v)
@@ -452,7 +454,7 @@ def test_backfill_cursor_cli() -> None:
             assert (state.read_text(), state.stat().st_mtime_ns) == before, "state untouched"
         assert c["by_origin"] == {"interactive": 4}, c
         assert c["turn_null"] == 0, c
-        assert c["by_kind"] == {"steer": 4, "turn": 7, "commit": 2, "rejection": 1}, c
+        assert c["by_kind"] == {"steer": 4, "turn": 7, "commit": 2, "rejection": 1, "link": 4}, c   # SDK runs: no link
     _run(check)
     print("ok backfill_cursor_cli")
 

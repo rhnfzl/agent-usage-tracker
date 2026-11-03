@@ -119,6 +119,31 @@ up and only tears down one it opened itself, so it is safe to run alongside an i
 session. An unreachable host arms the retry marker rather than counting as a scan failure —
 which is exactly the case this pairs with, since a laptop off the VPN cannot reach the host at all.
 
+### Commit outcomes once a day
+
+After a delivered scan the wrapper tries `aut outcomes` once per calendar day (marker
+`outcomes-day` in the config dir, written before the attempt, so a failing run waits for the next
+day and shows up as an error heartbeat), as its own step with its own heartbeat row (collector
+`outcomes`). It reads the clones under `outcome_repo_roots` (default `["~/projects"]`); set
+`outcome_fetch = true` in `config.toml` to `git fetch` them (30 s each, failures skipped) and ask
+`gh` about merged pull requests first. Turn it on for the machine that runs this: without a
+fetch, merged commits wait while the local default branch is older than merge + 14 days, and a
+commit whose GitHub PR was squash-merged ends `abandoned`. The first run computes line survival for every merged
+commit older than 14 days, which can take a while; later runs only score new commits.
+
+## Claude Code `/outcome` command (optional)
+
+`packaging/claude/commands/outcome.md` runs `aut outcome <shipped|ruled-out|open> --session
+<this session's id>`, which marks the session the command was typed in. Install it for your user:
+
+```bash
+mkdir -p ~/.claude/commands
+cp packaging/claude/commands/outcome.md ~/.claude/commands/
+```
+
+Then type `/outcome shipped` (or `ruled-out`, `open`) in a session. It needs `aut` on `PATH`
+and `transport.pg_dsn`.
+
 ## First run
 
 Do a one-time backfill of history (optional; on a heavy machine this can be a lot of
