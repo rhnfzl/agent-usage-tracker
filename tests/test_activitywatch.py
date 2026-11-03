@@ -9,7 +9,7 @@ Locks the rules:
   - aw-server down or without this host's buckets: no rows and no error;
   - deny-list and idle apps are dropped before anything leaves the machine, counts only logged;
   - every redaction pattern, the 300-char cut, and the per-machine title switch;
-  - the app -> category mapping, browser work titles, unknown apps;
+  - the app -> category mapping, browser work titles, unknown apps, macOS app categories;
   - the purge is bounded and never fails the scan, and a dry run purges nothing;
   - `aut time add` validation; time rows ride the same Postgres transaction as usage.
 """
@@ -34,7 +34,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from agent_usage_tracker import cli, push  # noqa: E402
 from agent_usage_tracker.collectors import REGISTRY  # noqa: E402
 from agent_usage_tracker.collectors import activitywatch as aw  # noqa: E402
-from agent_usage_tracker.config import ALL_AGENTS, DEFAULT_AGENTS, Config, load_config  # noqa: E402
+from agent_usage_tracker.config import ALL_AGENTS, AW_CATEGORIES, DEFAULT_AGENTS, Config, load_config  # noqa: E402
 from agent_usage_tracker.event import TimeInterval, UsageEvent  # noqa: E402
 from test_activity import _fake_psycopg  # noqa: E402
 
@@ -108,12 +108,23 @@ class FakeAW:
 
 @contextlib.contextmanager
 def _patched(fake: FakeAW, now: datetime):
-    saved = aw._http, aw._now
-    aw._http, aw._now = fake, (lambda: now)
+    saved = aw._http, aw._now, aw._macos_category
+    aw._http, aw._now, aw._macos_category = fake, (lambda: now), (lambda app: None)
     try:
         yield
     finally:
-        aw._http, aw._now = saved
+        aw._http, aw._now, aw._macos_category = saved
+
+
+@contextlib.contextmanager
+def _mac(table: dict):
+    """Stub the macOS bundle lookup: app name -> LSApplicationCategoryType (missing: None)."""
+    saved, asked = aw._macos_category, []
+    aw._macos_category = lambda app: (asked.append(app), table.get(app))[1]
+    try:
+        yield asked
+    finally:
+        aw._macos_category = saved
 
 
 def _wm() -> dict:
@@ -329,12 +340,137 @@ def test_mapping() -> None:
         ("Brave Browser", "TICKET-1 - Jira"): ("web-work", True, "browser_work_title"),
         ("Safari", "Weekend recipes"): ("web", False, "browser_other"),
         ("Arc", "Home - example-intranet"): ("web-work", True, "browser_work_title"),
+        **{(b, "Weekend recipes"): ("web", False, "browser_other") for b in (
+            "Dia", "Vivaldi", "Opera", "Opera GX", "Zen", "Orion", "Comet", "DuckDuckGo",
+            "Tor Browser", "LibreWolf", "SigmaOS", "Ladybird")},
     }
-    for (app, title), want in cases.items():
-        assert aw.classify(cfg, app, title) == want, (app, title, aw.classify(cfg, app, title))
-    assert aw.classify(cfg, "Firefox", "Dashboard", "http://localhost:3000/") == (
-        "web-work", True, "browser_work_title")
+    with _mac({}):
+        for (app, title), want in cases.items():
+            assert aw.classify(cfg, app, title) == want, (app, title, aw.classify(cfg, app, title))
+        assert aw.classify(cfg, "Firefox", "Dashboard", "http://localhost:3000/") == (
+            "web-work", True, "browser_work_title")
     print("ok mapping")
+
+
+def test_macos_category() -> None:
+    pre = "public.app-category."
+    table = {f"App {k}": pre + k for k in (
+        "developer-tools", "business", "productivity", "graphics-design", "music", "video",
+        "entertainment", "games", "action-games", "social-networking", "sports", "lifestyle",
+        "news", "photography", "utilities", "finance")}
+    table["Odd App"] = "com.example.not-a-category"
+    want = {"developer-tools": ("dev", True), "business": ("comms", True),
+            "productivity": ("docs", True), "graphics-design": ("design", True),
+            **dict.fromkeys(("music", "video", "entertainment", "games", "action-games",
+                             "social-networking", "sports", "lifestyle", "news", "photography"),
+                            ("media", False)),
+            "utilities": ("other", False), "finance": ("other", False)}
+    cfg = _cfg(activitywatch_categories={"app business": "editor"})
+    with _mac({**table, "Code": pre + "games", "Safari": pre + "games"}) as asked:
+        for k, (cat, rel) in want.items():
+            if k == "business":
+                continue
+            assert aw.classify(cfg, f"App {k}", "") == (cat, rel, "macos_category"), k
+        assert aw.classify(cfg, "Odd App", "") == ("other", False, "macos_category")
+        assert aw.classify(cfg, "No Bundle", "") == ("other", False, "unknown")
+        # config and code defaults win, and are never looked up
+        assert aw.classify(cfg, "App business", "") == ("editor", True, "config_app")
+        assert aw.classify(cfg, "Code", "") == ("editor", True, "default_app")
+        assert aw.classify(cfg, "Safari", "Weekend") == ("web", False, "browser_other")
+        assert not {"App business", "Code", "Safari"} & set(asked), asked
+    # dev is a category the config may use, and it is relevant
+    assert "dev" in AW_CATEGORIES and aw.classify(
+        _cfg(activitywatch_categories={"x": "dev"}), "X", "") == ("dev", True, "config_app")
+    # through a scan: the rule lands in attrs
+    t = CREATED + timedelta(minutes=10)
+    fake = FakeAW([_ev(1, t, 60, "App developer-tools"), _ev(2, t + timedelta(minutes=2), 60, "Nope")])
+    with _patched(fake, CREATED + timedelta(hours=2)), _mac(table), \
+            contextlib.redirect_stderr(io.StringIO()):
+        rows = [r for rs, _ in aw.collect(_cfg(), _wm()) for r in rs]
+    assert [(r.category, r.work_relevant, r.attrs) for r in rows] == [
+        ("dev", True, {"rule": "macos_category"}), ("other", False, {"rule": "unknown"})], rows
+    print("ok macos_category")
+
+
+def test_macos_lookup_guards() -> None:
+    """The real lookup function with mdfind stubbed: plist read, off-macOS, errors, timeout."""
+    import plistlib
+    import subprocess
+    real_run, real_darwin = aw.subprocess.run, aw._DARWIN
+    with tempfile.TemporaryDirectory() as d:
+        bundle = Path(d) / "Some.app"
+        (bundle / "Contents").mkdir(parents=True)
+        with open(bundle / "Contents" / "Info.plist", "wb") as f:
+            plistlib.dump({"LSApplicationCategoryType": "public.app-category.developer-tools"}, f)
+        web = Path(d) / "Web.app"
+        (web / "Contents").mkdir(parents=True)
+        with open(web / "Contents" / "Info.plist", "wb") as f:   # a browser declaring productivity
+            plistlib.dump({"LSApplicationCategoryType": "public.app-category.productivity",
+                           "CFBundleURLTypes": [{"CFBundleURLSchemes": ["webx", "HTTPS"]}]}, f)
+        seen: list = []
+        hits = {"Some": f"/Volumes/net/Some.app\n{bundle}\n", "Web": f"{web}\n",
+                "Far": "/Volumes/net/Far.app\n"}
+
+        def run(args, **kw):
+            seen.append((args, kw.get("timeout")))
+            name = args[1].rsplit("'", 2)[1]
+            return subprocess.CompletedProcess(args, 0, stdout=hits.get(name, ""), stderr="")
+
+        def boom(args, **kw):
+            raise subprocess.TimeoutExpired(args, kw.get("timeout"))
+
+        real_dirs = aw._MAC_APP_DIRS
+        try:
+            aw.subprocess.run, aw._DARWIN, aw._MAC_APP_DIRS = run, True, (os.path.join(d, ""),)
+            aw._macos_category.cache_clear()
+            assert aw._macos_category("Some") == "public.app-category.developer-tools"
+            assert aw._macos_category("Some") == "public.app-category.developer-tools"
+            assert len(seen) == 1, "one lookup per app per scan (cached)"
+            assert seen[0][0][0] == "mdfind" and seen[0][1] == 2
+            assert "kMDItemDisplayName == 'Some'" in seen[0][0][1]
+            assert "com.apple.application-bundle" in seen[0][0][1]
+            assert aw._macos_category("Bad'Name") is None and len(seen) == 1, "no query injection"
+            # a hit outside the app folders (network or external volume) is never opened
+            assert aw._macos_category("Far") is None and len(seen) == 2
+            # a bundle that opens http(s) links is a browser, whatever category it declares
+            assert aw._macos_category("Web") == "browser"
+            with _mac({"Web": "browser"}):
+                assert aw.classify(_cfg(), "Web", "Weekend") == ("web", False, "browser_other")
+                assert aw.classify(_cfg(), "Web", "PR 1 - GitHub") == (
+                    "web-work", True, "browser_work_title")
+            aw.subprocess.run = lambda a, **k: subprocess.CompletedProcess(
+                a, 0, stdout=f"{d}/Missing.app\n", stderr="")
+            assert aw._macos_category("Missing") is None
+            # one timeout (Spotlight stalled) turns lookups off for the rest of the scan
+            aw.subprocess.run = boom
+            assert aw._macos_category("Slow") is None
+            aw.subprocess.run = run
+            n = len(seen)
+            assert aw._macos_category("Some Other") is None and len(seen) == n, "no more lookups"
+            aw._mac_off = False
+            aw.subprocess.run, aw._DARWIN = run, False
+            aw._macos_category.cache_clear()
+            assert aw._macos_category("Some") is None and len(seen) == n, "macOS only"
+        finally:
+            aw.subprocess.run, aw._DARWIN, aw._MAC_APP_DIRS = real_run, real_darwin, real_dirs
+            aw._mac_off = False
+            aw._macos_category.cache_clear()
+    print("ok macos_lookup_guards")
+
+
+def test_macos_lookup_real() -> None:
+    if sys.platform != "darwin":
+        try:
+            import pytest
+            pytest.skip("macOS only")
+        except ImportError:
+            return
+    aw._macos_category.cache_clear()
+    got = aw._macos_category("Preview")          # ships with every macOS
+    assert got is None or got.startswith("public.app-category."), got
+    assert aw._macos_category("No Such App Name 0000") is None
+    aw._macos_category.cache_clear()
+    print("ok macos_lookup_real")
 
 
 def test_purge_bounded_and_not_on_dry_run() -> None:
@@ -517,6 +653,9 @@ def main() -> int:
     test_redaction_each_pattern()
     test_titles_switch_and_redacted_title_sent()
     test_mapping()
+    test_macos_category()
+    test_macos_lookup_guards()
+    test_macos_lookup_real()
     test_purge_bounded_and_not_on_dry_run()
     test_titles_kept_for_good_by_default()
     test_time_add_validation()

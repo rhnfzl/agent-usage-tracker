@@ -12,16 +12,21 @@ Nothing leaves the machine before these guards run, in this order:
      when activitywatch_title_days is set, a title older than that is never sent (default 0:
      titles are kept for good).
 
-Category and work relevance come from an app mapping (config over code defaults); a browser row
-is 'web-work' when its title or URL matches a work pattern, else 'web'. A scan never fails
-because ActivityWatch is closed: no server or no buckets means no rows.
+Category and work relevance come from an app mapping (config over code defaults, then the app's
+declared macOS category); a browser row is 'web-work' when its title or URL matches a work
+pattern, else 'web'. A scan never fails because ActivityWatch is closed: no server or no buckets
+means no rows.
 """
 
 from __future__ import annotations
 
+import functools
 import http.client
 import json
+import os
+import plistlib
 import re
+import subprocess
 import sys
 import time
 import urllib.error
@@ -86,7 +91,9 @@ _DEFAULT_APPS = {
     "figma": "design",
     **{a: "media" for a in ("spotify", "music", "vlc", "iina", "quicktime player")},
     **{a: "browser" for a in ("safari", "google chrome", "chrome", "chromium", "brave browser",
-                              "arc", "firefox", "helium", "microsoft edge")},
+                              "arc", "firefox", "helium", "microsoft edge", "dia", "vivaldi",
+                              "opera", "zen", "orion", "comet", "duckduckgo", "tor browser",
+                              "librewolf", "sigmaos", "ladybird")},
 }
 _WORK_TITLES = (
     r"github|gitlab|bitbucket|codeberg|sourcegraph|pull request|merge request",
@@ -96,7 +103,22 @@ _WORK_TITLES = (
     r"localhost|127\.0\.0\.1",
     r"chatgpt|claude|gemini|perplexity",
 )
-_RELEVANT = frozenset(("editor", "terminal", "agent", "comms", "docs", "design", "web-work"))
+_RELEVANT = frozenset(("editor", "terminal", "agent", "dev", "comms", "docs", "design",
+                       "web-work"))
+
+_DARWIN = sys.platform == "darwin"
+_MAC_TIMEOUT = 2
+_mac_off = False                  # set by the first timeout: a stalled Spotlight is not retried
+# local app folders only: a bundle on a network or external volume could block the plist read
+_MAC_APP_DIRS = ("/Applications/", "/System/", os.path.expanduser("~/Applications/"))
+# LSApplicationCategoryType (after 'public.app-category.') -> category; games-* are media too.
+# 'browser' is what _macos_category reports for a bundle that opens http(s) links.
+_MAC_CATEGORIES = {
+    "developer-tools": "dev", "business": "comms", "productivity": "docs",
+    "graphics-design": "design", "browser": "browser",
+    **dict.fromkeys(("music", "video", "entertainment", "games", "social-networking", "sports",
+                     "lifestyle", "news", "photography"), "media"),
+}
 
 
 def _http(cfg: Config, method: str, path: str, body: Any = None) -> Any:
@@ -153,6 +175,40 @@ def _lookup(table, name: str):
     return next((v for k, v in table.items() if name.startswith(k + " ")), None)
 
 
+@functools.cache                  # once per app per scan: a scan is one process
+def _macos_category(app: str) -> str | None:
+    """'browser' when the app bundle opens http(s) links (browsers declare productivity), else
+    its declared LSApplicationCategoryType, or None: off macOS, no local bundle, no key, or any
+    error or timeout. The app name only goes to the local Spotlight index."""
+    global _mac_off
+    if _mac_off or not _DARWIN or not app or any(c in app for c in "'\\*"):  # no quoting
+        return None
+    query = ("kMDItemContentType == 'com.apple.application-bundle' && "
+             f"kMDItemDisplayName == '{app}'")
+    try:
+        out = subprocess.run(["mdfind", query], capture_output=True, text=True, check=True,
+                             timeout=_MAC_TIMEOUT).stdout.splitlines()
+        hit = next((p for p in out if p.startswith(_MAC_APP_DIRS)), None)
+        if hit is None:
+            return None
+        with open(f"{hit}/Contents/Info.plist", "rb") as f:
+            info = plistlib.load(f)
+        schemes = {str(x).lower() for t in info.get("CFBundleURLTypes") or ()
+                   for x in t.get("CFBundleURLSchemes") or ()}
+        cat = "browser" if schemes & {"http", "https"} else info.get("LSApplicationCategoryType")
+    except subprocess.TimeoutExpired:
+        _mac_off = True
+        return None
+    except Exception:                 # a lookup must never fail a scan
+        return None
+    return cat if isinstance(cat, str) and cat else None
+
+
+def _mac_category(declared: str) -> str:
+    kind = declared.removeprefix("public.app-category.")
+    return "media" if kind.endswith("games") else _MAC_CATEGORIES.get(kind, "other")
+
+
 def denied(cfg: Config, app: str, title: str, data: dict | None = None) -> bool:
     """Password managers, private browsing, and config deny patterns, matched on title + URL.
     A Chromium private window (Brave, Chrome, Helium) has neither a title marker nor an
@@ -187,6 +243,8 @@ def classify(cfg: Config, app: str, title: str, url: str = "") -> tuple[str, boo
     cat, rule = _lookup(cfg.activitywatch_categories, name), "config_app"
     if cat is None:
         cat, rule = _lookup(_DEFAULT_APPS, name), "default_app"
+    if cat is None and (declared := _macos_category(app.strip())):
+        cat, rule = _mac_category(declared), "macos_category"
     if cat is None:
         cat, rule = "other", "unknown"
     if cat == "browser":

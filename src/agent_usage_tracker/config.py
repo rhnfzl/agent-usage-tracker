@@ -17,8 +17,8 @@ ALL_AGENTS = ("claude_code", "codex", "cursor", "cursor_sdk", "cursor_api", "cur
               "activitywatch")
 # activitywatch reads window titles, so it is opt-in: a config without `agents` never enables it.
 DEFAULT_AGENTS = tuple(a for a in ALL_AGENTS if a != "activitywatch")
-AW_CATEGORIES = ("editor", "terminal", "agent", "browser", "comms", "docs", "design", "media",
-                 "other")
+AW_CATEGORIES = ("editor", "terminal", "agent", "dev", "browser", "comms", "docs", "design",
+                 "media", "other")
 
 
 def _config_path() -> Path:
