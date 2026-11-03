@@ -21,7 +21,7 @@ from typing import Callable
 from urllib.parse import urlparse
 
 from .config import Config
-from .event import ActivityEvent, UsageEvent
+from .event import ActivityEvent, TimeInterval, UsageEvent
 
 # Column order shared with the homelab schema (agents.usage_event). Keep in sync.
 COLUMNS = (
@@ -47,6 +47,12 @@ SESSION_TABLE = "agents.event_session"
 # One row per non-token activity (agents.activity_event): steers, commits, turns. attrs is jsonb.
 ACTIVITY_COLUMNS = ("event_id", "ts", "machine", "agent", "kind", "session_id", "turn_id", "attrs")
 ACTIVITY_TABLE = "agents.activity_event"
+
+# One row per active-time interval (agents.time_interval): ActivityWatch window time and manual
+# entries. title is private (redacted on this machine, nulled at the sink after 180 days).
+TIME_COLUMNS = ("event_id", "ts", "end_ts", "machine", "source", "app", "title", "category",
+                "work_relevant", "attrs")
+TIME_TABLE = "agents.time_interval"
 _SESSION_NOTE_SHOWN = False
 _ERROR_MAX = 300
 
@@ -93,17 +99,27 @@ _ACTIVITY_SQL = _insert_sql(ACTIVITY_TABLE, ACTIVITY_COLUMNS, "event_id, ts").re
     "%s)", "%s::jsonb)")                 # the last placeholder is attrs
 
 
-def _split(batch: list) -> tuple[list[UsageEvent], list[ActivityEvent]]:
+_TIME_SQL = _insert_sql(TIME_TABLE, TIME_COLUMNS, "event_id, ts").replace("%s)", "%s::jsonb)")
+
+
+def _time_rows(times: list[TimeInterval]) -> list[tuple]:
+    return [(t.event_id, t.ts, t.end_ts, t.machine, t.source, t.app, t.title, t.category,
+             t.work_relevant, json.dumps(t.attrs, sort_keys=True)) for t in times]
+
+
+def _split(batch: list) -> tuple[list[UsageEvent], list[ActivityEvent], list[TimeInterval]]:
     usage = [e for e in batch if isinstance(e, UsageEvent)]
-    return usage, [e for e in batch if isinstance(e, ActivityEvent)]
+    acts = [e for e in batch if isinstance(e, ActivityEvent)]
+    return usage, acts, [e for e in batch if isinstance(e, TimeInterval)]
 
 
 def _insert_pg(dsn: str, batch: list) -> None:
-    """Usage rows, their session rows and the activity rows of the batch in ONE transaction: all
-    land or none does, so a raise leaves the watermark where it was and the batch is re-sent."""
+    """Usage rows, their session rows, and the activity and time rows of the batch in ONE
+    transaction: all land or none does, so a raise leaves the watermark where it was and the batch
+    is re-sent."""
     import psycopg  # optional dependency; install with the [postgres] extra
 
-    usage, acts = _split(batch)
+    usage, acts, times = _split(batch)
     rows = [tuple(e.to_dict()[c] for c in COLUMNS) for e in usage]
     sessions = _session_rows(usage)
     with psycopg.connect(dsn, connect_timeout=15) as conn:
@@ -114,6 +130,8 @@ def _insert_pg(dsn: str, batch: list) -> None:
                 cur.executemany(_insert_sql(SESSION_TABLE, SESSION_COLUMNS, "event_id"), sessions)
             if acts:
                 cur.executemany(_ACTIVITY_SQL, _activity_rows(acts))
+            if times:
+                cur.executemany(_TIME_SQL, _time_rows(times))
         conn.commit()
 
 
@@ -144,13 +162,14 @@ def send_session_rows(dsn: str, rows: list[dict]) -> None:
 
 def _note_sessions_skipped(batch: list) -> None:
     global _SESSION_NOTE_SHOWN
-    if _SESSION_NOTE_SHOWN or not any(isinstance(e, ActivityEvent) or e.session for e in batch):
+    if _SESSION_NOTE_SHOWN or not any(not isinstance(e, UsageEvent) or e.session for e in batch):
         return
     _SESSION_NOTE_SHOWN = True
     # shortcut: the webhook carries usage only; upgrade when a machine runs webhook-only (until
-    # then `aut backfill --sessions-only` / `--activity-only` over pg_dsn fills the gap).
-    print("aut: note: session/activity rows not sent over the webhook (needs transport.pg_dsn)",
-          file=sys.stderr)
+    # then `aut backfill --sessions-only` / `--activity-only` over pg_dsn fills the gap; time rows
+    # have no backfill, so a webhook-only machine loses them).
+    print("aut: note: session/activity/time rows not sent over the webhook (needs "
+          "transport.pg_dsn)", file=sys.stderr)
 
 
 def make_sender(cfg: Config) -> Callable[[list[UsageEvent]], None]:

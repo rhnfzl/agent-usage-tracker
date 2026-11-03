@@ -6,13 +6,19 @@ written as "env:VAR" is resolved from the environment at run time.
 from __future__ import annotations
 
 import os
+import re
 import socket
 import sys
 import tomllib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
-ALL_AGENTS = ("claude_code", "codex", "cursor", "cursor_sdk", "cursor_api", "cursor_cli", "pi")
+ALL_AGENTS = ("claude_code", "codex", "cursor", "cursor_sdk", "cursor_api", "cursor_cli", "pi",
+              "activitywatch")
+# activitywatch reads window titles, so it is opt-in: a config without `agents` never enables it.
+DEFAULT_AGENTS = tuple(a for a in ALL_AGENTS if a != "activitywatch")
+AW_CATEGORIES = ("editor", "terminal", "agent", "browser", "comms", "docs", "design", "media",
+                 "other")
 
 
 def _config_path() -> Path:
@@ -58,6 +64,14 @@ class Config:
     # Key for the activity rows' repo_key HMAC. Unset: a random per-install salt file is created
     # next to the state file. Set the same value on every machine so their keys match.
     repo_key_salt: str | None = None
+    # activitywatch (opt-in): local aw-server, title retention there, and the guards' extensions.
+    activitywatch_url: str = "http://localhost:5600"
+    activitywatch_title_days: int = 180
+    activitywatch_titles: bool = True                  # false: intervals and categories, no titles
+    activitywatch_deny_apps: tuple[str, ...] = ()      # lowercased app names, dropped entirely
+    activitywatch_deny_titles: tuple[str, ...] = ()    # regexes (case-insensitive), dropped entirely
+    activitywatch_work_titles: tuple[str, ...] = ()    # regexes that make a browser row web-work
+    activitywatch_categories: dict[str, str] = field(default_factory=dict)   # lowercased app -> cat
 
     @property
     def cf_access_headers(self) -> dict[str, str]:
@@ -85,10 +99,28 @@ def load_config() -> Config:
 
     transport = data.get("transport", {})
     machine = data.get("machine") or socket.gethostname().split(".")[0]
-    agents = tuple(data.get("agents") or ALL_AGENTS)
+    agents = tuple(data.get("agents") or DEFAULT_AGENTS)
     unknown = [a for a in agents if a not in ALL_AGENTS]
     if unknown:
         raise SystemExit(f"config: unknown agent(s) {unknown}; valid = {list(ALL_AGENTS)}")
+
+    aw_cats = {str(k).strip().lower(): v
+               for k, v in (data.get("activitywatch_categories") or {}).items()}
+    bad = sorted(k for k, v in aw_cats.items() if v not in AW_CATEGORIES)
+    if bad:
+        raise SystemExit(f"config: activitywatch_categories {bad}: category must be one of "
+                         f"{list(AW_CATEGORIES)}")
+    aw_titles = {k: tuple(str(p) for p in data.get(k) or ())
+                 for k in ("activitywatch_deny_titles", "activitywatch_work_titles")}
+    for key, patterns in aw_titles.items():
+        for i, pat in enumerate(patterns):
+            try:
+                re.compile(pat)
+            except re.error as exc:     # the pattern itself may name a bank: never echo it
+                raise SystemExit(f"config: {key}[{i}] is not a valid regex ({exc.msg})") from None
+    aw_days = int(data.get("activitywatch_title_days") or 180)
+    if aw_days < 1:
+        raise SystemExit("config: activitywatch_title_days must be at least 1")
 
     webhook_secret = _resolve(transport.get("webhook_secret"))
     pg_dsn = _resolve(transport.get("pg_dsn"))
@@ -115,4 +147,12 @@ def load_config() -> Config:
         cf_access_client_id=cf_id,
         cf_access_client_secret=cf_secret,
         repo_key_salt=salt,
+        activitywatch_url=str(data.get("activitywatch_url") or "http://localhost:5600"),
+        activitywatch_title_days=aw_days,
+        activitywatch_titles=_as_bool(data.get("activitywatch_titles", True)),
+        activitywatch_deny_apps=tuple(str(a).strip().lower()
+                                      for a in data.get("activitywatch_deny_apps") or ()),
+        activitywatch_deny_titles=aw_titles["activitywatch_deny_titles"],
+        activitywatch_work_titles=aw_titles["activitywatch_work_titles"],
+        activitywatch_categories=aw_cats,
     )

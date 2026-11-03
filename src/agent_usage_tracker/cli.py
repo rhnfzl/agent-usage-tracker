@@ -8,6 +8,8 @@
   aut backfill --activity-only [--dry-run]
                         the same for activity rows (steers, commits, turns, ...); never usage
   aut status            show config + watermark state
+  aut time add --start <local> --end <local> | --minutes N [--at <local end>] [--not-relevant]
+                        record a manual active-time interval (needs transport.pg_dsn)
 
 The dry-run report doubles as the accuracy check: it prints per-agent, per-model token
 sums straight from your real logs.
@@ -18,13 +20,13 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from . import __version__, pricing
-from .collectors import REGISTRY
+from .collectors import REGISTRY, activitywatch
 from .config import Config, load_config, _config_path
-from .event import ActivityEvent, UsageEvent, valid_ts
-from .push import (make_sender, scrub_error, send_activity_rows, send_scan_rows,
+from .event import ActivityEvent, TimeInterval, UsageEvent, make_event_id, valid_ts
+from .push import (_insert_pg, make_sender, scrub_error, send_activity_rows, send_scan_rows,
                    send_session_rows)
 from .state import collector_wm, load_state, save_state
 
@@ -45,10 +47,17 @@ def _wm_fp(wm: dict) -> str:
 def _blank_agg() -> dict:
     return {"events": 0, "human": 0, "input": 0, "output": 0, "cache_read": 0,
             "cache_write": 0, "reasoning": 0, "total": 0, "skipped_no_ts": 0,
-            "duplicates": 0, "by_model": {}, "activity": {}}
+            "duplicates": 0, "by_model": {}, "activity": {},
+            "intervals": 0, "time": {}, "relevant_s": 0.0}    # time: category -> seconds
 
 
-def _add(agg: dict, e: UsageEvent | ActivityEvent) -> None:
+def _add(agg: dict, e: UsageEvent | ActivityEvent | TimeInterval) -> None:
+    if isinstance(e, TimeInterval):      # active time; no tokens, kept out of events/human
+        secs = (datetime.fromisoformat(e.end_ts) - datetime.fromisoformat(e.ts)).total_seconds()
+        agg["intervals"] += 1
+        agg["time"][e.category] = agg["time"].get(e.category, 0.0) + secs
+        agg["relevant_s"] += secs if e.work_relevant else 0.0
+        return
     if isinstance(e, ActivityEvent):     # no tokens; tallied by kind, kept out of events/human
         agg["activity"][e.kind] = agg["activity"].get(e.kind, 0) + 1
         return
@@ -138,6 +147,8 @@ def run_scan(cfg: Config, agents: list[str], dry_run: bool) -> dict:
             else:                           # loop exhausted without draining (astronomically rare)
                 print(f"aut: warning: {name} hit the drain-pass cap ({_MAX_DRAIN_PASSES}); more "
                       "usage remains and will be picked up on the next scan.", file=sys.stderr)
+            if name == activitywatch.NAME and not dry_run:     # a dry run changes nothing
+                activitywatch.purge(cfg)                       # never raises
         except BaseException as exc:
             status, error = "error", scrub_error(exc)
             interrupted = not isinstance(exc, Exception)    # Ctrl-C: leave at once, send nothing
@@ -148,7 +159,8 @@ def run_scan(cfg: Config, agents: list[str], dry_run: bool) -> dict:
                 scan_rows.append({
                     "machine": cfg.machine, "collector": name, "started_at": started_at,
                     "finished_at": datetime.now(timezone.utc), "status": status,
-                    "events": agg["events"], "human": agg["human"], "newest_ts": newest_ts,
+                    "events": agg["events"] + agg["intervals"], "human": agg["human"],
+                    "newest_ts": newest_ts,
                     "error": error, "aut_version": __version__,
                 })
                 if status == "error" and not interrupted:   # the loop ends here: one delivery
@@ -165,7 +177,7 @@ def _print_report(cfg: Config, report: dict, dry_run: bool) -> None:
     grand = 0
     for name, agg in report.items():
         if (agg["events"] == 0 and agg["human"] == 0 and agg["skipped_no_ts"] == 0
-                and agg["duplicates"] == 0):
+                and agg["duplicates"] == 0 and agg["intervals"] == 0):
             print(f"{name:<12} -  no new usage")
             continue
         grand += agg["total"]
@@ -178,6 +190,12 @@ def _print_report(cfg: Config, report: dict, dry_run: bool) -> None:
                 print(f"    {model:<28} {mv['events']:>5} turns  {mv['total']:>12,} tokens")
         if agg["human"]:
             print(f"{name:<12} {agg['human']:>6} human turns (prompts you sent)")
+        if agg["intervals"]:
+            total_s = sum(agg["time"].values())
+            print(f"{name:<12} {agg['intervals']:>6} intervals  {total_s / 60:,.1f} min active "
+                  f"({agg['relevant_s'] / 60:,.1f} min work-relevant)")
+            for cat, secs in sorted(agg["time"].items(), key=lambda kv: -kv[1]):
+                print(f"    {cat:<28} {secs / 60:>9,.1f} min")
         if agg["activity"]:
             print(f"{name:<12} activity rows {json.dumps(agg['activity'], sort_keys=True)}")
         if agg["skipped_no_ts"]:
@@ -211,7 +229,7 @@ def run_export(cfg: Config, agents: list[str], out) -> tuple[int, int]:
             before = _wm_fp(wm)
             for events, commit in REGISTRY[name](cfg, wm):
                 for e in events:
-                    if isinstance(e, ActivityEvent):    # the CSV is agents.usage_event only
+                    if not isinstance(e, UsageEvent):   # the CSV is agents.usage_event only
                         continue
                     e.machine = cfg.machine
                     if not valid_ts(e.ts):
@@ -260,6 +278,8 @@ def run_session_backfill(cfg: Config, agents: list[str], dry_run: bool, sessions
             for events, commit in REGISTRY[name](cfg, wm):
                 for e in events:
                     e.machine = cfg.machine
+                    if isinstance(e, TimeInterval):     # neither a session nor an activity row
+                        continue
                     if isinstance(e, ActivityEvent):
                         if activity and valid_ts(e.ts) and e.event_id not in seen:
                             seen.add(e.event_id)
@@ -320,11 +340,64 @@ def cmd_status(cfg: Config, agents: tuple[str, ...]) -> None:
                      ("enabled, not yet scanned" if cfg.cursor_api else "disabled (cursor_api=false)")
         elif "chats" in wm:
             detail = f"{len(wm['chats'])} chats, {len(wm.get('sdk', {}))} SDK stores tracked"
+        elif name == activitywatch.NAME:
+            detail = f"read until {wm['end']}" if "end" in wm else "never scanned"
         elif "files" in wm:
             detail = f"{len(wm['files'])} files tracked"
         else:
             detail = "never scanned"
         print(f"    {name:<12} {detail}")
+
+
+_MAX_MANUAL = timedelta(hours=16)
+
+
+def _local(value: str) -> datetime:
+    """A datetime typed by the user; no zone means this machine's local time."""
+    try:
+        dt = datetime.fromisoformat(value)
+    except ValueError:
+        raise SystemExit(f"time add: not a date and time: {value!r} (use YYYY-MM-DD HH:MM)") \
+            from None
+    return dt if dt.tzinfo else dt.astimezone()
+
+
+def build_manual(cfg: Config, start: str | None = None, end: str | None = None,
+                 minutes: int | None = None, at: str | None = None, not_relevant: bool = False,
+                 now: datetime | None = None) -> TimeInterval:
+    """One manual agents.time_interval row, or SystemExit with the reason it was refused."""
+    now = now or datetime.now(timezone.utc)
+    if minutes is not None:
+        if start or end:
+            raise SystemExit("time add: use --start/--end or --minutes, not both")
+        end_dt = _local(at) if at else now
+        start_dt = end_dt - timedelta(minutes=minutes)
+    elif start and end and not at:
+        start_dt, end_dt = _local(start), _local(end)
+    else:
+        raise SystemExit("time add: give --start and --end, or --minutes [--at]")
+    if end_dt <= start_dt:
+        raise SystemExit("time add: the end must be after the start")
+    if end_dt - start_dt > _MAX_MANUAL:
+        raise SystemExit("time add: an interval can span at most 16 hours")
+    if start_dt > now:
+        raise SystemExit("time add: the start is in the future")
+    s_iso = start_dt.astimezone(timezone.utc).isoformat()
+    e_iso = end_dt.astimezone(timezone.utc).isoformat()
+    return TimeInterval(event_id=make_event_id("manual", cfg.machine, s_iso, e_iso), ts=s_iso,
+                        end_ts=e_iso, source="manual", app=None, title=None, category=None,
+                        work_relevant=not not_relevant, attrs={}, machine=cfg.machine)
+
+
+def cmd_time_add(cfg: Config, args) -> None:
+    row = build_manual(cfg, args.start, args.end, args.minutes, args.at, args.not_relevant)
+    if not cfg.has_pg:
+        raise SystemExit("time add needs transport.pg_dsn")
+    _insert_pg(cfg.pg_dsn, [row])
+    s, e = (datetime.fromisoformat(x).astimezone() for x in (row.ts, row.end_ts))
+    mins = (e - s).total_seconds() / 60
+    print(f"added manual interval {s:%Y-%m-%d %H:%M} -> {e:%Y-%m-%d %H:%M} ({mins:.0f} min, "
+          f"{'relevant' if row.work_relevant else 'not relevant'})")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -355,6 +428,15 @@ def main(argv: list[str] | None = None) -> int:
     p_report.add_argument("--prices", help="price map (default: <config-dir>/model_prices.json)")
     p_report.add_argument("--idle-gap", type=int, default=1800,
                           help="session idle-gap seconds (default 1800)")
+    p_time = sub.add_parser("time", help="manual active time")
+    time_sub = p_time.add_subparsers(dest="time_cmd", required=True)
+    p_tadd = time_sub.add_parser("add", help="record one manual interval (local times)")
+    p_tadd.add_argument("--start", help="local start, e.g. '2026-11-03 09:00'")
+    p_tadd.add_argument("--end", help="local end")
+    p_tadd.add_argument("--minutes", type=int, help="length in minutes, ending at --at")
+    p_tadd.add_argument("--at", help="local end for --minutes (default: now)")
+    p_tadd.add_argument("--not-relevant", action="store_true",
+                        help="not work-relevant (default: relevant)")
     args = parser.parse_args(argv)
 
     if args.cmd == "sync-prices":
@@ -385,6 +467,10 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.cmd == "status":
         cmd_status(cfg, agents)
+        return 0
+
+    if args.cmd == "time":
+        cmd_time_add(cfg, args)
         return 0
 
     if args.cmd == "export":
