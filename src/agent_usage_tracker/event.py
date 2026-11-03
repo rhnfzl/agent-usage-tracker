@@ -38,6 +38,16 @@ def make_event_id(agent: str, *parts: object) -> str:
 
 
 @dataclass(slots=True)
+class EventSession:
+    """Which session an event belongs to (one agents.event_session row). event_id, machine and
+    agent come from the owning UsageEvent, because the runner stamps machine after collect()."""
+    session_id: str
+    parent_session_id: str | None    # the spawning session, subagents only
+    run_origin: str                  # interactive | automated | subagent | unknown
+    turn_id: str | None              # the user turn (promptId) this event answers
+
+
+@dataclass(slots=True)
 class UsageEvent:
     event_id: str
     ts: str | None           # ISO-8601 from the source log line
@@ -54,9 +64,18 @@ class UsageEvent:
     est_cost_usd: float | None = None        # NOTIONAL / API-equivalent; subs are flat-rate
     project: str | None = None               # working-dir basename, never a full path
     machine: str | None = field(default=None)  # stamped by the runner, not the collector
+    session: EventSession | None = None        # claude_code only for now; never in to_dict()
 
     def to_dict(self) -> dict:
-        return asdict(self)
+        d = asdict(self)
+        del d["session"]                # the usage payload and columns stay exactly as before
+        return d
+
+    def session_row(self) -> dict | None:
+        if self.session is None:
+            return None
+        return {"event_id": self.event_id, "machine": self.machine, "agent": self.agent,
+                **asdict(self.session)}
 
     @property
     def any_tokens(self) -> bool:
