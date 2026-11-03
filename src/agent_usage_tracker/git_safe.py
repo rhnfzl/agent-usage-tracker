@@ -48,4 +48,7 @@ def _credential_config() -> tuple[str, ...]:
 
 
 def git_env() -> dict[str, str]:
-    return dict(os.environ, GIT_CONFIG_NOSYSTEM="1", GIT_TERMINAL_PROMPT="0")
+    # GIT_ALLOW_PROTOCOL replaces every protocol.*.allow setting, the repo's own included: a repo
+    # setting protocol.git.allow=always would otherwise beat the -c protocol.allow=never above.
+    return dict(os.environ, GIT_CONFIG_NOSYSTEM="1", GIT_TERMINAL_PROMPT="0",
+                GIT_ALLOW_PROTOCOL="https:ssh:file")

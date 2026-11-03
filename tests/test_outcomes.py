@@ -705,3 +705,24 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+
+def test_repo_cannot_switch_a_protocol_back_on():
+    # protocol.<name>.allow beats protocol.allow, so a repo setting protocol.git.allow=always
+    # would turn git:// (and with it the repo's own core.gitProxy) back on; GIT_ALLOW_PROTOCOL wins.
+    with tempfile.TemporaryDirectory() as d:
+        work, _s = _world(Path(d))
+        mark = Path(d) / "proxy-ran"
+        sc = Path(d) / "evil-proxy.sh"
+        sc.write_text(f"#!/bin/sh\necho ran > '{mark}'\n")
+        sc.chmod(0o755)
+        _g(work, "config", "protocol.git.allow", "always")
+        _g(work, "config", "core.gitProxy", str(sc))
+        _g(work, "remote", "add", "gp", "git://127.0.0.1:9/x")
+        plain = subprocess.run(["git", "-C", str(work), "-c", "protocol.allow=never", "fetch",
+                                "-q", "gp"], capture_output=True, timeout=60)
+        assert plain.returncode != 0 and mark.exists(), "the repo setting must win without the guard"
+        mark.unlink()
+        r = subprocess.run(git_argv(str(work), "fetch", "-q", "gp"), capture_output=True,
+                           timeout=60, env=git_env())
+        assert r.returncode != 0 and not mark.exists(), r.stderr
