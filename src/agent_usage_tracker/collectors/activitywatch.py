@@ -222,10 +222,15 @@ def denied(cfg: Config, app: str, title: str, data: dict | None = None) -> bool:
     return any(re.search(p, text, re.I) for p in (*_DENY_TITLES, *cfg.activitywatch_deny_titles))
 
 
-def clean_title(title: str) -> str:
+def redact(text: str) -> str:
+    """The redaction alone, for any local text (titles here, steer text in `aut label`)."""
     for _, pattern, repl in _REDACT:
-        title = pattern.sub(repl, title)
-    return title[:_TITLE_MAX]
+        text = pattern.sub(repl, text)
+    return text
+
+
+def clean_title(title: str) -> str:
+    return redact(title)[:_TITLE_MAX]
 
 
 def browser_category(cfg: Config, title: str, url: str = "") -> tuple[str, str]:

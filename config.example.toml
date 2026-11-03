@@ -100,3 +100,13 @@ webhook_secret = "env:AUT_WEBHOOK_SECRET"      # shared secret sent as the X-AUT
 # so a teammate's usage is never captured. Off by default. Requires Cursor installed + signed in.
 # cursor_api = true
 # cursor_api_lookback_days = 90    # first-scan window before a watermark exists
+
+# `aut label` (optional extra `aut[label]`, Apple silicon): a local model labels steers, work time
+# and window titles on this machine; only the label (an enum and a probability) is sent. The
+# nightly run (AUT_LABEL=1 in scan.env) labels only the tasks listed here; `aut label run --task T`
+# runs any one by hand. Tasks: steer_intent work_category soft_outcome aw_title_relevance daily_note
+# label_tasks = ["steer_intent"]
+# label_model = "mlx-community/gemma-4-31b-it-4bit"   # a local Hugging Face snapshot; never downloaded by aut
+# label_precision = 0.90       # per-label tau is set for this precision on your gold labels
+# label_coverage = 0.75        # a module below this share of known labels is not exported
+# label_budget_s = 3600        # time budget of one run; the rest waits for the next night

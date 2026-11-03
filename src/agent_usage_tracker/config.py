@@ -75,6 +75,13 @@ class Config:
     # `aut outcomes`: where the local clones live, and whether it fetches them (and asks gh) first.
     outcome_repo_roots: tuple[str, ...] = ("~/projects",)
     outcome_fetch: bool = False
+    # `aut label` (local model on this machine): which tasks the nightly run labels, the model,
+    # the precision bar for tau and the coverage gate, and the run's time budget.
+    label_tasks: tuple[str, ...] = ()
+    label_model: str = "mlx-community/gemma-4-31b-it-4bit"
+    label_precision: float = 0.90
+    label_coverage: float = 0.75
+    label_budget_s: int = 3600
 
     @property
     def cf_access_headers(self) -> dict[str, str]:
@@ -130,6 +137,15 @@ def load_config() -> Config:
     if aw_days < 0:
         raise SystemExit("config: activitywatch_title_days must be 0 (keep) or a number of days")
 
+    from .label.tasks import TASK_NAMES      # late: label imports config
+    label_tasks = data.get("label_tasks") or []
+    if not isinstance(label_tasks, list) or any(t not in TASK_NAMES for t in label_tasks):
+        raise SystemExit(f"config: label_tasks must be a list of {list(TASK_NAMES)}")
+    label_precision, label_coverage = (float(data.get(k, d)) for k, d in
+                                       (("label_precision", 0.90), ("label_coverage", 0.75)))
+    if not (0 < label_precision <= 1 and 0 <= label_coverage <= 1):
+        raise SystemExit("config: label_precision and label_coverage must lie in 0..1")
+
     webhook_secret = _resolve(transport.get("webhook_secret"))
     pg_dsn = _resolve(transport.get("pg_dsn"))
     cf_id = _resolve(transport.get("cf_access_client_id"))
@@ -165,4 +181,9 @@ def load_config() -> Config:
         activitywatch_categories=aw_cats,
         outcome_repo_roots=tuple(roots),
         outcome_fetch=_as_bool(data.get("outcome_fetch", False)),
+        label_tasks=tuple(label_tasks),
+        label_model=str(data.get("label_model") or "mlx-community/gemma-4-31b-it-4bit"),
+        label_precision=label_precision,
+        label_coverage=label_coverage,
+        label_budget_s=int(data.get("label_budget_s") or 3600),
     )

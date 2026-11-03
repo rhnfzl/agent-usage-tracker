@@ -16,6 +16,16 @@
                         the manual outcome of this project's newest interactive session
   aut episodes review [--month YYYY-MM]
                         hand-check a month's episodes on a local page -> agents.episode_correction
+  aut label run [--task T] [--since YYYY-MM-DD] [--dry-run]
+                        a local model labels new units (optional extra aut[label]) -> label rows
+  aut label backfill --task T --days N
+                        the same over the last N days; the nightly watermark is not moved back
+  aut label teach --task T --n N [--budget-usd X]
+                        teacher (silver) labels for a stratified sample -> eval/<task>.silver.jsonl
+  aut label review [--task T]
+                        label gold answers on a local page -> eval/<task>.jsonl (never text)
+  aut label eval --task T | choose --task T | train-encoder --task T
+                        bake-off on gold -> eval record; the winner -> label.json; the encoder
 
 The dry-run report doubles as the accuracy check: it prints per-agent, per-model token
 sums straight from your real logs.
@@ -26,7 +36,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
 from . import __version__, pricing
 from .collectors import REGISTRY, activitywatch
@@ -412,6 +422,33 @@ def cmd_time_add(cfg: Config, args) -> None:
           f"{'relevant' if row.work_relevant else 'not relevant'})")
 
 
+def cmd_label_eval(cfg: Config, args) -> int:
+    """teach | review | eval | choose | train-encoder: the gold and silver labels on this machine."""
+    if args.label_cmd == "teach":
+        from .label import teach
+        teach.print_teach(args.task, teach.run_teach(cfg, args.task, args.n, args.budget_usd,
+                                                     args.days), args.budget_usd)
+    elif args.label_cmd == "review":
+        from .label import gold
+        gold.run_review(cfg, args.task, args.days)
+    else:
+        from .label import bakeoff
+        if args.label_cmd == "eval":
+            for r in bakeoff.run_eval(cfg, args.task, args.days):
+                print(f"label eval {args.task} {r['model_id']}: macro-F1 {r['macro_f1']}, kappa "
+                      f"{r['kappa']}, ECE {r['ece_raw']} -> {r['ece_cal']}, coverage "
+                      f"{r['coverage']}, n {r['n']} (held out {r['n_held']}), "
+                      f"{r['s_per_decision']} s per decision")
+        elif args.label_cmd == "choose":
+            c = bakeoff.choose(cfg, args.task)
+            print(f"label choose {args.task}: {c['backend']} {c['model_id']} (T "
+                  f"{c['temperature']}, tau {json.dumps(c['tau'])})")
+        else:
+            r = bakeoff.train_encoder(cfg, args.task, args.days)
+            print(f"label train-encoder {args.task}: {json.dumps(r)}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="aut", description="coding-agent token usage tracker")
     parser.add_argument("--agents", help="comma-separated subset override (default: config)")
@@ -460,6 +497,34 @@ def main(argv: list[str] | None = None) -> int:
     eps_sub = p_eps.add_subparsers(dest="eps_cmd", required=True)
     p_rev = eps_sub.add_parser("review", help="hand-check one month's episodes (local page)")
     p_rev.add_argument("--month", help="YYYY-MM (default: the last completed month)")
+    from .label.tasks import TASK_NAMES
+    p_lab = sub.add_parser("label", help="local model labels (optional extra aut[label])")
+    lab_sub = p_lab.add_subparsers(dest="label_cmd", required=True)
+    p_lrun = lab_sub.add_parser("run", help="label new units since the watermark")
+    p_lrun.add_argument("--task", choices=TASK_NAMES, help="one task (default: label_tasks)")
+    p_lrun.add_argument("--since", type=date.fromisoformat,
+                        help="local YYYY-MM-DD to start from instead of the watermark")
+    p_lrun.add_argument("--dry-run", action="store_true", help="score and count, write nothing")
+    p_lback = lab_sub.add_parser("backfill", help="label one task over the last N days")
+    p_lback.add_argument("--task", choices=TASK_NAMES, required=True)
+    p_lback.add_argument("--days", type=int, required=True)
+    from .label.evalset import DAYS
+    from .label.tasks import TASKS
+    p_teach = lab_sub.add_parser("teach", help="teacher (silver) labels for a stratified sample")
+    p_teach.add_argument("--task", choices=list(TASKS), required=True)
+    p_teach.add_argument("--n", type=int, required=True, help="units to label this run")
+    p_teach.add_argument("--budget-usd", type=float, default=5.0,
+                         help="cap on this run's Sonnet spend (default 5)")
+    p_lrev = lab_sub.add_parser("review", help="label gold answers on a local page")
+    p_lrev.add_argument("--task", choices=list(TASKS))
+    for name, text in (("eval", "score every backend on the gold labels"),
+                       ("choose", "write the smallest backend that passes into label.json"),
+                       ("train-encoder", "fit the small encoder on gold + silver")):
+        lab_sub.add_parser(name, help=text).add_argument("--task", choices=list(TASKS),
+                                                         required=True)
+    for sp in (p_teach, p_lrev, lab_sub.choices["eval"], lab_sub.choices["train-encoder"]):
+        sp.add_argument("--days", type=int, default=DAYS,
+                        help=f"window of whole past days the units come from (default {DAYS})")
     args = parser.parse_args(argv)
 
     if args.cmd == "sync-prices":
@@ -519,6 +584,21 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "episodes":
         from . import review
         review.run_review(cfg, args.month)
+        return 0
+
+    if args.cmd == "label" and args.label_cmd not in ("run", "backfill"):
+        return cmd_label_eval(cfg, args)
+
+    if args.cmd == "label":
+        from .label import run as label_run
+        if args.label_cmd == "backfill":
+            since = date.today() - timedelta(days=args.days)
+            tasks, dry = [args.task], False
+        else:
+            since, tasks, dry = args.since, [args.task] if args.task else None, args.dry_run
+        report = label_run.run_label(cfg, tasks, label_run.local_midnight(since) if since
+                                     else None, dry)
+        label_run.print_report(report, dry)
         return 0
 
     if args.cmd == "export":
