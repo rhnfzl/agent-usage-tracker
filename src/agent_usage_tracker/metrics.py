@@ -54,18 +54,16 @@ def iter_sessions(rows: Iterable[Row], idle_gap_s: int):
 def cost_of(row: Row, prices: dict[str, dict[str, float]]) -> float | None:
     """API-equivalent cost of one row, or None if the model is not priced.
     cache_read/write use their own rate when present, else fall back to the input rate.
-    Reasoning bills as output."""
+    reasoning_tokens is already inside output_tokens, so it is never charged again."""
     p = prices.get(normalize_model_key(row.model or ""))
     if not p:
         return None
     in_rate = p.get("input_cost", 0.0)
-    out_rate = p.get("output_cost", 0.0)
     return (
         row.input_tokens * in_rate
-        + row.output_tokens * out_rate
+        + row.output_tokens * p.get("output_cost", 0.0)
         + row.cache_read_tokens * p.get("cache_read_cost", in_rate)
         + row.cache_write_tokens * p.get("cache_write_cost", in_rate)
-        + (row.reasoning_tokens or 0) * out_rate
     )
 
 
@@ -76,13 +74,11 @@ def naive_cost_of(row: Row, prices: dict[str, dict[str, float]]) -> float | None
     if not p:
         return None
     in_rate = p.get("input_cost", 0.0)
-    out_rate = p.get("output_cost", 0.0)
     return (
         row.input_tokens * in_rate
-        + row.output_tokens * out_rate
+        + row.output_tokens * p.get("output_cost", 0.0)
         + row.cache_read_tokens * in_rate
         + row.cache_write_tokens * p.get("cache_write_cost", in_rate)
-        + (row.reasoning_tokens or 0) * out_rate
     )
 
 
