@@ -16,6 +16,8 @@
                         the manual outcome of this project's newest interactive session
   aut episodes review [--month YYYY-MM]
                         hand-check a month's episodes on a local page -> agents.episode_correction
+  aut inspect --episode ID | --day YYYY-MM-DD | --label UNIT_ID
+                        why an episode, a day's episodes or a label exist, on a local read-only page
   aut label run [--task T] [--since YYYY-MM-DD] [--dry-run]
                         a local model labels new units (optional extra aut[label]) -> label rows
   aut label backfill --task T --days N
@@ -471,12 +473,9 @@ def main(argv: list[str] | None = None) -> int:
     p_sync.add_argument("--out", help="output JSON (default: <config-dir>/model_prices.json)")
     p_sync.add_argument("--litellm-url", default=pricing.LITELLM_URL)
     p_sync.add_argument("--models-dev-url", default=pricing.MODELS_DEV_URL)
-    p_report = sub.add_parser("report",
-                              help="compute showcase metrics from the sink -> metrics.json")
-    p_report.add_argument("--out", help="output JSON (default: <config-dir>/metrics.json)")
-    p_report.add_argument("--prices", help="price map (default: <config-dir>/model_prices.json)")
-    p_report.add_argument("--idle-gap", type=int, default=1800,
-                          help="session idle-gap seconds (default 1800)")
+    p_report = sub.add_parser("report", help="retired: replaced by the database views")
+    for flag in ("--out", "--prices", "--idle-gap"):   # still accepted, so old crons only warn
+        p_report.add_argument(flag, help=argparse.SUPPRESS)
     p_time = sub.add_parser("time", help="manual active time")
     time_sub = p_time.add_subparsers(dest="time_cmd", required=True)
     p_tadd = time_sub.add_parser("add", help="record one manual interval (local times)")
@@ -497,6 +496,11 @@ def main(argv: list[str] | None = None) -> int:
     eps_sub = p_eps.add_subparsers(dest="eps_cmd", required=True)
     p_rev = eps_sub.add_parser("review", help="hand-check one month's episodes (local page)")
     p_rev.add_argument("--month", help="YYYY-MM (default: the last completed month)")
+    p_ins = sub.add_parser("inspect", help="why an episode, a day or a label exists (local page)")
+    ins = p_ins.add_mutually_exclusive_group(required=True)
+    ins.add_argument("--episode", help="episode id (a prefix is enough)")
+    ins.add_argument("--day", help="local YYYY-MM-DD: the episodes active that day")
+    ins.add_argument("--label", help="a label's unit_id (steer event id, <episode>:<date>, ...)")
     from .label.tasks import TASK_NAMES
     p_lab = sub.add_parser("label", help="local model labels (optional extra aut[label])")
     lab_sub = p_lab.add_subparsers(dest="label_cmd", required=True)
@@ -534,6 +538,12 @@ def main(argv: list[str] | None = None) -> int:
         print(f"synced {n} model prices -> {out}", file=sys.stderr)
         return 0
 
+    if args.cmd == "report":
+        # shortcut: kept one release so old crons only warn; delete the subcommand after that
+        print("aut report is retired: metrics.json is replaced by the agents database views "
+              "(Grafana on the LAN). Nothing was written.", file=sys.stderr)
+        return 0
+
     cfg = load_config()
     agents = cfg.agents
     if args.agents:
@@ -541,17 +551,6 @@ def main(argv: list[str] | None = None) -> int:
         bad = [a for a in agents if a not in REGISTRY]
         if bad:
             parser.error(f"unknown agent(s): {bad}; valid = {list(REGISTRY)}")
-
-    if args.cmd == "report":
-        from . import report as report_mod
-        out = args.out or str(_config_path().parent / "metrics.json")
-        prices = args.prices or str(_config_path().parent / "model_prices.json")
-        metrics = report_mod.run_report(cfg.pg_dsn, prices, out,
-                                        idle_gap_s=args.idle_gap)
-        cov = metrics["priced_coverage"]
-        print(f"wrote metrics -> {out}  (priced {cov['models_priced']} models, "
-              f"{cov['unpriced_token_share']:.0%} of tokens unpriced)", file=sys.stderr)
-        return 0
 
     if args.cmd == "status":
         cmd_status(cfg, agents)
@@ -579,6 +578,11 @@ def main(argv: list[str] | None = None) -> int:
         row = outcomes.build_manual_outcome(cfg, args.outcome, os.getcwd(), args.session)
         outcomes.insert_manual(cfg.pg_dsn, row)
         print(f"marked session {row['session_id'][:8]} {row['outcome']}")
+        return 0
+
+    if args.cmd == "inspect":
+        from . import inspector
+        inspector.run_inspect(cfg, episode=args.episode, day=args.day, label=args.label)
         return 0
 
     if args.cmd == "episodes":

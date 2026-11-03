@@ -88,10 +88,10 @@ aut backfill           # reset the watermark, then push all history
 aut status             # config + watermark state
 aut export --out f.csv # write all usage as CSV (offline bulk-load / bridge)
 aut sync-prices        # refresh the API-equivalent model price map (LiteLLM -> models.dev)
-aut report             # compute showcase metrics from the sink -> metrics.json (needs [postgres])
 aut outcomes --dry-run # what became of each agent commit (merged, reverted, open, ...); counts only
 aut outcome shipped    # manual outcome of this project's newest session (also: ruled-out, open)
 aut episodes review    # hand-check last month's episodes on a page served on 127.0.0.1
+aut inspect --day 2026-11-02  # why each episode exists (also --episode ID, --label UNIT_ID)
 aut label run --dry-run  # a local model labels steers, work time, window titles (extra aut[label])
 aut label review       # label gold answers one at a time on a page served on 127.0.0.1
 aut label eval --task steer_intent  # bake-off on your gold labels; `label choose` keeps the winner
@@ -123,21 +123,20 @@ and the sink dedups re-sends by `event_id`.
 
 `CONTRACT.md` has the event schema and the webhook payload.
 
-## Showcase metrics (derived, opt-in)
+## Read side
 
-`aut report` reads the **unified sink** through `transport.pg_dsn`, which doubles as the
-report's read source, and writes a small `metrics.json` for a personal-site showcase.
+Aggregates live in the sink's database views (private, read through Grafana on your own LAN);
+aut itself publishes nothing. `aut report` and its `metrics.json` are retired: the command still
+runs for one release and only prints that note.
 
-It is a pure derivation over data you already hold. The collector is unchanged, and **`project`
-is never read**, so no project name can reach the output. That is aggregate by construction
-rather than aggregate by redaction.
+`aut inspect` is the evidence inspector for those views. For one episode (`--episode`, an id or a
+prefix), every episode active on a local day (`--day`), or the episode a label belongs to
+(`--label`, the label's `unit_id`), it serves a read-only page on 127.0.0.1 (random port and
+token) with the member sessions, the anchors by type that joined them, the outcome rule that
+fired, the labels with probability and model, and the hand corrections. Titles and branch names
+are read from this machine's logs and stay in that page. A link opens the `aut episodes review`
+form for the same episodes, the one action that writes (corrections, keys only).
 
-- **Framing.** It reports *ratios and trends*: cache-hit rate, output leverage, adoption
-  timeline, agent turns per human turn. Volume shows up once, framed as API-equivalent work
-  done on a flat-rate subscription, not as a token scoreboard.
-- **Pricing.** `aut sync-prices` builds `model_prices.json` from LiteLLM (primary) and
-  models.dev (fallback), both open source, extended here to carry the cache-read and
-  cache-write rates this tool needs. Every `$` figure is **notional and API-equivalent**. A
-  model missing from the map is reported under `priced_coverage`, never guessed.
-- **Sessions** are derived at report time by idle gap, 30 minutes by default via `--idle-gap`,
-  so the count covers all history without touching the collector.
+`aut sync-prices` builds `model_prices.json` from LiteLLM (primary) and models.dev (fallback),
+extended to carry the cache-read and cache-write rates. Every `$` figure derived from it is
+notional and API-equivalent.
