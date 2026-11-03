@@ -25,7 +25,7 @@ from ..event import ActivityEvent, make_event_id
 from ..push import send_activity_rows
 from .backends import MODELS, Encoder, encoder_path, features, make_backend
 from .core import Choice, choice_path, fit_tau, fit_temperature, softmax, temper
-from .evalset import (DAYS, append_jsonl, gold_latest, held_out, path, read_jsonl,
+from .evalset import (DAYS, append_jsonl, encoder_fit, gold_latest, held_out, path, read_jsonl,
                       silver_by_unit, stratum, window_units)
 from .tasks import TASKS, Source
 
@@ -88,7 +88,8 @@ def evaluate(task: str, backend, items: list[tuple], precision: float,
     t0 = time.monotonic()
     raws = [backend.distribution(r) for r, *_ in items]
     secs = (time.monotonic() - t0) / max(len(items), 1)
-    cal = [i for i, it in enumerate(items) if not it[2]]
+    enc = isinstance(backend, Encoder)      # its training half never calibrates it
+    cal = [i for i, it in enumerate(items) if not it[2] and not (enc and encoder_fit(it[0]))]
     held = [i for i, it in enumerate(items) if it[2]]
     t = fit_temperature([raws[i] for i in cal], [items[i][1] for i in cal])
     dists = [temper(d, t) for d in raws]
@@ -177,11 +178,15 @@ def run_eval(cfg: Config, task: str, days: int = DAYS, src: Source | None = None
     return recs
 
 
-def passes(rec: dict, coverage: float) -> bool:
-    """The bar (map.md 4): a held-out report, coverage at tau at least label_coverage, and no
+def passes(rec: dict, coverage: float, precision: float) -> bool:
+    """The bar (map.md 4): a held-out report, coverage at tau at least label_coverage, every
+    label that passed held-out items at its tau right at least `precision` of the time, and no
     label's share on known items off by more than SHARE_ERROR_PP."""
-    errs = [v["share_error_pp"] for v in rec["per_label"].values()]
+    per = rec["per_label"].values()
+    errs = [v["share_error_pp"] for v in per]
     return bool(rec["n_held"]) and (rec["coverage"] or 0) >= coverage \
+        and all(v.get("precision_at_tau") is None or v["precision_at_tau"] >= precision
+                for v in per) \
         and all(e is not None and e <= SHARE_ERROR_PP for e in errs)
 
 
@@ -191,7 +196,7 @@ def choose(cfg: Config, task: str) -> dict:
     for r in read_jsonl(path(task, "eval")):
         if r.get("task_ver") == TASKS[task].ver:
             newest[r["model_id"]] = r                   # the file is in time order
-    ok = [r for r in newest.values() if passes(r, cfg.label_coverage)]
+    ok = [r for r in newest.values() if passes(r, cfg.label_coverage, cfg.label_precision)]
     if not ok:
         why = {m: {"coverage": r["coverage"], "n_held": r["n_held"]} for m, r in newest.items()}
         raise SystemExit(f"label choose: no backend passes the bar for {task}: {json.dumps(why)}")
@@ -238,15 +243,16 @@ def _fit(data: list[tuple[list[int], list[float], float]], k: int, epochs: int =
 
 
 def train_encoder(cfg: Config, task: str, days: int = DAYS, src: Source | None = None) -> dict:
-    """Fit the encoder on gold (calibration days, GOLD_WEIGHT) and silver (teachers averaged),
-    never on a held-out gold unit; report accuracy and macro-F1 on the held-out gold only."""
+    """Fit the encoder on half the calibration-day gold (encoder_fit, GOLD_WEIGHT) and silver
+    (teachers averaged), never on a held-out gold unit nor on the gold eval calibrates it with;
+    report accuracy and macro-F1 on the held-out gold only."""
     labels = [c for c, _d in TASKS[task].candidates]
     reqs = window_units(cfg, task, days, src)
     gold, silver = gold_latest(task), silver_by_unit(task)
     test = {u for u in gold if u in reqs and held_out(reqs[u])}
     data = []
     for u, g in gold.items():
-        if u in reqs and u not in test:
+        if u in reqs and u not in test and encoder_fit(reqs[u]):
             data.append((features(reqs[u].state), [float(x == g) for x in labels], GOLD_WEIGHT))
     for u, ts in silver.items():
         if u in reqs and u not in test and u not in gold and ts:

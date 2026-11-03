@@ -22,7 +22,7 @@ from ..push import scrub_error, send_activity_rows, send_scan_rows
 from ..state import collector_wm, load_state, save_state
 from .backends import make_backend
 from .core import data_dir, decide, label_event, load_choice
-from .tasks import NOTE, OUTCOME_DAYS, TASKS, Source, units
+from .tasks import NOTE, OUTCOME_DAYS, TASKS, Source, SourceUnavailable, units
 
 BATCH = 50
 NAME = "label"
@@ -78,7 +78,9 @@ def _advance(wm: dict, name: str, ts: str | None) -> None:
 
 def _note_prompt(day: date, labels: list[dict], episodes: list[dict]) -> str:
     """Counts only: the day's accepted labels and episode facts, never a steer text or title."""
-    latest = {(a.get("task"), a.get("unit_id")): a for a in labels}     # newest row per unit
+    # the row agents.label_latest picks: newest task_ver, then newest labelled_at
+    latest = {(a.get("task"), a.get("unit_id")): a for a in sorted(
+        labels, key=lambda a: (a.get("task_ver") or 0, a.get("labelled_at") or ""))}
     by = Counter((a["task"], a["label"]) for a in latest.values() if not a.get("below_tau"))
     lines = [f"Write a short private note (3 to 5 sentences) about the work day {day}. Use only "
              "these facts and invent nothing.", "", "Confident labels (task: label count):"]
@@ -121,7 +123,7 @@ def _run_notes(cfg, src, backend, since, until, dry_run, deadline, wm, state) ->
 
 
 def _run_task(cfg, task, src, choice, backend, since, until, dry_run, deadline, wm, state,
-              cache) -> Counter:
+              cache, labelled_at) -> Counter:
     c: Counter = Counter()
     key = f"{task.name}@{task.ver}|{backend.model_id}|{choice.calib_ver}"
     done = set(cache.get(key, ())) if task.cached else set()
@@ -146,7 +148,7 @@ def _run_task(cfg, task, src, choice, backend, since, until, dry_run, deadline, 
             cut = r
             break
         res = decide(r, backend.distribution(r), choice, backend.model_id, backend.model_rev)
-        ev = label_event(r, res)
+        ev = label_event(r, res, labelled_at)
         ev.machine = cfg.machine
         pending.append(ev)
         c["rows"] += 1
@@ -171,6 +173,7 @@ def run_label(cfg: Config, tasks: list[str] | None = None, since: datetime | Non
     if not cfg.has_pg:
         raise SystemExit("label needs transport.pg_dsn (it reads the steer and episode rows)")
     started = datetime.now(timezone.utc)
+    labelled_at = started.isoformat(timespec="milliseconds")
     now = now or started
     src = src or Source(cfg)
     loaded: dict = {}
@@ -196,8 +199,13 @@ def run_label(cfg: Config, tasks: list[str] | None = None, since: datetime | Non
             if name == NOTE:
                 report[name] = _run_notes(cfg, src, backend, s, u, dry_run, deadline, wm, state)
             else:
-                report[name] = _run_task(cfg, TASKS[name], src, choice, backend, s, u, dry_run,
-                                         deadline, wm, state, cache)
+                try:
+                    report[name] = _run_task(cfg, TASKS[name], src, choice, backend, s, u,
+                                             dry_run, deadline, wm, state, cache, labelled_at)
+                except SourceUnavailable as exc:      # its watermark stays; the others go on
+                    print(f"aut: label {name}: {exc}; retried on the next run", file=sys.stderr)
+                    report[name] = Counter(unavailable=1)
+                    status, error = "error", scrub_error(exc)
         return report
     except BaseException as exc:
         status, error = "error", scrub_error(exc)

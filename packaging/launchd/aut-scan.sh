@@ -77,7 +77,8 @@ if [ "$rc" -eq 0 ] && [ "$(cat "$DAYMARK" 2>/dev/null)" != "$(date +%F)" ]; then
   date +%F >"$DAYMARK"
   echo "$(ts) outcomes start" >>"$LOG"
   "$AUT" outcomes >>"$LOG" 2>&1
-  echo "$(ts) outcomes done (exit $?)" >>"$LOG"
+  orc=$?    # before "$(ts)" below, which resets $?
+  echo "$(ts) outcomes done (exit $orc)" >>"$LOG"
 fi
 
 # Once a day after a delivered scan, only where AUT_LABEL=1: `aut label run` (the tasks in
@@ -89,7 +90,8 @@ if [ "$rc" -eq 0 ] && [ "${AUT_LABEL:-}" = "1" ] \
   date +%F >"$LABELMARK"
   echo "$(ts) label start" >>"$LOG"
   "$AUT" label run >>"$LOG" 2>&1
-  echo "$(ts) label done (exit $?)" >>"$LOG"
+  lrc=$?
+  echo "$(ts) label done (exit $lrc)" >>"$LOG"
 fi
 
 [ -n "$opened" ] && pkill -f "$SPEC" 2>/dev/null

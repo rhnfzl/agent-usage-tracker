@@ -167,6 +167,10 @@ def test_stratified_and_split():
     sides = {evalset.held_out(tasks.TASKS[TASK].request("steer", "u", BASE - timedelta(days=d),
                                                          {})) for d in range(20)}
     assert sides == {True, False}
+    # a title's ts moves with the window read: its side follows the unit_id, not the day
+    t = tasks.TASKS["aw_title_relevance"]
+    assert {evalset.held_out(t.request("aw_title", "k1", BASE - timedelta(days=d), {}))
+            for d in range(20)} == {evalset.held_out(t.request("aw_title", "k1", BASE, {}))}
     assert evalset.stratum(None) == "unlabelled"
     assert evalset.stratum({"x": {"a": 0.6, "b": 0.4}, "y": {"a": 0.9, "b": 0.1}}) == "a"
     assert evalset.stratum({"x": {"a": 0.6, "b": 0.4}, "y": {"a": 0.1, "b": 0.9}}) == "disagree"
@@ -300,6 +304,11 @@ def test_eval_record_choose_and_event(tmp_path, monkeypatch):
         c = core.load_choice(TASK)
         assert c.tau == {k: v["tau"] for k, v in good["per_label"].items()}
         assert c.calib_ver == good["calib_ver"] and c.model_rev == "r1"
+        # a held-out precision at tau below label_precision fails the bar, whatever coverage
+        rec = json.loads(json.dumps(good))
+        assert bakeoff.passes(rec, 0.75, 0.9)
+        rec["per_label"]["stop"]["precision_at_tau"] = 0.7
+        assert not bakeoff.passes(rec, 0.75, 0.9)
         # nothing passes -> no choice is written over the old one
         evalset.path(TASK, "eval").unlink()
         bakeoff.run_eval(cfg, TASK, src=src, backends=[Oracle("stop")])
@@ -329,7 +338,7 @@ def test_share_error_is_reweighted_to_natural_frequency(tmp_path):
 
 
 def test_train_encoder_and_backend(tmp_path):
-    golds = (["stop", "framing", "correction"] * 12)
+    golds = (["stop", "framing", "correction"] * 24)
     with _env(tmp_path):
         cfg, src, reqs = _gold(tmp_path, golds)
         with pytest.raises(SystemExit):
@@ -337,7 +346,12 @@ def test_train_encoder_and_backend(tmp_path):
         r = bakeoff.train_encoder(cfg, TASK, src=src)
         assert r["held_out"] > 0 and r["accuracy"] == 1.0 and r["macro_f1"] == 1.0
         held = {u for u, q in reqs.items() if evalset.held_out(q)}
-        assert r["trained_on"] == len(reqs) - len(held)
+        fit = {u for u, q in reqs.items() if u not in held and evalset.encoder_fit(q)}
+        assert 0 < len(fit) < len(reqs) - len(held) and r["trained_on"] == len(fit)
+        # eval calibrates the encoder only on the gold it never trained on
+        rec = bakeoff.evaluate(TASK, backends.Encoder(TASK), [
+            (q, q.state["text"].split()[0], u in held, 1.0) for u, q in reqs.items()], 0.9, "d")
+        assert rec["n_cal"] == len(reqs) - len(held) - len(fit) and rec["n_held"] == len(held)
         raw = backends.encoder_path(TASK).read_text()
         assert WORD not in raw and json.loads(raw)["labels"] == LABELS
         assert all(k.isdigit() for k in json.loads(raw)["w"])     # weights keyed by bucket ids

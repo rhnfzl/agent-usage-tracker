@@ -112,10 +112,21 @@ def unit_day(req: Request) -> date:
     return datetime.fromisoformat(req.ts).astimezone().date()
 
 
+def _side(key: str) -> int:
+    return int(hashlib.sha256(key.encode()).hexdigest(), 16) % 2
+
+
 def held_out(req: Request) -> bool:
     """Gold is split once, by the unit's local day: about half the days calibrate and choose, the
-    other half report. A day never changes sides, so a held-out answer never tunes anything."""
-    return int(hashlib.sha256(unit_day(req).isoformat().encode()).hexdigest(), 16) % 2 == 1
+    other half report. A day never changes sides, so a held-out answer never tunes anything. A
+    title's ts is its first sight inside the window read, which moves, so it splits by unit_id."""
+    return _side(req.unit_id if req.unit == "aw_title" else unit_day(req).isoformat()) == 1
+
+
+def encoder_fit(req: Request) -> bool:
+    """Of the non-held-out gold, the half the encoder trains on; the other half fits its
+    temperature and tau in eval, so they are never fitted on the encoder's own training data."""
+    return _side("encoder|" + req.unit_id) == 1
 
 
 def window_units(cfg: Config, task: str, days: int = DAYS, src: Source | None = None,

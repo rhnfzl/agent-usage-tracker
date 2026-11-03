@@ -40,12 +40,13 @@ class Task:
     #                                                 | recent: the last OUTCOME_DAYS, no watermark
     cached: bool = False                            # skip a unit_id already labelled (aw titles)
 
-    def request(self, unit: str, unit_id: str, ts: datetime, state: dict) -> Request:
+    def request(self, unit: str, unit_id: str, ts: datetime, state: dict,
+                rev: str | None = None) -> Request:
         return Request(task=self.name, task_ver=self.ver, unit=unit, unit_id=unit_id,
                        ts=ts.astimezone(timezone.utc).isoformat(), state=state,
                        question=self.question, decision=self.decision,
                        candidates=[{"id": i, "desc": d} for i, d in self.candidates],
-                       none_fits=self.none_fits)
+                       none_fits=self.none_fits, rev=rev)
 
 
 _OTHER = ("other", "none of the above fits")
@@ -86,6 +87,10 @@ TASKS: dict[str, Task] = {t.name: t for t in (
 )}
 NOTE = "daily_note"          # generative, private: one draft per day (run.py), not a decision
 TASK_NAMES = (*TASKS, NOTE)
+
+
+class SourceUnavailable(RuntimeError):
+    """A source the units need could not be read: the task's watermark must not move."""
 
 
 def _sql(dsn: str, sql: str, params: tuple) -> list[tuple]:
@@ -161,7 +166,10 @@ class Source:
 
     def windows(self, since: datetime, until: datetime) -> list[dict]:
         """This machine's ActivityWatch window rows in [since, until), through the collector's own
-        guards (idle, deny-list, redaction, title settings), one day per query."""
+        guards (idle, deny-list, redaction, title settings), one day per query. None where
+        activitywatch is not enabled; SourceUnavailable when it is but aw-server stops short."""
+        if aw.NAME not in self.cfg.agents:
+            return []
         out, wm = [], {"end": since.astimezone(timezone.utc).isoformat()}
         while datetime.fromisoformat(wm["end"]) < until:
             before = wm["end"]
@@ -170,6 +178,9 @@ class Source:
                 commit()
             if wm["end"] == before:
                 break
+        # collect stops on its own short of now - lag; anything earlier means it skipped
+        if datetime.fromisoformat(wm["end"]) < min(until, aw._now() - aw._LAG) - 2 * aw._MIN_RANGE:
+            raise SourceUnavailable("activitywatch: aw-server not readable for the label window")
         res = []
         for t in out:
             s, e = datetime.fromisoformat(t.ts), min(datetime.fromisoformat(t.end_ts), until)
@@ -237,19 +248,28 @@ def _aw_blocks(task: Task, wins: list[dict], steer_ts: list[datetime]) -> list:
     return out
 
 
+def _claude(steers: list[dict]) -> list[dict]:
+    """Claude Code steers only: an episode unit's facts may reach Sonnet (teach), and Sonnet
+    inputs are built only from Claude Code fields."""
+    return [r for r in steers if r["agent"] == "claude_code"]
+
+
 def _category_units(task: Task, src: Source, since: datetime, until: datetime | None) -> list:
     until = until or datetime.now(timezone.utc)
     steers = [r for r in src.steers(since) if r["ts"] < until]
     text = src.texts(steers)
+    mine = _claude(steers)
+    claude_sessions = {r["session_id"] for r in mine}
     eps = src.episodes(since)
     of_session: dict[str, list[str]] = defaultdict(list)
     for ep in eps:
         for sid in ep["sessions"]:
             of_session[sid].append(ep["episode_id"])
-    acts = src.activity(sorted(of_session), since, until) if of_session else []
+    sids = sorted(claude_sessions & set(of_session))
+    acts = src.activity(sids, since, until) if sids else []
     day_of = {d for d, _s, _e in _days(since, until)}
     days: dict[tuple, dict] = {}
-    for r in steers:
+    for r in mine:
         d = r["ts"].astimezone().date()
         if d not in day_of:
             continue
@@ -289,18 +309,21 @@ def _outcome_units(task: Task, src: Source, since: datetime, until: datetime | N
     """Episodes without commits (git outcome no_code) touched in the last OUTCOME_DAYS."""
     now = until or datetime.now(timezone.utc)
     eps = [e for e in src.episodes(since) if e["outcome"] == "no_code"]
-    steers = src.steers(since) if eps else []
+    steers = _claude(src.steers(since)) if eps else []
     text = src.texts(steers)
     out = []
     for ep in eps:
         mine = set(ep["sessions"])
-        said = [text[r["event_id"]] for r in sorted(steers, key=lambda r: r["ts"])
-                if r["session_id"] in mine and r["event_id"] in text]
+        st = [r for r in sorted(steers, key=lambda r: r["ts"]) if r["session_id"] in mine]
+        said = [text[r["event_id"]] for r in st if r["event_id"] in text]
         if not said:
             continue
-        out.append(task.request("episode", ep["episode_id"], ep["last_ts"], {
+        # ts = the episode start, so the row's day (and its held-out side) never moves; rev =
+        # its last activity, so a changed episode is re-asked and an unchanged one is a no-op
+        out.append(task.request("episode", ep["episode_id"], ep["first_ts"], {
             "last_steers": said[-5:], "days_idle": (now - ep["last_ts"]).days,
-            "sessions": ep["n_sessions"], "steers": ep["n_steers"]}))
+            "sessions": len({r["session_id"] for r in st}), "steers": len(st)},
+            rev=ep["last_ts"].astimezone(timezone.utc).isoformat()))
     return out
 
 

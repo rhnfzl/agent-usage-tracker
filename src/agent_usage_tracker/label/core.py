@@ -12,6 +12,7 @@ import json
 import math
 import os
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 
 from ..config import _config_path
@@ -45,6 +46,7 @@ class Request:
     decision: str              # choice | boolean
     candidates: list[dict]     # [{"id", "desc"}]: the task's closed list
     none_fits: str | None      # the explicit out-of-list candidate ("other"), or None
+    rev: str | None = None     # the unit's state version, when a changed unit is re-asked (episode)
 
     @property
     def prompt_ver(self) -> str:
@@ -175,16 +177,21 @@ def decide(req: Request, raw: dict[str, float], choice: Choice, model_id: str,
                     model_rev=model_rev, prompt_ver=req.prompt_ver, calib_ver=choice.calib_ver)
 
 
-def label_event(req: Request, res: Response) -> ActivityEvent:
+def label_event(req: Request, res: Response, labelled_at: str | None = None) -> ActivityEvent:
     """The activity_event row of one decision: enums, numbers and versions, never the state.
     Same unit, task version, model and calibration -> same id, so a rerun is a no-op at the sink;
-    a new model, prompt or calibration adds a row and never overwrites one."""
+    a new model, prompt or calibration (or a changed episode, req.rev) adds a row and never
+    overwrites one. labelled_at (UTC, fixed width) is the run's start: agents.label_latest takes
+    the newest one, so a later calibrated row wins over an earlier uncalibrated one."""
+    labelled_at = labelled_at or datetime.now(timezone.utc).isoformat(timespec="milliseconds")
     return ActivityEvent(
         event_id=make_event_id("label", req.task, req.task_ver, req.unit_id, res.model_id,
-                               res.model_rev, res.prompt_ver, res.calib_ver),
+                               res.model_rev, res.prompt_ver, res.calib_ver,
+                               *((req.rev,) if req.rev else ())),
         ts=req.ts, agent="label", kind="label", session_id=None, turn_id=None,
         attrs={"task": req.task, "task_ver": req.task_ver, "unit": req.unit,
                "unit_id": req.unit_id, "label": res.chosen, "p": round(res.prob, 4),
                "dist": {k: round(v, 4) for k, v in res.dist.items()},
                "below_tau": res.below_tau, "model_id": res.model_id, "model_rev": res.model_rev,
-               "prompt_ver": res.prompt_ver, "calib_ver": res.calib_ver})
+               "prompt_ver": res.prompt_ver, "calib_ver": res.calib_ver,
+               "labelled_at": labelled_at})

@@ -145,7 +145,10 @@ def test_label_row_has_no_text_and_a_stable_id():
     for word in SECRET.split():
         assert word not in blob
     assert set(ev.attrs) == {"task", "task_ver", "unit", "unit_id", "label", "p", "dist",
-                             "below_tau", "model_id", "model_rev", "prompt_ver", "calib_ver"}
+                             "below_tau", "model_id", "model_rev", "prompt_ver", "calib_ver",
+                             "labelled_at"}
+    assert datetime.fromisoformat(ev.attrs["labelled_at"]).tzinfo is not None
+    assert core.label_event(req, res, "2026-11-04T02:13:00.000+00:00").event_id == ev.event_id
     assert ev.kind == "label" and ev.ts == req.ts and ev.attrs["label"] == "instruction"
     assert set(ev.attrs["dist"]) <= {c["id"] for c in req.candidates}
     again = core.label_event(req, core.decide(req, ById().distribution(req), core.Choice(),
@@ -153,6 +156,9 @@ def test_label_row_has_no_text_and_a_stable_id():
     assert again.event_id == ev.event_id
     other = core.label_event(req, core.decide(req, {"framing": 1.0}, core.Choice(), "m2", "r"))
     assert other.event_id != ev.event_id
+    req.rev = "2026-11-02T10:00:00+00:00"           # a changed episode: a new row
+    assert core.label_event(req, res).event_id != ev.event_id
+    req.rev = None
     req.unit_id = "u2"
     assert core.label_event(req, res).event_id != ev.event_id
 
@@ -344,6 +350,8 @@ def test_title_units_are_browser_only_salted_and_cached(tmp_path, sink):
         run.run_label(cfg, ["aw_title_relevance"], src=FakeSource(cfg, wins=wins),
                       backend_for=lambda t, c: b, now=NOW)
         assert sum(len(x) for x in sink.rows) == 1
+        assert sink.rows[0][0].attrs["labelled_at"] == sink.scans[-1]["started_at"].isoformat(
+            timespec="milliseconds")
         sink.rows.clear()
         # a backfill over the same days: the title is cached, so it is not asked again
         run.run_label(cfg, ["aw_title_relevance"], since=t0 - timedelta(days=2),
@@ -369,6 +377,11 @@ def test_work_category_units(tmp_path):
             _win(t0 + timedelta(minutes=34, seconds=30), 3, app="Slack", category="comms",
                  rule="default_app"),
             _win(t0 + timedelta(minutes=50), 2, app="Notes", category="docs")]
+    # a Codex session in the same episode: its steer and turns stay out of the episode facts
+    steers.append(_steer("c1", "s2", t0 + timedelta(minutes=6), agent="codex"))
+    eps[0]["sessions"].append("s2")
+    acts.append({"session_id": "s2", "ts": t0 + timedelta(minutes=7), "kind": "turn",
+                 "attrs": {"by_tool": {"shell": 9}, "tool_errors": 4}})
     cfg = _cfg(tmp_path)
     reqs = tasks.units("work_category", FakeSource(cfg, steers, eps, acts, wins),
                        run.local_midnight(DAY1.astimezone().date()), run.local_midnight(
@@ -378,6 +391,7 @@ def test_work_category_units(tmp_path):
     st = by["episode_day"].state
     assert st["first_steer"] == "plan the export" and st["last_steers"] == ["now write it"]
     assert st["tool_calls_by_tool"] == {"Edit": 3, "Bash": 1} and st["commits"] == 1
+    assert st["steers"] == 2 and st["sessions"] == 1 and st["tool_errors"] == 1
     assert by["episode_day"].unit_id == f"e1:{t0.astimezone().date().isoformat()}"
     # the 7-minute Slack block counts; the one with a steer inside and the 2-minute one do not
     assert by["aw_block"].state["minutes"] == 7 and by["aw_block"].state["apps"] == ["Slack"]
@@ -385,21 +399,36 @@ def test_work_category_units(tmp_path):
 
 def test_soft_outcome_only_no_code(tmp_path):
     _claude_log(tmp_path, "s1", [("u1", "look into the queue"), ("u2", "park it")])
-    steers = [_steer("u1", "s1", DAY1), _steer("u2", "s2", DAY1)]
-    ep = {"first_ts": DAY1, "last_ts": DAY1, "n_sessions": 1, "n_steers": 1, "n_commits": 0}
-    eps = [{**ep, "episode_id": "e1", "outcome": "no_code", "sessions": ["s1"]},
+    start = DAY1 - timedelta(days=3)
+    steers = [_steer("u1", "s1", DAY1), _steer("u2", "s2", DAY1),
+              _steer("x1", "s3", DAY1, agent="codex")]
+    ep = {"first_ts": start, "last_ts": DAY1, "n_sessions": 2, "n_steers": 2, "n_commits": 0}
+    eps = [{**ep, "episode_id": "e1", "outcome": "no_code", "sessions": ["s1", "s3"]},
            {**ep, "episode_id": "e2", "outcome": "shipped", "sessions": ["s1"]}]
     reqs = tasks.units("soft_outcome", FakeSource(_cfg(tmp_path), steers, eps),
                        NOW - timedelta(days=14), NOW)
     assert [r.unit_id for r in reqs] == ["e1"]
     assert reqs[0].state["last_steers"] == ["look into the queue"]
     assert reqs[0].none_fits is None and reqs[0].state["days_idle"] == 1
+    assert reqs[0].state["steers"] == 1 and reqs[0].state["sessions"] == 1     # Claude Code only
+    # the row's ts is the episode start (stable); new activity re-asks with a new id
+    assert reqs[0].ts == start.isoformat()
+    res = core.decide(reqs[0], {"resolved": 1.0}, core.Choice(), "m", "r")
+    first = core.label_event(reqs[0], res).event_id
+    eps[0]["last_ts"] = NOW
+    again = tasks.units("soft_outcome", FakeSource(_cfg(tmp_path), steers, eps),
+                        NOW - timedelta(days=14), NOW)[0]
+    assert again.ts == reqs[0].ts and core.label_event(again, res).event_id != first
 
 
 def test_notes_prompt_counts_only(tmp_path, sink):
     labels = [{"task": "steer_intent", "unit_id": "a", "label": "correction", "below_tau": False},
               {"task": "steer_intent", "unit_id": "a", "label": "correction", "below_tau": False},
-              {"task": "steer_intent", "unit_id": "b", "label": "stop", "below_tau": True}]
+              # same unit and ts: the newer calibrated run wins over the uncalibrated one
+              {"task": "steer_intent", "unit_id": "b", "label": "stop", "below_tau": False,
+               "task_ver": 1, "labelled_at": "2026-11-05T02:00:00.000+00:00"},
+              {"task": "steer_intent", "unit_id": "b", "label": "stop", "below_tau": True,
+               "task_ver": 1, "labelled_at": "2026-11-03T02:00:00.000+00:00"}]
     eps = [{"episode_id": "e1", "first_ts": DAY1, "last_ts": DAY1, "n_sessions": 2,
             "n_steers": 4, "n_commits": 3, "outcome": "shipped", "sessions": ["s1"]}]
     cfg = _cfg(tmp_path)
@@ -410,7 +439,9 @@ def test_notes_prompt_counts_only(tmp_path, sink):
     assert rep["daily_note"]["notes"] == 1 and sink.notes[0][1] == "A quiet day."
     assert sink.notes[0][0] == DAY1.astimezone().date()
     p = b.prompts[0]
-    assert "steer_intent: correction 1" in p and "stop" not in p and "commits 3" in p
+    assert "steer_intent: correction 1" in p and "steer_intent: stop 1" in p and "commits 3" in p
+    assert run._note_prompt(DAY1.date(), labels[3:] + labels[2:3], []) == \
+        run._note_prompt(DAY1.date(), labels[2:4], [])
 
 
 def test_windows_go_through_the_collector(tmp_path, monkeypatch):
@@ -433,9 +464,35 @@ def test_windows_go_through_the_collector(tmp_path, monkeypatch):
     monkeypatch.setattr(aw, "_http", http)
     monkeypatch.setattr(aw, "_now", lambda: NOW)
     monkeypatch.setattr(aw, "_macos_category", lambda app: None)
-    w = tasks.Source(_cfg(tmp_path)).windows(t0 - timedelta(hours=1), t0 + timedelta(minutes=2))
+    cfg = _cfg(tmp_path, agents=("activitywatch",))
+    w = tasks.Source(cfg).windows(t0 - timedelta(hours=1), t0 + timedelta(minutes=2))
     assert [x["title"] for x in w] == ["page 0 password=[redacted]", "page 1 password=[redacted]"]
     assert all(x["rule"].startswith("browser_") for x in w)
+    assert tasks.Source(_cfg(tmp_path)).windows(t0, NOW) == []       # activitywatch not enabled
+
+    def down(cfg, method, path, body=None):
+        raise OSError("connection refused")
+    monkeypatch.setattr(aw, "_http", down)
+    with pytest.raises(tasks.SourceUnavailable):
+        tasks.Source(cfg).windows(t0, NOW)
+
+
+def test_unreadable_windows_keep_the_watermark(tmp_path, sink):
+    _claude_log(tmp_path, "s1", [("u1", "go")])
+    cfg = _cfg(tmp_path)
+
+    class Down(FakeSource):
+        def windows(self, since, until):
+            raise tasks.SourceUnavailable("aw-server down")
+    src = Down(cfg, [_steer("u1", "s1", DAY1)])
+    with _env(tmp_path):
+        rep = run.run_label(cfg, ["work_category", "steer_intent"], src=src,
+                            backend_for=lambda t, c: ById(), now=NOW)
+        assert rep["work_category"]["unavailable"] == 1 and rep["steer_intent"]["rows"] == 1
+        wm = json.loads((tmp_path / "state.json").read_text())["collectors"]["label"]
+        assert "work_category" not in wm and "steer_intent" in wm
+        assert sink.scans[-1]["status"] == "error"
+        assert sink.scans[-1]["error"] == "SourceUnavailable"
 
 
 def test_cli_and_config(tmp_path, monkeypatch):
@@ -482,6 +539,13 @@ def test_scan_script_runs_label_once_a_day_where_enabled():
         lines = calls.read_text().splitlines()
         assert lines.count("label run") == 1 and lines.count("outcomes") == 1
         assert lines.index("outcomes") < lines.index("label run")
+        # a failed step logs its own exit status, not the one of the timestamp
+        fake.write_text(f'#!/bin/sh\necho "$*" >>"{calls}"\n[ "$1" = scan ] || exit 3\n')
+        for mark in ("label-day", "outcomes-day"):
+            (conf / mark).unlink()
+        subprocess.run(["bash", script], env=env, check=True)
+        log = "\n".join(p.read_text() for p in home.rglob("*.log"))
+        assert "outcomes done (exit 3)" in log and "label done (exit 3)" in log
 
 
 if __name__ == "__main__":
