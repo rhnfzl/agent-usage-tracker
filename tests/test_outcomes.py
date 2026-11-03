@@ -641,21 +641,23 @@ def test_signing_proxy_alternates_and_helpers_never_run():
         gconf = Path(d) / "global.gitconfig"
         gconf.write_text(f"[credential]\n\thelper = !{tools['global']}\n")
         os.environ["GIT_CONFIG_GLOBAL"] = str(gconf)
-        http_ok = ("-c", "protocol.http.allow=always")              # https is allowed; the test
-        try:                                                        # server speaks plain http
+        try:
             def run(argv):
                 subprocess.run(argv, capture_output=True, timeout=60, env=git_env())
+
+            def plain(argv):                       # the control: git as the user runs it
+                subprocess.run(argv, capture_output=True, timeout=60, env=dict(os.environ))
 
             def new_ref(name):                     # a fetch with nothing new never negotiates
                 _g(work, "push", "-q", "origin", f"{s['A']}:refs/heads/{name}")
                 _g(work, "update-ref", "-d", f"refs/remotes/origin/{name}")
             # control: plain git runs each of them
             g = ["git", "-C", str(work)]
-            run([*g, "log", "--format=%H", "-1", signed])
-            run([*g, "fetch", "gp"])
+            plain([*g, "log", "--format=%H", "-1", signed])
+            plain([*g, "fetch", "gp"])
             new_ref("ctl1")
-            run([*g, "fetch", "origin"])
-            run([*g, "fetch", url])
+            plain([*g, "fetch", "origin"])
+            plain([*g, "fetch", url])
             assert {p.name for p in marks.iterdir()} == set(tools), sorted(marks.iterdir())
             for p in marks.iterdir():
                 p.unlink()
@@ -665,8 +667,11 @@ def test_signing_proxy_alternates_and_helpers_never_run():
             new_ref("ctl2")
             run(git_argv(str(work), "fetch", "origin"))
             assert _g(work, "rev-parse", "refs/remotes/origin/ctl2") == s["A"]   # fetch still works
+            # the test server speaks plain http, which git_env() refuses: allow it for this run only
             argv = git_argv(str(work), "fetch", url)
-            run([argv[0], *http_ok, *argv[1:]])
+            subprocess.run([argv[0], "-c", "protocol.http.allow=always", *argv[1:]],
+                           capture_output=True, timeout=60,
+                           env={**git_env(), "GIT_ALLOW_PROTOCOL": "https:ssh:file:http"})
             # the repo's helpers are gone, the user's global one still answers
             assert {p.name for p in marks.iterdir()} == {"global"}, sorted(marks.iterdir())
         finally:
