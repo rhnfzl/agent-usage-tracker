@@ -12,16 +12,20 @@ Nothing leaves the machine before these guards run, in this order:
      when activitywatch_title_days is set, a title older than that is never sent (default 0:
      titles are kept for good).
 
-Category and work relevance come from an app mapping (config over code defaults); a browser row
-is 'web-work' when its title or URL matches a work pattern, else 'web'. A scan never fails
-because ActivityWatch is closed: no server or no buckets means no rows.
+Category and work relevance come from an app mapping (config over code defaults, then the app's
+declared macOS category); a browser row is 'web-work' when its title or URL matches a work
+pattern, else 'web'. A scan never fails because ActivityWatch is closed: no server or no buckets
+means no rows.
 """
 
 from __future__ import annotations
 
+import functools
 import http.client
 import json
+import plistlib
 import re
+import subprocess
 import sys
 import time
 import urllib.error
@@ -96,7 +100,20 @@ _WORK_TITLES = (
     r"localhost|127\.0\.0\.1",
     r"chatgpt|claude|gemini|perplexity",
 )
-_RELEVANT = frozenset(("editor", "terminal", "agent", "comms", "docs", "design", "web-work"))
+_RELEVANT = frozenset(("editor", "terminal", "agent", "dev", "comms", "docs", "design",
+                       "web-work"))
+
+_DARWIN = sys.platform == "darwin"
+_MAC_TIMEOUT = 2
+# LSApplicationCategoryType (after 'public.app-category.') -> category; games-* are media too.
+# shortcut: a browser missing from _DEFAULT_APPS gets its bundle's category (often productivity,
+# so docs), add it to the defaults when the dry-run rule counts show one.
+_MAC_CATEGORIES = {
+    "developer-tools": "dev", "business": "comms", "productivity": "docs",
+    "graphics-design": "design",
+    **dict.fromkeys(("music", "video", "entertainment", "games", "social-networking", "sports",
+                     "lifestyle", "news", "photography"), "media"),
+}
 
 
 def _http(cfg: Config, method: str, path: str, body: Any = None) -> Any:
@@ -153,6 +170,31 @@ def _lookup(table, name: str):
     return next((v for k, v in table.items() if name.startswith(k + " ")), None)
 
 
+@functools.cache                  # once per app per scan: a scan is one process
+def _macos_category(app: str) -> str | None:
+    """The app bundle's declared LSApplicationCategoryType, or None: off macOS, no bundle, no
+    key, or any error or timeout. The app name only goes to the local Spotlight index."""
+    if not _DARWIN or not app or any(c in app for c in "'\\*"):    # no quoting in the query
+        return None
+    query = ("kMDItemContentType == 'com.apple.application-bundle' && "
+             f"kMDItemDisplayName == '{app}'")
+    try:
+        out = subprocess.run(["mdfind", query], capture_output=True, text=True, check=True,
+                             timeout=_MAC_TIMEOUT).stdout.splitlines()
+        if not out:
+            return None
+        with open(f"{out[0]}/Contents/Info.plist", "rb") as f:
+            cat = plistlib.load(f).get("LSApplicationCategoryType")
+    except Exception:                 # a lookup must never fail a scan
+        return None
+    return cat if isinstance(cat, str) and cat else None
+
+
+def _mac_category(declared: str) -> str:
+    kind = declared.removeprefix("public.app-category.")
+    return "media" if kind.endswith("games") else _MAC_CATEGORIES.get(kind, "other")
+
+
 def denied(cfg: Config, app: str, title: str, data: dict | None = None) -> bool:
     """Password managers, private browsing, and config deny patterns, matched on title + URL.
     A Chromium private window (Brave, Chrome, Helium) has neither a title marker nor an
@@ -187,6 +229,8 @@ def classify(cfg: Config, app: str, title: str, url: str = "") -> tuple[str, boo
     cat, rule = _lookup(cfg.activitywatch_categories, name), "config_app"
     if cat is None:
         cat, rule = _lookup(_DEFAULT_APPS, name), "default_app"
+    if cat is None and (declared := _macos_category(app.strip())):
+        cat, rule = _mac_category(declared), "macos_category"
     if cat is None:
         cat, rule = "other", "unknown"
     if cat == "browser":

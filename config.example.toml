@@ -49,7 +49,7 @@ agents = ["claude_code", "codex", "cursor_api", "cursor_cli", "pi"]
 # activitywatch_deny_apps = ["Some Private App"]
 # activitywatch_deny_titles = ["(?i)examplebank"]          # regexes, matched case-insensitively
 # activitywatch_work_titles = ["example-intranet"]         # browser titles that count as work
-# activitywatch_categories = { "My Tool" = "docs" }        # editor terminal agent browser comms docs design media other
+# activitywatch_categories = { "My Tool" = "docs" }        # editor terminal agent dev browser comms docs design media other
 
 [transport]
 # Default transport: POST batches to the n8n ingest webhook (behind Cloudflare Access).

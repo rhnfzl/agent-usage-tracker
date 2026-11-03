@@ -366,9 +366,9 @@ so parallel agents never count twice; agent runtime is never human time.
 | `ts`, `end_ts` | the window event clipped to the scan range, UTC | the typed interval, UTC |
 | `app` | the ActivityWatch app name | null |
 | `title` | **private**: redacted, cut to 300 chars; null when `activitywatch_titles = false` | null |
-| `category` | editor, terminal, agent, comms, docs, design, media, web-work, web, other | null |
-| `work_relevant` | category in editor, terminal, agent, comms, docs, design, web-work | true unless `--not-relevant` |
-| `attrs` | `rule`: config_app, default_app, browser_work_title, browser_other, unknown | `{}` |
+| `category` | editor, terminal, agent, dev, comms, docs, design, media, web-work, web, other | null |
+| `work_relevant` | category in editor, terminal, agent, dev, comms, docs, design, web-work | true unless `--not-relevant` |
+| `attrs` | `rule`: config_app, default_app, macos_category, browser_work_title, browser_other, unknown | `{}` |
 
 **Titles are private.** They are never in a public view (the read-only role sees
 `agents.time_interval_public`, every column but `title` and `event_id`; event_id is built from
@@ -409,8 +409,21 @@ Guards, all on the machine before anything is sent:
 Category: `activitywatch_categories` (app -> category) over the code defaults; an app name also
 matches a known name followed by a space ("PyCharm Professional"). A browser row is `web-work`
 when its title or URL matches a work pattern (code hosts, issue trackers, docs, cloud consoles,
-localhost, AI chat, plus `activitywatch_work_titles`), else `web`. Unknown apps are `other`, not
-relevant. `browser_category()` is the seam a model replaces later.
+localhost, AI chat, plus `activitywatch_work_titles`), else `web`. `browser_category()` is the
+seam a model replaces later.
+
+An app in neither mapping gets the category its macOS bundle declares (rule `macos_category`):
+the collector finds the bundle with `mdfind` (`kMDItemContentType ==
+'com.apple.application-bundle' && kMDItemDisplayName == '<app>'`), reads
+`LSApplicationCategoryType` from its `Contents/Info.plist`, once per app per scan, with a 2 s
+timeout. `developer-tools` is `dev`, `business` is `comms`, `productivity` is `docs`,
+`graphics-design` is `design` (all relevant); `music`, `video`, `entertainment`, every games
+category, `social-networking`, `sports`, `lifestyle`, `news` and `photography` are `media`; any
+other declared category is `other` (both not relevant). Off macOS, with no bundle, no declared
+category, a name holding `'`, `\` or `*`, or on any error or timeout, the app stays `other`
+with rule `unknown`. The config mapping and the code defaults always win and are never looked
+up. Limit: a browser missing from the defaults is classified by its bundle (often
+`productivity`, so `docs`); add it to `activitywatch_categories` as `browser`.
 
 `aut time add --start <local> --end <local>` or `--minutes N [--at <local end>]`, plus
 `--not-relevant`. No note field (nothing to redact). Refused: end at or before start, a span over
