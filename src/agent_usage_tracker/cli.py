@@ -380,8 +380,8 @@ def build_manual(cfg: Config, start: str | None = None, end: str | None = None,
         raise SystemExit("time add: the end must be after the start")
     if end_dt - start_dt > _MAX_MANUAL:
         raise SystemExit("time add: an interval can span at most 16 hours")
-    if start_dt > now:
-        raise SystemExit("time add: the start is in the future")
+    if end_dt > now:                    # hours not yet worked are not active time
+        raise SystemExit("time add: the end is in the future")
     s_iso = start_dt.astimezone(timezone.utc).isoformat()
     e_iso = end_dt.astimezone(timezone.utc).isoformat()
     return TimeInterval(event_id=make_event_id("manual", cfg.machine, s_iso, e_iso), ts=s_iso,

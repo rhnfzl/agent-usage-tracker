@@ -17,6 +17,7 @@ Locks the rules:
 from __future__ import annotations
 
 import contextlib
+import http.client
 import io
 import json
 import os
@@ -87,10 +88,20 @@ class FakeAW:
                     and aw._parse(e["timestamp"]) + timedelta(seconds=e["duration"]) > start]
             return [hits]
         if method == "GET" and path.startswith(f"/api/0/buckets/{WIN}/events?"):
+            # like aw-server-rust: newest first, and an event spanning `end` is clipped to it
             qs = urllib.parse.parse_qs(path.split("?", 1)[1])
-            return self.old[: int(qs["limit"][0])]
+            end = aw._parse(qs["end"][0])
+            hits = []
+            for e in sorted(self.old, key=lambda e: aw._parse(e["timestamp"]), reverse=True):
+                s = aw._parse(e["timestamp"])
+                if s < end:
+                    secs = min(e["duration"], (end - s).total_seconds())
+                    hits.append({**e, "duration": secs})
+            return hits[: int(qs["limit"][0])]
         if method == "DELETE" and path.startswith(f"/api/0/buckets/{WIN}/events/"):
-            self.deleted.append(int(path.rsplit("/", 1)[1]))
+            i = int(path.rsplit("/", 1)[1])
+            self.deleted.append(i)
+            self.old = [e for e in self.old if e["id"] != i]
             return None
         raise AssertionError(f"unexpected call {method} {path}")
 
@@ -103,6 +114,11 @@ def _patched(fake: FakeAW, now: datetime):
         yield
     finally:
         aw._http, aw._now = saved
+
+
+def _wm() -> dict:
+    """A watermark at CREATED: the scan range starts there (a first scan starts a day earlier)."""
+    return {"end": CREATED.isoformat()}
 
 
 def _rows(cfg, wm, fake, now):
@@ -159,7 +175,7 @@ def test_range_and_watermark() -> None:
         _ev(3, now - timedelta(minutes=6), 600, "Code", "three"),          # crosses the end
         _ev(4, now - timedelta(minutes=2), 60, "Code", "after"),           # past the end
     ])
-    cfg, wm = _cfg(), {}
+    cfg, wm = _cfg(), {"end": CREATED.isoformat()}
     out, _ = _rows(cfg, wm, fake, now)
     assert len(out) == 1
     rows, commit = out[0]
@@ -168,7 +184,7 @@ def test_range_and_watermark() -> None:
     assert rows[0].end_ts == (CREATED + timedelta(minutes=1)).isoformat()
     assert rows[2].end_ts == (now - timedelta(minutes=5)).isoformat()
     assert all(r.source == "aw" and r.machine is None for r in rows)
-    assert wm == {}, "the watermark moves only on commit"
+    assert wm == {"end": CREATED.isoformat()}, "the watermark moves only on commit"
     again, _ = _rows(cfg, wm, fake, now)
     assert [r.event_id for r in again[0][0]] == [r.event_id for r in rows], "re-run is idempotent"
     commit()
@@ -181,16 +197,27 @@ def test_range_and_watermark() -> None:
                                      (now - timedelta(minutes=2)).isoformat()]
     assert rows2[0].event_id not in {r.event_id for r in rows}
 
-    far = CREATED + timedelta(days=3)          # first scan of a long history: one day per pass
+    # first scan of a long history: one day per pass, starting a day before the bucket's
+    # 'created', which aw-server-rust writes in local time labelled UTC (so it can be hours late)
+    far = CREATED + timedelta(days=3)
     wm2: dict = {}
-    _rows(cfg, wm2, FakeAW(), far)[0][0][1]()
-    assert wm2 == {"end": (CREATED + timedelta(days=1)).isoformat()}
+    early = _ev(9, CREATED - timedelta(hours=1), 60, "Code", "before created")
+    (rows3, commit3), = _rows(cfg, wm2, FakeAW([early]), far)[0]
+    assert [r.ts for r in rows3] == [early["timestamp"]]
+    commit3()
+    assert wm2 == {"end": CREATED.isoformat()}
     print("ok range_and_watermark")
 
 
 def test_aw_down_or_no_buckets() -> None:
     now = CREATED + timedelta(hours=4)
-    for fake in (FakeAW(up=False), FakeAW(with_buckets=False)):
+    class Cut(FakeAW):                         # aw-server quits mid-response
+        def __call__(self, cfg, method, path, body=None):
+            if path == "/api/0/query/":
+                raise http.client.IncompleteRead(b"")
+            return super().__call__(cfg, method, path, body)
+
+    for fake in (FakeAW(up=False), FakeAW(with_buckets=False), Cut()):
         wm: dict = {}
         out, _ = _rows(_cfg(), wm, fake, now)
         assert out == [] and wm == {}
@@ -211,13 +238,16 @@ def test_deny_list_and_idle_dropped() -> None:
         _ev(5, t + timedelta(minutes=8), 60, "Safari", "Examplebank - Accounts"),
         _ev(6, t + timedelta(minutes=10), 60, "loginwindow", ""),
         _ev(7, t + timedelta(minutes=12), 60, "Code", "kept"),
+        _ev(8, t + timedelta(minutes=14), 60, "Passwords", secret_title),
+        _ev(9, t + timedelta(minutes=16), 60, "Brave Browser", "Log in",
+            url="https://examplebank.test/login"),     # deny regex matched on the URL
     ])
     cfg = _cfg(activitywatch_deny_apps=("example vault",),
                activitywatch_deny_titles=(r"examplebank",))
-    out, err = _rows(cfg, {}, fake, now)
+    out, err = _rows(cfg, _wm(), fake, now)
     rows = out[0][0]
     assert [r.app for r in rows] == ["Code"]
-    assert "dropped 5 intervals (5.0 min) by the deny-list" in err, err
+    assert "dropped 7 intervals (7.0 min) by the deny-list" in err, err
     assert "1.0 min idle" in err, err
     assert secret_title not in err and "Examplebank" not in err
     print("ok deny_list_and_idle_dropped")
@@ -238,6 +268,17 @@ def test_redaction_each_pattern() -> None:
         "long_hex": ("commit " + "0123456789abcdef" * 2 + " done", "0123456789abcdef" * 2),
         "long_base64": ("blob " + "QUJDREVGR0hJSktMTU5PUFFSU1RVVldY" + "==", "QUJDREVGR0hJSktMTU5PUFFSU1RV"),
     }
+    # environment-variable and header forms of the same secrets (values synthetic)
+    for text, secret in (("PGPASS" + "WORD=hunter2 psql -h db", "hunter2"),
+                         ("export DB_PASS" + "WORD=hunter2", "hunter2"),
+                         ("MYSQL_P" + "WD=hunter2 mysql", "hunter2"),
+                         ("export GITHUB_TO" + "KEN=abc123", "abc123"),
+                         ("access_to" + "ken=abcdEFGH1234", "abcdEFGH1234"),
+                         ("export AWS_SECRET_ACCESS_K" + "EY=abcd/efgh", "abcd/efgh"),
+                         ("Authorization: Bea" + "rer abc123def", "abc123def")):
+        out = aw.clean_title(text)
+        assert secret not in out and "[redacted]" in out, (text, out)
+    samples["bearer"] = ("curl -H 'Authorization: Bearer " + "zyx987'", "zyx987")
     names = {name for name, _, _ in aw._REDACT}
     for name, (text, secret) in samples.items():
         out = aw.clean_title("Fix login - " + text)
@@ -253,10 +294,16 @@ def test_titles_switch_and_redacted_title_sent() -> None:
     now = CREATED + timedelta(hours=4)
     t = CREATED + timedelta(minutes=10)
     fake = FakeAW([_ev(1, t, 60, "Code", "edit - gh" + "p_" + "Zz9" * 8)])
-    row = _rows(_cfg(), {}, fake, now)[0][0][0][0]
+    row = _rows(_cfg(), _wm(), fake, now)[0][0][0][0]
     assert row.title == "edit - [redacted]" and row.category == "editor" and row.work_relevant
-    off = _rows(_cfg(activitywatch_titles=False), {}, fake, now)[0][0][0][0]
+    off = _rows(_cfg(activitywatch_titles=False), _wm(), fake, now)[0][0][0][0]
     assert off.title is None and off.category == "editor" and off.event_id
+    nul = _rows(_cfg(), _wm(), FakeAW([_ev(1, t, 60, "Co\x00de", "a\x00b\x1fc")]), now)[0][0][0][0]
+    assert nul.app == "Code" and nul.title == "a b c", "control characters never reach Postgres"
+    old_t = now - timedelta(days=200)          # first scan of an old history: no stale titles
+    stale = _rows(_cfg(), {"end": (old_t - timedelta(hours=1)).isoformat()},
+                  FakeAW([_ev(1, old_t, 60, "Code", "old")]), now)[0][0][0][0]
+    assert stale.title is None and stale.category == "editor"
     print("ok titles_switch_and_redacted_title_sent")
 
 
@@ -292,15 +339,25 @@ def test_purge_bounded_and_not_on_dry_run() -> None:
     now = datetime(2026, 11, 1, tzinfo=timezone.utc)
     cutoff = now - timedelta(days=180)
     old = [_ev(i, cutoff - timedelta(days=1, minutes=i), 30, "Code", "x")
-           for i in range(1, aw._PURGE_BATCH + 50)]
-    old.insert(0, _ev(999, cutoff - timedelta(seconds=10), 60, "Code", "spans the cutoff"))
-    fake = FakeAW(old=old)
+           for i in range(1, 2 * aw._PURGE_BATCH + 50)]
+    old.insert(0, _ev(9999, cutoff - timedelta(seconds=10), 60, "Code", "spans the cutoff"))
+    young = _ev(10000, cutoff + timedelta(hours=1), 60, "Code", "inside the window")
+    fake = FakeAW(old=[*old, young])
     with _patched(fake, now), contextlib.redirect_stderr(io.StringIO()) as err:
         n = aw.purge(_cfg())
-    assert n == aw._PURGE_BATCH - 1 and len(fake.deleted) == n and 999 not in fake.deleted
+    # the whole backlog goes in one scan, oldest included, though the server answers newest first
+    assert n == len(old) - 1 and len(fake.deleted) == n, n
+    assert 9999 not in fake.deleted and 10000 not in fake.deleted, "the clipped boundary event stays"
+    assert min(e["id"] for e in old) in fake.deleted and max(fake.deleted) < 9999
     assert f"purged {n} window events" in err.getvalue()
     query = [p for m, p in fake.calls if m == "GET" and "/events?" in p][0]
     assert f"limit={aw._PURGE_BATCH}" in query
+    saved, aw._PURGE_BUDGET = aw._PURGE_BUDGET, 0
+    try:
+        with _patched(FakeAW(old=old), now), contextlib.redirect_stderr(io.StringIO()):
+            assert aw.purge(_cfg()) == 0, "the time budget bounds a scan's purge"
+    finally:
+        aw._PURGE_BUDGET = saved
 
     class Boom(FakeAW):
         def __call__(self, cfg, method, path, body=None):
@@ -348,6 +405,8 @@ def test_time_add_validation() -> None:
            dict(start="2026-11-03T10:00+00:00", end="2026-11-03T09:00+00:00"),       # end < start
            dict(start="2026-11-02T10:00+00:00", end="2026-11-03T02:01+00:00"),       # > 16 h
            dict(start="2026-11-03T13:00+00:00", end="2026-11-03T14:00+00:00"),       # future
+           dict(start="2026-11-03T11:00+00:00", end="2026-11-03T13:00+00:00"),       # end future
+           dict(minutes=60, at="2026-11-03T13:00+00:00"),                            # end future
            dict(minutes=0), dict(minutes=-5), dict(), dict(start="2026-11-03T09:00+00:00"),
            dict(minutes=10, start="2026-11-03T09:00+00:00"), dict(start="not a date", end="x")]
     for kw in bad:
@@ -417,6 +476,20 @@ def test_delivery_one_transaction_and_webhook_note() -> None:
         push._post_webhook = saved
     assert posted == [[usage]], "time rows never go over the webhook"
     assert err.getvalue().count("not sent over the webhook") == 1, err.getvalue()
+
+    # webhook first, pg_dsn too: usage over the webhook, the time rows still land in Postgres
+    posted, log = [], []
+    push._post_webhook = lambda url, secret, batch, headers=None: posted.append(batch)
+    try:
+        both = push.make_sender(_cfg(webhook_url="https://hook.example.test/x", webhook_secret="s",
+                                     pg_dsn="postgresql://x"))
+        with _fake_psycopg(log), contextlib.redirect_stderr(io.StringIO()):
+            both([usage, ti])
+    finally:
+        push._post_webhook = saved
+    assert posted == [[usage]]
+    assert [x if x == "commit" else x[0].split(" (")[0] for x in log] == [
+        "INSERT INTO agents.time_interval", "commit"], log
     print("ok delivery_one_transaction_and_webhook_note")
 
 

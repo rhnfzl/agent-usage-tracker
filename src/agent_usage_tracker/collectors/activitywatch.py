@@ -5,10 +5,11 @@ time while the AFK watcher says not-afk, and emits one TimeInterval per (clipped
 Nothing leaves the machine before these guards run, in this order:
 
   1. login window / screen saver rows are dropped (not active time);
-  2. deny-list: password managers, private-browsing titles, and whatever the config adds are
-     dropped entirely (no interval, no app, no title);
+  2. deny-list: password managers, private-browsing titles, and whatever the config adds
+     (matched on the title and the URL) are dropped entirely (no interval, no app, no title);
   3. titles are redacted (keys, tokens, JWTs, long hex/base64 runs, password=..., URL
-     credentials, emails) and cut to 300 chars; `activitywatch_titles = false` sends none.
+     credentials, emails) and cut to 300 chars; `activitywatch_titles = false` sends none, and
+     a title older than activitywatch_title_days is never sent.
 
 Category and work relevance come from an app mapping (config over code defaults); a browser row
 is 'web-work' when its title or URL matches a work pattern, else 'web'. A scan never fails
@@ -18,9 +19,11 @@ because ActivityWatch is closed: no server or no buckets means no rows.
 from __future__ import annotations
 
 import hashlib
+import http.client
 import json
 import re
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -35,7 +38,8 @@ _LAG = timedelta(minutes=5)          # aw-watcher-window extends its last event;
 _CHUNK = timedelta(days=1)           # one query per pass; the scan's drain loop runs the next day
 _MIN_RANGE = timedelta(minutes=1)    # below this, wait for the next scan (lets the drain loop end)
 _TITLE_MAX = 300
-_PURGE_BATCH = 200
+_PURGE_BATCH = 500
+_PURGE_BUDGET = 20.0                 # seconds of GET+DELETE per scan; a backlog drains over scans
 _TIMEOUT = 10
 
 _QUERY = """window = flood(query_bucket({win}));
@@ -49,8 +53,10 @@ R = "[redacted]"
 _REDACT = (
     ("url_credentials", re.compile(r"\b([a-z][a-z0-9+.-]*://)[^\s/@:]+:[^\s/@]+@", re.I),
      r"\1" + R + "@"),
-    ("assignment", re.compile(r"\b(password|passwd|pwd|secret|token|api[_-]?key)(\s*[=:]\s*)\S+",
-                              re.I), r"\1\2" + R),
+    # no leading \b: env names (PGPASSWORD=, DB_PASSWORD=, GITHUB_TOKEN=) carry a prefix
+    ("assignment", re.compile(r"([A-Za-z0-9_]*(?:password|passwd|pwd|secret|token|api[_-]?key"
+                              r"|access[_-]?key))(\s*[=:]\s*)\S+", re.I), r"\1\2" + R),
+    ("bearer", re.compile(r"\b(bearer\s+)\S+", re.I), r"\1" + R),
     ("jwt", re.compile(r"\beyJ[\w-]+\.[\w-]+\.[\w-]+"), R),
     ("sk_key", re.compile(r"\bsk-[\w-]{16,}"), R),
     ("github_pat", re.compile(r"\bgithub_pat_\w{20,}"), R),
@@ -63,9 +69,10 @@ _REDACT = (
 )
 
 _IDLE_APPS = ("loginwindow", "screensaverengine", "screen saver")
-_DENY_APPS = ("1password", "bitwarden", "keepassxc", "keychain access", "dashlane", "lastpass",
-              "proton pass")
+_DENY_APPS = ("1password", "bitwarden", "keepassxc", "keychain access", "passwords", "dashlane",
+              "lastpass", "proton pass")
 _DENY_TITLES = (r"private browsing", r"\bincognito\b", r"\binprivate\b")
+_CTRL = re.compile(r"[\x00-\x1f\x7f]")   # Postgres text refuses NUL; the rest is noise
 
 _EDITORS = ("code", "visual studio code", "cursor", "zed", "sublime text", "xcode",
             "intellij idea", "pycharm", "webstorm", "goland", "clion", "rider", "rubymine",
@@ -128,7 +135,11 @@ def _buckets(cfg: Config) -> tuple[str, str, datetime] | None:
     if not (host and win and afk):
         return None
     meta = buckets[win].get("metadata") or {}
-    return win, afk, _parse(meta.get("start") or buckets[win]["created"])
+    if meta.get("start"):
+        return win, afk, _parse(meta["start"])
+    # aw-server-rust writes 'created' in local time labelled UTC, up to 14 h late: start a day
+    # earlier (empty chunks cost one query each)
+    return win, afk, _parse(buckets[win]["created"]) - timedelta(days=1)
 
 
 def _norm(app: str) -> str:
@@ -143,12 +154,16 @@ def _lookup(table, name: str):
 
 
 def denied(cfg: Config, app: str, title: str, data: dict | None = None) -> bool:
+    """Password managers, private browsing, and config deny patterns, matched on title + URL.
+    A Chromium private window (Brave, Chrome, Helium) has neither a title marker nor an
+    incognito flag from today's watcher, so it is not detectable here."""
     name = _norm(app)
     if _lookup(dict.fromkeys((*_DENY_APPS, *cfg.activitywatch_deny_apps), True), name):
         return True
     if (data or {}).get("incognito") is True:
         return True
-    return any(re.search(p, title, re.I) for p in (*_DENY_TITLES, *cfg.activitywatch_deny_titles))
+    text = f"{title} {(data or {}).get('url') or ''}"
+    return any(re.search(p, text, re.I) for p in (*_DENY_TITLES, *cfg.activitywatch_deny_titles))
 
 
 def clean_title(title: str) -> str:
@@ -193,12 +208,14 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[TimeInterval], Callabl
         res = _http(cfg, "POST", "/api/0/query/",
                     {"query": query, "timeperiods": [f"{start.isoformat()}/{end.isoformat()}"]})
         raw = res[0] if isinstance(res, list) and res and isinstance(res[0], list) else []
-    except (urllib.error.URLError, OSError, ValueError, TypeError, AttributeError, KeyError) as exc:
+    except (urllib.error.URLError, http.client.HTTPException, OSError, ValueError, TypeError,
+            AttributeError, KeyError) as exc:
         print(f"aut: activitywatch: aw-server not usable ({type(exc).__name__}); skipping",
               file=sys.stderr)
         return
 
     rows: list[TimeInterval] = []
+    title_from = _now() - timedelta(days=cfg.activitywatch_title_days)
     denied_n, denied_s, idle_s = 0, 0.0, 0.0
     for ev in raw:
         try:
@@ -211,7 +228,8 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[TimeInterval], Callabl
         if e <= s:
             continue
         secs = (e - s).total_seconds()
-        app, title = str(data.get("app") or ""), str(data.get("title") or "")
+        app = _CTRL.sub("", str(data.get("app") or ""))
+        title = _CTRL.sub(" ", str(data.get("title") or ""))
         if _norm(app) in _IDLE_APPS:
             idle_s += secs
             continue
@@ -219,7 +237,8 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[TimeInterval], Callabl
             denied_n, denied_s = denied_n + 1, denied_s + secs
             continue
         category, relevant, rule = classify(cfg, app, title, str(data.get("url") or ""))
-        sent = (clean_title(title) or None) if cfg.activitywatch_titles else None
+        keep = cfg.activitywatch_titles and s >= title_from   # an old history sends no old titles
+        sent = (clean_title(title) or None) if keep else None
         s_iso, e_iso = s.astimezone(timezone.utc).isoformat(), e.astimezone(timezone.utc).isoformat()
         title_hash = hashlib.sha256((sent or "").encode()).hexdigest()
         rows.append(TimeInterval(
@@ -238,22 +257,30 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[TimeInterval], Callabl
 
 
 def purge(cfg: Config) -> int:
-    """Delete aw-server's own window events older than activitywatch_title_days, at most
-    _PURGE_BATCH per scan. Best effort: it never raises, and logs a count only."""
+    """Delete aw-server's own window events older than activitywatch_title_days, in batches of
+    _PURGE_BATCH until none is left or _PURGE_BUDGET seconds pass. Best effort: it never raises,
+    and logs a count only."""
     n = 0
+    deadline = time.monotonic() + _PURGE_BUDGET
     try:
         found = _buckets(cfg)
         if found is None:
             return 0
         win = urllib.parse.quote(found[0], safe="")
         cutoff = _now() - timedelta(days=cfg.activitywatch_title_days)
-        old = _http(cfg, "GET", f"/api/0/buckets/{win}/events?"
-                    + urllib.parse.urlencode({"end": cutoff.isoformat(), "limit": _PURGE_BATCH}))
-        for ev in old or []:
-            if _parse(ev["timestamp"]) + timedelta(seconds=float(ev.get("duration") or 0)) > cutoff:
-                continue                     # still partly inside the retention window
-            _http(cfg, "DELETE", f"/api/0/buckets/{win}/events/{int(ev['id'])}")
-            n += 1
+        query = urllib.parse.urlencode({"end": cutoff.isoformat(), "limit": _PURGE_BATCH})
+        # the server answers newest first, so each batch is the next older slice: loop to the end
+        while time.monotonic() < deadline:
+            batch = _http(cfg, "GET", f"/api/0/buckets/{win}/events?{query}") or []
+            # aw-server-rust clips the event spanning `end` to it, so one that reaches the cutoff
+            # is partly inside the retention window and stays
+            gone = [int(ev["id"]) for ev in batch if _parse(ev["timestamp"])
+                    + timedelta(seconds=float(ev.get("duration") or 0)) < cutoff]
+            if not gone:
+                break
+            for i in gone:
+                _http(cfg, "DELETE", f"/api/0/buckets/{win}/events/{i}")
+                n += 1
     except Exception as exc:                 # purge must never fail a scan
         print(f"aut: activitywatch: purge stopped ({type(exc).__name__})", file=sys.stderr)
     if n:

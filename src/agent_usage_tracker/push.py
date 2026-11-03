@@ -160,7 +160,7 @@ def send_session_rows(dsn: str, rows: list[dict]) -> None:
         conn.commit()
 
 
-def _note_sessions_skipped(batch: list) -> None:
+def _note_sessions_skipped(batch: list, pg: bool = False) -> None:
     global _SESSION_NOTE_SHOWN
     if _SESSION_NOTE_SHOWN or not any(not isinstance(e, UsageEvent) or e.session for e in batch):
         return
@@ -168,6 +168,10 @@ def _note_sessions_skipped(batch: list) -> None:
     # shortcut: the webhook carries usage only; upgrade when a machine runs webhook-only (until
     # then `aut backfill --sessions-only` / `--activity-only` over pg_dsn fills the gap; time rows
     # have no backfill, so a webhook-only machine loses them).
+    if pg:
+        print("aut: note: session rows not sent over the webhook (`aut backfill --sessions-only` "
+              "fills them over pg_dsn)", file=sys.stderr)
+        return
     print("aut: note: session/activity/time rows not sent over the webhook (needs "
           "transport.pg_dsn)", file=sys.stderr)
 
@@ -203,15 +207,18 @@ def make_sender(cfg: Config) -> Callable[[list[UsageEvent]], None]:
             return
         webhook_err: Exception | None = None
         if cfg.has_webhook:
+            usage, acts, times = _split(batch)
             try:
-                usage = _split(batch)[0]
                 if usage:
                     _post_webhook(cfg.webhook_url, cfg.webhook_secret, usage,
                                   cfg.cf_access_headers)
-                _note_sessions_skipped(batch)
-                return
             except (urllib.error.URLError, RuntimeError, OSError) as exc:
                 webhook_err = exc
+            else:
+                if cfg.has_pg and (acts or times):     # the webhook carries usage only
+                    _insert_pg(cfg.pg_dsn, acts + times)
+                _note_sessions_skipped(usage if cfg.has_pg else batch, cfg.has_pg)
+                return
         if cfg.has_pg:
             _insert_pg(cfg.pg_dsn, batch)
             return

@@ -373,26 +373,34 @@ so parallel agents never count twice; agent runtime is never human time.
 **Titles are private.** They are never in a public view (the read-only role sees
 `agents.time_interval_public`, every column but `title`), the sink nulls them after 180 days
 (category and interval are kept), and the collector deletes ActivityWatch's own window events
-older than `activitywatch_title_days` (default 180) through its REST API, at most 200 per scan,
-never failing the scan and logging a count only. A dry run purges nothing.
+older than `activitywatch_title_days` (default 180) through its REST API, in batches of 500
+until none is left or 20 s pass (a long backlog drains over several scans), never failing the
+scan and logging a count only. The event that spans the cutoff is kept until it is wholly older.
+A dry run purges nothing. A title older than `activitywatch_title_days` is never sent, so the
+first scan of a long history sends no stale titles.
 
 The `activitywatch` collector is **opt-in**: it is in the valid agent list but not in the default
 used when the config has no `agents`. It reads THIS host's window and AFK buckets with
 aw-server's query API (`filter_keyvals(afk, "status", ["not-afk"])`, then
 `filter_period_intersect`) over `[watermark, now - 5 min]`, at most one day per pass; the first
-scan starts at the window bucket's first moment. The watermark is the range end, saved only after
+scan starts a day before the window bucket's `created` (aw-server-rust writes it in local time
+labelled UTC, so it can be hours late; empty days cost one query each). The watermark is the range end, saved only after
 delivery. aw-server closed or no buckets for this host: no rows, no error.
 
 Guards, all on the machine before anything is sent:
 
 - login window and screen saver rows are dropped (not active time);
-- deny-list: password managers (1Password, Bitwarden, KeePassXC, Keychain Access, Dashlane,
-  LastPass, Proton Pass), private-browsing titles (Private Browsing, Incognito, InPrivate) and
-  rows ActivityWatch flags incognito are dropped entirely. `activitywatch_deny_apps` and
-  `activitywatch_deny_titles` (regexes) extend both lists; private names belong there, never in
-  code. Only a count and minutes of dropped rows are logged;
+- deny-list: password managers (1Password, Bitwarden, KeePassXC, Keychain Access, Passwords,
+  Dashlane, LastPass, Proton Pass), private-browsing titles (Private Browsing, Incognito,
+  InPrivate) and rows ActivityWatch flags incognito are dropped entirely. `activitywatch_deny_apps`
+  and `activitywatch_deny_titles` (regexes, matched on the title and the browser URL) extend both
+  lists; private names belong there, never in code. Only a count and minutes of dropped rows are
+  logged. Limit: a Chromium private window (Brave, Chrome, Helium) is not detectable, because
+  today's watcher sends no incognito flag and the title has no marker;
+- control characters (NUL included) are removed from the app and title;
 - redaction replaces with `[redacted]`: URL credentials (`user:pass@`), `password=` / `secret=` /
-  `token=` / `api_key=` values, JWTs, `sk-` keys, `github_pat_` and `gh[pousr]_` tokens,
+  `token=` / `api_key=` / `access_key=` values, also with a prefix (`PGPASSWORD=`, `DB_PASSWORD=`,
+  `GITHUB_TOKEN=`, `access_token=`), `Bearer` values, JWTs, `sk-` keys, `github_pat_` and `gh[pousr]_` tokens,
   `xox[abprs]-` tokens, AWS access key ids, email addresses, and any unbroken run of 32+ base64
   characters (long hex, base64, and also long slugs or paths). The rest of the title is kept;
 - the browser URL is matched against the work patterns locally and never sent.
@@ -405,11 +413,13 @@ relevant. `browser_category()` is the seam a model replaces later.
 
 `aut time add --start <local> --end <local>` or `--minutes N [--at <local end>]`, plus
 `--not-relevant`. No note field (nothing to redact). Refused: end at or before start, a span over
-16 hours, a start in the future. Writes over `pg_dsn` only.
+16 hours, an end in the future. Writes over `pg_dsn` only.
 
 Delivery: over `transport.pg_dsn` in the same transaction as the usage, session and activity
-rows of the batch, `ON CONFLICT (event_id, ts) DO NOTHING`. The webhook skips them with the same
-one-line note; there is no backfill for them, so a webhook-only machine does not send time.
+rows of the batch, `ON CONFLICT (event_id, ts) DO NOTHING`. With a webhook and a `pg_dsn`, the
+webhook carries the usage and the activity and time rows of the same batch still go over
+`pg_dsn`. A webhook-only machine skips them with the same one-line note; there is no backfill for
+time, so it does not send time.
 
 ## Derived artifact: metrics.json (not part of the event contract)
 
