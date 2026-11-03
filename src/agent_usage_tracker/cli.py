@@ -318,6 +318,8 @@ def cmd_status(cfg: Config, agents: tuple[str, ...]) -> None:
         elif name == "cursor_api":
             detail = ("since_ms=" + str(wm["since_ms"])) if "since_ms" in wm else \
                      ("enabled, not yet scanned" if cfg.cursor_api else "disabled (cursor_api=false)")
+        elif "chats" in wm:
+            detail = f"{len(wm['chats'])} chats, {len(wm.get('sdk', {}))} SDK stores tracked"
         elif "files" in wm:
             detail = f"{len(wm['files'])} files tracked"
         else:

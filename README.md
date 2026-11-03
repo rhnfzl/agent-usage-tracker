@@ -61,7 +61,7 @@ Copy `config.example.toml` to `~/.config/agent-usage-tracker/config.toml` and ed
 
 ```toml
 machine = "laptop"                       # role-based label for this machine
-agents  = ["claude_code", "codex", "cursor_api", "pi"]   # pick ONE Cursor source (they overlap)
+agents  = ["claude_code", "codex", "cursor_api", "cursor_cli", "pi"]   # ONE Cursor token source; cursor_cli has no tokens
 # cursor_api = true                      # accurate Cursor usage (CLI+IDE) via the dashboard API
 # cursor_sdk_manifests = "/home/you/projects/**/.state/runs/*/manifest.json"  # or SDK manifests
 
