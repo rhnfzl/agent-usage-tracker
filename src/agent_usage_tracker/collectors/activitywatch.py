@@ -18,7 +18,6 @@ because ActivityWatch is closed: no server or no buckets means no rows.
 
 from __future__ import annotations
 
-import hashlib
 import http.client
 import json
 import re
@@ -240,9 +239,10 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[TimeInterval], Callabl
         keep = cfg.activitywatch_titles and s >= title_from   # an old history sends no old titles
         sent = (clean_title(title) or None) if keep else None
         s_iso, e_iso = s.astimezone(timezone.utc).isoformat(), e.astimezone(timezone.utc).isoformat()
-        title_hash = hashlib.sha256((sent or "").encode()).hexdigest()
+        # No title in the id: only one window has focus at a time, and an id must not let anyone
+        # confirm a guessed title.
         rows.append(TimeInterval(
-            event_id=make_event_id(NAME, cfg.machine, app, s_iso, e_iso, title_hash),
+            event_id=make_event_id(NAME, cfg.machine, app, s_iso, e_iso),
             ts=s_iso, end_ts=e_iso, source="aw", app=app or None, title=sent,
             category=category, work_relevant=relevant, attrs={"rule": rule}))
     if denied_n or idle_s:

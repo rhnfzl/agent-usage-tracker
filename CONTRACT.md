@@ -371,7 +371,8 @@ so parallel agents never count twice; agent runtime is never human time.
 | `attrs` | `rule`: config_app, default_app, browser_work_title, browser_other, unknown | `{}` |
 
 **Titles are private.** They are never in a public view (the read-only role sees
-`agents.time_interval_public`, every column but `title`), the sink nulls them after 180 days
+`agents.time_interval_public`, every column but `title` and `event_id`; event_id is built from
+machine, app, start and end only, never the title), the sink nulls them after 180 days
 (category and interval are kept), and the collector deletes ActivityWatch's own window events
 older than `activitywatch_title_days` (default 180) through its REST API, in batches of 500
 until none is left or 20 s pass (a long backlog drains over several scans), never failing the

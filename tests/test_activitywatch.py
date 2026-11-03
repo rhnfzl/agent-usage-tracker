@@ -172,6 +172,8 @@ def test_range_and_watermark() -> None:
     fake = FakeAW([
         _ev(1, CREATED - timedelta(minutes=1), 120, "Code", "one"),        # crosses the start
         _ev(2, CREATED + timedelta(hours=1), 600, "iTerm2", "two"),
+        _ev(5, CREATED + timedelta(hours=2), 0, "Code", "zero"),            # zero length: skipped
+        _ev(6, CREATED - timedelta(minutes=5), 300, "Code", "ends at start"),  # clips to nothing
         _ev(3, now - timedelta(minutes=6), 600, "Code", "three"),          # crosses the end
         _ev(4, now - timedelta(minutes=2), 60, "Code", "after"),           # past the end
     ])
