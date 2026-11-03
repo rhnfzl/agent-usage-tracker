@@ -250,11 +250,14 @@ def test_cli_activity() -> None:
         assert t1.attrs == {"tool_calls": 3, "tool_errors": 1, "hook_blocks": 0,
                             "by_tool": {"Shell": 1, "Read": 1, "mcp": 1},
                             "max_identical_run": 1, "retry_flag": False,
-                            "runaway_flag": False}, t1.attrs
+                            "runaway_flag": False, "run_origin": "interactive"}, t1.attrs
         t2 = turns[(A, "r2")].attrs
         assert (t2["tool_calls"], t2["tool_errors"], t2["hook_blocks"], t2["by_tool"]) == \
             (3, 1, 1, {"SwitchMode": 1, "Shell": 1, "Subagent": 1}), t2
-        assert turns[(B, "rb")].attrs["by_tool"] == {"Read": 1}
+        tb = turns[(B, "rb")].attrs
+        assert (tb["by_tool"], tb["run_origin"], tb["parent_session_id"]) == \
+            ({"Read": 1}, "subagent", A), tb
+        assert "parent_session_id" not in t1.attrs
         commits = {e.attrs["sha"]: e for e in _acts(evs, "commit")}
         assert sorted(commits) == ["1a2b3c4", "9f8e7d6"], commits
         c1, c7 = commits["1a2b3c4"], commits["9f8e7d6"]
@@ -302,15 +305,90 @@ def test_open_turn_waits_and_counts_once() -> None:
     print("ok open_turn_waits_and_counts_once")
 
 
+def _blob(m: dict) -> str:
+    return hashlib.sha256(json.dumps(m).encode()).hexdigest()
+
+
+def _rows(evs: list, sid: str) -> list:
+    return [e for e in evs if (e.session.session_id if isinstance(e, UsageEvent)
+                               else e.session_id) == sid]
+
+
+def _tid(e) -> str | None:
+    return e.session.turn_id if isinstance(e, UsageEvent) else e.turn_id
+
+
+def test_rewritten_call_counts_once() -> None:
+    def check(home, repo):
+        # a later root re-lists call e1 in a rewritten assistant blob (new blob id, same call)
+        p, res = _prompt("q1", "first"), _result("e1", "Read", "ok")
+        one = _calls(("e1", "Read", {"p": 1}))
+        two = _msg("assistant", [{"type": "reasoning", "text": "think again"},
+                                 {"type": "tool-call", "toolCallId": "e1", "toolName": "Read",
+                                  "args": {"p": 1}}])
+        _store(home, C, [[_sys(), p, one, res], [_sys(), p, two, res,
+                                                 _calls(("e2", "Grep", {"p": 2}))]])
+        [t] = _acts(_rows(_collect(home), C), "turn")
+        assert (t.attrs["tool_calls"], t.attrs["by_tool"]) == (2, {"Read": 1, "Grep": 1}), t.attrs
+    _run(check)
+    print("ok rewritten_call_counts_once")
+
+
+def test_follow_up_prompt_in_running_turn() -> None:
+    def check(home, repo):
+        # a second prompt sent while q1 ran reuses q1's requestId; a re-serialized copy of the
+        # first prompt (same text, new blob) is not a new prompt
+        p1 = _prompt("q1", "first", "Monday, Jul 20, 2026, 9:05 AM (UTC)")
+        p2 = _prompt("q1", "and also this", "Monday, Jul 20, 2026, 9:10 AM (UTC)")
+        dup = dict(p1, providerOptions={"cursor": {"requestId": "q1", "mode": "agent"}})
+        _store(home, C, [[_sys(), p1, _calls(("e1", "Read", {})), _result("e1", "Read", "ok"),
+                          p2, _calls(("e2", "Read", {})), _result("e2", "Read", "ok"), dup]])
+        evs = _rows(_collect(home), C)
+        human = sorted(((e.event_id, e.ts, e.session.turn_id) for e in evs
+                        if isinstance(e, UsageEvent)), key=lambda x: x[1])
+        assert human == [
+            (make_event_id(NAME, "human", C, "q1"), "2026-07-20T09:05:00+00:00", "q1"),
+            (make_event_id(NAME, "human", C, "q1", _blob(p2)), "2026-07-20T09:10:00+00:00",
+             "q1")], human
+        steer = sorted(_acts(evs, "steer"), key=lambda e: e.ts)
+        assert [(e.event_id, e.turn_id, e.attrs["words"]) for e in steer] == [
+            (_eid("steer", f"{C}|q1"), "q1", 1),
+            (_eid("steer", f"{C}|q1|{_blob(p2)}"), "q1", 3)], steer
+        [t] = _acts(evs, "turn")
+        assert (t.turn_id, t.attrs["tool_calls"], t.ts) == ("q1", 2, "2026-07-20T09:05:00+00:00")
+    _run(check)
+    print("ok follow_up_prompt_in_running_turn")
+
+
+def test_unlisted_prompt_waits_while_active() -> None:
+    def check(home, repo):
+        # the prompt blob landed before the root that lists it: an active chat waits for it
+        p1, p2 = _prompt("q1", "first"), _prompt("q2", "second")
+        head = [_sys(), p1, _calls(("e1", "Read", {})), _result("e1", "Read", "ok")]
+        _store(home, C, [head], extra=[p2], mtime=time.time())
+        wm: dict = {}
+        assert not [e for e in _rows(_collect(home, wm), C) if _tid(e) == "q2"], "q2 must wait"
+        _store(home, C, [head, head + [p2, _calls(("e2", "Grep", {}),
+                                                  ("e3", "Grep", {}))]])
+        later = _rows(_collect(home, wm), C)
+        q2 = sorted(e.kind for e in later if _tid(e) == "q2")
+        assert q2 == ["human", "steer", "turn"], q2
+        [t] = [e for e in _acts(later, "turn") if e.turn_id == "q2"]
+        assert t.attrs["tool_calls"] == 2, t.attrs
+    _run(check)
+    print("ok unlisted_prompt_waits_while_active")
+
+
 def test_sdk_runs() -> None:
     def check(home, repo):
         evs = _collect(home)
         turns = {e.turn_id: e for e in _acts(evs, sid="agent-sdk1")}
         assert sorted(turns) == ["run-1", "run-2", "run-3"], sorted(turns)
         assert all(e.kind == "turn" for e in turns.values())
-        assert turns["run-1"].attrs == {"status": "finished", "duration_ms": 30500}
-        assert turns["run-2"].attrs == {"status": "cancelled", "duration_ms": None}
-        assert turns["run-3"].attrs == {"status": "error", "duration_ms": None}
+        auto = {"run_origin": "automated"}
+        assert turns["run-1"].attrs == {"status": "finished", "duration_ms": 30500, **auto}
+        assert turns["run-2"].attrs == {"status": "cancelled", "duration_ms": None, **auto}
+        assert turns["run-3"].attrs == {"status": "error", "duration_ms": None, **auto}
         assert turns["run-1"].ts == "2026-07-20T10:00:01.000Z"
         assert turns["run-1"].event_id == _eid("turn", "agent-sdk1|run-1")
         wm: dict = {}
@@ -384,6 +462,9 @@ def main() -> int:
     test_cli_human_and_sessions()
     test_cli_activity()
     test_open_turn_waits_and_counts_once()
+    test_rewritten_call_counts_once()
+    test_follow_up_prompt_in_running_turn()
+    test_unlisted_prompt_waits_while_active()
     test_sdk_runs()
     test_attrs_carry_no_text()
     test_activity_errors_never_block_human_rows()

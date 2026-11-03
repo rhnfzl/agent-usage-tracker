@@ -306,6 +306,7 @@ _ENUMS = {
     "trigger": {"manual", "auto"},
     "skill": {"my-skill", "mcp"},              # the fixture's own skill names
     "status": {"finished", "cancelled", "error", "queued", "running"},
+    "run_origin": {"interactive", "subagent", "automated"},
 }
 _TOOLS = {"Bash", "Read", "Edit", "Write", "Skill", "Agent", "Task", "WebSearch", "WebFetch",
           "Glob", "Grep", "mcp", "exec_command", "bash", "read", "Shell", "SwitchMode",

@@ -123,7 +123,6 @@ both transports, re-scans) never double-counts.
 | **codex** | `~/.codex/sessions/**/rollout-*.jsonl` `token_count` | `turn_context.model` | event `timestamp` | `input` includes cached; we split it. Captures `reasoning_tokens`. Known gap, not fixed: some Codex Desktop `token_count` rows carry only `total_tokens` (input and output 0, no model) and are dropped (177 rows, about half of the Desktop tokens, when measured). |
 | **pi** | `~/.pi/agent/sessions/**/*.jsonl` `message.usage`, plus the `usage` of `compaction` records | `message.model` / `model_change.modelId` | record `timestamp` | Cleanest schema; older sessions may log zeros. `reasoning_tokens` from `usage.reasoning` (part of output). `project` from the session header's `cwd`. |
 | **cursor** | `state.vscdb` `cursorDiskKV bubbleId:*` | **often null** (not in DB) | bubble `createdAt` or joined `composerData` | EXPERIMENTAL: a LOWER BOUND on tokens. For complete + model-attributed + costed data use `cursor_api`. Full-scans each run + dedups at the sink. **The only source of Cursor human turns** — see below. |
-
 | **cursor_cli** | `~/.cursor/chats/<h>/<uuid>/store.db` (cursor-agent CLI chats) and `~/.cursor/projects/*/sdk-agent-store/*/index.db` (SDK runs) | none | prompt's embedded `<timestamp>` (minute precision), else the chat's `createdAt`; SDK: run `started_at` | **No token rows** (the stores hold none, and `cursor_api` counts these tokens). Human rows, session rows and activity only. See the Cursor CLI sections below. |
 
 ### The two Cursor sources are complementary, not redundant
@@ -213,12 +212,16 @@ Cursor CLI (`cursor_cli`; its only usage rows are human rows, so only they carry
 | Column | Cursor CLI |
 |---|---|
 | `session_id` | the chat's `meta.agentId` (equal to its directory name, the fallback) |
-| `parent_session_id` | always NULL: a subagent chat (meta carries `subagentInfo`, with `parentAgentId`) emits no human row, so it has no session row to hold its parent |
+| `parent_session_id` | always NULL: a subagent chat (meta carries `subagentInfo`, with `parentAgentId`) emits no human row, so it has no session row to hold its parent; its `turn` rows carry it as the `parent_session_id` attr |
 | `run_origin` | `interactive`. A subagent chat's prompts are its parent agent talking and are not human rows. A headless `cursor-agent -p` run cannot be told apart from a typed one (no marker in the store) |
 | `turn_id` | the prompt's `providerOptions.cursor.requestId` |
 
 SDK agents (`index.db`) emit no usage row, so they get no session row either: their `agent_id` is
-the `session_id` of their activity rows (run_origin would be `automated`).
+the `session_id` of their activity rows. Because these sessions have no session row, every
+`cursor_cli` `turn` row carries the origin itself as the `run_origin` attr: `interactive` for a
+typed chat, `subagent` for a subagent chat (plus `parent_session_id`, the parent's uuid, or NULL
+when it is not a uuid), `automated` for an SDK run. A commit or rejection row takes its turn's
+origin by joining on `(session_id, turn_id)`.
 
 Delivery: over `transport.pg_dsn`, usage rows and session rows are written on one connection in
 **one transaction** (`ON CONFLICT (event_id) DO NOTHING` for sessions), so a failure stores
@@ -329,16 +332,17 @@ requestIds), when a later prompt follows it or the chat has been idle for an hou
 
 | kind | Cursor CLI | Cursor SDK |
 |---|---|---|
-| `steer` | each human row (seed: requestId); `via` always `typed`; `words` and `chars` of the `<user_query>` text, `images` (image blocks) | not possible: run prompts are app input |
+| `steer` | each human row (seed: requestId; a later prompt sent during the running turn reuses that requestId and gets its own human and steer row, seeded with its blob id too, at its own timestamp); `via` always `typed`; `words` and `chars` of the `<user_query>` text, `images` (image blocks) | not possible: run prompts are app input |
 | `commit` | a `Shell` tool-call whose command is a commit call, paired by `toolCallId` with its result (`Exit code: N` then `Command output:`); the shared SHA parser; `repo_key` from the call's `working_directory`, else NULL | none |
 | `rejection` | a `SwitchMode` result `Mode switch was rejected by the user` (seed: toolCallId) | none |
-| `turn` | one per requestId: `tool_calls`, `by_tool` (Cursor's tool names; `mcp_<server>_<tool>` and `CallMcpTool` count as `mcp`, a name that is not a plain identifier as `other`), `tool_errors` (tool results with `highLevelToolCallResult.isError`), `hook_blocks` (Shell results opening `Rejected: Hook blocked`, also errors), `max_identical_run`, `retry_flag`, `runaway_flag`; no `duration_ms` | one per run that ended: `status` (`finished`, `cancelled`, `error`), `duration_ms` = `finished_at - started_at` (NULL without both); `turn_id` = `run_id`, `session_id` = `agent_id`. Queued and running runs are sent once they end (a row is insert-only). `error_code` and `result` are free text and never read |
+| `turn` | one per requestId: `tool_calls`, `by_tool` (Cursor's tool names; `mcp_<server>_<tool>` and `CallMcpTool` count as `mcp`, a name that is not a plain identifier as `other`), `tool_errors` (tool results with `highLevelToolCallResult.isError`), `hook_blocks` (Shell results opening `Rejected: Hook blocked`, also errors), `max_identical_run`, `retry_flag`, `runaway_flag`, `run_origin` (and `parent_session_id` in a subagent chat); no `duration_ms`. A tool call counts once per turn by `toolCallId`, even when a rewritten blob in another root lists it again | one per run that ended: `status` (`finished`, `cancelled`, `error`), `duration_ms` = `finished_at - started_at` (NULL without both), `run_origin` `automated`; `turn_id` = `run_id`, `session_id` = `agent_id`. Queued and running runs are sent once they end (a row is insert-only). `error_code` and `result` are free text and never read |
 | `interrupt` | not possible: no record in the store. The transcript's `turn_ended` carries a status but no id or timestamp, and its count does not line up with the prompts, so it is not joined | a cancelled run is `turn` with `status` `cancelled` |
 | `pr` | skipped: only `gh pr create` output text | none |
 | `compaction`, `invoke` | not possible (no record; reading a skill file is a guess) | none |
 
 Known gaps: a prompt no surviving root lists (its history was dropped) still gives its human and
-steer rows but no turn row. A message after a summary and before the next prompt sits in no turn
+steer rows but no turn row, once the chat is idle (until then it may be a new prompt whose root is
+not written yet). A message after a summary and before the next prompt sits in no turn
 (about 5% of tool calls when measured). A tool call logged under a prompt more than an hour after
 the chat went quiet is lost.
 

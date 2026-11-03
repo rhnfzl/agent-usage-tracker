@@ -46,6 +46,7 @@ _TS = re.compile(r"<timestamp>\s*\w+,\s*([A-Za-z]{3})\w*\.?\s+(\d{1,2}),\s*(\d{4
 _QUERY = re.compile(r"<user_query>(.*?)</user_query>", re.S)
 _EXIT = re.compile(r"^Exit code: (-?\d+)\s*(?:Command output:\s*)?")
 _IDENT = re.compile(r"[A-Za-z][A-Za-z_]*")
+_UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 
 
 def _po(m: dict) -> dict:
@@ -164,8 +165,12 @@ def _activity(m: dict, t: dict, calls: dict, keys: RepoKeys) -> None:
     if m.get("role") == "assistant":
         for b in content:
             if b.get("type") == "tool-call" and isinstance(b.get("toolName"), str):
+                cid = b.get("toolCallId")
+                calls[cid] = b.get("args")
+                if isinstance(cid, str) and cid in t["cids"]:
+                    continue        # a rewritten blob that a later root lists again
+                t["cids"].add(cid)
                 add_call(agg, _tool(b["toolName"]), b.get("args"))
-                calls[b.get("toolCallId")] = b.get("args")
         return
     if m.get("role") != "tool":
         return
@@ -203,6 +208,12 @@ def _chat(path: str, con: sqlite3.Connection, meta: dict, cur: dict, idle: bool,
     # A subagent chat's prompts are its parent agent talking, not a person. Its parent is in
     # subagentInfo.parentAgentId, but it has no usage or human row to carry a session row.
     human = not meta.get("subagentInfo")
+    sub = meta.get("subagentInfo") if isinstance(meta.get("subagentInfo"), dict) else {}
+    parent = sub.get("parentAgentId")
+    # No session row can carry a subagent chat's origin (it has no usage row), so its turn does.
+    origin = {"run_origin": "interactive"} if human else {
+        "run_origin": "subagent",
+        "parent_session_id": parent if isinstance(parent, str) and _UUID.fullmatch(parent) else None}
     created = epoch_ms_to_iso(meta.get("createdAt"))
     lists = _lists(con)
     msgs = _messages(con, {i for seq in lists for i in seq})
@@ -222,8 +233,16 @@ def _chat(path: str, con: sqlite3.Connection, meta: dict, cur: dict, idle: bool,
                 if rid and rid != r:
                     turns[rid]["closed"] = True
                 rid = r
-                turns.setdefault(r, {"msg": m, "agg": blank_agg(), "acts": [], "closed": False,
-                                     "listed": True})
+                t = turns.setdefault(r, {"msg": m, "agg": blank_agg(), "acts": [], "cids": set(),
+                                         "more": {}, "closed": False, "listed": True})
+                # A prompt sent while the turn runs reuses its requestId. A blob with the first
+                # prompt's text is a rewrite of it, not a new prompt.
+                # shortcut: "first" is the first one seen in list order, so a follow-up that sits
+                # only in a list sorting before the original's swaps their ids; upgrade if
+                # backfill and live steer ids ever disagree.
+                text = text_of(m.get("content"))
+                if m is not t["msg"] and text != text_of(t["msg"].get("content")):
+                    t["more"].setdefault(text, (mid, m))
             elif rid and rid not in done and mid not in seen:
                 seen.add(mid)
                 # Best effort: a message whose extraction raises is counted and skipped, so
@@ -232,10 +251,13 @@ def _chat(path: str, con: sqlite3.Connection, meta: dict, cur: dict, idle: bool,
                     _activity(m, turns[rid], calls, keys)
                 except Exception:
                     errors += 1
-    for m in msgs.values():             # a prompt no surviving root lists: long finished
+    for m in msgs.values():             # a prompt no surviving root lists
         r = _rid(m)
         if r and r not in turns:
-            turns[r] = {"msg": m, "agg": None, "acts": [], "closed": True, "listed": False}
+            # its history was dropped, or it is newer than the root that will list it: wait
+            # until the chat is idle so a still-running turn is not closed early
+            turns[r] = {"msg": m, "agg": None, "acts": [], "more": {}, "closed": idle,
+                        "listed": False}
 
     events: list = []
     for rid, t in turns.items():
@@ -249,22 +271,28 @@ def _chat(path: str, con: sqlite3.Connection, meta: dict, cur: dict, idle: bool,
             events.append(ActivityEvent(event_id=make_event_id(NAME, kind, f"{sid}|{seed}"),
                                         ts=ts, agent=NAME, kind=kind, session_id=sid, turn_id=r,
                                         attrs=attrs))
-        if human:
-            q = _QUERY.search(text)
-            words = (q[1] if q else text).strip()
-            c = t["msg"].get("content")
+        # the first prompt keeps the (sid, rid) ids; a follow-up adds its blob id to them
+        prompts = [((), t["msg"])] + [((mid,), pm) for mid, pm in t["more"].values()]
+        for extra, pm in prompts if human else ():
+            ptext = text_of(pm.get("content"))
+            pts = _prompt_ts(ptext, created)
+            q = _QUERY.search(ptext)
+            words = (q[1] if q else ptext).strip()
+            c = pm.get("content")
             images = sum(isinstance(b, dict) and b.get("type") == "image" for b in c) \
                 if isinstance(c, list) else 0
             events.append(UsageEvent(
-                event_id=make_event_id(NAME, "human", sid, rid), ts=ts, agent=NAME, model=None,
-                provider=None, kind="human",
+                event_id=make_event_id(NAME, "human", sid, rid, *extra), ts=pts, agent=NAME,
+                model=None, provider=None, kind="human",
                 session=EventSession(sid, None, "interactive", rid)))
-            emit("steer", rid, {"via": "typed", "words": len(words.split()), "chars": len(words),
-                                "images": images})
+            emit("steer", "|".join((rid, *extra)), {"via": "typed", "words": len(words.split()),
+                                                    "chars": len(words), "images": images},
+                 ts=pts)
         for kind, seed, attrs in t["acts"]:
             emit(kind, seed, attrs)
         if t["listed"]:
-            emit("turn", rid, {**turn_attrs(t["agg"]), "hook_blocks": t["agg"]["hooks"]})
+            emit("turn", rid, {**turn_attrs(t["agg"]), "hook_blocks": t["agg"]["hooks"],
+                               **origin})
     cur["done"] = sorted(done)
     cur["open"] = sum(r not in done for r in turns)
     return events, errors
@@ -305,7 +333,8 @@ def _sdk(path: str, have: set[str]) -> list[ActivityEvent]:
         out.append(ActivityEvent(
             event_id=make_event_id(NAME, "turn", f"{agent_id}|{run_id}"), ts=started or created,
             agent=NAME, kind="turn", session_id=agent_id, turn_id=run_id,
-            attrs={"status": st, "duration_ms": ms_between(started, finished)}))
+            attrs={"status": st, "duration_ms": ms_between(started, finished),
+                   "run_origin": "automated"}))
     return out
 
 
