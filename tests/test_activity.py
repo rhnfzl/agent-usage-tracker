@@ -533,7 +533,9 @@ def test_repo_key_salt() -> None:
         try:
             k1 = act.RepoKeys(None).of("example.com/owner/repo")
             salt = Path(d) / "st" / "repo_key.salt"
-            assert salt.exists() and (salt.stat().st_mode & 0o777) == 0o600, salt
+            assert salt.exists(), salt
+            if os.name != "nt":                                 # Windows has no POSIX modes
+                assert (salt.stat().st_mode & 0o777) == 0o600, oct(salt.stat().st_mode)
             assert act.RepoKeys(None).of("example.com/owner/repo") == k1      # reused
             assert k1 != hashlib.sha256(b"example.com/owner/repo").hexdigest()
             assert k1 != _key("example.com/owner/repo")

@@ -97,7 +97,7 @@ def _load_salt(configured: str | None) -> bytes:
             finally:
                 tmp.unlink(missing_ok=True)
         salt = p.read_text().strip()
-        if p.stat().st_mode & 0o077:
+        if os.name != "nt" and p.stat().st_mode & 0o077:     # Windows has no POSIX modes
             print(f"aut: warning: {p} is group/other-readable; run: chmod 600 {p}", file=sys.stderr)
     except OSError:
         return b""
