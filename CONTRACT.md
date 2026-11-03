@@ -57,7 +57,7 @@ values. Rows already in a sink keep the classification they were written with, b
   "output_tokens": 0,
   "cache_read_tokens": 0,                   // prompt tokens served from cache
   "cache_write_tokens": 0,                  // prompt tokens written to cache
-  "reasoning_tokens": null,                 // codex only; null elsewhere
+  "reasoning_tokens": null,                 // codex only; null elsewhere. SUBSET of output_tokens: informational, never added to totals or cost
   "total_tokens": 0,
   "est_cost_usd": null,                     // NOTIONAL / API-equivalent (subs are flat-rate)
   "project": "agent-usage-tracker"          // repo dir basename only, never a full path

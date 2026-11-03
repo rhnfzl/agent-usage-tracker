@@ -74,9 +74,10 @@ def test_cost_and_naive() -> None:
     assert round(naive_cost_of(r, PRICES), 10) == round(
         0.0015 + 0.00075 + 0.015 + 0.0009375, 10
     )
-    r2 = _row("2026-01-01T10:00:00", reason=4)
-    # reasoning bills at the output rate
-    assert round(cost_of(r2, PRICES), 10) == round(4 * 7.5e-05, 10)
+    # reasoning is a subset of output_tokens, so it adds nothing on top of the output charge
+    r2 = _row("2026-01-01T10:00:00", inp=100, out=10, cr=1000, cw=50, reason=4)
+    assert round(cost_of(r2, PRICES), 10) == round(cost_of(r, PRICES), 10)
+    assert round(naive_cost_of(r2, PRICES), 10) == round(naive_cost_of(r, PRICES), 10)
 
 
 def test_cost_none_for_unpriced_model() -> None:

@@ -101,7 +101,8 @@ and the sink dedups re-sends by `event_id`.
 - **One row per assistant turn**, keyed by a deterministic `event_id`. The sink dedups via
   `ON CONFLICT`, so a re-scan never double-counts.
 - **All four token classes are read**: input, output, cache-read, and cache-write, plus
-  reasoning tokens for Codex. Claude Code records cache reads and cache writes as fields
+  reasoning tokens for Codex (a subset of output, shown for information and never added to
+  totals or cost). Claude Code records cache reads and cache writes as fields
   separate from `input_tokens`, so summing `input_tokens` alone reports a number well under
   the real one. That is where the reported Claude Code undercount comes from.
 - **Cursor is experimental.** The local DB is a lower bound and often lacks the model id. See
