@@ -16,10 +16,11 @@ from __future__ import annotations
 import glob
 import json
 import re
+from pathlib import Path
 from typing import Callable, Iterator
 
 from ..config import Config
-from ..event import UsageEvent, make_event_id
+from ..event import EventSession, UsageEvent, make_event_id
 from ._util import basename, scan_file
 
 NAME = "claude_code"
@@ -96,6 +97,32 @@ def _text_of(content: object) -> str:
     return ""
 
 
+def _str(v: object) -> str | None:
+    return v if isinstance(v, str) and v else None
+
+
+def _file_identity(base: Path, path: str) -> tuple[bool, str, str | None]:
+    """(is_subagent, fallback session_id, fallback parent) from the path alone. A subagent lives at
+    <parent>/subagents/[workflows/<wf>/]agent-<id>.jsonl; a main session at <sessionId>.jsonl."""
+    parts = Path(path).relative_to(base).parts
+    stem = Path(path).stem
+    if "subagents" in parts[1:-1]:       # parts[0] is the project dir, whatever its name
+        i = parts.index("subagents", 1)
+        return True, stem.removeprefix("agent-"), parts[i - 1] if i else None
+    return False, stem, None
+
+
+def _session_of(o: dict, ident: tuple[bool, str, str | None], turn: str | None) -> EventSession:
+    sub, sid, parent = ident
+    if sub:     # records carry sessionId = the PARENT session and agentId = their own
+        return EventSession(_str(o.get("agentId")) or sid, _str(o.get("sessionId")) or parent,
+                            "subagent", turn)
+    ep = o.get("entrypoint")
+    origin = ("automated" if ep in _PROGRAM_ENTRYPOINTS
+              else "interactive" if ep == "cli" else "unknown")
+    return EventSession(_str(o.get("sessionId")) or sid, None, origin, turn)
+
+
 def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[UsageEvent], Callable[[], None]]]:
     base = cfg.home / ".claude" / "projects"
     if not base.exists():
@@ -131,6 +158,14 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[UsageEvent], Callable[
         # shortcut: counted per scan chunk, so an old file read in two chunks keeps two /loops;
         # harmless while old files are complete on disk and scanned once.
         old_loops = 0
+        ident = _file_identity(base, path)
+        # turn_id: promptId of the latest user record (tool_results carry it too); a subagent keeps
+        # its first one, the parent turn that spawned it.
+        # Carried across chunks in the file's watermark entry, so a turn that began in an earlier
+        # scan is not lost. Dropped when the path now holds a different file (rotated/replaced).
+        # shortcut: files first read before this existed start at NULL until their next user record.
+        turn: str | None = (_str(fstate.get("turn"))
+                            if fstate.get("ino") == new_fstate.get("ino") else None)
         for raw in lines:
             try:
                 o = json.loads(raw)
@@ -140,6 +175,9 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[UsageEvent], Callable[
                 continue
             typ = o.get("type")
             if typ == "user":
+                pid = _str(o.get("promptId"))
+                if pid and not (ident[0] and turn):
+                    turn = pid
                 # A real human prompt: string content (typed text or a slash command) or an
                 # all-text block list. Skip the tool_result user-lines Claude Code injects after
                 # every tool call (they dominate the raw "user" count), plus synthetic
@@ -162,6 +200,7 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[UsageEvent], Callable[
                         event_id=make_event_id(NAME, "human", uid),
                         ts=o.get("timestamp"), agent=NAME, model=None, provider=None,
                         kind="human", project=basename(o.get("cwd")),
+                        session=_session_of(o, ident, turn),
                     ))
                 continue
             if typ != "assistant":
@@ -203,8 +242,13 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[UsageEvent], Callable[
                 cache_write_tokens=cw,
                 total_tokens=total,
                 project=basename(o.get("cwd")),
+                session=_session_of(o, ident, turn),
             )
         events = list(best.values()) + human
+        if turn:
+            new_fstate["turn"] = turn
+        else:
+            new_fstate.pop("turn", None)
 
         def commit(p: str = path, s: dict = new_fstate) -> None:
             files[p] = s

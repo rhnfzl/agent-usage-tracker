@@ -3,6 +3,8 @@
   aut scan              incremental: read new usage since the watermark, push, advance
   aut scan --dry-run    parse + normalize + AGGREGATE, print a report, send/commit nothing
   aut backfill          reset the watermark for the selected agents, then scan everything
+  aut backfill --sessions-only [--dry-run]
+                        re-read all history and send ONLY session rows; watermark untouched
   aut status            show config + watermark state
 
 The dry-run report doubles as the accuracy check: it prints per-agent, per-model token
@@ -20,7 +22,7 @@ from . import __version__, pricing
 from .collectors import REGISTRY
 from .config import Config, load_config, _config_path
 from .event import UsageEvent, valid_ts
-from .push import make_sender, scrub_error, send_scan_rows
+from .push import make_sender, scrub_error, send_scan_rows, send_session_rows
 from .state import collector_wm, load_state, save_state
 
 BATCH = 500
@@ -217,6 +219,55 @@ def run_export(cfg: Config, agents: list[str], out) -> tuple[int, int]:
     return n, skipped
 
 
+def run_session_backfill(cfg: Config, agents: list[str], dry_run: bool) -> dict:
+    """Send agents.event_session rows for ALL history, never usage rows: re-reading files from
+    byte 0 re-emits (event_id, ts) pairs that can differ from the stored ones (see the ts note in
+    collectors/claude_code.py), and those would land as new duplicates. Works on a throwaway
+    watermark, so the live one is neither read nor saved. ON CONFLICT makes a re-run free."""
+    if not dry_run and not cfg.has_pg:
+        raise SystemExit("backfill --sessions-only needs transport.pg_dsn (or use --dry-run).")
+    counts: dict = {"rows": 0, "by_origin": {}, "turn_null": 0, "subagent_no_parent": 0}
+    buf: list[dict] = []
+
+    def flush() -> None:
+        if buf and not dry_run:
+            send_session_rows(cfg.pg_dsn, buf)      # raises -> the command fails, nothing to undo
+        buf.clear()
+
+    for name in agents:
+        wm: dict = {}
+        seen: set[str] = set()                      # same session under two paths: one row
+        for _ in range(_MAX_DRAIN_PASSES):
+            before = _wm_fp(wm)
+            for events, commit in REGISTRY[name](cfg, wm):
+                for e in events:
+                    e.machine = cfg.machine
+                    row = e.session_row()
+                    # no row for an event the usage path drops (bad ts), or one already sent
+                    if row is None or not valid_ts(e.ts) or e.event_id in seen:
+                        continue
+                    seen.add(e.event_id)
+                    counts["rows"] += 1
+                    origin = row["run_origin"]
+                    counts["by_origin"][origin] = counts["by_origin"].get(origin, 0) + 1
+                    counts["turn_null"] += row["turn_id"] is None
+                    counts["subagent_no_parent"] += (origin == "subagent"
+                                                     and row["parent_session_id"] is None)
+                    buf.append(row)
+                    if len(buf) >= BATCH:
+                        flush()
+                        if counts["rows"] % (BATCH * 20) == 0:
+                            print(f"aut: {name}: {counts['rows']:,} session rows so far",
+                                  file=sys.stderr)
+                commit()                            # advances only the throwaway wm
+            if _wm_fp(wm) == before:
+                break
+        flush()
+        print(f"aut: {name}: {len(seen):,} session rows {'counted' if dry_run else 'sent'}",
+              file=sys.stderr)
+    return counts
+
+
 def cmd_status(cfg: Config, agents: tuple[str, ...]) -> None:
     state = load_state()
     print(f"machine       : {cfg.machine}")
@@ -248,7 +299,12 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="cmd", required=True)
     p_scan = sub.add_parser("scan", help="push new usage since the watermark")
     p_scan.add_argument("--dry-run", action="store_true", help="parse + report, send nothing")
-    sub.add_parser("backfill", help="reset watermark for selected agents, then scan all history")
+    p_back = sub.add_parser("backfill",
+                            help="reset watermark for selected agents, then scan all history")
+    p_back.add_argument("--sessions-only", action="store_true",
+                        help="send only session rows for all history; watermark untouched")
+    p_back.add_argument("--dry-run", action="store_true", help="with --sessions-only: counts only")
+    p_back.add_argument("--agents", default=argparse.SUPPRESS, help=argparse.SUPPRESS)
     sub.add_parser("status", help="show config + watermark state")
     p_export = sub.add_parser("export", help="write all usage as CSV (bulk load / offline bridge)")
     p_export.add_argument("--out", help="output CSV file (default: stdout)")
@@ -305,6 +361,17 @@ def main(argv: list[str] | None = None) -> int:
         skip_note = f" ({skipped} skipped: missing/invalid ts)" if skipped else ""
         print(f"exported {n} events{skip_note}{dest}", file=sys.stderr)
         return 0
+
+    if args.cmd == "backfill" and args.sessions_only:
+        c = run_session_backfill(cfg, list(agents), args.dry_run)
+        mode = "DRY-RUN (nothing sent)" if args.dry_run else "sent"
+        print(f"sessions-only backfill {mode}: {c['rows']} rows, by run_origin "
+              f"{json.dumps(c['by_origin'], sort_keys=True)}, turn_id NULL {c['turn_null']}, "
+              f"subagent rows without a parent {c['subagent_no_parent']}")
+        return 0
+    if args.cmd == "backfill" and args.dry_run:
+        parser.error("backfill --dry-run needs --sessions-only (a plain backfill resets the "
+                     "watermark; preview it with `aut scan --dry-run` instead)")
 
     if args.cmd == "backfill":
         state = load_state()

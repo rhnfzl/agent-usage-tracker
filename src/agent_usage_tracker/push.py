@@ -37,6 +37,13 @@ SCAN_COLUMNS = (
     "newest_ts", "error", "aut_version",
 )
 SCAN_TABLE = "agents.collector_scan"
+
+# One row per usage event_id (agents.event_session): which session, parent and turn it belongs to.
+SESSION_COLUMNS = (
+    "event_id", "machine", "agent", "session_id", "parent_session_id", "run_origin", "turn_id",
+)
+SESSION_TABLE = "agents.event_session"
+_SESSION_NOTE_SHOWN = False
 _ERROR_MAX = 300
 
 
@@ -64,20 +71,52 @@ def _post_webhook(url: str, secret: str, batch: list[UsageEvent],
         raise RuntimeError(f"webhook HTTP {status}")
 
 
+def _insert_sql(table: str, columns: tuple[str, ...], conflict: str) -> str:
+    return (f"INSERT INTO {table} ({', '.join(columns)}) VALUES "
+            f"({', '.join(['%s'] * len(columns))}) ON CONFLICT ({conflict}) DO NOTHING")
+
+
+def _session_rows(batch: list[UsageEvent]) -> list[tuple]:
+    return [tuple(r[c] for c in SESSION_COLUMNS) for r in map(UsageEvent.session_row, batch) if r]
+
+
 def _insert_pg(dsn: str, batch: list[UsageEvent]) -> None:
+    """Usage rows and their session rows in ONE transaction: either both land or neither does,
+    so a raise leaves the watermark where it was and the batch is re-sent whole."""
     import psycopg  # optional dependency; install with the [postgres] extra
 
-    cols = ", ".join(COLUMNS)
-    placeholders = ", ".join(["%s"] * len(COLUMNS))
-    sql = (
-        f"INSERT INTO {TABLE} ({cols}) VALUES ({placeholders}) "
-        "ON CONFLICT (event_id, ts) DO NOTHING"
-    )
     rows = [tuple(e.to_dict()[c] for c in COLUMNS) for e in batch]
+    sessions = _session_rows(batch)
     with psycopg.connect(dsn, connect_timeout=15) as conn:
         with conn.cursor() as cur:
-            cur.executemany(sql, rows)
+            cur.executemany(_insert_sql(TABLE, COLUMNS, "event_id, ts"), rows)
+            if sessions:
+                cur.executemany(_insert_sql(SESSION_TABLE, SESSION_COLUMNS, "event_id"), sessions)
         conn.commit()
+
+
+def send_session_rows(dsn: str, rows: list[dict]) -> None:
+    """Session rows only (the sessions-only backfill). Idempotent on event_id; raises on failure."""
+    if not rows:
+        return
+    import psycopg  # optional dependency; install with the [postgres] extra
+
+    with psycopg.connect(dsn, connect_timeout=15) as conn:
+        with conn.cursor() as cur:
+            cur.executemany(_insert_sql(SESSION_TABLE, SESSION_COLUMNS, "event_id"),
+                            [tuple(r[c] for c in SESSION_COLUMNS) for r in rows])
+        conn.commit()
+
+
+def _note_sessions_skipped(batch: list[UsageEvent]) -> None:
+    global _SESSION_NOTE_SHOWN
+    if _SESSION_NOTE_SHOWN or not any(e.session for e in batch):
+        return
+    _SESSION_NOTE_SHOWN = True
+    # shortcut: the webhook carries usage only; upgrade when a machine runs webhook-only (until
+    # then `aut backfill --sessions-only` over pg_dsn fills the gap).
+    print("aut: note: session rows not sent over the webhook (needs transport.pg_dsn)",
+          file=sys.stderr)
 
 
 def make_sender(cfg: Config) -> Callable[[list[UsageEvent]], None]:
@@ -113,6 +152,7 @@ def make_sender(cfg: Config) -> Callable[[list[UsageEvent]], None]:
         if cfg.has_webhook:
             try:
                 _post_webhook(cfg.webhook_url, cfg.webhook_secret, batch, cfg.cf_access_headers)
+                _note_sessions_skipped(batch)
                 return
             except (urllib.error.URLError, RuntimeError, OSError) as exc:
                 webhook_err = exc

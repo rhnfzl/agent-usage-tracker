@@ -158,9 +158,38 @@ with one stderr note. The heartbeat **never blocks usage delivery**: any failure
 prints one warning and is swallowed, so usage rows, the watermark and the exit status are the
 same as without it.
 
-`agents.event_session` (session identity keyed by `event_id`, because `usage_event` rows are
-insert-only) and `agents.activity_event` (non-token activity) exist in the sink for upcoming
-steps. `aut` does not write either yet.
+## Session identity: agents.event_session
+
+`usage_event` rows are insert-only, so which session an event belongs to lives in its own table,
+one row per usage `event_id` (the same id, so it joins 1:1). `claude_code` fills it for every
+event it emits, agent and human turns alike; the other collectors do not yet.
+
+| Column | Meaning |
+|---|---|
+| `event_id`, `machine`, `agent` | the usage event this row describes |
+| `session_id` | main session file: the record's `sessionId` (fallback: file stem). Subagent file: its `agentId` (fallback: file stem without `agent-`) |
+| `parent_session_id` | subagents only: the record's `sessionId`, which is the PARENT session (fallback: the directory above `subagents/`). NULL for a main session |
+| `run_origin` | `subagent` for any file under `subagents/` (including `subagents/workflows/<wf>/`); else `automated` for `entrypoint` `sdk-py` / `sdk-cli`; else `interactive` for `cli`; else `unknown` |
+| `turn_id` | the user turn this event answers: the `promptId` of the most recent user record earlier in the same file, tool_result records included (they carry the current turn's `promptId`). A subagent keeps its FIRST user record's `promptId`, the parent turn that spawned it. NULL when no user record was seen yet |
+
+`promptId` only appears on user records, never on assistant records, which is why the turn is
+carried forward in file order, and saved with the file's read position so the next scan of that
+file picks up the same turn. A session row is never rewritten once stored (the writer is INSERT
+only), so a row stored with NULL `turn_id` stays NULL.
+
+Delivery: over `transport.pg_dsn`, usage rows and session rows are written on one connection in
+**one transaction** (`ON CONFLICT (event_id) DO NOTHING` for sessions), so a failure stores
+neither and the watermark does not move. The webhook carries usage only and says so once on
+stderr.
+
+History: `aut backfill --sessions-only [--agents claude_code] [--dry-run]` re-reads every file from
+the start on a throwaway watermark (the live one is neither read nor saved) and sends **only**
+session rows. It never re-sends usage: a full re-read can emit an `(event_id, ts)` pair that differs
+from the stored one, which would land as a new duplicate. Safe to re-run. `--dry-run` prints counts
+(rows by `run_origin`, rows with NULL `turn_id`, subagent rows without a parent) and sends nothing.
+
+`agents.activity_event` (non-token activity) exists in the sink for an upcoming step. `aut` does
+not write it yet.
 
 ## Derived artifact: metrics.json (not part of the event contract)
 
