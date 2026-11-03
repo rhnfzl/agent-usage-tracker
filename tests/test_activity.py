@@ -307,7 +307,7 @@ _ENUMS = {
     "skill": {"my-skill", "mcp"},              # the fixture's own skill names
 }
 _TOOLS = {"Bash", "Read", "Edit", "Write", "Skill", "Agent", "Task", "WebSearch", "WebFetch",
-          "Glob", "Grep", "mcp"}
+          "Glob", "Grep", "mcp", "exec_command", "bash", "read"}
 _HEX = re.compile(r"^[0-9a-f]{7,64}$")
 _UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 

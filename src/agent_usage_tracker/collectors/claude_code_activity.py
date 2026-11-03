@@ -3,159 +3,26 @@
 Called record by record from the claude_code collector. attrs carry counts, flags, short enums,
 ids and hashes only, never prompt text, tool output, paths, titles or commit messages.
 
-The turn aggregates' retry and runaway rules are ported from AgentsView
-(github.com/kenn-io/agentsview, MIT licence, (c) its authors).
+The turn aggregates and the retry and runaway rules live in _activity_common (from AgentsView,
+github.com/kenn-io/agentsview, MIT licence, (c) its authors).
 """
 
 from __future__ import annotations
 
 import copy
-import hashlib
-import hmac
-import json
-import os
-import re
-import secrets
-import subprocess
-import sys
 from urllib.parse import urlparse
 
 from ..event import ActivityEvent, EventSession, make_event_id
-from ..state import _state_path
+# repo_identity and _GIT_COMMIT are re-exported for the tests that lock them
+from ._activity_common import _GIT_COMMIT, RepoKeys, repo_identity  # noqa: F401
+from ._activity_common import add_call, blank_agg, commit_call, commit_shas, turn_attrs
+from ._activity_common import h as _h
+from ._activity_common import text_of as _text
+from ._activity_common import tool_key as _tool
 
 _INTERRUPT = "[Request interrupted"
 _REJECTED = "The user doesn't want to proceed"
-_SEGMENTS = re.compile(r"&&|\|\||[;|\n]")
-_HEREDOC = re.compile(r"""<<-?\s*(['"]?)(\w+)\1([^\n]*)\n.*?\n\s*\2[ \t]*(?=\n|$)""", re.S)
-_ARG = r"""(?:[^\s"']|"[^"]*"|'[^']*')+"""
-# optional wrappers (VAR=x, env, command, timeout N, rtk [proxy]), then `git`, then only global
-# options (-C <dir>, -c <k=v>, --flag[=v]), then the commit subcommand itself
-_GIT_COMMIT = re.compile(
-    rf"^\s*[({{]?\s*(?:(?:\w+={_ARG}|(?:\S*/)?env|command|timeout\s+\S+|rtk(?:\s+proxy)?)\s+)*"
-    rf"(?:\S*/)?git(?:\s+(?:-[Cc]\s+{_ARG}|--[\w-]+(?:={_ARG})?|-\w+))*\s+commit(?:\s|$)")
-# segments that print nothing, so a commit after only these still owns the output's first line
-_SILENT = re.compile(rf"^\s*(?:(?:cd|pushd|set|export|true|mkdir|rm)\b|cat\s+>|\w+={_ARG}\s*$"
-                     rf"|(?:\S*/)?git(?:\s+-C\s+{_ARG})?\s+add\b)")
-_COMMIT_OUT = re.compile(r"^\[[^\]\s]+(?: \(root-commit\))? (?P<sha>[0-9a-f]{7,40})\]", re.M)
-# The condensed form a command proxy prints instead of git's own "[branch sha]" line: "ok <sha>"
-# or "<sha> <subject>" on the FIRST line. Most commits on a machine with such a proxy look like this.
-_CONDENSED = re.compile(r"(?:ok )?(?P<sha>[0-9a-f]{7,40})(?:\s|$)")
-_OK_LINE = re.compile(r"^ok (?P<sha>[0-9a-f]{7,40})\s*$", re.M)
 _SEEN_MAX = 20     # open-turn tool ids carried across scans (re-logs land within ~40 lines)
-
-
-def _text(content: object) -> str:
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        return "\n".join(b["text"] for b in content if isinstance(b, dict)
-                         and b.get("type") == "text" and isinstance(b.get("text"), str))
-    return ""
-
-
-def _tool(name: str) -> str:
-    """MCP tools are `mcp__<server>__<tool>`, and a server label is free text (it can name an
-    employer or client), so they all count as `mcp`."""
-    return "mcp" if name.startswith("mcp__") else name
-
-
-def _h(text: str) -> str:
-    return hashlib.sha256(text.strip().encode("utf-8")).hexdigest()
-
-
-def repo_identity(url: str) -> str:
-    """host/owner/repo, lowercased, with credentials, port and a .git suffix dropped, so the https
-    and scp-style remotes of one repo (and a PR's host + repository) give the same key."""
-    m = re.match(r"^[\w.-]+@([^:/]+):(.+)$", url)       # git@host:owner/repo
-    if m:
-        host, path = m.groups()
-    else:
-        p = urlparse(url)                 # raises ValueError on a malformed URL
-        host, path = p.hostname or "", p.path
-    return f"{host}/{path.strip('/').removesuffix('.git')}".lower()
-
-
-def _load_salt(configured: str | None) -> bytes:
-    """The config's repo_key_salt, else a random salt kept next to the state file (created 0600 on
-    first use). b"" when neither can be had: repo keys are then NULL, never an unsalted hash."""
-    if configured:
-        return configured.encode("utf-8")
-    p = _state_path().parent / "repo_key.salt"
-    try:
-        if not p.exists():
-            # Written in full to a temp file, then linked into place: a crash or a second process
-            # never sees a half-written salt, and the first link wins a race.
-            p.parent.mkdir(parents=True, exist_ok=True)
-            tmp = p.with_name(f"{p.name}.{os.getpid()}.tmp")
-            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-            with os.fdopen(fd, "w") as fh:
-                fh.write(secrets.token_hex(32))
-            try:
-                os.link(tmp, p)
-            except FileExistsError:
-                pass
-            finally:
-                tmp.unlink(missing_ok=True)
-        salt = p.read_text().strip()
-        if os.name != "nt" and p.stat().st_mode & 0o077:     # Windows has no POSIX modes
-            print(f"aut: warning: {p} is group/other-readable; run: chmod 600 {p}", file=sys.stderr)
-    except OSError:
-        return b""
-    if len(salt) < 32:
-        print(f"aut: warning: {p} is too short; repo_key stays NULL until it is fixed",
-              file=sys.stderr)
-        return b""
-    return salt.encode("utf-8")
-
-
-class RepoKeys:
-    """repo_key = HMAC-SHA256(salt, host/owner/repo), so a list of candidate repo names cannot be
-    tested against stored keys without the salt. Cached per cwd for one collect() pass."""
-
-    def __init__(self, salt: str | None) -> None:
-        self._configured, self._salt, self._cwd = salt, None, {}
-
-    def of(self, identity: str) -> str | None:
-        if self._salt is None:
-            self._salt = _load_salt(self._configured)
-        if not self._salt:
-            return None
-        return hmac.new(self._salt, identity.encode("utf-8"), hashlib.sha256).hexdigest()
-
-    def of_cwd(self, cwd: object) -> str | None:
-        """Key of the origin remote for a working dir; None when the directory or the remote is
-        gone. The URL itself is never stored or logged."""
-        if not isinstance(cwd, str):
-            return None
-        if cwd not in self._cwd:
-            self._cwd[cwd] = None
-            if os.path.isdir(cwd):
-                try:
-                    r = subprocess.run(["git", "-C", cwd, "remote", "get-url", "origin"],
-                                       capture_output=True, timeout=2)
-                    url = r.stdout.decode("utf-8", "replace").strip()
-                    if r.returncode == 0 and url:
-                        self._cwd[cwd] = self.of(repo_identity(url))
-                except (OSError, subprocess.SubprocessError, ValueError):
-                    pass
-        return self._cwd[cwd]
-
-
-def _commit_call(cmd: str) -> tuple[bool, bool] | None:
-    """(is_amend, printed_before) when a command segment runs `git commit` (not --dry-run);
-    printed_before: a segment ahead of the commit may have printed, so the output's first line is
-    not necessarily the commit's."""
-    # a heredoc body is data (a file, a commit message), not commands: drop it before splitting
-    segs = [x for x in _SEGMENTS.split(_HEREDOC.sub(r"\3", cmd)) if x.strip()]
-    hits = [i for i, x in enumerate(segs) if _GIT_COMMIT.match(x) and "--dry-run" not in x.split()]
-    if not hits:
-        return None
-    return (any("--amend" in segs[i].split() for i in hits),
-            not all(_SILENT.match(x) for x in segs[:hits[0]]))
-
-
-def _blank() -> dict:
-    return {"calls": 0, "errors": 0, "hooks": 0, "by": {}, "last": None, "run": 0, "max": 0}
 
 
 class Activity:
@@ -173,7 +40,7 @@ class Activity:
         self.after_intr = False
         # Turn aggregates and unanswered commit calls are carried across scans in the watermark,
         # so a turn split by a scan boundary still gets one complete row.
-        self.agg = s.get("agg") or _blank()
+        self.agg = s.get("agg") or blank_agg()
         self.pend: dict = s.get("pend") or {}  # commit tool_use_id -> [is_amend, printed_before]
         # Tool block ids already counted. Within a chunk the set spans turns (Claude Code re-logs
         # history after a turn ends). Across scans only the open turn's newest _SEEN_MAX ids are
@@ -293,16 +160,11 @@ class Activity:
         self.seen["u" + tid] = None
         self.open_ids.append("u" + tid)
         inp = b.get("input") if isinstance(b.get("input"), dict) else {}
-        a = self.agg
-        a["calls"] += 1
-        a["by"][_tool(name)] = a["by"].get(_tool(name), 0) + 1
-        key = name + ":" + _h(json.dumps(inp, sort_keys=True, default=str))[:16]
-        a["run"] = a["run"] + 1 if key == a["last"] else 1
-        a["last"], a["max"] = key, max(a["max"], a["run"])
+        add_call(self.agg, name, inp)
         if name == "Skill" and isinstance(inp.get("skill"), str):
             self._emit("invoke", o, tid, sess, {"skill": _tool(inp["skill"])})
         cmd = inp.get("command")
-        call = _commit_call(cmd) if name == "Bash" and isinstance(cmd, str) else None
+        call = commit_call(cmd) if name == "Bash" and isinstance(cmd, str) else None
         if call:
             self.pend[tid] = list(call)
 
@@ -326,17 +188,11 @@ class Activity:
 
     def _commits(self, o: dict, tid: str, amend: bool, before: bool, text: str, err: bool,
                  sess: EventSession) -> None:
-        found = [m["sha"] for m in _COMMIT_OUT.finditer(text)]
-        if not found and not err:
-            tr = o.get("toolUseResult")
-            g = tr.get("gitOperation") if isinstance(tr, dict) else None
-            c = g.get("commit") if isinstance(g, dict) else None
-            if isinstance(c, dict) and isinstance(c.get("sha"), str):
-                found = [c["sha"]]
-            elif before:     # an earlier command may have printed: only a late "ok <sha>" counts
-                found = [m["sha"] for m in _OK_LINE.finditer(text)][-1:]
-            elif m := _CONDENSED.match(text.split("\n", 1)[0]):
-                found = [m["sha"]]
+        tr = o.get("toolUseResult")
+        g = tr.get("gitOperation") if isinstance(tr, dict) else None
+        c = g.get("commit") if isinstance(g, dict) else None
+        sha = c.get("sha") if isinstance(c, dict) and isinstance(c.get("sha"), str) else None
+        found = commit_shas(text, err, before, sha)
         key = self.keys.of_cwd(o.get("cwd")) if found else None
         for sha in found:
             self._emit("commit", o, f"{tid}|{sha}", sess,
@@ -360,19 +216,12 @@ class Activity:
         self._emit("pr", o, seed, sess, {"number": num, "host": kind, "repo_key": key})
 
     def _turn(self, o: dict, sess: EventSession) -> None:
-        a = self.agg
-        top = max(a["by"].values(), default=0)
         self._emit("turn", o, self._uid(o), sess, {
             "duration_ms": o.get("durationMs") if isinstance(o.get("durationMs"), int) else None,
             "message_count": o.get("messageCount") if isinstance(o.get("messageCount"), int)
             else None,
-            "tool_calls": a["calls"], "tool_errors": a["errors"], "by_tool": dict(a["by"]),
-            "hook_blocks": a["hooks"], "max_identical_run": a["max"],
-            # AgentsView (MIT): a retry loop is 3+ identical calls in a row; a runaway turn is
-            # 6+ errors, or 3+ errors while one tool was called 10+ times.
-            "retry_flag": a["max"] >= 3,
-            "runaway_flag": a["errors"] >= 6 or (a["errors"] >= 3 and top >= 10),
+            "hook_blocks": self.agg["hooks"], **turn_attrs(self.agg),
         })
-        self.agg = _blank()
+        self.agg = blank_agg()
         self.pend.clear()                # a commit call still unanswered at turn end never will be
         self.open_ids = []
