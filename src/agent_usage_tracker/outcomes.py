@@ -139,9 +139,11 @@ def _fetch(path: str) -> bool:
     try:
         return p.wait(timeout=FETCH_TIMEOUT_S) == 0
     except subprocess.TimeoutExpired:
-        for sig, wait in ((signal.SIGTERM, 5), (signal.SIGKILL, None)):
+        # Windows has no process groups or SIGKILL: there kill() ends git itself
+        kill = (lambda s: os.killpg(p.pid, s)) if hasattr(os, "killpg") else (lambda s: p.kill())
+        for sig, wait in ((signal.SIGTERM, 5), (getattr(signal, "SIGKILL", signal.SIGTERM), None)):
             try:
-                os.killpg(p.pid, sig)
+                kill(sig)
                 p.wait(timeout=wait)
                 break
             except (OSError, subprocess.TimeoutExpired):

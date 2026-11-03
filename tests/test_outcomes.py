@@ -192,6 +192,8 @@ def test_survival_cached_and_never_recomputed():
 
 
 def test_gh_merged_pr_counts_as_merged():
+    if os.name == "nt":                    # the fakes are POSIX shell scripts
+        return
     with tempfile.TemporaryDirectory() as d:
         work, s = _world(Path(d))
         url = "https://github.com/owner/repo.git"
@@ -538,6 +540,8 @@ def test_cli_outcome_and_outcomes():
 
 
 def test_repo_config_never_runs_commands():
+    if os.name == "nt":                    # the fakes are POSIX shell scripts
+        return
     with tempfile.TemporaryDirectory() as d:
         work, s = _world(Path(d))
         marks = Path(d) / "marks"
@@ -594,6 +598,8 @@ def test_repo_config_never_runs_commands():
 
 
 def test_signing_proxy_alternates_and_helpers_never_run():
+    if os.name == "nt":                    # the fakes are POSIX shell scripts
+        return
     import http.server
     import threading
 

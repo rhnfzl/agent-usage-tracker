@@ -147,8 +147,9 @@ def test_commit_dir() -> None:
         ("(cd /w/one && git commit -m x)", "/w/one"),
         ("ls", None),
     ]
-    for cmd, want in cases:
-        assert ac.commit_dir(cmd) == want, (cmd, ac.commit_dir(cmd), want)
+    for cmd, want in cases:                                      # Windows joins with "\\"
+        got = ac.commit_dir(cmd)
+        assert (got and os.path.normpath(got)) == (want and os.path.normpath(want)), (cmd, got)
     print("ok commit_dir")
 
 
