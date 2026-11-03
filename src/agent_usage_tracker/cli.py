@@ -258,7 +258,7 @@ def run_session_backfill(cfg: Config, agents: list[str], dry_run: bool, sessions
         raise SystemExit("backfill --sessions-only/--activity-only needs transport.pg_dsn "
                          "(or use --dry-run).")
     counts: dict = {"rows": 0, "by_origin": {}, "turn_null": 0, "subagent_no_parent": 0,
-                    "activity": 0, "by_kind": {}, "via": {}}
+                    "activity": 0, "by_kind": {}, "via": {}, "link": {}}
     buf: list[dict] = []
     abuf: list[ActivityEvent] = []
 
@@ -288,6 +288,12 @@ def run_session_backfill(cfg: Config, agents: list[str], dry_run: bool, sessions
                             if e.kind == "steer":
                                 v = e.attrs["via"]
                                 counts["via"][v] = counts["via"].get(v, 0) + 1
+                            elif e.kind == "link":     # rows per role, and how many carry each key
+                                r = counts["link"].setdefault(e.attrs["role"], {"rows": 0})
+                                r["rows"] += 1
+                                for k, v in e.attrs.items():
+                                    if k != "role" and v:
+                                        r[k] = r.get(k, 0) + 1
                             abuf.append(e)
                             if len(abuf) >= BATCH:
                                 flush()
@@ -496,7 +502,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.activity_only:
             print(f"activity-only backfill {mode}: {c['activity']} rows, by kind "
                   f"{json.dumps(c['by_kind'], sort_keys=True)}, steer via "
-                  f"{json.dumps(c['via'], sort_keys=True)}")
+                  f"{json.dumps(c['via'], sort_keys=True)}, link rows with each key by role "
+                  f"{json.dumps(c['link'], sort_keys=True)}")
         return 0
     if args.cmd == "backfill" and args.dry_run:
         parser.error("backfill --dry-run needs --sessions-only or --activity-only (a plain "

@@ -450,7 +450,7 @@ def test_pi_usage_and_sessions() -> None:
                       for e in fork if e.session) == [
             (SID, None), (SID, None), (FORK, SID), (FORK, SID)], fork
         assert {e.event_id for e in _acts(evs, sid=FORK)} == {
-            make_event_id("pi", "steer", f"{FORK}|f1"), make_event_id("pi", "turn", f"{FORK}|f1")}
+            make_event_id("pi", k, f"{FORK}|f1") for k in ("steer", "turn", "link")}
         # parent and session fallbacks: the uuid in a file name, never the path
         assert pi._uuid_in(f"/gone/2026-01-01T00-00-00-000Z_{FORK}.jsonl") == FORK
         assert pi._uuid_in("/gone/not-a-session.jsonl") is None
@@ -520,8 +520,8 @@ def test_pi_carries_across_scans() -> None:
 
 def test_attrs_carry_no_text() -> None:
     def check(home, repo):
-        kinds = {"codex": {"steer", "interrupt", "turn", "commit", "compaction"},
-                 "pi": {"steer", "interrupt", "turn", "commit", "compaction", "invoke"}}
+        kinds = {"codex": {"steer", "interrupt", "turn", "commit", "compaction", "link"},
+                 "pi": {"steer", "interrupt", "turn", "commit", "compaction", "invoke", "link"}}
         for mod in (codex, pi):
             evs = _acts(_collect(mod, home))
             assert {e.kind for e in evs} == kinds[mod.NAME], (mod.NAME, {e.kind for e in evs})
@@ -556,8 +556,10 @@ def test_backfill_codex_pi() -> None:
         assert c["by_origin"] == {"interactive": 6, "automated": 2, "subagent": 1,
                                   "unknown": 11}, c
         assert c["subagent_no_parent"] == 0, c
+        # a link row per closed turn; Codex also closes one on turn_aborted
         assert c["by_kind"] == {"steer": 10, "interrupt": 2, "turn": 8, "commit": 2,
-                                "compaction": 2, "invoke": 1}, c
+                                "compaction": 2, "invoke": 1, "link": 9}, c
+        assert sum(r["rows"] for r in c["link"].values()) == 9 and c["link"]["seed"]["repo_key"], c
     _run(check)
     print("ok backfill_codex_pi")
 

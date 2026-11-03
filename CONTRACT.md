@@ -252,6 +252,7 @@ identity rules above; `ts` is the source record's own timestamp; `event_id` is
 | `turn` | `system` `turn_duration` record | uuid | `duration_ms`, `message_count`, `tool_calls`, `tool_errors`, `by_tool`, `hook_blocks`, `max_identical_run`, `retry_flag`, `runaway_flag` |
 | `compaction` | `system` `compact_boundary` record | uuid | `trigger` when present |
 | `invoke` | `Skill` tool_use | tool_use_id | `skill` (`mcp` for an MCP name) |
+| `link` | closed turn: a `turn_duration` record, else (a subagent or scripted file, or a final turn with no `turn_duration`) the file once read to its end and idle for an hour | the turn's uuid, else the last record's uuid | `repo_key`, `branch_key`, `ticket_keys`, `sha_refs`, `pr_keys`, `role` (see Link rows below) |
 
 Rules worth knowing:
 
@@ -271,7 +272,11 @@ Rules worth knowing:
   the first line (`ok <sha>` / `<sha> <subject>`) when nothing ahead of the commit could have
   printed (only `cd`, `pushd`, `set`, `export`, `true`, `mkdir`, `rm`, `cat > file`, a variable
   assignment or `git add` came before), else the last `ok <sha>` line. The branch is not stored:
-  branch names are free text.
+  branch names are free text (the link row carries it as `branch_key`).
+- A commit's `repo_key` comes from the directory the command moved to (`cd X && git commit`,
+  `git -C X commit`, relative to the record's `cwd`), else the session's worktree
+  (`worktree-state.originalCwd`), else the record's `cwd`; NULL when none resolves. A move through
+  a variable (`cd $DIR`) is not followed.
 - `repo_key` = HMAC-SHA256 of `host/owner/repo` (lowercased; credentials, port and `.git`
   dropped) under a per-install salt, from `git remote get-url origin` in the record's `cwd` (2 s
   timeout, cached per cwd per pass), NULL when the directory or remote is gone. A PR's key uses
@@ -293,6 +298,30 @@ Rules worth knowing:
   same input in a row); `runaway_flag` = `tool_errors >= 6`, or `>= 3` while one tool ran 10+
   times. Both rules come from AgentsView (MIT).
 
+### Link rows (`link`, all four agents)
+
+One row per closed turn, the raw material for linking sessions into episodes. Every value is a
+key, a SHA, an enum or a list of those; branch names, ticket ids, URLs and paths stay on the
+machine. Keys are HMAC-SHA256 under the same salt as `repo_key`.
+
+| attr | value |
+|---|---|
+| `repo_key` | the turn's repo, by source: the commit's own directory (rules above), the worktree's original checkout, the record's `cwd`, Codex `session_meta.git.repository_url` (normalised like a remote) |
+| `branch_key` | `HMAC(repo_key \|\| branch)` paired with the repo of its own source: git's `[branch sha]` commit line, `worktree-state.worktreeBranch`, Codex `session_meta.git.branch`, the record's `gitBranch`. `main`, `master`, `develop`, `trunk` and `HEAD` get none |
+| `ticket_keys` | up to 5 `HMAC(ticket)` for strict ids `[A-Z][A-Z0-9]{1,9}-\d+` (not inside a longer word; `UTF-8`, `SHA-256`, `ISO-8601` and similar standards excluded) in the turn's branches, commit subjects and Claude Code session titles (`ai-title`, `custom-title`) |
+| `sha_refs` | up to 20 commit-like SHAs quoted in the turn's tool output or message text: 7 to 40 lowercase hex with at least one digit and one letter, not part of a longer word, uuid or hash |
+| `pr_keys` | up to 10 `HMAC(host/owner/repo\|number)` from GitHub `https://github.com/<o>/<r>/pull/<n>` and Bitbucket `https://bitbucket.org/<ws>/<repo>/pull-requests/<n>` URLs in the same text, plus the turn's `pr-link` records (the same PR gives the same key either way) |
+| `role` | `child` for a subagent or a scripted run (`run_origin` subagent or automated), else `seed` |
+
+Turn close per agent: Claude Code as in the table above; Codex `task_complete` or
+`turn_aborted` (seed `session_id|turn_id`); Pi the derived turn (seed `session_id|<prompt id>`);
+Cursor CLI each emitted turn (seed `session_id|requestId`), SDK runs get none. A Claude Code
+worktree holds for every turn until `worktree-state` reports it left. Codex takes the repo and
+branch from the first `session_meta` (its `cwd`, else the remote URL) for every turn. Seeds are
+deterministic, so `aut backfill --activity-only` fills history and a live scan split anywhere
+gives the same rows as one full read; the dry run prints the link rows per role and how many
+carry each key.
+
 ### Codex and Pi activity
 
 Same kinds and attrs as Claude Code where the source has them. Seeds start with the session id
@@ -309,7 +338,7 @@ are the shared code in `collectors/_activity_common.py`.
 | `steer` | each prompt counted as human (seeded like it); `via` always `typed`; `words`, `chars`, `images` (attached images), `after_interrupt` (an interrupt since the previous prompt) | each user message: `via` `skill` (text opens `<skill name="`), `queued` (the previous message is a toolResult: typed while the agent ran), else `typed`; `words`, `chars`, `after_interrupt` (the previous assistant record was aborted) |
 | `interrupt` | `turn_aborted` with reason `interrupted`; no attrs | assistant `stopReason == "aborted"`; `during_tool` (the entry before it is a toolResult) |
 | `turn` | `task_complete`: `duration_ms` from the record, else `task_started` to `task_complete`; `tool_calls` and `by_tool` from the model's tool calls (`function_call`, `custom_tool_call`; an `mcp__` namespace or a name containing `__`, the older CLI form, counts as `mcp`) plus `McpToolCall` items whose id matches no MCP call of the turn (Codex Desktop logs most MCP calls only as items); `tool_errors` from `CommandExecution` items with `exit_code != 0` and `McpToolCall` items with status `failed` (command items run inside a tool call, so they are not counted as calls) | derived: one per user message, from it to the first `stop` / `aborted` / `length` assistant record, else to the last entry before the next user message (an `error` followed by another assistant record is a retry, not an end); `duration_ms` = end ts minus prompt ts, `message_count` (the prompt, assistant and toolResult messages), tool aggregates from `toolCall` blocks, `tool_errors` from `toolResult.isError`. The last open turn of a file is emitted on a later scan |
-| `commit` | `CommandExecution` item: its shell script and `aggregated_output`, `repo_key` from the item's `cwd` | `bash` toolCall paired with its toolResult by `toolCallId`; `repo_key` from the header `cwd` |
+| `commit` | `CommandExecution` item: its shell script and `aggregated_output`, `repo_key` from the command's own directory, else the item's `cwd` | `bash` toolCall paired with its toolResult by `toolCallId`; `repo_key` from the command's own directory, else the header `cwd` |
 | `compaction` | `ContextCompaction` item; no attrs | `compaction` record: `tokens_before` |
 | `invoke` | not possible (no skill tool; reading a skill file is a guess) | a user message opening `<skill name="X">`: `skill` = X |
 | `rejection` | not possible: no user approval decisions are logged (an automatic reviewer decides) | not possible: Pi has no permission prompt |
@@ -333,7 +362,7 @@ requestIds), when a later prompt follows it or the chat has been idle for an hou
 | kind | Cursor CLI | Cursor SDK |
 |---|---|---|
 | `steer` | each human row (seed: requestId; a later prompt sent during the running turn reuses that requestId and gets its own human and steer row, seeded with its blob id too, at its own timestamp); `via` always `typed`; `words` and `chars` of the `<user_query>` text, `images` (image blocks) | not possible: run prompts are app input |
-| `commit` | a `Shell` tool-call whose command is a commit call, paired by `toolCallId` with its result (`Exit code: N` then `Command output:`); the shared SHA parser; `repo_key` from the call's `working_directory`, else NULL | none |
+| `commit` | a `Shell` tool-call whose command is a commit call, paired by `toolCallId` with its result (`Exit code: N` then `Command output:`); the shared SHA parser; `repo_key` from the command's own directory (relative to the call's `working_directory`), else the `working_directory`, else NULL | none |
 | `rejection` | a `SwitchMode` result `Mode switch was rejected by the user` (seed: toolCallId) | none |
 | `turn` | one per requestId: `tool_calls`, `by_tool` (Cursor's tool names; `mcp_<server>_<tool>` and `CallMcpTool` count as `mcp`, a name that is not a plain identifier as `other`), `tool_errors` (tool results with `highLevelToolCallResult.isError`), `hook_blocks` (Shell results opening `Rejected: Hook blocked`, also errors), `max_identical_run`, `retry_flag`, `runaway_flag`, `run_origin` (and `parent_session_id` in a subagent chat); no `duration_ms`. A tool call counts once per turn by `toolCallId`, even when a rewritten blob in another root lists it again | one per run that ended: `status` (`finished`, `cancelled`, `error`), `duration_ms` = `finished_at - started_at` (NULL without both), `run_origin` `automated`; `turn_id` = `run_id`, `session_id` = `agent_id`. Queued and running runs are sent once they end (a row is insert-only). `error_code` and `result` are free text and never read |
 | `interrupt` | not possible: no record in the store. The transcript's `turn_ended` carries a status but no id or timestamp, and its count does not line up with the prompts, so it is not joined | a cancelled run is `turn` with `status` `cancelled` |

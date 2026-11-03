@@ -23,8 +23,9 @@ from typing import Callable, Iterator
 
 from ..config import Config
 from ..event import ActivityEvent, EventSession, UsageEvent, make_event_id
-from ._activity_common import (RepoKeys, add_call, blank_agg, commit_call, commit_shas,
-                               first_record, ms_between, text_of, turn_attrs)
+from ._activity_common import (Link, RepoKeys, add_call, blank_agg, commit_call, commit_dir,
+                               commit_repo, commit_shas, first_record, ms_between, repo_identity,
+                               text_of, turn_attrs)
 from ._util import basename, read_new_lines, safe_int
 
 NAME = "codex"
@@ -75,12 +76,25 @@ def _str(v: object) -> str | None:
     return v if isinstance(v, str) and v else None
 
 
-def _set_meta(cur: dict, p: dict) -> None:
+def _set_meta(cur: dict, p: dict, keys: RepoKeys) -> None:
     """Identity, origin and cwd from the FIRST session_meta only: a forked file repeats its
-    parent's meta on a later line."""
+    parent's meta on a later line. Its git block gives the link fields every turn carries: the
+    repo from the cwd, else the remote URL (hashed, never kept), and the branch, as keys."""
     cur["meta"] = {"id": _str(p.get("id")), "parent": _str(p.get("parent_thread_id")),
                    "origin": _run_origin(p)}
     cur["cwd"] = p.get("cwd") or cur.get("cwd")
+    g = p.get("git") if isinstance(p.get("git"), dict) else {}
+    rk = keys.of_cwd(p.get("cwd"))
+    if not rk and isinstance(g.get("repository_url"), str):
+        try:
+            rk = keys.of(repo_identity(g["repository_url"]))
+        except ValueError:
+            pass
+    # shortcut: a later turn_context cwd in another repo keeps the first meta's repo; take the
+    # turn's cwd if Codex threads start moving between repos
+    link = Link(keys, {})
+    link.place(2, rk, g.get("branch"))
+    cur["meta"]["link"] = link.s
 
 
 def _session(cur: dict, path: str) -> EventSession:
@@ -117,9 +131,11 @@ def _prompt(t: object, p: dict, has_um: bool) -> tuple[str, int] | None:
 
 
 def _activity(o: dict, t: object, p: dict, a: dict, sess: EventSession, keys: RepoKeys,
-              out: list) -> None:
-    """Non-prompt activity of one record: tool aggregates, interrupt, turn, commit, compaction."""
+              out: list, cur: dict) -> None:
+    """Non-prompt activity of one record: tool aggregates, interrupt, turn, commit, compaction,
+    link."""
     ts = o.get("timestamp")
+    link = Link(keys, a.setdefault("link", {}))
 
     def emit(kind: str, seed: str, attrs: dict) -> None:
         out.append(ActivityEvent(event_id=make_event_id(NAME, kind, f"{sess.session_id}|{seed}"),
@@ -128,6 +144,7 @@ def _activity(o: dict, t: object, p: dict, a: dict, sess: EventSession, keys: Re
 
     agg = a.setdefault("agg", blank_agg())
     if t == "response_item":
+        link.text(p.get("output"))           # a tool call's output
         name = p.get("name")
         if p.get("type") in ("function_call", "custom_tool_call") and isinstance(name, str):
             # an MCP namespace is a server label (free text); other namespaces are codex's own.
@@ -142,7 +159,13 @@ def _activity(o: dict, t: object, p: dict, a: dict, sess: EventSession, keys: Re
     if t != "event_msg":
         return
     pt, it = p.get("type"), p.get("item")
-    if pt == "task_started":
+    if pt in ("task_complete", "turn_aborted"):
+        link.merge((cur.get("meta") or {}).get("link") or {})
+        emit("link", str(p.get("turn_id") or ts), link.attrs(sess.run_origin))
+        link.reset()
+    if pt == "agent_message":
+        link.text(p.get("message"))
+    elif pt == "task_started":
         a["agg"], a["start"] = blank_agg(), ts
     elif pt == "turn_aborted" and p.get("reason") == "interrupted":
         a["intr"] = True
@@ -162,9 +185,13 @@ def _activity(o: dict, t: object, p: dict, a: dict, sess: EventSession, keys: Re
             script = _script(it.get("command"))
             call = commit_call(script) if script else None
             out_text = it.get("aggregated_output")
+            out_text = out_text if isinstance(out_text, str) else ""
+            link.text(out_text)
             if call:
-                found = commit_shas(out_text if isinstance(out_text, str) else "", err, call[1])
-                key = keys.of_cwd(it.get("cwd")) if found else None
+                found = commit_shas(out_text, err, call[1])
+                key = commit_repo(keys, it.get("cwd"), commit_dir(script), None) if found else None
+                if found:
+                    link.commit(key, out_text)
                 for sha in found:
                     emit("commit", f"{it.get('id')}|{sha}",
                          {"sha": sha, "repo_key": key, "amend": call[0]})
@@ -217,7 +244,7 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list, Callable[[], None]]]:
             first = first_record(path)
             if first and first.get("type") == "session_meta" \
                     and isinstance(first.get("payload"), dict):
-                _set_meta(cur, first["payload"])
+                _set_meta(cur, first["payload"], keys)
         recs = []
         # A forked child's file opens with a copy of its parent's history: lines before the first
         # meta's subagent_history_start_ordinal (0-based). `skip` is how many copied lines are
@@ -252,7 +279,7 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list, Callable[[], None]]]:
                 cur["session_id"] = p.get("session_id") or p.get("id") or cur["session_id"]
                 cur["provider"] = p.get("model_provider") or cur["provider"]
                 if "meta" not in cur:
-                    _set_meta(cur, p)
+                    _set_meta(cur, p, keys)
             elif t == "turn_context":
                 if p.get("model"):
                     cur["model"] = p.get("model")
@@ -304,6 +331,7 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list, Callable[[], None]]]:
             if prompt is not None:
                 after_intr = bool(a.pop("intr", False))
                 text, images = prompt
+                Link(keys, a.setdefault("link", {})).text(text)
                 sess = _session(cur, path)
                 # A prompt someone typed. Threads a program drives (subagents, `codex exec`, MCP
                 # calls, another agent's integration, scheduled automations) are not human turns.
@@ -331,13 +359,15 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list, Callable[[], None]]]:
             # Best effort: a record whose activity extraction raises is counted and skipped, so
             # activity never blocks the usage and session rows of the same chunk.
             try:
-                _activity(o, t, p, a, _session(cur, path), keys, events)
+                _activity(o, t, p, a, _session(cur, path), keys, events, cur)
             except Exception:
                 act_errors += 1
         cur["off"] = new_off
         agg = a.get("agg")
         if agg is not None and not (agg["calls"] or agg["errors"]):
             del a["agg"]
+        if not a.get("link"):
+            a.pop("link", None)
         if not any(a.values()):
             cur.pop("act", None)
 

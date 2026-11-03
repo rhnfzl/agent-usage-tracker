@@ -29,7 +29,8 @@ from typing import Callable, Iterator
 
 from ..config import Config
 from ..event import ActivityEvent, EventSession, UsageEvent, make_event_id
-from ._activity_common import (RepoKeys, add_call, blank_agg, commit_call, commit_shas,
+from ._activity_common import (Link, RepoKeys, add_call, blank_agg, commit_call, commit_dir,
+                               commit_repo, commit_shas,
                                ms_between, text_of, turn_attrs)
 from ._util import epoch_ms_to_iso
 from .cursor import _connect_ro
@@ -158,11 +159,13 @@ def _messages(con: sqlite3.Connection, ids: set[str]) -> dict[str, dict]:
 
 
 def _activity(m: dict, t: dict, calls: dict, keys: RepoKeys) -> None:
-    """One assistant or tool message of turn `t`: tool aggregates, commits, rejections."""
+    """One assistant or tool message of turn `t`: tool aggregates, commits, rejections, link."""
     agg = t["agg"]
+    link = Link(keys, t["link"])
     content = [b for b in m["content"] if isinstance(b, dict)] \
         if isinstance(m.get("content"), list) else []
     if m.get("role") == "assistant":
+        link.text(text_of(content))
         for b in content:
             if b.get("type") == "tool-call" and isinstance(b.get("toolName"), str):
                 cid = b.get("toolCallId")
@@ -182,19 +185,24 @@ def _activity(m: dict, t: dict, calls: dict, keys: RepoKeys) -> None:
             continue
         res, cid = b.get("result"), b.get("toolCallId")
         res = res if isinstance(res, str) else ""
+        link.text(res)
         if b.get("toolName") == "SwitchMode" and res.startswith("Mode switch was rejected by the user"):
             t["acts"].append(("rejection", str(cid), {}))
         elif b.get("toolName") == "Shell":
             agg["hooks"] += res.startswith("Rejected: Hook blocked")
             args = calls.get(cid)
             cmd = args.get("command") if isinstance(args, dict) else None
+            wd = args.get("working_directory") if isinstance(args, dict) else None
+            link.place(3, keys.of_cwd(wd))
             hit = commit_call(cmd) if isinstance(cmd, str) else None
             if not hit:
                 continue
             ex = _EXIT.match(res)       # "Exit code: N\n\nCommand output:\n..." when it ran
             found = commit_shas(res[ex.end():] if ex else res, err or not ex or ex[1] != "0",
                                 hit[1])
-            key = keys.of_cwd(args.get("working_directory")) if found else None
+            key = commit_repo(keys, wd, commit_dir(cmd), None) if found else None
+            if found:
+                link.commit(key, res[ex.end():] if ex else res)
             for sha in found:
                 t["acts"].append(("commit", f"{cid}|{sha}",
                                   {"sha": sha, "repo_key": key, "amend": hit[0]}))
@@ -234,7 +242,7 @@ def _chat(path: str, con: sqlite3.Connection, meta: dict, cur: dict, idle: bool,
                     turns[rid]["closed"] = True
                 rid = r
                 t = turns.setdefault(r, {"msg": m, "agg": blank_agg(), "acts": [], "cids": set(),
-                                         "more": {}, "closed": False, "listed": True})
+                                         "more": {}, "closed": False, "listed": True, "link": {}})
                 # A prompt sent while the turn runs reuses its requestId. A blob with the first
                 # prompt's text is a rewrite of it, not a new prompt.
                 # shortcut: "first" is the first one seen in list order, so a follow-up that sits
@@ -281,6 +289,8 @@ def _chat(path: str, con: sqlite3.Connection, meta: dict, cur: dict, idle: bool,
             c = pm.get("content")
             images = sum(isinstance(b, dict) and b.get("type") == "image" for b in c) \
                 if isinstance(c, list) else 0
+            if t["listed"]:
+                Link(keys, t["link"]).text(ptext)
             events.append(UsageEvent(
                 event_id=make_event_id(NAME, "human", sid, rid, *extra), ts=pts, agent=NAME,
                 model=None, provider=None, kind="human",
@@ -293,6 +303,7 @@ def _chat(path: str, con: sqlite3.Connection, meta: dict, cur: dict, idle: bool,
         if t["listed"]:
             emit("turn", rid, {**turn_attrs(t["agg"]), "hook_blocks": t["agg"]["hooks"],
                                **origin})
+            emit("link", rid, Link(keys, t["link"]).attrs(origin["run_origin"]))
     cur["done"] = sorted(done)
     cur["open"] = sum(r not in done for r in turns)
     return events, errors
