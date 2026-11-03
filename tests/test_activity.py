@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import hmac
 import io
 import json
 import os
@@ -39,9 +40,12 @@ TYPED = "please tidy the parser module"
 QUEUED = "and then run the checks"
 
 
+SALT = "test-salt"
+
+
 def _cfg(home: Path, pg_dsn: str | None = None) -> Config:
     return Config(machine="test", agents=("claude_code",), webhook_url=None,
-                  webhook_secret=None, pg_dsn=pg_dsn, home=home)
+                  webhook_secret=None, pg_dsn=pg_dsn, home=home, repo_key_salt=SALT)
 
 
 def _write_jsonl(path: Path, records: list[dict]) -> None:
@@ -88,8 +92,8 @@ def _git_repo(d: Path, remote: str) -> Path:
     return repo
 
 
-def _sha(s: str) -> str:
-    return hashlib.sha256(s.encode()).hexdigest()
+def _key(identity: str, salt: str = SALT) -> str:
+    return hmac.new(salt.encode(), identity.encode(), hashlib.sha256).hexdigest()
 
 
 def _fixture(home: Path, repo: Path) -> None:
@@ -224,12 +228,12 @@ def test_interrupt_rejection_hook() -> None:
 def test_commits() -> None:
     def check(home, repo):
         evs = _collect(home)
-        got = {(e.attrs["sha"], e.attrs["branch"], e.attrs.get("amend")) for e in _acts(evs, "commit")}
+        got = {(e.attrs["sha"], e.attrs.get("amend")) for e in _acts(evs, "commit")}
         # c2 is a --dry-run, c4 failed with no SHA; c5 is the condensed "ok <sha>" form
-        assert got == {("1a2b3c4", "feat/x", False), ("def5678", "feat/x", True),
-                       ("0a1b2c3", "feat/x", False)}, got
+        assert got == {("1a2b3c4", False), ("def5678", True), ("0a1b2c3", False)}, got
+        assert all("branch" not in e.attrs for e in _acts(evs, "commit"))  # branch names are text
         keys = {e.attrs["repo_key"] for e in _acts(evs, "commit")}
-        assert keys == {_sha("example.com/owner/repo")}, keys      # creds and .git stripped
+        assert keys == {_key("example.com/owner/repo")}, keys      # creds and .git stripped
     _run(check)
     print("ok commits")
 
@@ -239,23 +243,31 @@ def test_repo_key_normalisation() -> None:
     assert k("https://user:secret@Example.com/Owner/Repo.git") == "example.com/owner/repo"
     assert k("git@example.com:Owner/Repo.git") == "example.com/owner/repo"
     assert k("ssh://git@example.com:22/Owner/Repo/") == "example.com/owner/repo"
-    assert act.repo_key("/no/such/dir/anywhere", {}) is None
+    keys = act.RepoKeys(SALT)
+    assert keys.of_cwd("/no/such/dir/anywhere") is None
     with tempfile.TemporaryDirectory() as d:
         plain = Path(d) / "plain"
         plain.mkdir()
         subprocess.run(["git", "init", "-q", str(plain)], check=True)
-        assert act.repo_key(str(plain), {}) is None                # repo without a remote
+        assert keys.of_cwd(str(plain)) is None                     # repo without a remote
+    assert keys.of("example.com/owner/repo") == _key("example.com/owner/repo")
+    assert act.RepoKeys("other").of("example.com/owner/repo") != _key("example.com/owner/repo")
     print("ok repo_key_normalisation")
 
 
 def test_pr_rows() -> None:
     def check(home, repo):
-        prs = {e.attrs["number"]: e for e in _acts(_collect(home), "pr")}
-        assert sorted(prs) == [3, 4, 12], prs                       # the repeat link is one row
+        rows = _acts(_collect(home), "pr")
+        # one row per pr-link record, so ts never depends on how much of the file a scan read;
+        # distinct PRs are counted in SQL
+        assert sorted(e.attrs["number"] for e in rows) == [3, 4, 12, 12], rows
+        prs = {e.attrs["number"]: e for e in rows}
         assert {n: e.attrs["host"] for n, e in prs.items()} == {12: "github", 3: "bitbucket",
                                                                 4: "other"}
-        assert prs[12].attrs["repo_key"] == _sha("github.com/acme/widget")
-        assert prs[12].event_id == make_event_id(NAME, "pr", "S1", 12) and prs[12].ts == TS
+        assert prs[12].attrs["repo_key"] == _key("github.com/acme/widget")
+        twelve = sorted((e.ts, e.event_id) for e in rows if e.attrs["number"] == 12)
+        assert [t for t, _ in twelve] == [TS, "2026-07-18T11:00:00Z"], twelve
+        assert twelve[0][1] == make_event_id(NAME, "pr", f"S1|12|{TS}"), twelve
     _run(check)
     print("ok pr_rows")
 
@@ -285,31 +297,74 @@ def test_compaction_and_invoke() -> None:
     print("ok compaction_and_invoke")
 
 
-_ID = re.compile(r"^[\w.:/@+-]{1,100}$")       # enums, ids, names, hex: no spaces, no free text
+# attrs allowlist: every string value is a fixed enum, lowercase hex or a uuid; dicts map known
+# tool names to ints. Nothing with a slash, an @ or a space can pass.
+_ENUMS = {
+    "via": {"typed", "suggestion_accepted", "queued", "slash_command", "bash_input", "skill"},
+    "host": {"github", "bitbucket", "other"},
+    "trigger": {"manual", "auto"},
+    "skill": {"my-skill", "mcp"},              # the fixture's own skill names
+}
+_TOOLS = {"Bash", "Read", "Edit", "Write", "Skill", "Agent", "Task", "WebSearch", "WebFetch",
+          "Glob", "Grep", "mcp"}
+_HEX = re.compile(r"^[0-9a-f]{7,64}$")
+_UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 
 
-def _plain_value(v) -> bool:
+def _plain_value(key: str, v) -> bool:
     if v is None or isinstance(v, (bool, int, float)):
         return True
     if isinstance(v, str):
-        return bool(_ID.match(v)) and not v.startswith(("/", "~")) and "://" not in v
+        ok = v in _ENUMS.get(key, ()) or _HEX.match(v) or _UUID.match(v)
+        return bool(ok) and not any(c in v for c in "/@ ")
     if isinstance(v, dict):
-        return all(_plain_value(k) and isinstance(n, int) for k, n in v.items())
+        return all(t in _TOOLS and isinstance(n, int) and not isinstance(n, bool)
+                   for t, n in v.items())
     return False
+
+
+def _adversarial(home: Path, repo: Path) -> None:
+    """Text that must never reach attrs: a ticket-and-client branch, a relative path, an MCP server
+    label, a commit subject."""
+    cwd, br = str(repo), "feature/ABC-1-clientname-import"
+    _write_jsonl(home / ".claude/projects/-p/S3.jsonl", [
+        _user("v1", "fix it", sessionId="S3", cwd=cwd, gitBranch=br),
+        _tools("mv",
+               _use("v2", "Read", file_path="src/pkg/clientname_module.py"),
+               _use("v3", "mcp__acmecorp_internal__authenticate", token="x"),
+               _use("v4", "Bash", command='git commit -m "fix clientname import"'),
+               _use("v5", "Skill", skill="mcp__acmecorp_internal__lookup"),
+               sessionId="S3", cwd=cwd, gitBranch=br),
+        _result("w2", "v2", "contents", sessionId="S3", cwd=cwd),
+        _result("w3", "v3", "ok", sessionId="S3", cwd=cwd),
+        _result("w4", "v4", f"[{br} abc1234] fix clientname import\n 1 file changed",
+                sessionId="S3", cwd=cwd, gitBranch=br),
+        _result("w5", "v5", "done", sessionId="S3", cwd=cwd),
+        _turn_end("tv", 5, 4) | {"sessionId": "S3"},
+    ])
 
 
 def test_attrs_carry_no_text() -> None:
     def check(home, repo):
+        _adversarial(home, repo)
         evs = _acts(_collect(home))
         assert {e.kind for e in evs} == {"steer", "interrupt", "rejection", "commit", "pr", "turn",
                                          "compaction", "invoke"}
         for e in evs:
             for k, v in e.attrs.items():
-                assert _plain_value(v), (e.kind, k, v)
+                assert _plain_value(k, v), (e.kind, k, v)
             blob = json.dumps(e.attrs)
-            for leak in (TYPED, QUEUED, "tidy", "acme", "widget", "Owner", str(repo), "blocked"):
+            for leak in (TYPED, QUEUED, "tidy", "acme", "widget", "Owner", str(repo), "blocked",
+                         "ABC-1", "clientname", "acmecorp", "src/pkg", "feature", "feat/x"):
                 assert leak not in blob, (e.kind, leak)
-        assert not _plain_value("free text here") and not _plain_value("/abs/path")
+        [tv] = [e for e in evs if e.event_id == make_event_id(NAME, "turn", "tv")]
+        assert tv.attrs["by_tool"] == {"Read": 1, "mcp": 1, "Bash": 1, "Skill": 1}, tv.attrs
+        assert [e.attrs["sha"] for e in evs if e.kind == "commit" and e.session_id == "S3"] == \
+            ["abc1234"]
+        assert {e.attrs["skill"] for e in evs if e.kind == "invoke"} == {"my-skill", "mcp"}
+        for bad in ("free text here", "/abs/path", "src/pkg/m.py", "user@corp.com", "a-b-c"):
+            assert not _plain_value("skill", bad) and not _plain_value("sha", bad), bad
+        assert not _plain_value("by_tool", {"mcp__corp__x": 1})
     _run(check)
     print("ok attrs_carry_no_text")
 
@@ -337,6 +392,230 @@ def test_turn_and_commit_carry_across_scans() -> None:
         assert [e.attrs["sha"] for e in _acts(second, "commit")] == ["1a2b3c4"]
         assert "act" not in next(iter(wm["files"].values())), "nothing left to carry"
     print("ok turn_and_commit_carry_across_scans")
+
+
+def test_commit_detection() -> None:
+    cases = [   # (command, output, sha expected or None)
+        ("git merge --no-ff --no-commit topic", "abc1234 subject", None),
+        ("git cat-file commit HEAD", "2222222 tree", None),
+        ("git rev-parse HEAD^{commit}", "bbbbbbb", None),
+        ("git verify-commit HEAD", "ccccccc", None),
+        ('git log --oneline -5\necho "since last commit"', "8888888 subject", None),
+        ('git log --oneline -3\ngit commit -m "x"', "3333333 old subject\nok 4444444", "4444444"),
+        ('git commit -m "x" && git push', "ok 5555555\nok main", "5555555"),
+        ("git log --oneline -1 && git commit -m x", "6666666 old subject", None),
+        ('git -C /some/dir -c user.name=x commit -m "y"', "ok 7777777", "7777777"),
+        ("git commit --amend -m x && git log -1", "[main 9999999] x\nok aaaaaaa", "9999999"),
+        ("git commit -m x", "ddddddd subject", "ddddddd"),       # single segment: first line
+        # segments before the commit that print nothing: the first line is still the commit's own
+        ("cd /some/dir && git add -A && git commit -m x && git push", "eeeeeee subject\nok main",
+         "eeeeeee"),
+        ('set -e\nexport X=1\ngit -C d add f\ngit commit -m "$(cat <<\'EOF\'\nx\nEOF\n)"',
+         "fffffff subject", "fffffff"),
+        # a wrapper before git, and a -c value with a space in quotes
+        ('/usr/bin/env git -c user.name="A B" commit -m x', "[main 1234567] x", "1234567"),
+        ("GIT_EDITOR=true git commit --amend", "[main 2345678] x", "2345678"),
+        ("echo git commit", "3456789 subject", None),
+        # a heredoc body is data, not commands: neither its lines nor a "git commit" inside count
+        ('D="/a b/"\ncat > f.txt <<\'EOF\'\nhello\ngit commit -m y\nEOF\nmkdir -p d && git commit -m x',
+         "4567890 subject", "4567890"),
+        ("cat > f.sh <<'EOF'\ngit commit -m y\nEOF", "5678901 subject", None),
+        ("uv run pytest -q && git commit -m x", "6789012 passed\n7890123 subject", None),
+    ]
+    with tempfile.TemporaryDirectory() as d:
+        home = Path(d)
+        recs = [_user("h1", "go")]
+        recs += [_tools(f"m{i}", _use(f"k{i}", "Bash", command=c)) for i, (c, _o, _s) in
+                 enumerate(cases)]
+        recs += [_result(f"r{i}", f"k{i}", o) for i, (_c, o, _s) in enumerate(cases)]
+        _write_jsonl(home / ".claude/projects/-p/S1.jsonl", recs)
+        got = {e.event_id: e.attrs["sha"] for e in _acts(_collect(home), "commit")}
+        want = {make_event_id(NAME, "commit", f"k{i}|{s}"): s for i, (_c, _o, s) in
+                enumerate(cases) if s}
+        assert got == want, (got, want)
+    print("ok commit_detection")
+
+
+def test_failed_delivery_rescan_matches_clean_pass() -> None:
+    # The sink is down for one scan; the state saved after it must not already hold that scan's
+    # turn counts or popped commit calls.
+    with tempfile.TemporaryDirectory() as d:
+        home = Path(d)
+        f = home / ".claude/projects/-p/S1.jsonl"
+        _write_jsonl(f, [
+            _user("h1", "go", promptSource="typed"),
+            _tools("m1", _use("c1", "Bash", command="git commit -m x"), _use("x1", "Read")),
+            _result("r0", "x1", "nope", err=True),
+        ])
+        sent: list = []
+        prev = os.environ.get("AUT_STATE")
+        os.environ["AUT_STATE"] = str(home / "state" / "state.json")
+
+        def scan(fail: bool) -> None:
+            def sender(batch):
+                if fail:
+                    raise RuntimeError("sink down")
+                sent.extend(batch)
+            saved = cli.make_sender
+            cli.make_sender = lambda c: sender
+            try:
+                with contextlib.redirect_stderr(io.StringIO()):
+                    cli.run_scan(_cfg(home), ["claude_code"], dry_run=False)
+                assert not fail
+            except RuntimeError:
+                assert fail
+            finally:
+                cli.make_sender = saved
+        try:
+            scan(False)
+            with f.open("a") as fh:
+                for r in (_result("r1", "c1", "[main 1a2b3c4] x"),
+                          _tools("m2", _use("x2", "Bash", command="ls")),
+                          _result("r2", "x2", "fine"), _turn_end("td1", 9, 3)):
+                    fh.write(json.dumps(r) + "\n")
+            scan(True)
+            scan(False)
+        finally:
+            if prev is None:
+                os.environ.pop("AUT_STATE", None)
+            else:
+                os.environ["AUT_STATE"] = prev
+        clean = _collect(home)
+
+        def view(evs):
+            return sorted((e.kind, e.event_id, e.ts, json.dumps(e.attrs, sort_keys=True))
+                          for e in _acts(evs) if e.kind in ("turn", "commit"))
+        assert view(sent) == view(clean) and len(view(clean)) == 2, (view(sent), view(clean))
+    print("ok failed_delivery_rescan_matches_clean_pass")
+
+
+def test_activity_errors_never_block_usage() -> None:
+    with tempfile.TemporaryDirectory() as d:
+        home = Path(d)
+        f = home / ".claude/projects/-p/S1.jsonl"
+        _write_jsonl(f, [
+            _user("h1", "go", promptSource="typed"),
+            _base(type="pr-link", prNumber=1, prUrl="https://[x/pull/1", prRepository="o/r"),
+            _tools("m1", _use("x1", "Read")),
+            _user("r1", [{"type": "tool_result", "tool_use_id": "x1", "is_error": True,
+                          "content": [{"type": "text", "text": None}]}]),
+            _turn_end("td1", 9, 3),
+            _tools("m2", _use("x2", "Read")),
+        ])
+        wm: dict = {}
+        evs = _collect(home, wm)
+        assert [e.attrs["host"] for e in _acts(evs, "pr")] == ["other"]    # bad URL, still a row
+        assert len(_acts(evs, "turn")) == 1
+        # a raise anywhere in activity extraction is counted and skipped, never blocks the rest
+        f.unlink()
+        _write_jsonl(f, [_user("h1", "go", promptSource="typed"), _tools("m1", _use("x1", "Read")),
+                         _turn_end("td1", 9, 3)])
+        saved = act.Activity._turn
+        act.Activity._turn = lambda self, o, sess: 1 / 0
+        err = io.StringIO()
+        try:
+            with contextlib.redirect_stderr(err):
+                evs = _collect(home, {})
+        finally:
+            act.Activity._turn = saved
+        assert len(_humans(evs)) == 1 and any(e.kind == "agent" for e in evs
+                                              if isinstance(e, UsageEvent)), evs
+        assert len(_acts(evs, "steer")) == 1 and not _acts(evs, "turn")
+        assert "1 activity record" in err.getvalue(), err.getvalue()
+    print("ok activity_errors_never_block_usage")
+
+
+def test_repo_key_salt() -> None:
+    with tempfile.TemporaryDirectory() as d:
+        prev = {k: os.environ.get(k) for k in ("AUT_STATE", "AUT_CONFIG", "AUT_TEST_SALT")}
+        os.environ["AUT_STATE"] = str(Path(d) / "st" / "state.json")
+        try:
+            k1 = act.RepoKeys(None).of("example.com/owner/repo")
+            salt = Path(d) / "st" / "repo_key.salt"
+            assert salt.exists() and (salt.stat().st_mode & 0o777) == 0o600, salt
+            assert act.RepoKeys(None).of("example.com/owner/repo") == k1      # reused
+            assert k1 != hashlib.sha256(b"example.com/owner/repo").hexdigest()
+            assert k1 != _key("example.com/owner/repo")
+            cfgf = Path(d) / "config.toml"
+            cfgf.write_text('repo_key_salt = "env:AUT_TEST_SALT"\n')
+            cfgf.chmod(0o600)
+            os.environ.update(AUT_CONFIG=str(cfgf), AUT_TEST_SALT="from-env")
+            from agent_usage_tracker.config import load_config
+            assert load_config().repo_key_salt == "from-env"
+        finally:
+            for k, v in prev.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+    print("ok repo_key_salt")
+
+
+def test_usage_filter_only_on_fresh_read() -> None:
+    usage = "<command-name>/usage</command-name>\n<command-message>usage</command-message>"
+    with tempfile.TemporaryDirectory() as d:
+        home = Path(d)
+        f = home / ".claude/projects/-p/S1.jsonl"
+        _write_jsonl(f, [_user("h1", "go"), _tools("m1", _use("x1", "Read"))])
+        wm: dict = {}
+        _collect(home, wm)
+        with f.open("a") as fh:      # a later chunk with only a /usage: live keeps it
+            for r in (_user("u1", usage), _user("u2", "<local-command-stdout>t</local-command-stdout>")):
+                fh.write(json.dumps(r) + "\n")
+        live = _collect(home, wm)
+        assert [e.event_id for e in _humans(live)] == [make_event_id(NAME, "human", "u1")], live
+        assert len(_acts(live, "steer")) == 1
+        full = _collect(home)        # and so does a full re-read of the same file
+        assert make_event_id(NAME, "human", "u1") in {e.event_id for e in _humans(full)}
+        g = home / ".claude/projects/-p/S2.jsonl"
+        _write_jsonl(g, [_user("u3", usage, sessionId="S2")])
+        assert not [e for e in _collect(home, wm) if e.session_id == "S2"]   # fresh: dropped
+    print("ok usage_filter_only_on_fresh_read")
+
+
+def test_relogged_blocks_across_scans() -> None:
+    with tempfile.TemporaryDirectory() as d:
+        home = Path(d)
+        f = home / ".claude/projects/-p/S1.jsonl"
+        _write_jsonl(f, [
+            _user("h1", "go"),
+            _tools("m1", _use("x3", "Skill", skill="my-skill"), _use("x1", "Read")),
+            _result("r1", "x1", "The user doesn't want to proceed with this tool use.", err=True),
+        ])
+        wm: dict = {}
+        first = _collect(home, wm)
+        later = "2026-07-18T10:00:01Z"
+        with f.open("a") as fh:      # Claude Code re-logs both blocks just after the scan
+            for r in (_tools("m1", _use("x3", "Skill", skill="my-skill"), _use("x1", "Read"),
+                             timestamp=later),
+                      _result("r1b", "x1", "The user doesn't want to proceed with this tool use.",
+                              err=True, timestamp=later),
+                      _turn_end("td1", 9, 3)):
+                fh.write(json.dumps(r) + "\n")
+        second = _collect(home, wm)
+        evs = first + second
+        assert len(_acts(evs, "invoke")) == 1 and len(_acts(evs, "rejection")) == 1, evs
+        [t] = _acts(second, "turn")
+        assert (t.attrs["tool_calls"], t.attrs["tool_errors"]) == (2, 1), t.attrs
+        assert "act" not in wm["files"][str(f)], wm["files"][str(f)]     # reset at turn end
+        # bounded while a turn stays open
+        with f.open("a") as fh:
+            fh.write(json.dumps(_tools("m9", *[_use(f"z{i}", "Read") for i in range(250)])) + "\n")
+        _collect(home, wm)
+        assert len(wm["files"][str(f)]["act"]["seen"]) == 200
+    print("ok relogged_blocks_across_scans")
+
+
+def test_subagent_keeps_no_agg() -> None:
+    with tempfile.TemporaryDirectory() as d:
+        home = Path(d)
+        f = home / ".claude/projects/-p/S1/subagents/agent-A1.jsonl"
+        _write_jsonl(f, [_user("s1", "go", agentId="A1", isSidechain=True),
+                         _tools("m1", _use("x1", "Read"), agentId="A1")])
+        wm: dict = {}
+        _collect(home, wm)
+        assert "agg" not in wm["files"][str(f)].get("act", {}), wm["files"][str(f)]
+    print("ok subagent_keeps_no_agg")
 
 
 class _Cur:
@@ -458,6 +737,13 @@ def main() -> int:
     test_compaction_and_invoke()
     test_attrs_carry_no_text()
     test_turn_and_commit_carry_across_scans()
+    test_commit_detection()
+    test_failed_delivery_rescan_matches_clean_pass()
+    test_activity_errors_never_block_usage()
+    test_repo_key_salt()
+    test_usage_filter_only_on_fresh_read()
+    test_relogged_blocks_across_scans()
+    test_subagent_keeps_no_agg()
     test_pg_one_transaction()
     test_activity_backfill_sends_no_usage()
     print("\nALL PASS")

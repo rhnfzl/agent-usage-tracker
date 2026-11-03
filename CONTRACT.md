@@ -31,7 +31,7 @@ Excluded:
 | Claude Code | tool results, sidechains (subagent transcripts), meta and compaction records | `isSidechain` / `isMeta` / `isCompactSummary`, `tool_result` blocks |
 | Claude Code | background-task notifications, slash-command stdout, interrupt notices | text opens with `<task-notification>`, `<local-command-stdout>`, `[Request interrupted` |
 | Claude Code | SDK programs driving a session | `entrypoint` in `sdk-py`, `sdk-cli` |
-| Claude Code | Stop hook verdicts, turns made only of context blocks, sessions that only ran `/usage` | text opens with `Stop hook feedback:`; nothing left after removing `<system-reminder>`, `<ide_selection>`, `<ide_opened_file>` blocks; a scan chunk with no model call whose every prompt is `/usage` (ported from AgentsView, MIT) |
+| Claude Code | Stop hook verdicts, turns made only of context blocks, sessions that only ran `/usage` | text opens with `Stop hook feedback:`; nothing left after removing `<system-reminder>`, `<ide_selection>`, `<ide_opened_file>` blocks; a read from byte 0 with no model call whose every prompt is `/usage` (a later chunk is never dropped, so a live scan and a full re-read agree; ported from AgentsView, MIT) |
 | Codex | agent-spawned threads, scripted `codex exec`, MCP calls, another agent's integration | `session_meta.source` (`subagent` key / `exec` / `mcp`), `originator` |
 | Codex | Codex Desktop scheduled automations | message opens with `Automation:` **and** contains `Automation ID:` |
 
@@ -202,11 +202,11 @@ identity rules above; `ts` is the source record's own timestamp; `event_id` is
 | `steer` | human turn (1:1 with `kind='human'`) | the human turn's uuid | `via` (typed, suggestion_accepted, queued, slash_command, bash_input, skill), `words`, `chars`, `after_interrupt` |
 | `interrupt` | `[Request interrupted` user record in a main session (a subagent's copy is the same keypress) | uuid | `during_tool` |
 | `rejection` | errored tool_result opening `The user doesn't want to proceed` | tool_use_id | none |
-| `commit` | SHA printed by a Bash `git commit` (not `--dry-run`), paired by tool_use_id | tool_use_id + sha | `sha`, `branch`, `repo_key`, `amend` |
-| `pr` | distinct (session, PR number) from `pr-link` records | sessionId + prNumber | `number`, `host` (github, bitbucket, other), `repo_key` |
+| `commit` | SHA printed by a Bash `git commit` (not `--dry-run`), paired by tool_use_id | tool_use_id + sha | `sha`, `repo_key`, `amend` |
+| `pr` | `pr-link` record (the same PR is linked many times; count distinct `(session_id, attrs->>'number')` in SQL) | the record's uuid, else sessionId + prNumber + the record's ts | `number`, `host` (github, bitbucket, other), `repo_key` |
 | `turn` | `system` `turn_duration` record | uuid | `duration_ms`, `message_count`, `tool_calls`, `tool_errors`, `by_tool`, `hook_blocks`, `max_identical_run`, `retry_flag`, `runaway_flag` |
 | `compaction` | `system` `compact_boundary` record | uuid | `trigger` when present |
-| `invoke` | `Skill` tool_use | tool_use_id | `skill` |
+| `invoke` | `Skill` tool_use | tool_use_id | `skill` (`mcp` for an MCP name) |
 
 Rules worth knowing:
 
@@ -216,14 +216,33 @@ Rules worth knowing:
 - `after_interrupt`: the previous non-meta user record in the file was an interrupt.
 - Hook denials (`PreToolUse:... hook error`) are not rejections; they count in the turn's
   `hook_blocks` (and in `tool_errors`, which counts every errored tool_result).
+- A commit call is a command segment (split on `;`, `&&`, `||`, `|` and newlines, heredoc bodies
+  removed first) that is `git [global options such as -C <dir>, -c <k=v>]* commit`, optionally
+  behind `VAR=x`, `env`, `command`, `timeout N` or `rtk [proxy]`, without `--dry-run`. So
+  `--no-commit`, `cat-file commit`, `verify-commit` or `commit` in an echo or a heredoc never count.
 - Commit SHAs come from git's `[branch sha]` line; failing that (and only for a successful call)
-  from Claude Code's structured `gitOperation.commit`, or a condensed first line `ok <sha>` /
-  `<sha> <subject>` as printed by a command-output proxy. Branch falls back to the record's
-  `gitBranch`.
-- `repo_key` = sha256 of `host/owner/repo` (lowercased; credentials, port and `.git` dropped),
-  from `git remote get-url origin` in the record's `cwd` (2 s timeout, cached per cwd per pass),
-  NULL when the directory or remote is gone. A PR's key hashes its URL host plus `prRepository`
-  the same way, so commits and PRs of one repo share a key.
+  from Claude Code's structured `gitOperation.commit`, or a condensed line printed by a
+  command-output proxy. The condensed form is read only where it can be the commit's own output:
+  the first line (`ok <sha>` / `<sha> <subject>`) when nothing ahead of the commit could have
+  printed (only `cd`, `pushd`, `set`, `export`, `true`, `mkdir`, `rm`, `cat > file`, a variable
+  assignment or `git add` came before), else the last `ok <sha>` line. The branch is not stored:
+  branch names are free text.
+- `repo_key` = HMAC-SHA256 of `host/owner/repo` (lowercased; credentials, port and `.git`
+  dropped) under a per-install salt, from `git remote get-url origin` in the record's `cwd` (2 s
+  timeout, cached per cwd per pass), NULL when the directory or remote is gone. A PR's key uses
+  its URL host plus `prRepository` the same way, so commits and PRs of one repo share a key. The
+  salt is the config key `repo_key_salt` (an `env:VAR` value works), else a random salt created
+  (mode 0600) as `repo_key.salt` next to the state file on first use. Without the salt the recipe
+  is not reproducible, so stored keys cannot be matched against a list of candidate repo names. Set
+  the same `repo_key_salt` on every machine for their keys to match; changing it changes every new
+  key. The remote URL is never stored or logged.
+- `by_tool` keys are the tool names, except that every MCP tool (`mcp__<server>__<tool>`) counts
+  as `mcp`: a server label is free text and can name an employer or a client.
+- Activity extraction is best effort: a record whose extraction raises is skipped and counted (one
+  stderr line per pass), and never holds back the usage and session rows of its file.
+- Tool block ids seen in the open turn (the newest 200) ride in the watermark until the turn ends,
+  so a block Claude Code re-logs just after a scan boundary counts once. A subagent file never
+  gets a `turn_duration`, so its turn counters are not kept in the watermark.
 - Turn aggregates cover the records since the previous turn end in the same file, carried across
   scans in the file's watermark entry. `retry_flag` = `max_identical_run >= 3` (same tool and
   same input in a row); `runaway_flag` = `tool_errors >= 6`, or `>= 3` while one tool ran 10+

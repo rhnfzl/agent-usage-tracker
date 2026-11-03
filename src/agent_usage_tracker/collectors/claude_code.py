@@ -16,13 +16,15 @@ from __future__ import annotations
 import glob
 import json
 import re
+import sys
 from pathlib import Path
 from typing import Callable, Iterator
 
 from ..config import Config
 from ..event import EventSession, UsageEvent, make_event_id
-from ._util import basename, scan_file
-from .claude_code_activity import Activity
+from ._util import basename, safe_int, scan_file
+from .claude_code_activity import Activity, RepoKeys
+from .claude_code_activity import _text as _text_of
 
 NAME = "claude_code"
 
@@ -96,15 +98,6 @@ def _is_injected(text: str) -> bool:
             or (bool(text.strip()) and not _CONTEXT_BLOCK_RE.sub("", text).strip()))
 
 
-def _text_of(content: object) -> str:
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        return "\n".join(b.get("text", "") for b in content
-                         if isinstance(b, dict) and b.get("type") == "text")
-    return ""
-
-
 def _str(v: object) -> str | None:
     return v if isinstance(v, str) and v else None
 
@@ -136,7 +129,8 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[UsageEvent], Callable[
     if not base.exists():
         return
     files: dict = wm.setdefault("files", {})
-    repo_cache: dict = {}                # cwd -> repo_key, once per collect() pass
+    keys = RepoKeys(cfg.repo_key_salt)   # cwd -> repo_key cached once per collect() pass
+    act_errors = 0
 
     for path in glob.glob(str(base / "**" / "*.jsonl"), recursive=True):
         fstate = files.get(path, {})
@@ -176,7 +170,8 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[UsageEvent], Callable[
         same_file = fstate.get("ino") == new_fstate.get("ino")
         turn: str | None = _str(fstate.get("turn")) if same_file else None
         # activity state rides in the same watermark entry and is dropped with it on a new file
-        act = Activity(NAME, path, ident[0], fstate.get("act") if same_file else None, repo_cache)
+        act = Activity(NAME, path, ident[0], fstate.get("act") if same_file else None, keys)
+        fresh = not same_file or safe_int(fstate.get("off")) == 0     # read from byte 0
         steers: list = []
         for raw in lines:
             try:
@@ -261,11 +256,13 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[UsageEvent], Callable[
                 session=_session_of(o, ident, turn),
             )
         # A session that only ran /usage (no model call, every prompt a /usage) was nobody working
-        # (AgentsView, MIT). shortcut: judged per scan chunk, so a session whose first scan saw only
-        # the /usage keeps it dropped if real work follows later; harmless while it stays rare.
-        if not best and steers and all(is_usage for _s, is_usage in steers):
+        # (AgentsView, MIT). Judged only on a read from byte 0, so a /usage typed mid-session and
+        # caught alone by a live scan is kept, as a full re-read keeps it. shortcut: a file whose
+        # first chunk held only the /usage keeps it dropped if real work follows; rare.
+        if fresh and not best and steers and all(is_usage for _s, is_usage in steers):
             human, steers = [], []
-        events = list(best.values()) + human + [s for s, _u in steers] + act.events
+        events = list(best.values()) + human + [s for s, _u in steers if s] + act.events
+        act_errors += act.errors
         if turn:
             new_fstate["turn"] = turn
         else:
@@ -280,3 +277,6 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[UsageEvent], Callable[
             files[p] = s
 
         yield events, commit
+    if act_errors:
+        print(f"aut: {NAME}: {act_errors} activity record(s) skipped (extraction failed); usage "
+              "and session rows are unaffected.", file=sys.stderr)
