@@ -23,6 +23,7 @@ from __future__ import annotations
 import functools
 import http.client
 import json
+import os
 import plistlib
 import re
 import subprocess
@@ -90,7 +91,9 @@ _DEFAULT_APPS = {
     "figma": "design",
     **{a: "media" for a in ("spotify", "music", "vlc", "iina", "quicktime player")},
     **{a: "browser" for a in ("safari", "google chrome", "chrome", "chromium", "brave browser",
-                              "arc", "firefox", "helium", "microsoft edge")},
+                              "arc", "firefox", "helium", "microsoft edge", "dia", "vivaldi",
+                              "opera", "zen", "orion", "comet", "duckduckgo", "tor browser",
+                              "librewolf", "sigmaos", "ladybird")},
 }
 _WORK_TITLES = (
     r"github|gitlab|bitbucket|codeberg|sourcegraph|pull request|merge request",
@@ -105,12 +108,14 @@ _RELEVANT = frozenset(("editor", "terminal", "agent", "dev", "comms", "docs", "d
 
 _DARWIN = sys.platform == "darwin"
 _MAC_TIMEOUT = 2
+_mac_off = False                  # set by the first timeout: a stalled Spotlight is not retried
+# local app folders only: a bundle on a network or external volume could block the plist read
+_MAC_APP_DIRS = ("/Applications/", "/System/", os.path.expanduser("~/Applications/"))
 # LSApplicationCategoryType (after 'public.app-category.') -> category; games-* are media too.
-# shortcut: a browser missing from _DEFAULT_APPS gets its bundle's category (often productivity,
-# so docs), add it to the defaults when the dry-run rule counts show one.
+# 'browser' is what _macos_category reports for a bundle that opens http(s) links.
 _MAC_CATEGORIES = {
     "developer-tools": "dev", "business": "comms", "productivity": "docs",
-    "graphics-design": "design",
+    "graphics-design": "design", "browser": "browser",
     **dict.fromkeys(("music", "video", "entertainment", "games", "social-networking", "sports",
                      "lifestyle", "news", "photography"), "media"),
 }
@@ -172,19 +177,28 @@ def _lookup(table, name: str):
 
 @functools.cache                  # once per app per scan: a scan is one process
 def _macos_category(app: str) -> str | None:
-    """The app bundle's declared LSApplicationCategoryType, or None: off macOS, no bundle, no
-    key, or any error or timeout. The app name only goes to the local Spotlight index."""
-    if not _DARWIN or not app or any(c in app for c in "'\\*"):    # no quoting in the query
+    """'browser' when the app bundle opens http(s) links (browsers declare productivity), else
+    its declared LSApplicationCategoryType, or None: off macOS, no local bundle, no key, or any
+    error or timeout. The app name only goes to the local Spotlight index."""
+    global _mac_off
+    if _mac_off or not _DARWIN or not app or any(c in app for c in "'\\*"):  # no quoting
         return None
     query = ("kMDItemContentType == 'com.apple.application-bundle' && "
              f"kMDItemDisplayName == '{app}'")
     try:
         out = subprocess.run(["mdfind", query], capture_output=True, text=True, check=True,
                              timeout=_MAC_TIMEOUT).stdout.splitlines()
-        if not out:
+        hit = next((p for p in out if p.startswith(_MAC_APP_DIRS)), None)
+        if hit is None:
             return None
-        with open(f"{out[0]}/Contents/Info.plist", "rb") as f:
-            cat = plistlib.load(f).get("LSApplicationCategoryType")
+        with open(f"{hit}/Contents/Info.plist", "rb") as f:
+            info = plistlib.load(f)
+        schemes = {str(x).lower() for t in info.get("CFBundleURLTypes") or ()
+                   for x in t.get("CFBundleURLSchemes") or ()}
+        cat = "browser" if schemes & {"http", "https"} else info.get("LSApplicationCategoryType")
+    except subprocess.TimeoutExpired:
+        _mac_off = True
+        return None
     except Exception:                 # a lookup must never fail a scan
         return None
     return cat if isinstance(cat, str) and cat else None

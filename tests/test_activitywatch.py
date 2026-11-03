@@ -340,6 +340,9 @@ def test_mapping() -> None:
         ("Brave Browser", "TICKET-1 - Jira"): ("web-work", True, "browser_work_title"),
         ("Safari", "Weekend recipes"): ("web", False, "browser_other"),
         ("Arc", "Home - example-intranet"): ("web-work", True, "browser_work_title"),
+        **{(b, "Weekend recipes"): ("web", False, "browser_other") for b in (
+            "Dia", "Vivaldi", "Opera", "Opera GX", "Zen", "Orion", "Comet", "DuckDuckGo",
+            "Tor Browser", "LibreWolf", "SigmaOS", "Ladybird")},
     }
     with _mac({}):
         for (app, title), want in cases.items():
@@ -399,17 +402,26 @@ def test_macos_lookup_guards() -> None:
         (bundle / "Contents").mkdir(parents=True)
         with open(bundle / "Contents" / "Info.plist", "wb") as f:
             plistlib.dump({"LSApplicationCategoryType": "public.app-category.developer-tools"}, f)
+        web = Path(d) / "Web.app"
+        (web / "Contents").mkdir(parents=True)
+        with open(web / "Contents" / "Info.plist", "wb") as f:   # a browser declaring productivity
+            plistlib.dump({"LSApplicationCategoryType": "public.app-category.productivity",
+                           "CFBundleURLTypes": [{"CFBundleURLSchemes": ["webx", "HTTPS"]}]}, f)
         seen: list = []
+        hits = {"Some": f"/Volumes/net/Some.app\n{bundle}\n", "Web": f"{web}\n",
+                "Far": "/Volumes/net/Far.app\n"}
 
         def run(args, **kw):
             seen.append((args, kw.get("timeout")))
-            return subprocess.CompletedProcess(args, 0, stdout=f"{bundle}\n", stderr="")
+            name = args[1].rsplit("'", 2)[1]
+            return subprocess.CompletedProcess(args, 0, stdout=hits.get(name, ""), stderr="")
 
         def boom(args, **kw):
             raise subprocess.TimeoutExpired(args, kw.get("timeout"))
 
+        real_dirs = aw._MAC_APP_DIRS
         try:
-            aw.subprocess.run, aw._DARWIN = run, True
+            aw.subprocess.run, aw._DARWIN, aw._MAC_APP_DIRS = run, True, (d + "/",)
             aw._macos_category.cache_clear()
             assert aw._macos_category("Some") == "public.app-category.developer-tools"
             assert aw._macos_category("Some") == "public.app-category.developer-tools"
@@ -418,16 +430,30 @@ def test_macos_lookup_guards() -> None:
             assert "kMDItemDisplayName == 'Some'" in seen[0][0][1]
             assert "com.apple.application-bundle" in seen[0][0][1]
             assert aw._macos_category("Bad'Name") is None and len(seen) == 1, "no query injection"
-            aw.subprocess.run = boom
-            assert aw._macos_category("Slow") is None
+            # a hit outside the app folders (network or external volume) is never opened
+            assert aw._macos_category("Far") is None and len(seen) == 2
+            # a bundle that opens http(s) links is a browser, whatever category it declares
+            assert aw._macos_category("Web") == "browser"
+            with _mac({"Web": "browser"}):
+                assert aw.classify(_cfg(), "Web", "Weekend") == ("web", False, "browser_other")
+                assert aw.classify(_cfg(), "Web", "PR 1 - GitHub") == (
+                    "web-work", True, "browser_work_title")
             aw.subprocess.run = lambda a, **k: subprocess.CompletedProcess(
                 a, 0, stdout=f"{d}/Missing.app\n", stderr="")
             assert aw._macos_category("Missing") is None
+            # one timeout (Spotlight stalled) turns lookups off for the rest of the scan
+            aw.subprocess.run = boom
+            assert aw._macos_category("Slow") is None
+            aw.subprocess.run = run
+            n = len(seen)
+            assert aw._macos_category("Some Other") is None and len(seen) == n, "no more lookups"
+            aw._mac_off = False
             aw.subprocess.run, aw._DARWIN = run, False
             aw._macos_category.cache_clear()
-            assert aw._macos_category("Some") is None and len(seen) == 1, "macOS only"
+            assert aw._macos_category("Some") is None and len(seen) == n, "macOS only"
         finally:
-            aw.subprocess.run, aw._DARWIN = real_run, real_darwin
+            aw.subprocess.run, aw._DARWIN, aw._MAC_APP_DIRS = real_run, real_darwin, real_dirs
+            aw._mac_off = False
             aw._macos_category.cache_clear()
     print("ok macos_lookup_guards")
 
