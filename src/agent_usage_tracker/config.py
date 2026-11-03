@@ -12,7 +12,7 @@ import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
-ALL_AGENTS = ("claude_code", "codex", "cursor", "cursor_sdk", "cursor_api", "pi")
+ALL_AGENTS = ("claude_code", "codex", "cursor", "cursor_sdk", "cursor_api", "cursor_cli", "pi")
 
 
 def _config_path() -> Path:

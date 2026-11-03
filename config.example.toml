@@ -19,7 +19,9 @@ machine = "laptop"
 # you get accurate tokens but no Cursor human turns - fine, human turns still come from
 # claude_code/codex/pi. To add `cursor` alongside cursor_api JUST for human turns, set
 # cursor_human_only = true below - without it their token counts double up.
-agents = ["claude_code", "codex", "cursor_api", "pi"]
+# cursor_cli is NOT a token source and overlaps none of them: it reads the cursor-agent CLI chat
+# stores and the SDK run stores for prompts (human turns), sessions and activity, no tokens.
+agents = ["claude_code", "codex", "cursor_api", "cursor_cli", "pi"]
 
 # Emit ONLY human prompts from the local `cursor` collector, dropping its token rows. This is the
 # one safe way to run `cursor` and `cursor_api` together: cursor_api's feed is token usage and

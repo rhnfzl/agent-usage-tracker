@@ -32,8 +32,12 @@ Excluded:
 | Claude Code | background-task notifications, slash-command stdout, interrupt notices | text opens with `<task-notification>`, `<local-command-stdout>`, `[Request interrupted` |
 | Claude Code | SDK programs driving a session | `entrypoint` in `sdk-py`, `sdk-cli` |
 | Claude Code | Stop hook verdicts, turns made only of context blocks, sessions that only ran `/usage` | text opens with `Stop hook feedback:`; nothing left after removing `<system-reminder>`, `<ide_selection>`, `<ide_opened_file>` blocks; a read from byte 0 with no model call whose every prompt is `/usage` (a later chunk is never dropped, so a live scan and a full re-read agree; ported from AgentsView, MIT) |
-| Codex | agent-spawned threads, scripted `codex exec`, MCP calls, another agent's integration | `session_meta.source` (`subagent` key / `exec` / `mcp`), `originator` |
-| Codex | Codex Desktop scheduled automations | message opens with `Automation:` **and** contains `Automation ID:` |
+| Codex | agent-spawned threads, scripted `codex exec`, MCP calls, another agent's integration | the FIRST `session_meta` (a fork repeats its parent's meta later): `source` (`subagent` key / `exec` / `mcp`), `originator` |
+| Codex | Codex Desktop scheduled automations | `thread_source == "automation"`, or (older files without it) the message opens with `Automation:` **and** contains `Automation ID:` |
+
+A Codex prompt is an `event_msg user_message`. Newer Codex Desktop files carry prompts only as an
+`item_completed` item of type `UserMessage`; those count only in a file with no `user_message`,
+because older files log every prompt both ways. Every Pi `role: user` message is a human turn.
 
 A typed slash command (`/review`) **is** a human turn. An unknown or absent `entrypoint` stays
 counted: only positively-identified programs are dropped.
@@ -50,7 +54,7 @@ values. Rows already in a sink keep the classification they were written with, b
   "event_id": "<sha256(agent|...)[:32]>",  // deterministic idempotency key
   "ts": "2026-07-18T20:11:04Z",            // ISO-8601, from the source log line (NOT NULL)
   "machine": "laptop",                      // role-based label, stamped by the runner
-  "agent": "claude_code|codex|cursor|pi",
+  "agent": "claude_code|codex|cursor|cursor_cli|pi|...",
   "kind": "agent",                          // 'agent' = assistant turn (tokens); 'human' = a prompt you sent (0 tokens, model null)
   "model": "claude-opus-4-8",               // may be null (esp. cursor)
   "provider": "anthropic|openai|cursor|...",
@@ -58,7 +62,7 @@ values. Rows already in a sink keep the classification they were written with, b
   "output_tokens": 0,
   "cache_read_tokens": 0,                   // prompt tokens served from cache
   "cache_write_tokens": 0,                  // prompt tokens written to cache
-  "reasoning_tokens": null,                 // codex only; null elsewhere. SUBSET of output_tokens: informational, never added to totals or cost
+  "reasoning_tokens": null,                 // codex and pi; null elsewhere. SUBSET of output_tokens: informational, never added to totals or cost
   "total_tokens": 0,
   "est_cost_usd": null,                     // NOTIONAL / API-equivalent (subs are flat-rate)
   "project": "agent-usage-tracker"          // repo dir basename only, never a full path
@@ -116,9 +120,10 @@ both transports, re-scans) never double-counts.
 | Agent | Source | Model | Timestamp | Notes |
 |---|---|---|---|---|
 | **claude_code** | `~/.claude/projects/**/*.jsonl` `assistant.message.usage` | yes | record `timestamp` | Most tokens are in the **cache** fields; summing only `input_tokens` undercounts ~460x. Globs all files (20k+); an inode+offset watermark reads only changed ones. |
-| **codex** | `~/.codex/sessions/**/rollout-*.jsonl` `token_count` | `turn_context.model` | event `timestamp` | `input` includes cached; we split it. Captures `reasoning_tokens`. |
-| **pi** | `~/.pi/agent/sessions/**/*.jsonl` `message.usage` | `message.model` / `model_change` | record `timestamp` | Cleanest schema; older sessions may log zeros. |
+| **codex** | `~/.codex/sessions/**/rollout-*.jsonl` `token_count` | `turn_context.model` | event `timestamp` | `input` includes cached; we split it. Captures `reasoning_tokens`. Known gap, not fixed: some Codex Desktop `token_count` rows carry only `total_tokens` (input and output 0, no model) and are dropped (177 rows, about half of the Desktop tokens, when measured). |
+| **pi** | `~/.pi/agent/sessions/**/*.jsonl` `message.usage`, plus the `usage` of `compaction` records | `message.model` / `model_change.modelId` | record `timestamp` | Cleanest schema; older sessions may log zeros. `reasoning_tokens` from `usage.reasoning` (part of output). `project` from the session header's `cwd`. |
 | **cursor** | `state.vscdb` `cursorDiskKV bubbleId:*` | **often null** (not in DB) | bubble `createdAt` or joined `composerData` | EXPERIMENTAL: a LOWER BOUND on tokens. For complete + model-attributed + costed data use `cursor_api`. Full-scans each run + dedups at the sink. **The only source of Cursor human turns** — see below. |
+| **cursor_cli** | `~/.cursor/chats/<h>/<uuid>/store.db` (cursor-agent CLI chats) and `~/.cursor/projects/*/sdk-agent-store/*/index.db` (SDK runs) | none | prompt's embedded `<timestamp>` (minute precision), else the chat's `createdAt`; SDK: run `started_at` | **No token rows** (the stores hold none, and `cursor_api` counts these tokens). Human rows, session rows and activity only. See the Cursor CLI sections below. |
 
 ### The two Cursor sources are complementary, not redundant
 
@@ -127,7 +132,7 @@ pick one. But each holds something the other structurally cannot:
 
 | | `cursor` (local `state.vscdb`) | `cursor_api` |
 |---|---|---|
-| human turns | **yes** | **none** — the feed is token usage, it has no prompt records |
+| human turns | **yes** (IDE only; CLI prompts come from `cursor_cli`) | **none** — the feed is token usage, it has no prompt records |
 | cache read/write tokens | always 0 | yes, and they dominate Cursor's totals |
 | `cursor-agent` CLI usage | no, IDE only | yes |
 | history older than first scan | yes, whatever the DB still holds | **no** — `cursor_api_lookback_days` bounds only the FIRST scan, so the API can never reach back past the day it was enabled |
@@ -162,8 +167,10 @@ same as without it.
 ## Session identity: agents.event_session
 
 `usage_event` rows are insert-only, so which session an event belongs to lives in its own table,
-one row per usage `event_id` (the same id, so it joins 1:1). `claude_code` fills it for every
-event it emits, agent and human turns alike; the other collectors do not yet.
+one row per usage `event_id` (the same id, so it joins 1:1). `claude_code`, `codex` and `pi` fill
+it for every event they emit, agent and human turns alike (Pi: except entries a fork copied from
+its parent, see below); `cursor_cli` fills it for its human rows; the other Cursor collectors do
+not. The Claude Code rules:
 
 | Column | Meaning |
 |---|---|
@@ -178,12 +185,50 @@ carried forward in file order, and saved with the file's read position so the ne
 file picks up the same turn. A session row is never rewritten once stored (the writer is INSERT
 only), so a row stored with NULL `turn_id` stays NULL.
 
+Codex (identity from the FIRST `session_meta` in the file; a forked file repeats its parent's
+meta on a later line, which is ignored for identity, source and cwd):
+
+| Column | Codex |
+|---|---|
+| `session_id` | `session_meta.payload.id` (the thread id). A child thread's `payload.session_id` is its parent's, so usage rows of child threads used to land on the parent. The usage `event_id` seed still uses the old field, so no stored usage row changes id |
+| `parent_session_id` | `parent_thread_id`, else NULL |
+| `run_origin` | `subagent` when `source` is a dict with a `subagent` key; `automated` for `source` `exec` / `mcp`, `thread_source == "automation"` or originator "Claude Code"; `interactive` for `source` `vscode` / `cli`; else `unknown` |
+| `turn_id` | `turn_id` of the latest `event_msg task_started`, carried in the file's watermark entry |
+
+Pi (identity from the session header on line 1, kept in the file's watermark entry):
+
+| Column | Pi |
+|---|---|
+| `session_id` | the header `id` (fallback: the uuid in the file name) |
+| `parent_session_id` | for a fork or clone: the header `id` of the file named in `parentSession`, else the uuid in that name. The path is never stored |
+| `run_origin` | always `unknown`: interactive, print, RPC and SDK runs write the same file, and Pi has no subagents |
+| `turn_id` | `id` of the latest user message, carried in the watermark |
+
+A Pi fork copies its parent's entries with their ids and timestamps, all dated before its own
+header. Their usage rows dedupe by id; they get no session or activity rows from the fork file.
+
+Cursor CLI (`cursor_cli`; its only usage rows are human rows, so only they carry a session row):
+
+| Column | Cursor CLI |
+|---|---|
+| `session_id` | the chat's `meta.agentId` (equal to its directory name, the fallback) |
+| `parent_session_id` | always NULL: a subagent chat (meta carries `subagentInfo`, with `parentAgentId`) emits no human row, so it has no session row to hold its parent; its `turn` rows carry it as the `parent_session_id` attr |
+| `run_origin` | `interactive`. A subagent chat's prompts are its parent agent talking and are not human rows. A headless `cursor-agent -p` run cannot be told apart from a typed one (no marker in the store) |
+| `turn_id` | the prompt's `providerOptions.cursor.requestId` |
+
+SDK agents (`index.db`) emit no usage row, so they get no session row either: their `agent_id` is
+the `session_id` of their activity rows. Because these sessions have no session row, every
+`cursor_cli` `turn` row carries the origin itself as the `run_origin` attr: `interactive` for a
+typed chat, `subagent` for a subagent chat (plus `parent_session_id`, the parent's uuid, or NULL
+when it is not a uuid), `automated` for an SDK run. A commit or rejection row takes its turn's
+origin by joining on `(session_id, turn_id)`.
+
 Delivery: over `transport.pg_dsn`, usage rows and session rows are written on one connection in
 **one transaction** (`ON CONFLICT (event_id) DO NOTHING` for sessions), so a failure stores
 neither and the watermark does not move. The webhook carries usage only and says so once on
 stderr.
 
-History: `aut backfill --sessions-only [--agents claude_code] [--dry-run]` re-reads every file from
+History: `aut backfill --sessions-only [--agents claude_code,codex,pi,cursor_cli] [--dry-run]` re-reads every file from
 the start on a throwaway watermark (the live one is neither read nor saved) and sends **only**
 session rows. It never re-sends usage: a full re-read can emit an `(event_id, ts)` pair that differs
 from the stored one, which would land as a new duplicate. Safe to re-run. `--dry-run` prints counts
@@ -191,11 +236,11 @@ from the stored one, which would land as a new duplicate. Safe to re-run. `--dry
 
 ## Activity: agents.activity_event
 
-Non-token activity from Claude Code, one row per thing that happened. `attrs` (jsonb) holds
+Non-token activity from Claude Code, Codex, Pi and the Cursor CLI, one row per thing that happened. `attrs` (jsonb) holds
 counts, flags, short enums, ids and hashes only, **never** prompt text, tool output, file paths,
 titles, commit messages, URLs or repository names. `session_id` / `turn_id` follow the session
 identity rules above; `ts` is the source record's own timestamp; `event_id` is
-`make_event_id("claude_code", kind, seed)`.
+`make_event_id(agent, kind, seed)`. Claude Code:
 
 | kind | one row per | seed | attrs |
 |---|---|---|---|
@@ -248,11 +293,65 @@ Rules worth knowing:
   same input in a row); `runaway_flag` = `tool_errors >= 6`, or `>= 3` while one tool ran 10+
   times. Both rules come from AgentsView (MIT).
 
+### Codex and Pi activity
+
+Same kinds and attrs as Claude Code where the source has them. Seeds start with the session id
+(`session_id|...`). A forked Codex child (first `session_meta` has `forked_from_id`) opens with a
+copy of its parent's history, the lines before `subagent_history_start_ordinal` (0-based); they
+give no activity rows and no `turn_id` (the copy ends in a `turn_aborted` that is not a real
+interrupt). A spawned child without `forked_from_id` can carry an ordinal too (measured: equal to its line count, with no copy): it is
+read in full. The commit rules (command segments, SHA parsing, `repo_key`) and the turn
+aggregates (`by_tool` with the MCP collapse, `max_identical_run`, `retry_flag`, `runaway_flag`)
+are the shared code in `collectors/_activity_common.py`.
+
+| kind | Codex | Pi |
+|---|---|---|
+| `steer` | each prompt counted as human (seeded like it); `via` always `typed`; `words`, `chars`, `images` (attached images), `after_interrupt` (an interrupt since the previous prompt) | each user message: `via` `skill` (text opens `<skill name="`), `queued` (the previous message is a toolResult: typed while the agent ran), else `typed`; `words`, `chars`, `after_interrupt` (the previous assistant record was aborted) |
+| `interrupt` | `turn_aborted` with reason `interrupted`; no attrs | assistant `stopReason == "aborted"`; `during_tool` (the entry before it is a toolResult) |
+| `turn` | `task_complete`: `duration_ms` from the record, else `task_started` to `task_complete`; `tool_calls` and `by_tool` from the model's tool calls (`function_call`, `custom_tool_call`; an `mcp__` namespace or a name containing `__`, the older CLI form, counts as `mcp`) plus `McpToolCall` items whose id matches no MCP call of the turn (Codex Desktop logs most MCP calls only as items); `tool_errors` from `CommandExecution` items with `exit_code != 0` and `McpToolCall` items with status `failed` (command items run inside a tool call, so they are not counted as calls) | derived: one per user message, from it to the first `stop` / `aborted` / `length` assistant record, else to the last entry before the next user message (an `error` followed by another assistant record is a retry, not an end); `duration_ms` = end ts minus prompt ts, `message_count` (the prompt, assistant and toolResult messages), tool aggregates from `toolCall` blocks, `tool_errors` from `toolResult.isError`. The last open turn of a file is emitted on a later scan |
+| `commit` | `CommandExecution` item: its shell script and `aggregated_output`, `repo_key` from the item's `cwd` | `bash` toolCall paired with its toolResult by `toolCallId`; `repo_key` from the header `cwd` |
+| `compaction` | `ContextCompaction` item; no attrs | `compaction` record: `tokens_before` |
+| `invoke` | not possible (no skill tool; reading a skill file is a guess) | a user message opening `<skill name="X">`: `skill` = X |
+| `rejection` | not possible: no user approval decisions are logged (an automatic reviewer decides) | not possible: Pi has no permission prompt |
+| `pr` | not possible: no PR record | not possible from structured data (only by parsing `gh pr create` output, skipped) |
+
+Also not possible: Codex `during_tool`, `hook_blocks`, `message_count` and a compaction
+`trigger`; Pi `hook_blocks`, a compaction `trigger` and a `slash_command` / `bash_input` split of
+steers (templates are expanded before logging).
+
+### Cursor CLI and SDK activity (`cursor_cli`)
+
+A chat store keeps its messages as JSON blobs and lists them in order in protobuf root blobs
+(field 1, 32-byte blob ids); every step writes a new root. A summarized or rewound chat starts a
+new list, so older messages sit only in older roots: every root list that is no prefix of another
+is read, and a message seen in several lists counts once. Messages after a prompt belong to its
+turn (`turn_id` = its requestId) and take its timestamp. The store has no turn-end record, so a
+turn is emitted, all its rows at once and only once (the chat's watermark entry keeps the emitted
+requestIds), when a later prompt follows it or the chat has been idle for an hour. Seeds are
+`session_id|...`.
+
+| kind | Cursor CLI | Cursor SDK |
+|---|---|---|
+| `steer` | each human row (seed: requestId; a later prompt sent during the running turn reuses that requestId and gets its own human and steer row, seeded with its blob id too, at its own timestamp); `via` always `typed`; `words` and `chars` of the `<user_query>` text, `images` (image blocks) | not possible: run prompts are app input |
+| `commit` | a `Shell` tool-call whose command is a commit call, paired by `toolCallId` with its result (`Exit code: N` then `Command output:`); the shared SHA parser; `repo_key` from the call's `working_directory`, else NULL | none |
+| `rejection` | a `SwitchMode` result `Mode switch was rejected by the user` (seed: toolCallId) | none |
+| `turn` | one per requestId: `tool_calls`, `by_tool` (Cursor's tool names; `mcp_<server>_<tool>` and `CallMcpTool` count as `mcp`, a name that is not a plain identifier as `other`), `tool_errors` (tool results with `highLevelToolCallResult.isError`), `hook_blocks` (Shell results opening `Rejected: Hook blocked`, also errors), `max_identical_run`, `retry_flag`, `runaway_flag`, `run_origin` (and `parent_session_id` in a subagent chat); no `duration_ms`. A tool call counts once per turn by `toolCallId`, even when a rewritten blob in another root lists it again | one per run that ended: `status` (`finished`, `cancelled`, `error`), `duration_ms` = `finished_at - started_at` (NULL without both), `run_origin` `automated`; `turn_id` = `run_id`, `session_id` = `agent_id`. Queued and running runs are sent once they end (a row is insert-only). `error_code` and `result` are free text and never read |
+| `interrupt` | not possible: no record in the store. The transcript's `turn_ended` carries a status but no id or timestamp, and its count does not line up with the prompts, so it is not joined | a cancelled run is `turn` with `status` `cancelled` |
+| `pr` | skipped: only `gh pr create` output text | none |
+| `compaction`, `invoke` | not possible (no record; reading a skill file is a guess) | none |
+
+Known gaps: a prompt no surviving root lists (its history was dropped) still gives its human and
+steer rows but no turn row, once the chat is idle (until then it may be a new prompt whose root is
+not written yet). A message after a summary and before the next prompt sits in no turn
+(about 5% of tool calls when measured). A tool call logged under a prompt more than an hour after
+the chat went quiet is lost.
+
 Delivery: over `transport.pg_dsn` in the same transaction as the usage and session rows of that
 batch, `ON CONFLICT (event_id, ts) DO NOTHING` (the writer has INSERT only). The webhook skips
 them with the same one-line note as session rows. History: `aut backfill --activity-only
 [--dry-run]` works exactly like `--sessions-only` (both flags may be given together) and never
-sends usage rows.
+sends usage rows. For `cursor_cli` the first normal `aut scan` also sends its human rows, which no
+collector sent before.
 
 ## Derived artifact: metrics.json (not part of the event contract)
 

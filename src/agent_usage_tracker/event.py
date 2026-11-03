@@ -51,7 +51,7 @@ class EventSession:
 class UsageEvent:
     event_id: str
     ts: str | None           # ISO-8601 from the source log line
-    agent: str               # claude_code | codex | cursor | pi
+    agent: str               # claude_code | codex | cursor | cursor_cli | pi | ...
     model: str | None
     provider: str | None
     kind: str = "agent"      # 'agent' = an assistant turn (has tokens); 'human' = a user prompt (no tokens)
@@ -59,12 +59,12 @@ class UsageEvent:
     output_tokens: int = 0
     cache_read_tokens: int = 0
     cache_write_tokens: int = 0
-    reasoning_tokens: int | None = None      # codex only; None elsewhere
+    reasoning_tokens: int | None = None      # codex and pi (a subset of output); None elsewhere
     total_tokens: int = 0
     est_cost_usd: float | None = None        # NOTIONAL / API-equivalent; subs are flat-rate
     project: str | None = None               # working-dir basename, never a full path
     machine: str | None = field(default=None)  # stamped by the runner, not the collector
-    session: EventSession | None = None        # claude_code only for now; never in to_dict()
+    session: EventSession | None = None        # claude_code, codex, pi, cursor_cli; never in to_dict()
 
     def to_dict(self) -> dict:
         d = asdict(self)

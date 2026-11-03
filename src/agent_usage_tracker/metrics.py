@@ -83,7 +83,8 @@ def naive_cost_of(row: Row, prices: dict[str, dict[str, float]]) -> float | None
 
 
 _INSTRUMENT = {
-    "agents_normalized": ["claude_code", "codex", "cursor", "cursor_sdk", "cursor_api", "pi"],
+    "agents_normalized": ["claude_code", "codex", "cursor", "cursor_sdk", "cursor_api", "cursor_cli",
+                          "pi"],
     "token_classes": ["input", "output", "cache_read", "cache_write", "reasoning"],
     "passive": True,
     "subscription_safe": True,

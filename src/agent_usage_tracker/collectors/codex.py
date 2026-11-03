@@ -14,13 +14,17 @@ persisted so resuming from a byte offset keeps the right attribution across scan
 
 from __future__ import annotations
 
+import copy
 import glob
 import json
 import os
+import sys
 from typing import Callable, Iterator
 
 from ..config import Config
-from ..event import UsageEvent, make_event_id
+from ..event import ActivityEvent, EventSession, UsageEvent, make_event_id
+from ._activity_common import (RepoKeys, add_call, blank_agg, commit_call, commit_shas,
+                               first_record, ms_between, text_of, turn_attrs)
 from ._util import basename, read_new_lines, safe_int
 
 NAME = "codex"
@@ -28,8 +32,7 @@ NAME = "codex"
 
 def _fresh_state(dev: int | None = None, ino: int | None = None) -> dict:
     return {"off": 0, "dev": dev, "ino": ino, "model": None, "provider": "openai",
-            "session_id": None, "cwd": None, "tc_ord": 0, "um_ord": 0,
-            "originator": None, "source": None}
+            "session_id": None, "cwd": None, "tc_ord": 0, "um_ord": 0}
 
 
 # session_meta.source values that mean the thread was started by software, not by a person:
@@ -39,42 +42,149 @@ def _fresh_state(dev: int | None = None, ino: int | None = None) -> dict:
 _PROGRAM_SOURCES = {"exec", "mcp"}
 
 
-def _is_driven_by_a_program(originator: object, source: object) -> bool:
-    """True when this session's user_messages come from software rather than a person.
+def _run_origin(p: dict) -> str:
+    """run_origin from the thread's FIRST session_meta. Structural signals only: originator,
+    source and thread_source are recorded by codex itself.
 
-    Without this every user_message counts as 'a prompt you sent', which on a machine that runs
-    scheduled automations, `codex exec` harnesses and agent-spawned subagents overstates human
-    input several-fold -- and since the showcase reports agent_turns_per_human_turn, an inflated
-    denominator silently understates leverage.
-
-    Structural signals only. Deciding this from the message text would be guesswork; originator
-    and source are recorded by codex itself."""
-    if isinstance(source, dict):
-        return "subagent" in source
-    if isinstance(source, str) and source in _PROGRAM_SOURCES:
-        return True
-    # Another coding agent driving codex through its own integration (the rescue/review flows).
-    return isinstance(originator, str) and originator.strip().lower() == "claude code"
+    Prompts of a subagent or automated thread are not human turns. Without this every
+    user_message counts as 'a prompt you sent', which on a machine that runs scheduled
+    automations, `codex exec` harnesses and agent-spawned subagents overstates human input
+    several-fold, and since the showcase reports agent_turns_per_human_turn, an inflated
+    denominator silently understates leverage."""
+    src, orig = p.get("source"), p.get("originator")
+    if isinstance(src, dict):
+        return "subagent" if "subagent" in src else "unknown"
+    if (src in _PROGRAM_SOURCES or p.get("thread_source") == "automation"
+            # another coding agent driving codex through its own integration (rescue/review)
+            or (isinstance(orig, str) and orig.strip().lower() == "claude code")):
+        return "automated"
+    return "interactive" if src in ("vscode", "cli") else "unknown"
 
 
 def _is_scheduled_automation(message: object) -> bool:
-    """True for the preamble Codex Desktop puts on a scheduled automation run.
-
-    Text-based, unlike _is_driven_by_a_program, because these arrive over the same originator and
-    source as a person typing in the desktop app -- there is no structural flag to read. Both
-    markers are required so an ordinary message that merely opens with the word 'Automation'
-    is not swallowed."""
+    """True for the preamble older Codex Desktop files put on a scheduled automation run (newer
+    files flag it structurally with thread_source). Both markers are required so an ordinary
+    message that merely opens with the word 'Automation' is not swallowed."""
     if not isinstance(message, str):
         return False
     head = message.lstrip()[:200]
     return head.startswith("Automation:") and "Automation ID:" in head
 
 
-def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[UsageEvent], Callable[[], None]]]:
+def _str(v: object) -> str | None:
+    return v if isinstance(v, str) and v else None
+
+
+def _set_meta(cur: dict, p: dict) -> None:
+    """Identity, origin and cwd from the FIRST session_meta only: a forked file repeats its
+    parent's meta on a later line."""
+    cur["meta"] = {"id": _str(p.get("id")), "parent": _str(p.get("parent_thread_id")),
+                   "origin": _run_origin(p)}
+    cur["cwd"] = p.get("cwd") or cur.get("cwd")
+
+
+def _session(cur: dict, path: str) -> EventSession:
+    m = cur.get("meta") or {}
+    return EventSession(m.get("id") or cur.get("session_id") or os.path.basename(path),
+                        m.get("parent"), m.get("origin") or "unknown", cur.get("turn"))
+
+
+def _script(cmd: object) -> str | None:
+    """The shell script of a CommandExecution: codex runs `[shell, -c|-lc, script]`."""
+    if isinstance(cmd, str):
+        return cmd
+    if isinstance(cmd, list) and all(isinstance(x, str) for x in cmd):
+        return cmd[2] if len(cmd) == 3 and cmd[1] in ("-c", "-lc") else " ".join(cmd)
+    return None
+
+
+def _prompt(t: object, p: dict, has_um: bool) -> tuple[str, int] | None:
+    """(text, images) when the record is a prompt: a user_message, or a UserMessage item in a
+    file that has no user_message (older files carry both for one prompt)."""
+    if t != "event_msg":
+        return None
+    if p.get("type") == "user_message":
+        imgs = p.get("local_images")
+        msg = p.get("message")
+        return (msg if isinstance(msg, str) else ""), len(imgs) if isinstance(imgs, list) else 0
+    it = p.get("item")
+    if p.get("type") == "item_completed" and isinstance(it, dict) \
+            and it.get("type") == "UserMessage" and not has_um:
+        c = it.get("content")
+        blocks = [b for b in c if isinstance(b, dict)] if isinstance(c, list) else []
+        return text_of(c), sum(b.get("type") != "text" for b in blocks)
+    return None
+
+
+def _activity(o: dict, t: object, p: dict, a: dict, sess: EventSession, keys: RepoKeys,
+              out: list) -> None:
+    """Non-prompt activity of one record: tool aggregates, interrupt, turn, commit, compaction."""
+    ts = o.get("timestamp")
+
+    def emit(kind: str, seed: str, attrs: dict) -> None:
+        out.append(ActivityEvent(event_id=make_event_id(NAME, kind, f"{sess.session_id}|{seed}"),
+                                 ts=ts, agent=NAME, kind=kind, session_id=sess.session_id,
+                                 turn_id=sess.turn_id, attrs=attrs))
+
+    agg = a.setdefault("agg", blank_agg())
+    if t == "response_item":
+        name = p.get("name")
+        if p.get("type") in ("function_call", "custom_tool_call") and isinstance(name, str):
+            # an MCP namespace is a server label (free text); other namespaces are codex's own.
+            # Older CLI files name MCP tools `<server>__<tool>` with no namespace; codex's own
+            # tool names never contain `__`.
+            ns = p.get("namespace")
+            mcp = (isinstance(ns, str) and ns.startswith("mcp__")) or "__" in name
+            if mcp:     # Desktop may log the same call again as an McpToolCall item
+                agg.setdefault("mcp_ids", []).append(p.get("call_id"))
+            add_call(agg, "mcp" if mcp else name, p.get("arguments", p.get("input")))
+        return
+    if t != "event_msg":
+        return
+    pt, it = p.get("type"), p.get("item")
+    if pt == "task_started":
+        a["agg"], a["start"] = blank_agg(), ts
+    elif pt == "turn_aborted" and p.get("reason") == "interrupted":
+        a["intr"] = True
+        emit("interrupt", str(p.get("turn_id") or ts), {})
+    elif pt == "task_complete":
+        d = p.get("duration_ms")
+        dur = d if isinstance(d, int) and not isinstance(d, bool) else ms_between(a.get("start"), ts)
+        emit("turn", str(p.get("turn_id") or ts), {"duration_ms": dur, **turn_attrs(agg)})
+        a["agg"] = blank_agg()
+        a.pop("start", None)
+    elif pt == "item_completed" and isinstance(it, dict):
+        typ = it.get("type")
+        if typ == "CommandExecution":
+            code = it.get("exit_code")
+            err = isinstance(code, int) and code != 0
+            agg["errors"] += err
+            script = _script(it.get("command"))
+            call = commit_call(script) if script else None
+            out_text = it.get("aggregated_output")
+            if call:
+                found = commit_shas(out_text if isinstance(out_text, str) else "", err, call[1])
+                key = keys.of_cwd(it.get("cwd")) if found else None
+                for sha in found:
+                    emit("commit", f"{it.get('id')}|{sha}",
+                         {"sha": sha, "repo_key": key, "amend": call[0]})
+        elif typ == "McpToolCall":
+            # Desktop logs most MCP calls only as this item; one that pairs (same id) with an
+            # MCP function_call of the turn was already counted
+            if it.get("id") not in agg.get("mcp_ids", ()):
+                add_call(agg, "mcp", it.get("arguments"))
+            agg["errors"] += it.get("status") == "failed"
+        elif typ == "ContextCompaction":
+            emit("compaction", str(it.get("id") or ts), {})
+
+
+def collect(cfg: Config, wm: dict) -> Iterator[tuple[list, Callable[[], None]]]:
     base = cfg.home / ".codex" / "sessions"
     if not base.exists():
         return
     files: dict = wm.setdefault("files", {})
+    keys = RepoKeys(cfg.repo_key_salt)
+    act_errors = 0
 
     for path in glob.glob(str(base / "**" / "rollout-*.jsonl"), recursive=True):
         try:
@@ -101,32 +211,55 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[UsageEvent], Callable[
             continue
 
         lines, new_off = read_new_lines(path, off)
-        cur = dict(prev)
-        events: list[UsageEvent] = []
-        for raw in lines:
+        # A deep copy: only commit() may publish this chunk's state into the watermark.
+        cur = copy.deepcopy(prev)
+        if off and "meta" not in cur:     # resumed from a state saved before identity was kept
+            first = first_record(path)
+            if first and first.get("type") == "session_meta" \
+                    and isinstance(first.get("payload"), dict):
+                _set_meta(cur, first["payload"])
+        recs = []
+        # A forked child's file opens with a copy of its parent's history: lines before the first
+        # meta's subagent_history_start_ordinal (0-based). `skip` is how many copied lines are
+        # still unread. Only a fork: a spawned child can carry an ordinal too, with no copy.
+        skip = cur.pop("skip", 0)
+        for i, raw in enumerate(lines):
+            copied, skip = skip > 0, max(skip - 1, 0)
             try:
                 o = json.loads(raw)
             except (json.JSONDecodeError, UnicodeDecodeError):
                 continue
-            if not isinstance(o, dict):
-                continue
-            t = o.get("type")
-            p = o.get("payload") or {}
-            if not isinstance(p, dict):
-                continue
+            p = o.get("payload") if isinstance(o, dict) else None
+            if isinstance(p, dict):
+                if not off and not i and o.get("type") == "session_meta" \
+                        and p.get("forked_from_id"):
+                    skip = max(safe_int(p.get("subagent_history_start_ordinal")) - 1, 0)
+                    copied = True
+                recs.append((o, o.get("type"), p, copied))
+        if skip:
+            cur["skip"] = skip
+        # shortcut: judged per chunk (plus earlier chunks of the file), so an older-format turn
+        # split exactly between its UserMessage item and its user_message counts twice; older
+        # files are complete on disk and read in one chunk, upgrade if that changes.
+        if any(t == "event_msg" and p.get("type") == "user_message" for _o, t, p, _c in recs):
+            cur["has_um"] = True
+        a: dict = cur.setdefault("act", {})
+        events: list = []
+        for o, t, p, copied in recs:
             if t == "session_meta":
+                # the usage event_id seed keeps its old rule (payload.session_id, any meta line),
+                # so stored usage rows never change id; session rows use the thread id instead
                 cur["session_id"] = p.get("session_id") or p.get("id") or cur["session_id"]
                 cur["provider"] = p.get("model_provider") or cur["provider"]
-                cur["cwd"] = p.get("cwd") or cur["cwd"]
-                # Who is driving this session. Recorded so user_message can tell a person typing
-                # from a program prompting -- see _is_driven_by_a_program.
-                cur["originator"] = p.get("originator")
-                cur["source"] = p.get("source")
+                if "meta" not in cur:
+                    _set_meta(cur, p)
             elif t == "turn_context":
                 if p.get("model"):
                     cur["model"] = p.get("model")
                 if p.get("cwd"):
                     cur["cwd"] = p.get("cwd")
+            elif t == "event_msg" and p.get("type") == "task_started" and not copied:
+                cur["turn"] = _str(p.get("turn_id")) or cur.get("turn")
             elif t == "event_msg" and p.get("type") == "token_count":
                 try:
                     info = p.get("info")
@@ -141,6 +274,8 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[UsageEvent], Callable[
                 except (ValueError, TypeError, AttributeError, OverflowError):
                     continue
                 cur["tc_ord"] += 1
+                # Known gap: some Desktop rows carry only total_tokens (input and output 0) and
+                # no model; they are dropped here. See CONTRACT.md.
                 if inp + out + rea == 0:
                     continue
                 ts = o.get("timestamp")
@@ -160,32 +295,56 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[UsageEvent], Callable[
                     reasoning_tokens=rea,
                     total_tokens=total,
                     project=basename(cur["cwd"]),
+                    session=_session(cur, path),
                 ))
-            elif t == "event_msg" and p.get("type") == "user_message":
-                # A prompt someone typed. Sessions a program drives (subagent threads, `codex
-                # exec`, MCP calls, another agent's integration) and Codex Desktop's scheduled
-                # automations emit the same event, so screen those out rather than counting them
-                # as human input.
-                if _is_driven_by_a_program(cur.get("originator"), cur.get("source")):
-                    continue
-                if _is_scheduled_automation(p.get("message")):
+                continue
+            if copied:      # the parent's turns, not this thread's (usage above is unchanged)
+                continue
+            prompt = _prompt(t, p, bool(cur.get("has_um")))
+            if prompt is not None:
+                after_intr = bool(a.pop("intr", False))
+                text, images = prompt
+                sess = _session(cur, path)
+                # A prompt someone typed. Threads a program drives (subagents, `codex exec`, MCP
+                # calls, another agent's integration, scheduled automations) are not human turns.
+                if sess.run_origin in ("subagent", "automated") or _is_scheduled_automation(text):
                     continue
                 # No tokens; a stable per-session ordinal makes the id deterministic so a
                 # re-read (file reset) re-emits the same id and the sink dedups it. The ordinal
                 # advances only for kept messages, which is fine: it just has to be stable for a
                 # given file, and the screening above is deterministic from the same bytes.
-                # .get(): per-file state persisted before this field existed lacks um_ord.
                 cur["um_ord"] = cur.get("um_ord", 0) + 1
                 ts = o.get("timestamp")
                 sid = cur["session_id"] or os.path.basename(path)
                 events.append(UsageEvent(
                     event_id=make_event_id(NAME, "human", sid, ts or "", cur["um_ord"]),
                     ts=ts, agent=NAME, model=None, provider=None,
-                    kind="human", project=basename(cur["cwd"]),
+                    kind="human", project=basename(cur["cwd"]), session=sess,
                 ))
+                events.append(ActivityEvent(
+                    event_id=make_event_id(NAME, "steer", sid, ts or "", cur["um_ord"]),
+                    ts=ts, agent=NAME, kind="steer", session_id=sess.session_id,
+                    turn_id=sess.turn_id, attrs={"via": "typed", "words": len(text.split()),
+                                                 "chars": len(text), "images": images,
+                                                 "after_interrupt": after_intr}))
+                continue
+            # Best effort: a record whose activity extraction raises is counted and skipped, so
+            # activity never blocks the usage and session rows of the same chunk.
+            try:
+                _activity(o, t, p, a, _session(cur, path), keys, events)
+            except Exception:
+                act_errors += 1
         cur["off"] = new_off
+        agg = a.get("agg")
+        if agg is not None and not (agg["calls"] or agg["errors"]):
+            del a["agg"]
+        if not any(a.values()):
+            cur.pop("act", None)
 
         def commit(p: str = path, c: dict = cur) -> None:
             files[p] = c
 
         yield events, commit
+    if act_errors:
+        print(f"aut: {NAME}: {act_errors} activity record(s) skipped (extraction failed); usage "
+              "and session rows are unaffected.", file=sys.stderr)

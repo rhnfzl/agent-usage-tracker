@@ -305,9 +305,12 @@ _ENUMS = {
     "host": {"github", "bitbucket", "other"},
     "trigger": {"manual", "auto"},
     "skill": {"my-skill", "mcp"},              # the fixture's own skill names
+    "status": {"finished", "cancelled", "error", "queued", "running"},
+    "run_origin": {"interactive", "subagent", "automated"},
 }
 _TOOLS = {"Bash", "Read", "Edit", "Write", "Skill", "Agent", "Task", "WebSearch", "WebFetch",
-          "Glob", "Grep", "mcp"}
+          "Glob", "Grep", "mcp", "exec_command", "bash", "read", "Shell", "SwitchMode",
+          "Subagent", "other"}
 _HEX = re.compile(r"^[0-9a-f]{7,64}$")
 _UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 
