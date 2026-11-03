@@ -43,7 +43,9 @@ def _ok_collector(cfg, wm):
         return
     # +02:00 is 08:00Z, so a plain string max would wrongly pick it over 09:00Z
     events = [_ev("a1", "2026-07-18T10:00:00+02:00"), _ev("a2", "2026-07-18T09:00:00Z"),
-              _ev("h1", "2026-07-18T07:00:00Z", kind="human"), _ev("x1", None)]
+              _ev("h1", "2026-07-18T07:00:00Z", kind="human"), _ev("x1", None),
+              # no time zone (valid_ts accepts it): read as UTC, and it must never break the scan
+              _ev("a3", "2026-07-18T09:30:00")]
     yield events, lambda: wm.update(done=True)
 
 
@@ -91,10 +93,11 @@ def test_scan_rows_ok_and_error() -> None:
     assert set(rows) == {"good", "quiet", "bad"}, rows
     good, quiet, bad = rows["good"], rows["quiet"], rows["bad"]
     assert good["status"] == "ok" and good["error"] is None
-    assert good["events"] == 2 and good["human"] == 1   # the no-ts record is not counted
-    assert good["newest_ts"] == datetime(2026, 7, 18, 9, tzinfo=timezone.utc), good["newest_ts"]
+    assert good["events"] == 3 and good["human"] == 1   # the no-ts record is not counted
+    assert good["newest_ts"] == datetime(2026, 7, 18, 9, 30, tzinfo=timezone.utc), good["newest_ts"]
     assert quiet["status"] == "ok" and quiet["events"] == 0 and quiet["newest_ts"] is None
-    assert bad["status"] == "error" and "boom reading logs" in bad["error"], bad
+    # only the error TYPE is stored: messages can carry paths or secrets, and stay on local stderr
+    assert bad["status"] == "error" and bad["error"] == "RuntimeError", bad
     for r in calls[0]:
         assert r["machine"] == "test" and r["aut_version"] == __version__
         assert r["started_at"].tzinfo is not None and r["started_at"] <= r["finished_at"]
@@ -109,17 +112,21 @@ def test_delivery_failure_is_swallowed() -> None:
     def _broken(cfg, rows):
         raise OSError("connection refused")
 
+    def _broken_other(cfg, rows):
+        raise ValueError("relation agents.collector_scan does not exist")
+
     results = []
-    for sink in (_ok, _broken):
+    for sink in (_ok, _broken, _broken_other):
         err = io.StringIO()
         with _patched({"good": _ok_collector}, sink) as (sent, state_path):
             with contextlib.redirect_stderr(err):
                 report = cli.run_scan(_cfg(pg_dsn="postgresql://x"), ["good"], dry_run=False)
             results.append((report, sent, state_path.read_text(), err.getvalue()))
-    (rep_ok, sent_ok, state_ok, _), (rep_bad, sent_bad, state_bad, err_bad) = results
-    assert rep_bad == rep_ok and sent_bad == sent_ok and state_bad == state_ok
-    assert sent_ok == [["a1", "a2", "h1"]], sent_ok
-    assert err_bad.count("\n") == 1 and "heartbeat" in err_bad, err_bad
+    rep_ok, sent_ok, state_ok, _ = results[0]
+    for rep_bad, sent_bad, state_bad, err_bad in results[1:]:
+        assert rep_bad == rep_ok and sent_bad == sent_ok and state_bad == state_ok
+        assert err_bad.count("\n") == 1 and "heartbeat" in err_bad, err_bad
+    assert sent_ok == [["a1", "a2", "h1", "a3"]], sent_ok
     print("ok delivery_failure_is_swallowed")
 
 
@@ -128,27 +135,37 @@ def test_dry_run_sends_nothing() -> None:
     with _patched({"good": _ok_collector}, lambda cfg, rows: calls.append(rows)) as (sent, _):
         cli.make_sender = lambda cfg: (_ for _ in ()).throw(AssertionError("no sender in dry-run"))
         report = cli.run_scan(_cfg(pg_dsn="postgresql://x"), ["good"], dry_run=True)
-    assert report["good"]["events"] == 2
+    assert report["good"]["events"] == 3
     assert calls == [] and sent == [], (calls, sent)
     print("ok dry_run_sends_nothing")
 
 
 def test_scrub_error() -> None:
-    s = push.scrub_error(RuntimeError("x" * 1000))
-    assert len(s) <= 300, len(s)
-    for secret in ("postgresql://aut:hunter2@db.example:5432/agents",
-                   "postgres://aut:hunter2@db.example/agents?sslmode=require",
-                   "https://user:hunter2@hooks.example/h",
-                   "host=db.example user=aut password=hunter2 dbname=agents"):
-        out = push.scrub_error(RuntimeError(f"could not connect: {secret} timed out"))
-        assert "hunter2" not in out, out
-        assert "could not connect" in out and "timed out" in out, out
-    # redact BEFORE truncating, or a cut through the URL would leave the password behind
-    out = push.scrub_error(RuntimeError("y" * 270 + " postgresql://aut:hunter2@db/agents"))
-    assert "hunter2" not in out and len(out) <= 300, out
-    # a URL without credentials is fine to keep
-    assert "https://hooks.example/h" in push.scrub_error(RuntimeError("HTTP 502 https://hooks.example/h"))
+    # The stored error is the exception TYPE only. Free text can hold a work repo path or part of
+    # a secret, and no redaction pattern catches every form, so none of it leaves the machine.
+    for msg in ("could not connect: postgresql://aut:hunter2@db.example/agents",
+                "host=db user=aut password='my secret' dbname=agents",
+                "No such file: /home/someone/work/client-repo/session.jsonl", "x" * 1000):
+        assert push.scrub_error(RuntimeError(msg)) == "RuntimeError", msg
+    assert push.scrub_error(KeyError("k")) == "KeyError"
     print("ok scrub_error")
+
+
+def test_interrupt_is_not_delivered() -> None:
+    # Ctrl-C must stop at once: no 5-15 s connect to the sink on the way out.
+    def _interrupted(cfg, wm):
+        raise KeyboardInterrupt
+        yield  # pragma: no cover
+
+    calls: list = []
+    with _patched({"stop": _interrupted}, lambda cfg, rows: calls.append(rows)):
+        try:
+            cli.run_scan(_cfg(pg_dsn="postgresql://x"), ["stop"], dry_run=False)
+            raise AssertionError("KeyboardInterrupt must propagate")
+        except KeyboardInterrupt:
+            pass
+    assert calls == [], calls
+    print("ok interrupt_is_not_delivered")
 
 
 def test_send_scan_rows_transport() -> None:
@@ -201,6 +218,7 @@ def main() -> int:
     test_delivery_failure_is_swallowed()
     test_dry_run_sends_nothing()
     test_scrub_error()
+    test_interrupt_is_not_delivered()
     test_send_scan_rows_transport()
     print("\nALL PASS")
     return 0

@@ -14,7 +14,6 @@ stored), and any non-2xx is a hard failure.
 from __future__ import annotations
 
 import json
-import re
 import sys
 import urllib.error
 import urllib.request
@@ -39,10 +38,6 @@ SCAN_COLUMNS = (
 )
 SCAN_TABLE = "agents.collector_scan"
 _ERROR_MAX = 300
-# scheme://user:pass@host... and libpq's keyword form (password=...): either can surface in a
-# connection error, and the error text is stored in a table other people can read.
-_CRED_URL = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://[^\s/@]*:[^\s@]*@\S*")
-_CRED_KV = re.compile(r"(password\s*=\s*)\S+", re.IGNORECASE)
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -130,11 +125,10 @@ def make_sender(cfg: Config) -> Callable[[list[UsageEvent]], None]:
 
 
 def scrub_error(exc: BaseException) -> str:
-    """Short, credential-free error text for a scan row. Redacts before truncating so a cut
-    through a URL can never leave its password behind."""
-    text = f"{type(exc).__name__}: {exc}"
-    text = _CRED_KV.sub(r"\1<redacted>", _CRED_URL.sub("<redacted-url>", text))
-    return text[:_ERROR_MAX]
+    """The error stored in a scan row: the exception TYPE only. Messages can carry a file path
+    (which names a project) or part of a credential, and no redaction pattern catches every
+    form, so the full message stays on this machine's stderr and never reaches the sink."""
+    return type(exc).__name__[:_ERROR_MAX]
 
 
 def send_scan_rows(cfg: Config, rows: list[dict]) -> None:
@@ -154,7 +148,8 @@ def send_scan_rows(cfg: Config, rows: list[dict]) -> None:
         f"INSERT INTO {SCAN_TABLE} ({cols}) VALUES ({placeholders}) "
         "ON CONFLICT (machine, collector, finished_at) DO NOTHING"
     )
-    with psycopg.connect(cfg.pg_dsn, connect_timeout=15) as conn:
+    # 5 s, not 15: usage is already delivered, so an unreachable sink should not hold the exit.
+    with psycopg.connect(cfg.pg_dsn, connect_timeout=5) as conn:
         with conn.cursor() as cur:
             cur.executemany(sql, [tuple(r[c] for c in SCAN_COLUMNS) for r in rows])
         conn.commit()

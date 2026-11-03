@@ -149,7 +149,7 @@ it ran, after the usage for that collector has been delivered:
 | `status` | `ok`, or `error` if the collector raised (the scan still fails exactly as before) |
 | `events`, `human` | new agent / human turns this scan, the same counts the scan report prints |
 | `newest_ts` | latest valid event timestamp seen this scan, null if none |
-| `error` | `<ExceptionType>: <message>`, credentials in URLs or `password=` stripped, max 300 chars |
+| `error` | the exception type only (for example `OperationalError`). The message never leaves the machine: it can name a project path or part of a credential, so it stays on local stderr |
 | `aut_version` | the client version |
 
 All rows of a scan go out in one `INSERT ... ON CONFLICT (machine, collector, finished_at) DO

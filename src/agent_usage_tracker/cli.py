@@ -86,7 +86,7 @@ def run_scan(cfg: Config, agents: list[str], dry_run: bool) -> dict:
         buf_events: list[UsageEvent] = []
         buf_commits: list = []
         started_at = datetime.now(timezone.utc)
-        status, error, newest_ts = "ok", None, None
+        status, error, newest_ts, interrupted = "ok", None, None, False
 
         def flush() -> None:
             if buf_events and sender is not None:   # sender is None in dry-run -> nothing sent
@@ -105,8 +105,12 @@ def run_scan(cfg: Config, agents: list[str], dry_run: bool) -> dict:
                         if not valid_ts(e.ts):
                             agg["skipped_no_ts"] += 1
                             continue
-                        ts = datetime.fromisoformat(e.ts.replace("Z", "+00:00"))  # as valid_ts
-                        newest_ts = ts if newest_ts is None or ts > newest_ts else newest_ts
+                        try:                # heartbeat bookkeeping must never stop the scan
+                            ts = datetime.fromisoformat(e.ts.replace("Z", "+00:00"))
+                            ts = ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
+                            newest_ts = ts if newest_ts is None or ts > newest_ts else newest_ts
+                        except Exception:
+                            pass
                         if e.event_id in seen:
                             agg["duplicates"] += 1      # counted once, above
                         else:
@@ -128,6 +132,7 @@ def run_scan(cfg: Config, agents: list[str], dry_run: bool) -> dict:
                       "usage remains and will be picked up on the next scan.", file=sys.stderr)
         except BaseException as exc:
             status, error = "error", scrub_error(exc)
+            interrupted = not isinstance(exc, Exception)    # Ctrl-C: leave at once, send nothing
             raise                           # unchanged: the scan still fails as before
         finally:
             if not dry_run:
@@ -138,7 +143,7 @@ def run_scan(cfg: Config, agents: list[str], dry_run: bool) -> dict:
                     "events": agg["events"], "human": agg["human"], "newest_ts": newest_ts,
                     "error": error, "aut_version": __version__,
                 })
-                if status == "error":       # the loop ends here, so this is the one delivery
+                if status == "error" and not interrupted:   # the loop ends here: one delivery
                     _deliver_scan_rows(cfg, scan_rows)
 
     if not dry_run:
