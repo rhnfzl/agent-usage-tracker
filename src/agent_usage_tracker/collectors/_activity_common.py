@@ -36,6 +36,7 @@ _COMMIT_OUT = re.compile(r"^\[[^\]\s]+(?: \(root-commit\))? (?P<sha>[0-9a-f]{7,4
 # The condensed form a command proxy prints instead of git's own "[branch sha]" line: "ok <sha>"
 # or "<sha> <subject>" on the FIRST line. Most commits on a machine with such a proxy look like this.
 _CONDENSED = re.compile(r"(?:ok )?(?P<sha>[0-9a-f]{7,40})(?:\s|$)")
+_HEX_SHA = re.compile(r"[0-9a-f]{7,40}")
 _OK_LINE = re.compile(r"^ok (?P<sha>[0-9a-f]{7,40})\s*$", re.M)
 # git's commit line with its branch and subject, for the link row (both are text: hashed or dropped)
 _COMMIT_LINE = re.compile(
@@ -236,8 +237,10 @@ def pr_key(keys: RepoKeys, host: str, repo: str, number: object) -> str | None:
 def sha_key(keys: RepoKeys, sha: str) -> str | None:
     """HMAC of a SHA's first 7 hex: a quoted SHA and a printed commit meet on it, and a hex secret
     that passes the SHA filter (a 32-hex API key, a 40-hex token) is never kept, not even a
-    prefix of it. None without a salt."""
-    return keys.of("sha7:" + sha[:7].lower())
+    prefix of it. None without a salt, and None for anything that is not 7 to 40 hex (a structured
+    sha of '1' would otherwise key every session that printed it into one episode)."""
+    sha = sha.lower()
+    return keys.of("sha7:" + sha[:7]) if _HEX_SHA.fullmatch(sha) else None
 
 
 class Link:

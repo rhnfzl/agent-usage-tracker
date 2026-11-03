@@ -593,6 +593,88 @@ def test_repo_config_never_runs_commands():
     print("ok repo_config_never_runs_commands")
 
 
+def test_signing_proxy_alternates_and_helpers_never_run():
+    import http.server
+    import threading
+
+    class Deny(http.server.BaseHTTPRequestHandler):       # every request asks for credentials
+        def do_GET(self):
+            self.send_response(401)
+            self.send_header("WWW-Authenticate", 'Basic realm="x"')
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def log_message(self, *a):
+            pass
+
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Deny)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    url = f"http://127.0.0.1:{srv.server_port}/r.git"
+    saved_global = os.environ["GIT_CONFIG_GLOBAL"]
+    with tempfile.TemporaryDirectory() as d:
+        work, s = _world(Path(d))
+        marks = Path(d) / "marks"
+        marks.mkdir()
+        tools = {}
+        for name in ("gpg", "proxy", "alt", "cred", "credurl", "global"):
+            sc = Path(d) / f"evil-{name}.sh"
+            sc.write_text(f"#!/bin/sh\necho ran > '{marks / name}'\n")
+            sc.chmod(0o755)
+            tools[name] = str(sc)
+        body = (f"tree {_g(work, 'rev-parse', 'HEAD^{tree}')}\nparent {s['A']}\n"
+                "author t <t@example.com> 1 +0000\ncommitter t <t@example.com> 1 +0000\n"
+                "gpgsig -----BEGIN PGP SIGNATURE-----\n \n x\n -----END PGP SIGNATURE-----\n\nsigned\n")
+        signed = subprocess.run(["git", "-C", str(work), "hash-object", "-t", "commit", "-w",
+                                 "--stdin"], input=body, capture_output=True, text=True,
+                                check=True).stdout.strip()
+        _g(work, "update-ref", "refs/heads/signed", signed)
+        _g(work, "config", "log.showSignature", "true")
+        _g(work, "config", "gpg.program", tools["gpg"])
+        _g(work, "config", "core.gitProxy", tools["proxy"])
+        _g(work, "remote", "add", "gp", "git://127.0.0.1:9/x")
+        subprocess.run(["git", "init", "-q", "--bare", str(Path(d) / "alt.git")], check=True)
+        (work / ".git" / "objects" / "info" / "alternates").write_text(
+            str(Path(d) / "alt.git" / "objects") + "\n")
+        _g(work, "config", "core.alternateRefsCommand", tools["alt"])
+        _g(work, "config", "credential.helper", "!" + tools["cred"])
+        _g(work, "config", f"credential.{url}.helper", "!" + tools["credurl"])
+        gconf = Path(d) / "global.gitconfig"
+        gconf.write_text(f"[credential]\n\thelper = !{tools['global']}\n")
+        os.environ["GIT_CONFIG_GLOBAL"] = str(gconf)
+        http_ok = ("-c", "protocol.http.allow=always")              # https is allowed; the test
+        try:                                                        # server speaks plain http
+            def run(argv):
+                subprocess.run(argv, capture_output=True, timeout=60, env=git_env())
+
+            def new_ref(name):                     # a fetch with nothing new never negotiates
+                _g(work, "push", "-q", "origin", f"{s['A']}:refs/heads/{name}")
+                _g(work, "update-ref", "-d", f"refs/remotes/origin/{name}")
+            # control: plain git runs each of them
+            g = ["git", "-C", str(work)]
+            run([*g, "log", "--format=%H", "-1", signed])
+            run([*g, "fetch", "gp"])
+            new_ref("ctl1")
+            run([*g, "fetch", "origin"])
+            run([*g, "fetch", url])
+            assert {p.name for p in marks.iterdir()} == set(tools), sorted(marks.iterdir())
+            for p in marks.iterdir():
+                p.unlink()
+            run(git_argv(str(work), "log", "--format=%H %ct %P", "-1", signed))
+            run(git_argv(str(work), "show", "-s", signed))
+            run(git_argv(str(work), "fetch", "gp"))
+            new_ref("ctl2")
+            run(git_argv(str(work), "fetch", "origin"))
+            assert _g(work, "rev-parse", "refs/remotes/origin/ctl2") == s["A"]   # fetch still works
+            argv = git_argv(str(work), "fetch", url)
+            run([argv[0], *http_ok, *argv[1:]])
+            # the repo's helpers are gone, the user's global one still answers
+            assert {p.name for p in marks.iterdir()} == {"global"}, sorted(marks.iterdir())
+        finally:
+            os.environ["GIT_CONFIG_GLOBAL"] = saved_global
+            srv.shutdown()
+    print("ok signing_proxy_alternates_and_helpers_never_run")
+
+
 def test_fetch_only_clones_with_a_row_key():
     with tempfile.TemporaryDirectory() as d:
         work, s = _world(Path(d))

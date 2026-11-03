@@ -103,6 +103,19 @@ def test_sha_refs_filter() -> None:
     print("ok sha_refs_filter")
 
 
+def test_junk_commit_sha_gets_no_key() -> None:
+    # Claude Code's structured gitOperation sha has been '1', '2', '90': keyed, they would hard-join
+    # every session that printed them
+    link = ac.Link(_keys(), {})
+    for junk in ("1", "2", "90", "abc123", "abc1234g", "a" * 41, ""):
+        assert ac.sha_key(_keys(), junk) is None, junk
+        link.commit(None, "", ac.commit_shas("", False, False, junk))
+    assert link.s.get("cks", []) == [], link.s
+    link.commit(None, "", ac.commit_shas("", False, False, "ABC1234"))
+    assert link.s["cks"] == [_sk("abc1234")], link.s
+    print("ok junk_commit_sha_gets_no_key")
+
+
 def test_pr_urls() -> None:
     keys = _keys()
     link = ac.Link(keys, {})
