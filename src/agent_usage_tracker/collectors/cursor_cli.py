@@ -202,7 +202,7 @@ def _activity(m: dict, t: dict, calls: dict, keys: RepoKeys) -> None:
                                 hit[1])
             key = commit_repo(keys, wd, commit_dir(cmd), None) if found else None
             if found:
-                link.commit(key, res[ex.end():] if ex else res)
+                link.commit(key, res[ex.end():] if ex else res, found)
             for sha in found:
                 t["acts"].append(("commit", f"{cid}|{sha}",
                                   {"sha": sha, "repo_key": key, "amend": hit[0]}))

@@ -13,7 +13,10 @@ Locks the rules:
   - the merge time is when the commit landed (first parent), survival waits for a default ref
     newer than merge + 14 days, the furthest-along clone wins, a commit gone missing or a failed
     gh lookup never replaces a stored state, fetch never runs gc and is terminated on timeout;
-  - the manual outcome picks the newest interactive session of the current project.
+  - the manual outcome picks the newest interactive session of the current project;
+  - a clone's own config, attributes and hooks never make git run a command (diff.external, a
+    textconv driver, core.fsmonitor, a hook, remote uploadpack), and --fetch only fetches clones
+    whose repo_key a commit row carries.
 """
 
 from __future__ import annotations
@@ -32,6 +35,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from agent_usage_tracker import outcomes as oc  # noqa: E402
 from agent_usage_tracker.collectors._activity_common import RepoKeys, repo_identity  # noqa: E402
 from agent_usage_tracker.config import Config  # noqa: E402
+from agent_usage_tracker.git_safe import git_argv, git_env  # noqa: E402
 
 os.environ["GIT_CONFIG_GLOBAL"] = os.devnull      # the user's git config never reaches the tests
 os.environ["GIT_CONFIG_NOSYSTEM"] = "1"
@@ -531,6 +535,83 @@ def test_cli_outcome_and_outcomes():
         assert got["fetch"] is True and got["dry"] is True            # config turns fetch on
         assert '"merged": 2' in out.getvalue() and "DRY-RUN" in out.getvalue(), out.getvalue()
     print("ok cli_outcome_and_outcomes")
+
+
+def test_repo_config_never_runs_commands():
+    with tempfile.TemporaryDirectory() as d:
+        work, s = _world(Path(d))
+        marks = Path(d) / "marks"
+        marks.mkdir()
+        git_dir = work / ".git"
+        for ref in ("ctl1", "ctl2"):        # on origin but not fetched yet: each fetch adds a ref
+            _g(work, "push", "-q", "origin", f"{s['A']}:refs/heads/{ref}")
+            _g(work, "update-ref", "-d", f"refs/remotes/origin/{ref}")
+        tools = {}
+        for name in ("external", "textconv", "fsmonitor", "hook", "uploadpack"):
+            sc = Path(d) / f"evil-{name}.sh"
+            sc.write_text(f"#!/bin/sh\necho ran > '{marks / name}'\n")
+            sc.chmod(0o755)
+            tools[name] = str(sc)
+        _g(work, "config", "diff.external", tools["external"])
+        _g(work, "config", "diff.evil.textconv", tools["textconv"])
+        _g(work, "config", "core.fsmonitor", tools["fsmonitor"])
+        _g(work, "config", "remote.origin.uploadpack", tools["uploadpack"])
+        (git_dir / "info").mkdir(exist_ok=True)
+        (git_dir / "info" / "attributes").write_text("*.txt diff=evil\n")
+        (work / ".gitattributes").write_text("*.txt diff=evil\n")
+        hook = git_dir / "hooks" / "reference-transaction"
+        hook.parent.mkdir(exist_ok=True)
+        hook.write_text(Path(tools["hook"]).read_text())
+        hook.chmod(0o755)
+
+        def raw(*args):
+            subprocess.run(["git", "-C", str(work), *args], capture_output=True, timeout=60)
+        # control: plain git does run each of them, so the guarded run below proves something
+        raw("log", "-p", "-1", s["A"])
+        raw("status")
+        raw("diff", "HEAD~1", "HEAD")
+        raw("fetch", "origin")                                       # runs the uploadpack
+        raw("fetch", "--upload-pack=git-upload-pack", "origin",
+            "ctl1:refs/remotes/origin/ctl1")                         # runs the hook
+        assert {p.name for p in marks.iterdir()} == set(tools), sorted(marks.iterdir())
+        for p in marks.iterdir():
+            p.unlink()
+
+        key = _key(str(Path(d) / "origin.git"))
+        clones = oc.find_clones([str(Path(d) / "projects")], RepoKeys(SALT))
+        assert oc.fetch_clones(clones) == (1, 0)                      # fetch to a local bare remote
+        assert _g(work, "rev-parse", "refs/remotes/origin/ctl2") == s["A"]    # it did update refs
+        outs, _ = oc.evaluate([_row(s["A"], key, 30), _row(s["B"], key, 30)], clones, NOW,
+                              cache={})                             # log -p, patch-id, show, blame
+        assert _states(outs)[s["A"][:9]][:2] == ("merged", 1.0), _states(outs)
+        assert _states(outs)[s["B"][:9]][0] == "merged", _states(outs)     # via its patch-id twin
+        assert RepoKeys(SALT).of_cwd(str(work)) == key
+        for args in (("status",), ("diff", "HEAD~1", "HEAD"), ("blame", "HEAD", "--", "a.txt")):
+            subprocess.run(git_argv(str(work), *args), capture_output=True, env=git_env(),
+                           timeout=60)
+        assert not list(marks.iterdir()), sorted(marks.iterdir())
+    print("ok repo_config_never_runs_commands")
+
+
+def test_fetch_only_clones_with_a_row_key():
+    with tempfile.TemporaryDirectory() as d:
+        work, s = _world(Path(d))
+        fetched: list = []
+        saved = (oc._load_rows, oc._load_cache, oc._load_stored, oc.fetch_clones)
+        oc._load_rows = lambda dsn: [_row(s["A"], None, 30)]       # the SHA is there, no key
+        oc._load_cache, oc._load_stored = dict, lambda dsn: {}
+        oc.fetch_clones = lambda cs: (fetched.extend(cs), (len(cs), 0))[1]
+        try:
+            oc.run_outcomes(_cfg(Path(d), (str(Path(d) / "projects"),)), fetch=True,
+                            dry_run=True, now=NOW)
+            assert fetched == [], fetched
+            oc._load_rows = lambda dsn: [_row(s["A"], _key(str(Path(d) / "origin.git")), 30)]
+            oc.run_outcomes(_cfg(Path(d), (str(Path(d) / "projects"),)), fetch=True,
+                            dry_run=True, now=NOW)
+            assert [c.path for c in fetched] == [str(work)], fetched
+        finally:
+            oc._load_rows, oc._load_cache, oc._load_stored, oc.fetch_clones = saved
+    print("ok fetch_only_clones_with_a_row_key")
 
 
 def main() -> int:

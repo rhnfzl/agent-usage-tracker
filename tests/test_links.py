@@ -2,7 +2,8 @@
 
 Run: `python tests/test_links.py`  (or `pytest`).
 Locks the rules:
-  - one link row per closed turn: repo_key, branch_key, ticket_keys, sha_refs, pr_keys, role;
+  - one link row per closed turn: repo_key, branch_key, ticket_keys, sha_refs, commit_keys,
+    pr_keys, role;
   - the source order for repo and branch (commit line and its directory, worktree, session meta,
     record) and the default-branch exclusion;
   - the strict ticket pattern, the sha_refs filter, the PR URL forms, the caps;
@@ -11,7 +12,8 @@ Locks the rules:
   - a subagent or scripted file closes its link turn once complete and idle, an hour-long gap
     between records closes it too, and a scan split anywhere gives the same rows as one full read;
   - a Codex watermark from before link fields existed still gets the session's repo and branch;
-  - nothing but keys, SHAs, enums and ints reaches attrs.
+  - nothing but keys, enums and ints reaches link attrs (no raw SHA: sha_refs and commit_keys are
+    keyed).
 """
 
 from __future__ import annotations
@@ -41,6 +43,10 @@ SHA_A, SHA_B = "1a2b3c4d", "5e6f7a8b9c"
 
 def _bk(repo_key: str, branch: str) -> str:
     return _key(repo_key + branch)
+
+
+def _sk(sha: str) -> str:
+    return _key("sha7:" + sha[:7])
 
 
 def _links(evs: list, sid: str | None = None) -> list:
@@ -76,21 +82,24 @@ def test_ticket_pattern() -> None:
 
 def test_sha_refs_filter() -> None:
     link = ac.Link(_keys(), {})
-    keep = ["abc1234", "0123456789abcdef0123456789abcdef01234567"[:ac.SHA_REF_LEN], "deadbee5"]
+    keep = ["abc1234", "0123456789abcdef0123456789abcdef01234567", "deadbee5"]
     drop = ["abc123", "facade", "decade0"[:6], "deadbeef", "1234567", "a" * 41 + "1",
             "0123456789abcdef" * 4, "550e8400-e29b-41d4-a716-446655440000", "ABC1234",
             "abc1234_x", "x_abc1234", "abc1234g", "zabc1234"]
     link.text(" ".join(drop) + "\n" + " ".join(keep) + " abc1234")
-    assert link.s["shas"] == keep, link.s
+    assert link.s["shas"] == [_sk(v) for v in keep], link.s
     many = ac.Link(_keys(), {})
     many.text(" ".join(f"{i:07x}a" for i in range(ac.MAX_SHAS + 10)))
     assert len(many.s["shas"]) == ac.MAX_SHAS
-    # a 32- or 40-hex secret passes the SHA filter: only a prefix is kept, never the whole value
+    # a 32- or 40-hex secret passes the SHA filter: only a keyed hash of 7 hex is kept
     secret = "9f3c1e0b7a6d5c4b3a291807f6e5d4c3"
     leak = ac.Link(_keys(), {})
     leak.text(f'webhook_secret = "{secret}"\nhttps://{secret}@o1.ingest.example.com/1 '
               f"tok={secret}0a1b2c3d")
-    assert leak.s["shas"] == [secret[:ac.SHA_REF_LEN]], leak.s
+    assert leak.s["shas"] == [_sk(secret)], leak.s
+    assert secret[:7] not in json.dumps(leak.s), leak.s
+    # a watermark saved before keying carried raw hex: it is dropped on load
+    assert ac.Link(_keys(), {"shas": [secret[:12], _sk(secret)]}).s["shas"] == [_sk(secret)]
     print("ok sha_refs_filter")
 
 
@@ -147,7 +156,7 @@ def test_branch_never_crosses_repos() -> None:
     def attrs(rk, out):
         link = ac.Link(keys, {})
         link.place(3, K1, "feat/x")                    # the record: repo one on feat/x
-        link.commit(rk, out)
+        link.commit(rk, out, ["abc1234"])
         return link.attrs("interactive")["repo_key"], link.attrs("interactive")["branch_key"]
     assert attrs(K2, "ok abc1234") == (K2, None)                  # no branch line: not one's
     assert attrs(K2, "[feat/y abc1234] x") == (K2, _bk(K2, "feat/y"))
@@ -219,7 +228,8 @@ def test_claude_sources_and_order() -> None:
         assert l1.attrs == {
             "repo_key": K2, "branch_key": _bk(K2, "fix/QA-2-b"),
             "ticket_keys": [_key("ABC-1"), _key("QA-2"), _key("QA-3")],
-            "sha_refs": [SHA_A, "9f8e7d6"], "pr_keys": [_key("github.com/o/r|5")],
+            "sha_refs": [_sk(SHA_A), _sk("9f8e7d6")], "commit_keys": [_sk("9f8e7d6")],
+            "pr_keys": [_key("github.com/o/r|5")],
             "role": "seed"}, l1.attrs
         assert (l1.ts, l1.session_id) == (_base()["timestamp"], "S1")
         [commit] = [e for e in evs if isinstance(e, ActivityEvent) and e.kind == "commit"]
@@ -286,7 +296,7 @@ def test_claude_roles_and_idle_close() -> None:
                                                                     ("S9", "child")}, later
         [la] = [e for e in later if e.session_id == "A1"]
         assert (la.attrs["repo_key"], la.attrs["branch_key"], la.attrs["sha_refs"]) == \
-            (K1, _bk(K1, "feat/y"), [SHA_B]), la.attrs
+            (K1, _bk(K1, "feat/y"), [_sk(SHA_B)]), la.attrs
         assert (la.event_id, la.turn_id) == (make_event_id("claude_code", "link", "a-sm1"), "P-s1")
         assert "act" not in wm["files"][str(sub)], "closed: nothing left to carry"
         assert not _links(_collect(home, wm)), "closed once"
@@ -398,8 +408,9 @@ def test_link_attrs_carry_no_text() -> None:
         for leak in ("ABC-1", "clientname", "acmecorp", "feature", "github", str(one), "/"):
             assert leak not in blob, leak
         assert lk.attrs["pr_keys"] == [_key("github.com/acmecorp/clientname|12")], lk.attrs
-        assert set(lk.attrs) == {"repo_key", "branch_key", "ticket_keys", "sha_refs", "pr_keys",
-                                 "role"}
+        assert set(lk.attrs) == {"repo_key", "branch_key", "ticket_keys", "sha_refs",
+                                 "commit_keys", "pr_keys", "role"}
+        assert lk.attrs["commit_keys"] == [_sk("abc1234")] and "abc1234" not in blob, lk.attrs
     print("ok link_attrs_carry_no_text")
 
 
@@ -456,13 +467,15 @@ def test_codex_link() -> None:
         links = {(e.session_id, e.turn_id): e.attrs for e in _links(_run_mod(codex, home))}
         assert links[("T1", "u1")] == {
             "repo_key": K2, "branch_key": _bk(K2, "feat/q"), "ticket_keys": [_key("AB-5")],
-            "sha_refs": [SHA_A, "7c7c7c7"], "pr_keys": [_key("github.com/o/r|9")],
+            "sha_refs": [_sk(SHA_A), _sk("7c7c7c7")], "commit_keys": [_sk("7c7c7c7")],
+            "pr_keys": [_key("github.com/o/r|9")],
             "role": "seed"}, links[("T1", "u1")]
         assert links[("T1", "u2")]["repo_key"] == K1
         assert links[("T1", "u2")]["branch_key"] == _bk(K1, "feat/AB-5-x")
         assert links[("T1", "u2")]["sha_refs"] == []
         assert links[("T2", "v1")] == {"repo_key": K2, "branch_key": None, "ticket_keys": [],
-                                       "sha_refs": [], "pr_keys": [], "role": "child"}
+                                       "sha_refs": [], "commit_keys": [], "pr_keys": [],
+                                       "role": "child"}
         commit = [e for e in _run_mod(codex, home) if getattr(e, "kind", "") == "commit"]
         assert [e.attrs["repo_key"] for e in commit] == [K2]
     print("ok codex_link")
@@ -519,8 +532,9 @@ def test_pi_link() -> None:
         ])
         links = {e.turn_id: e.attrs for e in _links(_run_mod(pi, home))}
         assert links["u1"] == {"repo_key": K1, "branch_key": _bk(K1, "feat/AB-2"),
-                               "ticket_keys": [_key("AB-2")], "sha_refs": [SHA_A, "abcd123"],
-                               "pr_keys": [], "role": "seed"}, links
+                               "ticket_keys": [_key("AB-2")],
+                               "sha_refs": [_sk(SHA_A), _sk("abcd123")],
+                               "commit_keys": [_sk("abcd123")], "pr_keys": [], "role": "seed"}, links
         assert links["u2"]["sha_refs"] == [] and links["u2"]["repo_key"] == K1, links
     print("ok pi_link")
 
@@ -533,8 +547,8 @@ def test_cursor_link() -> None:
         k = _key("example.com/owner/repo")
         assert links[(tc.A, "r1")] == {
             "repo_key": k, "branch_key": _bk(k, "feature/ABC-1-clientname"),
-            "ticket_keys": [_key("ABC-1")], "sha_refs": ["1a2b3c4"], "pr_keys": [],
-            "role": "seed"}, links[(tc.A, "r1")]
+            "ticket_keys": [_key("ABC-1")], "sha_refs": [_sk("1a2b3c4")],
+            "commit_keys": [_sk("1a2b3c4")], "pr_keys": [], "role": "seed"}, links[(tc.A, "r1")]
         assert links[(tc.B, "rb")]["role"] == "child", links
         assert links[(tc.A, "r3")]["repo_key"] is None, links      # no working_directory
     tc._run(check)

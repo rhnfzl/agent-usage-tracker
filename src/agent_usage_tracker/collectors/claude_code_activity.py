@@ -257,7 +257,7 @@ class Activity:
         if not found:
             return
         key = commit_repo(self.keys, o.get("cwd"), target, self.wt[0] if self.wt else None)
-        self.link.commit(key, text)
+        self.link.commit(key, text, found)
         for sha in found:
             self._emit("commit", o, f"{tid}|{sha}", sess,
                        {"sha": sha, "repo_key": key, "amend": amend})

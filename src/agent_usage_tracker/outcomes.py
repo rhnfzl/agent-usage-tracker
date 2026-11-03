@@ -43,6 +43,7 @@ from pathlib import Path
 from . import __version__
 from .collectors._activity_common import RepoKeys, repo_identity
 from .config import Config
+from .git_safe import git_argv, git_env
 from .push import scrub_error, send_scan_rows
 from .state import _state_path
 
@@ -63,8 +64,8 @@ MANUAL = {"shipped": "shipped", "ruled-out": "ruled_out", "open": "open"}
 def _git(path: str, *args: str, inp: str | None = None, timeout: float = 300) -> str | None:
     """stdout of a git command, or None when it fails or times out."""
     try:
-        r = subprocess.run(["git", "-C", path, *args], input=inp, capture_output=True, text=True,
-                           errors="replace", timeout=timeout)
+        r = subprocess.run(git_argv(path, *args), input=inp, capture_output=True, text=True,
+                           errors="replace", timeout=timeout, env=git_env())
     except (OSError, subprocess.SubprocessError):
         return None
     return r.stdout if r.returncode == 0 else None
@@ -127,13 +128,12 @@ def _fetch(path: str) -> bool:
     """Fetch origin's refs and nothing else: no gc or maintenance (it could prune objects later
     runs need), no FETCH_HEAD, no submodules, no prompt. On timeout SIGTERM the process group so
     git removes its lock files, then SIGKILL."""
-    cmd = ["git", "-C", path, "-c", "gc.auto=0", "-c", "maintenance.auto=false", "fetch",
-           "--quiet", "--no-tags", "--no-auto-maintenance", "--no-write-fetch-head",
-           "--no-recurse-submodules", "origin"]
+    cmd = git_argv(path, "fetch", "--quiet", "--no-tags", "--no-auto-maintenance",
+                   "--no-write-fetch-head", "--no-recurse-submodules", "origin")
     try:
         p = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                              stderr=subprocess.DEVNULL, start_new_session=True,
-                             env=dict(os.environ, GIT_TERMINAL_PROMPT="0"))
+                             env=git_env())
     except OSError:
         return False
     try:
@@ -183,11 +183,12 @@ def _lookup(clone: Clone, shas: list[str]) -> dict[str, tuple[str, int]]:
 def _patch_ids(path: str, args: list[str], inp: str | None = None) -> dict[str, str]:
     """full sha -> stable patch id for the commits `git log -p <args>` prints."""
     try:
-        log = subprocess.Popen(["git", "-C", path, "log", "-p", "--format=commit %H", *args],
+        log = subprocess.Popen(git_argv(path, "log", "-p", "--format=commit %H", *args),
                                stdin=subprocess.PIPE if inp is not None else subprocess.DEVNULL,
-                               stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-        pid = subprocess.Popen(["git", "-C", path, "patch-id", "--stable"], stdin=log.stdout,
-                               stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+                               stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=git_env())
+        pid = subprocess.Popen(git_argv(path, "patch-id", "--stable"), stdin=log.stdout,
+                               stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+                               env=git_env())
         log.stdout.close()
         if inp is not None:
             log.stdin.write(inp.encode())
@@ -507,10 +508,10 @@ def run_outcomes(cfg: Config, fetch: bool, dry_run: bool, now: float | None = No
         clones = find_clones(list(cfg.outcome_repo_roots), RepoKeys(cfg.repo_key_salt))
         stats: Counter = Counter(clones=len(clones))
         if fetch:
+            # only repos the agents committed to: fetch talks to the remote, so a clone that
+            # merely sits under a root (and holds a matching short SHA) is never fetched
             keys = {r["repo_key"] for r in rows if r["repo_key"]}
-            shas = sorted({(r["sha"] or "").lower() for r in rows if _SHA.match(
-                (r["sha"] or "").lower())})
-            want = [c for c in clones if c.key in keys or _lookup(c, shas)]
+            want = [c for c in clones if c.key in keys]
             stats["fetch_ok"], stats["fetch_failed"] = fetch_clones(want)
         cache = _load_cache()
         outs, ev = evaluate(rows, clones, now, cache, gh=fetch)

@@ -375,6 +375,11 @@ def test_attrs_carry_no_text() -> None:
         assert not _plain_value("sha_refs", ["ABC-1"]) and not _plain_value("role", "lead")
         [lv] = [e for e in evs if e.kind == "link" and e.session_id == "S3"]
         assert lv.attrs["ticket_keys"] == [_key("ABC-1")] and lv.attrs["branch_key"], lv.attrs
+        # a quoted or printed SHA reaches the link row only as a keyed hash, never as raw hex
+        assert lv.attrs["commit_keys"] and lv.attrs["sha_refs"], lv.attrs
+        for k in ("sha_refs", "commit_keys"):
+            assert all(re.fullmatch(r"[0-9a-f]{64}", v) for v in lv.attrs[k]), (k, lv.attrs)
+        assert "abc1234" not in json.dumps(lv.attrs), lv.attrs
     _run(check)
     print("ok attrs_carry_no_text")
 

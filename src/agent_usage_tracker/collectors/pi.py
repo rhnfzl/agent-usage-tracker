@@ -159,7 +159,7 @@ class _Activity:
                     key = commit_repo(self.keys, self.cwd, target[0] if target else None,
                                       None) if found else None
                     if found:
-                        link.commit(key, text_of(content))
+                        link.commit(key, text_of(content), found)
                     for sha in found:
                         self._emit("commit", ts, f"{tid}|{sha}", sess.turn_id,
                                    {"sha": sha, "repo_key": key, "amend": bool(amend)})

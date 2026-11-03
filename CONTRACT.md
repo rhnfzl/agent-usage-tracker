@@ -252,7 +252,7 @@ identity rules above; `ts` is the source record's own timestamp; `event_id` is
 | `turn` | `system` `turn_duration` record | uuid | `duration_ms`, `message_count`, `tool_calls`, `tool_errors`, `by_tool`, `hook_blocks`, `max_identical_run`, `retry_flag`, `runaway_flag` |
 | `compaction` | `system` `compact_boundary` record | uuid | `trigger` when present |
 | `invoke` | `Skill` tool_use | tool_use_id | `skill` (`mcp` for an MCP name) |
-| `link` | closed turn: a `turn_duration` record, else (a subagent or scripted file, or a final turn with no `turn_duration`) the file once read to its end and idle for an hour, or the next record an hour or more after the turn's last one | the turn's uuid, else the last record's uuid | `repo_key`, `branch_key`, `ticket_keys`, `sha_refs`, `pr_keys`, `role` (see Link rows below) |
+| `link` | closed turn: a `turn_duration` record, else (a subagent or scripted file, or a final turn with no `turn_duration`) the file once read to its end and idle for an hour, or the next record an hour or more after the turn's last one | the turn's uuid, else the last record's uuid | `repo_key`, `branch_key`, `ticket_keys`, `sha_refs`, `commit_keys`, `pr_keys`, `role` (see Link rows below) |
 
 Rules worth knowing:
 
@@ -304,7 +304,7 @@ Rules worth knowing:
 ### Link rows (`link`, all four agents)
 
 One row per closed turn, the raw material for linking sessions into episodes. Every value is a
-key, a SHA, an enum or a list of those; branch names, ticket ids, URLs and paths stay on the
+key, an enum or a list of those (no raw SHA: a quoted hex string can be a secret); branch names, ticket ids, URLs and paths stay on the
 machine. Keys are HMAC-SHA256 under the same salt as `repo_key`.
 
 | attr | value |
@@ -312,7 +312,8 @@ machine. Keys are HMAC-SHA256 under the same salt as `repo_key`.
 | `repo_key` | the turn's repo, by source: the commit's own directory (rules above), the worktree's original checkout, the record's `cwd`, Codex `session_meta.git.repository_url` (normalised like a remote) |
 | `branch_key` | `HMAC(repo_key \|\| branch)` from, in order, git's `[branch sha]` commit line, `worktree-state.worktreeBranch`, Codex `session_meta.git.branch`, the record's `gitBranch`, taken only from a source in the same repo as `repo_key` (a branch key never pairs one repo with another's branch). `main`, `master`, `develop`, `trunk` and `HEAD` get none, and a source that names one ends the search (a commit on `main` does not borrow the record's `gitBranch`) |
 | `ticket_keys` | up to 5 `HMAC(ticket)` for strict ids `[A-Z][A-Z0-9]{1,9}-\d+` (not inside a longer word; `UTF-8`, `SHA-256`, `ISO-8601` and similar standards excluded) in the turn's branches, commit subjects and Claude Code session titles (`ai-title`, `custom-title`) |
-| `sha_refs` | up to 50 commit-like SHAs quoted in the turn's tool output or message text: 7 to 40 lowercase hex with at least one digit and one letter, not part of a longer word, uuid or hash, kept as their first 12 hex (match them to commits by prefix; a hex secret that passes the filter is never kept whole) |
+| `sha_refs` | up to 50 commit-like SHAs quoted in the turn's tool output or message text: 7 to 40 lowercase hex with at least one digit and one letter, not part of a longer word, uuid or hash, each kept only as `sha_key = HMAC("sha7:" + first 7 hex, lowercased)` (none without a salt), so a hex secret that passes the filter is never kept, not even a prefix |
+| `commit_keys` | the `sha_key` of every commit the turn's commit calls printed (the SHAs the `commit` rows carry: git's `[branch sha]` line, else the structured or condensed form); a quoted SHA meets a commit where its `sha_refs` key is in some turn's `commit_keys` |
 | `pr_keys` | up to 10 `HMAC(host/owner/repo\|number)` from GitHub `https://github.com/<o>/<r>/pull/<n>` and Bitbucket `https://bitbucket.org/<ws>/<repo>/pull-requests/<n>` URLs in the same text, plus the turn's `pr-link` records (the same PR gives the same key either way) |
 | `role` | `child` for a subagent or a scripted run (`run_origin` subagent or automated), else `seed` |
 
@@ -426,13 +427,21 @@ commit's `(state, survival)` differs from its latest stored row.
   branch, then on a branch, then unreachable).
 - A commit this run cannot see or decide (no clone holds it any more, gh failed, a stale default
   ref) never replaces a stored row of its sha: decided states stay decided.
-- `--fetch` (or `outcome_fetch = true`) runs `git -c gc.auto=0 -c maintenance.auto=false fetch
-  --quiet --no-tags --no-auto-maintenance --no-write-fetch-head --no-recurse-submodules origin`
-  with `GIT_TERMINAL_PROMPT=0` in each clone that holds a commit or has a commit row's key (30 s
+- `--fetch` (or `outcome_fetch = true`) runs `git fetch --upload-pack=git-upload-pack --quiet
+  --no-tags --no-auto-maintenance --no-write-fetch-head --no-recurse-submodules origin` only in
+  a clone whose origin's repo_key a commit row carries (30 s
   each, then SIGTERM so git removes its locks; failures are skipped and counted) and turns on the
   gh lookup. Without it, a commit whose GitHub PR was squash-merged ends `abandoned`, so set
   `outcome_fetch = true` on the machine that runs the nightly job. A dry run reads the sink and the clones and writes nothing: no rows, no
   cache, no heartbeat. A real run sends one `agents.collector_scan` row, collector `outcomes`.
+
+- Every git command aut runs (here, and `git remote get-url origin` for repo keys) goes through
+  `git_safe`: `-c core.fsmonitor= -c core.hooksPath=/dev/null -c protocol.ext.allow=never
+  -c diff.external= -c core.sshCommand=ssh -c core.askPass= -c gc.auto=0
+  -c maintenance.auto=false`, `--no-textconv --no-ext-diff` on `log`/`show`/`diff`,
+  `--no-textconv` on `blame`, with `GIT_CONFIG_NOSYSTEM=1` and `GIT_TERMINAL_PROMPT=0`, so a
+  clone's own config, attributes or hooks never make git run a command. The user's global config
+  (HOME) still applies, so fetch keeps their ssh and credential setup.
 
 `aut outcome <shipped|ruled-out|open> [--session ID]` writes `agents.manual_outcome (session_id,
 outcome, ts, repo_key)` for `--session ID`, else the newest interactive (entrypoint `cli`) Claude

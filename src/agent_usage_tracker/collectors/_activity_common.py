@@ -18,6 +18,7 @@ import sys
 from datetime import datetime
 from urllib.parse import urlparse
 
+from ..git_safe import git_argv, git_env
 from ..state import _state_path
 
 _SEGMENTS = re.compile(r"&&|\|\||[;|\n]")
@@ -50,11 +51,8 @@ _PR_URL = re.compile(r"https?://(?:www\.)?(?:(github\.com)/([\w.-]+)/([\w.-]+)/p
                      r"|(bitbucket\.org)/([\w.-]+)/([\w.-]+)/pull-requests)/(\d+)")
 _DEFAULT_BRANCHES = {"main", "master", "develop", "trunk", "HEAD"}
 # 20 SHAs (first come) filled up on 7% of Claude Code and 26% of Cursor turns that quote any,
-# pushing out a commit quoted late in the turn; 50 is cheap at 12 hex each
+# pushing out a commit quoted late in the turn; 50 is cheap at one key each
 MAX_SHAS, MAX_PRS, MAX_TICKETS = 50, 10, 5
-# a quoted SHA is kept as its first 12 hex: enough to prefix-match a commit, and a hex secret
-# that passes the SHA filter (a 32-hex API key, a 40-hex token) cannot be read back from it
-SHA_REF_LEN = 12
 IDLE_S = 3600        # a file untouched this long is complete: its open link turn closes
 
 
@@ -166,8 +164,8 @@ class RepoKeys:
             self._cwd[cwd] = None
             if os.path.isdir(cwd):
                 try:
-                    r = subprocess.run(["git", "-C", cwd, "remote", "get-url", "origin"],
-                                       capture_output=True, timeout=2)
+                    r = subprocess.run(git_argv(cwd, "remote", "get-url", "origin"),
+                                       capture_output=True, timeout=2, env=git_env())
                     url = r.stdout.decode("utf-8", "replace").strip()
                     if r.returncode == 0 and url:
                         self._cwd[cwd] = self.of(repo_identity(url))
@@ -235,9 +233,16 @@ def pr_key(keys: RepoKeys, host: str, repo: str, number: object) -> str | None:
     return keys.of(f"{identity}|{number}")
 
 
+def sha_key(keys: RepoKeys, sha: str) -> str | None:
+    """HMAC of a SHA's first 7 hex: a quoted SHA and a printed commit meet on it, and a hex secret
+    that passes the SHA filter (a 32-hex API key, a 40-hex token) is never kept, not even a
+    prefix of it. None without a salt."""
+    return keys.of("sha7:" + sha[:7].lower())
+
+
 class Link:
     """One turn's link fields (activity kind `link`). The state dict `s` is mutated in place and
-    rides in the watermark, so it holds keys and SHAs only, never a branch, ticket, URL or path.
+    rides in the watermark, so it holds keys only, never a SHA, branch, ticket, URL or path.
     s["at"]: source rank -> [repo_key, branch_key]; rank 0 the commit (`[branch sha]` line and the
     commit's own directory), 1 the worktree, 2 the session meta (Codex git), 3 the record.
     branch_key is False where the source names a default branch: it has no key, and a lower rank
@@ -245,6 +250,8 @@ class Link:
 
     def __init__(self, keys: RepoKeys, s: dict) -> None:
         self.keys, self.s = keys, s
+        if s.get("shas"):     # a watermark from before sha_refs were keyed held raw hex: drop it
+            s["shas"] = [v for v in s["shas"] if len(v) == 64]
 
     def source(self, repo_key: str | None, branch: object = None) -> list:
         """[repo_key, branch_key] of one source (its branch's tickets go to this turn)."""
@@ -268,8 +275,11 @@ class Link:
                         and not self._add("tix", self.keys.of(m[0]), MAX_TICKETS):
                     break
 
-    def commit(self, repo_key: str | None, text: str) -> None:
-        """A commit call's output: its repo, and the branch and subject of git's commit line."""
+    def commit(self, repo_key: str | None, text: str, shas: list[str]) -> None:
+        """A commit call's output: its repo, the commits it printed (`commit_shas`), and the
+        branch and subject of git's commit line."""
+        for sha in shas:
+            self._add("cks", sha_key(self.keys, sha), MAX_SHAS)
         m = _COMMIT_LINE.search(text)
         self.place(0, repo_key, m["br"] if m else None)
         for m in _COMMIT_LINE.finditer(text):
@@ -283,7 +293,7 @@ class Link:
             for m in _SHA_REF.finditer(text):
                 v = m[0]
                 if not v.isdigit() and not v.isalpha() \
-                        and not self._add("shas", v[:SHA_REF_LEN], MAX_SHAS):
+                        and not self._add("shas", sha_key(self.keys, v), MAX_SHAS):
                     break
         if "/pull" in text and len(self.s.get("prs", ())) < MAX_PRS:
             for m in _PR_URL.finditer(text):
@@ -303,7 +313,7 @@ class Link:
         bk = next((b for r, b in at if r == rk and b is not None), None) if rk else None
         return {"repo_key": rk, "branch_key": bk or None,
                 "ticket_keys": list(self.s.get("tix", ())), "sha_refs": list(self.s.get("shas", ())),
-                "pr_keys": list(self.s.get("prs", ())),
+                "commit_keys": list(self.s.get("cks", ())), "pr_keys": list(self.s.get("prs", ())),
                 # subagents and scripted runs attach to an episode, never start one
                 "role": "child" if origin in ("subagent", "automated") else "seed"}
 

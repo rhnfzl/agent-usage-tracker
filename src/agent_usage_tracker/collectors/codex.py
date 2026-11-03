@@ -195,7 +195,7 @@ def _activity(o: dict, t: object, p: dict, a: dict, sess: EventSession, keys: Re
                 found = commit_shas(out_text, err, call[1])
                 key = commit_repo(keys, it.get("cwd"), commit_dir(script), None) if found else None
                 if found:
-                    link.commit(key, out_text)
+                    link.commit(key, out_text, found)
                 for sha in found:
                     emit("commit", f"{it.get('id')}|{sha}",
                          {"sha": sha, "repo_key": key, "amend": call[0]})
