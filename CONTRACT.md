@@ -136,6 +136,32 @@ its token rows, so the double-count the warning guards against cannot happen —
 zero tokens by construction. Use it when you want `cursor_api`'s accurate tokens *and* Cursor human
 turns, or when the local DB is the only place your older Cursor history still exists.
 
+## Scan heartbeat: agents.collector_scan
+
+Usage rows only prove a machine was used, not that it was watched: a collector that dies looks
+the same as a quiet week. So every `aut scan` (not `--dry-run`) also writes one row per collector
+it ran, after the usage for that collector has been delivered:
+
+| Column | Meaning |
+|---|---|
+| `machine`, `collector` | who ran, which collector |
+| `started_at`, `finished_at` | wall clock around that collector's drain loop (UTC) |
+| `status` | `ok`, or `error` if the collector raised (the scan still fails exactly as before) |
+| `events`, `human` | new agent / human turns this scan, the same counts the scan report prints |
+| `newest_ts` | latest valid event timestamp seen this scan, null if none |
+| `error` | `<ExceptionType>: <message>`, credentials in URLs or `password=` stripped, max 300 chars |
+| `aut_version` | the client version |
+
+All rows of a scan go out in one `INSERT ... ON CONFLICT (machine, collector, finished_at) DO
+NOTHING` over `transport.pg_dsn`, also when a collector raised. A webhook-only config skips it
+with one stderr note. The heartbeat **never blocks usage delivery**: any failure sending it
+prints one warning and is swallowed, so usage rows, the watermark and the exit status are the
+same as without it.
+
+`agents.event_session` (session identity keyed by `event_id`, because `usage_event` rows are
+insert-only) and `agents.activity_event` (non-token activity) exist in the sink for upcoming
+steps. `aut` does not write either yet.
+
 ## Derived artifact: metrics.json (not part of the event contract)
 
 `aut report` produces `metrics.json` — an aggregate of the events above, never a passthrough.

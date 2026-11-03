@@ -14,6 +14,8 @@ stored), and any non-2xx is a hard failure.
 from __future__ import annotations
 
 import json
+import re
+import sys
 import urllib.error
 import urllib.request
 from typing import Callable
@@ -29,6 +31,18 @@ COLUMNS = (
     "reasoning_tokens", "total_tokens", "est_cost_usd", "project",
 )
 TABLE = "agents.usage_event"
+
+# One row per collector per scan (agents.collector_scan): proof a machine ran and how it ended.
+SCAN_COLUMNS = (
+    "machine", "collector", "started_at", "finished_at", "status", "events", "human",
+    "newest_ts", "error", "aut_version",
+)
+SCAN_TABLE = "agents.collector_scan"
+_ERROR_MAX = 300
+# scheme://user:pass@host... and libpq's keyword form (password=...): either can surface in a
+# connection error, and the error text is stored in a table other people can read.
+_CRED_URL = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://[^\s/@]*:[^\s@]*@\S*")
+_CRED_KV = re.compile(r"(password\s*=\s*)\S+", re.IGNORECASE)
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -113,3 +127,34 @@ def make_sender(cfg: Config) -> Callable[[list[UsageEvent]], None]:
         raise RuntimeError(f"webhook delivery failed and no PG fallback: {webhook_err}")
 
     return send
+
+
+def scrub_error(exc: BaseException) -> str:
+    """Short, credential-free error text for a scan row. Redacts before truncating so a cut
+    through a URL can never leave its password behind."""
+    text = f"{type(exc).__name__}: {exc}"
+    text = _CRED_KV.sub(r"\1<redacted>", _CRED_URL.sub("<redacted-url>", text))
+    return text[:_ERROR_MAX]
+
+
+def send_scan_rows(cfg: Config, rows: list[dict]) -> None:
+    """Deliver scan heartbeat rows over the PG DSN. Idempotent on (machine, collector,
+    finished_at). Raises on failure; the caller decides that a heartbeat never blocks a scan."""
+    if not rows:
+        return
+    if not cfg.has_pg:
+        # shortcut: webhook path for scan rows not built; upgrade when a machine runs webhook-only.
+        print("aut: note: scan heartbeat not sent (needs transport.pg_dsn)", file=sys.stderr)
+        return
+    import psycopg  # optional dependency; install with the [postgres] extra
+
+    cols = ", ".join(SCAN_COLUMNS)
+    placeholders = ", ".join(["%s"] * len(SCAN_COLUMNS))
+    sql = (
+        f"INSERT INTO {SCAN_TABLE} ({cols}) VALUES ({placeholders}) "
+        "ON CONFLICT (machine, collector, finished_at) DO NOTHING"
+    )
+    with psycopg.connect(cfg.pg_dsn, connect_timeout=15) as conn:
+        with conn.cursor() as cur:
+            cur.executemany(sql, [tuple(r[c] for c in SCAN_COLUMNS) for r in rows])
+        conn.commit()
