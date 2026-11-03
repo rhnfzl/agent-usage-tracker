@@ -5,6 +5,8 @@
   aut backfill          reset the watermark for the selected agents, then scan everything
   aut backfill --sessions-only [--dry-run]
                         re-read all history and send ONLY session rows; watermark untouched
+  aut backfill --activity-only [--dry-run]
+                        the same for activity rows (steers, commits, turns, ...); never usage
   aut status            show config + watermark state
 
 The dry-run report doubles as the accuracy check: it prints per-agent, per-model token
@@ -21,8 +23,9 @@ from datetime import datetime, timezone
 from . import __version__, pricing
 from .collectors import REGISTRY
 from .config import Config, load_config, _config_path
-from .event import UsageEvent, valid_ts
-from .push import make_sender, scrub_error, send_scan_rows, send_session_rows
+from .event import ActivityEvent, UsageEvent, valid_ts
+from .push import (make_sender, scrub_error, send_activity_rows, send_scan_rows,
+                   send_session_rows)
 from .state import collector_wm, load_state, save_state
 
 BATCH = 500
@@ -42,10 +45,13 @@ def _wm_fp(wm: dict) -> str:
 def _blank_agg() -> dict:
     return {"events": 0, "human": 0, "input": 0, "output": 0, "cache_read": 0,
             "cache_write": 0, "reasoning": 0, "total": 0, "skipped_no_ts": 0,
-            "duplicates": 0, "by_model": {}}
+            "duplicates": 0, "by_model": {}, "activity": {}}
 
 
-def _add(agg: dict, e: UsageEvent) -> None:
+def _add(agg: dict, e: UsageEvent | ActivityEvent) -> None:
+    if isinstance(e, ActivityEvent):     # no tokens; tallied by kind, kept out of events/human
+        agg["activity"][e.kind] = agg["activity"].get(e.kind, 0) + 1
+        return
     if e.kind == "human":            # a user prompt: no tokens, kept out of the token/model rollup
         agg["human"] += 1
         return
@@ -172,6 +178,8 @@ def _print_report(cfg: Config, report: dict, dry_run: bool) -> None:
                 print(f"    {model:<28} {mv['events']:>5} turns  {mv['total']:>12,} tokens")
         if agg["human"]:
             print(f"{name:<12} {agg['human']:>6} human turns (prompts you sent)")
+        if agg["activity"]:
+            print(f"{name:<12} activity rows {json.dumps(agg['activity'], sort_keys=True)}")
         if agg["skipped_no_ts"]:
             print(f"    (skipped {agg['skipped_no_ts']} records with missing/invalid timestamp)")
         if agg["duplicates"]:
@@ -203,6 +211,8 @@ def run_export(cfg: Config, agents: list[str], out) -> tuple[int, int]:
             before = _wm_fp(wm)
             for events, commit in REGISTRY[name](cfg, wm):
                 for e in events:
+                    if isinstance(e, ActivityEvent):    # the CSV is agents.usage_event only
+                        continue
                     e.machine = cfg.machine
                     if not valid_ts(e.ts):
                         skipped += 1
@@ -219,20 +229,28 @@ def run_export(cfg: Config, agents: list[str], out) -> tuple[int, int]:
     return n, skipped
 
 
-def run_session_backfill(cfg: Config, agents: list[str], dry_run: bool) -> dict:
-    """Send agents.event_session rows for ALL history, never usage rows: re-reading files from
-    byte 0 re-emits (event_id, ts) pairs that can differ from the stored ones (see the ts note in
-    collectors/claude_code.py), and those would land as new duplicates. Works on a throwaway
-    watermark, so the live one is neither read nor saved. ON CONFLICT makes a re-run free."""
+def run_session_backfill(cfg: Config, agents: list[str], dry_run: bool, sessions: bool = True,
+                         activity: bool = False) -> dict:
+    """Send agents.event_session rows (sessions) and/or agents.activity_event rows (activity) for
+    ALL history, never usage rows: re-reading files from byte 0 re-emits (event_id, ts) pairs that
+    can differ from the stored ones (see the ts note in collectors/claude_code.py), and those would
+    land as new duplicates. Works on a throwaway watermark, so the live one is neither read nor
+    saved. ON CONFLICT makes a re-run free."""
     if not dry_run and not cfg.has_pg:
-        raise SystemExit("backfill --sessions-only needs transport.pg_dsn (or use --dry-run).")
-    counts: dict = {"rows": 0, "by_origin": {}, "turn_null": 0, "subagent_no_parent": 0}
+        raise SystemExit("backfill --sessions-only/--activity-only needs transport.pg_dsn "
+                         "(or use --dry-run).")
+    counts: dict = {"rows": 0, "by_origin": {}, "turn_null": 0, "subagent_no_parent": 0,
+                    "activity": 0, "by_kind": {}, "via": {}}
     buf: list[dict] = []
+    abuf: list[ActivityEvent] = []
 
     def flush() -> None:
         if buf and not dry_run:
             send_session_rows(cfg.pg_dsn, buf)      # raises -> the command fails, nothing to undo
+        if abuf and not dry_run:
+            send_activity_rows(cfg.pg_dsn, abuf)
         buf.clear()
+        abuf.clear()
 
     for name in agents:
         wm: dict = {}
@@ -242,6 +260,20 @@ def run_session_backfill(cfg: Config, agents: list[str], dry_run: bool) -> dict:
             for events, commit in REGISTRY[name](cfg, wm):
                 for e in events:
                     e.machine = cfg.machine
+                    if isinstance(e, ActivityEvent):
+                        if activity and valid_ts(e.ts) and e.event_id not in seen:
+                            seen.add(e.event_id)
+                            counts["activity"] += 1
+                            counts["by_kind"][e.kind] = counts["by_kind"].get(e.kind, 0) + 1
+                            if e.kind == "steer":
+                                v = e.attrs["via"]
+                                counts["via"][v] = counts["via"].get(v, 0) + 1
+                            abuf.append(e)
+                            if len(abuf) >= BATCH:
+                                flush()
+                        continue
+                    if not sessions:
+                        continue
                     row = e.session_row()
                     # no row for an event the usage path drops (bad ts), or one already sent
                     if row is None or not valid_ts(e.ts) or e.event_id in seen:
@@ -263,8 +295,8 @@ def run_session_backfill(cfg: Config, agents: list[str], dry_run: bool) -> dict:
             if _wm_fp(wm) == before:
                 break
         flush()
-        print(f"aut: {name}: {len(seen):,} session rows {'counted' if dry_run else 'sent'}",
-              file=sys.stderr)
+        print(f"aut: {name}: {len(seen):,} {'session/activity' if activity else 'session'} rows "
+              f"{'counted' if dry_run else 'sent'}", file=sys.stderr)
     return counts
 
 
@@ -303,7 +335,10 @@ def main(argv: list[str] | None = None) -> int:
                             help="reset watermark for selected agents, then scan all history")
     p_back.add_argument("--sessions-only", action="store_true",
                         help="send only session rows for all history; watermark untouched")
-    p_back.add_argument("--dry-run", action="store_true", help="with --sessions-only: counts only")
+    p_back.add_argument("--activity-only", action="store_true",
+                        help="send only activity rows for all history; watermark untouched")
+    p_back.add_argument("--dry-run", action="store_true",
+                        help="with --sessions-only/--activity-only: counts only")
     p_back.add_argument("--agents", default=argparse.SUPPRESS, help=argparse.SUPPRESS)
     sub.add_parser("status", help="show config + watermark state")
     p_export = sub.add_parser("export", help="write all usage as CSV (bulk load / offline bridge)")
@@ -362,16 +397,22 @@ def main(argv: list[str] | None = None) -> int:
         print(f"exported {n} events{skip_note}{dest}", file=sys.stderr)
         return 0
 
-    if args.cmd == "backfill" and args.sessions_only:
-        c = run_session_backfill(cfg, list(agents), args.dry_run)
+    if args.cmd == "backfill" and (args.sessions_only or args.activity_only):
+        c = run_session_backfill(cfg, list(agents), args.dry_run, sessions=args.sessions_only,
+                                 activity=args.activity_only)
         mode = "DRY-RUN (nothing sent)" if args.dry_run else "sent"
-        print(f"sessions-only backfill {mode}: {c['rows']} rows, by run_origin "
-              f"{json.dumps(c['by_origin'], sort_keys=True)}, turn_id NULL {c['turn_null']}, "
-              f"subagent rows without a parent {c['subagent_no_parent']}")
+        if args.sessions_only:
+            print(f"sessions-only backfill {mode}: {c['rows']} rows, by run_origin "
+                  f"{json.dumps(c['by_origin'], sort_keys=True)}, turn_id NULL {c['turn_null']}, "
+                  f"subagent rows without a parent {c['subagent_no_parent']}")
+        if args.activity_only:
+            print(f"activity-only backfill {mode}: {c['activity']} rows, by kind "
+                  f"{json.dumps(c['by_kind'], sort_keys=True)}, steer via "
+                  f"{json.dumps(c['via'], sort_keys=True)}")
         return 0
     if args.cmd == "backfill" and args.dry_run:
-        parser.error("backfill --dry-run needs --sessions-only (a plain backfill resets the "
-                     "watermark; preview it with `aut scan --dry-run` instead)")
+        parser.error("backfill --dry-run needs --sessions-only or --activity-only (a plain "
+                     "backfill resets the watermark; preview it with `aut scan --dry-run`)")
 
     if args.cmd == "backfill":
         state = load_state()

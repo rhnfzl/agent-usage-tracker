@@ -92,7 +92,7 @@ def test_duplicate_session_paths_counted_once() -> None:
         assert report["events"] == 1, report          # not 2
         assert report["human"] == 1, report           # not 2
         assert report["total"] == 100, report         # not 200
-        assert report["duplicates"] == 2, report      # both repeats surfaced, not hidden
+        assert report["duplicates"] == 3, report      # usage, human and its steer row, surfaced
         assert report["by_model"]["claude-opus-5"]["events"] == 1
 
         buf = io.StringIO()

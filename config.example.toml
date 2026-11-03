@@ -31,6 +31,11 @@ agents = ["claude_code", "codex", "cursor_api", "pi"]
 # than that, and the only source of Cursor human turns at any date.
 # cursor_human_only = true
 
+# Key for the activity rows' repo_key (an HMAC of the repository identity). Unset, a random salt is
+# created as repo_key.salt next to the state file on first use. Set the same value on every machine
+# so their keys match. Treat it as a secret.
+# repo_key_salt = "env:AUT_REPO_KEY_SALT"
+
 [transport]
 # Default transport: POST batches to the n8n ingest webhook (behind Cloudflare Access).
 webhook_url    = "https://n8n.example.tld/webhook/llm-usage"

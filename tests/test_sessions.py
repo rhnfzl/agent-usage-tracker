@@ -27,6 +27,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from agent_usage_tracker import cli, push  # noqa: E402
 from agent_usage_tracker.collectors import claude_code  # noqa: E402
 from agent_usage_tracker.config import Config  # noqa: E402
+from agent_usage_tracker.event import ActivityEvent  # noqa: E402
 
 TS = "2026-07-18T10:00:00Z"
 
@@ -96,7 +97,8 @@ def _sessions(home: Path) -> dict:
     out = {}
     for events, _commit in claude_code.collect(_cfg(home), {}):
         for e in events:
-            out[e.event_id] = e
+            if not isinstance(e, ActivityEvent):    # activity rows: tests/test_activity.py
+                out[e.event_id] = e
     return out
 
 

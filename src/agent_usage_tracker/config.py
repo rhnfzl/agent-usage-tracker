@@ -55,6 +55,9 @@ class Config:
     # anywhere - no VPN. Both set -> sent as CF-Access-Client-Id / CF-Access-Client-Secret headers.
     cf_access_client_id: str | None = None
     cf_access_client_secret: str | None = None
+    # Key for the activity rows' repo_key HMAC. Unset: a random per-install salt file is created
+    # next to the state file. Set the same value on every machine so their keys match.
+    repo_key_salt: str | None = None
 
     @property
     def cf_access_headers(self) -> dict[str, str]:
@@ -91,8 +94,9 @@ def load_config() -> Config:
     pg_dsn = _resolve(transport.get("pg_dsn"))
     cf_id = _resolve(transport.get("cf_access_client_id"))
     cf_secret = _resolve(transport.get("cf_access_client_secret"))
+    salt = _resolve(data.get("repo_key_salt"))
     # If the config holds a secret, warn when it is group/other-accessible (should be chmod 600).
-    if path.exists() and (webhook_secret or pg_dsn or cf_secret) and (path.stat().st_mode & 0o077):
+    if path.exists() and (webhook_secret or pg_dsn or cf_secret or salt) and (path.stat().st_mode & 0o077):
         print(f"aut: warning: {path} holds a secret but is group/other-accessible; "
               f"run: chmod 600 {path}", file=sys.stderr)
 
@@ -110,4 +114,5 @@ def load_config() -> Config:
         cursor_api_lookback_days=int(data.get("cursor_api_lookback_days") or 90),
         cf_access_client_id=cf_id,
         cf_access_client_secret=cf_secret,
+        repo_key_salt=salt,
     )

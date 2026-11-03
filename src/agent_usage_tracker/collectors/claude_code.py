@@ -16,12 +16,15 @@ from __future__ import annotations
 import glob
 import json
 import re
+import sys
 from pathlib import Path
 from typing import Callable, Iterator
 
 from ..config import Config
 from ..event import EventSession, UsageEvent, make_event_id
-from ._util import basename, scan_file
+from ._util import basename, safe_int, scan_file
+from .claude_code_activity import Activity, RepoKeys
+from .claude_code_activity import _text as _text_of
 
 NAME = "claude_code"
 
@@ -70,7 +73,13 @@ _INJECTED_PREFIXES = (
     "This session is being continued from a previous",  # compaction summary without its flag
     "<bash-stdout>",            # output of a `!` shell command (the typed `<bash-input>` stays)
     "<bash-stderr>",
+    "Stop hook feedback:",      # a Stop hook's verdict fed back as a user turn (AgentsView, MIT)
 )
+# Context blocks the harness or IDE attaches to a turn. A turn made of nothing else was not typed
+# (filter ported from AgentsView, github.com/kenn-io/agentsview, MIT licence).
+_CONTEXT_BLOCK_RE = re.compile(
+    r"<(system-reminder|ide_selection|ide_opened_file)>.*?</\1>", re.S)
+_USAGE_CMD = "<command-name>/usage</command-name>"
 
 
 _LOOP_RE = re.compile(r"<command-(?:message>(?:[\w-]+:)?loop</command-message|name>/loop</command-name)>")
@@ -85,16 +94,8 @@ def _is_old_loop(o: dict, text: str) -> bool:
 def _is_injected(text: str) -> bool:
     """True for harness-generated role=user turns. A `<command-name>` slash-command expansion is
     deliberately NOT here: you typed the slash command, so it stays a human turn."""
-    return text.lstrip().startswith(_INJECTED_PREFIXES)
-
-
-def _text_of(content: object) -> str:
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        return "\n".join(b.get("text", "") for b in content
-                         if isinstance(b, dict) and b.get("type") == "text")
-    return ""
+    return (text.lstrip().startswith(_INJECTED_PREFIXES)
+            or (bool(text.strip()) and not _CONTEXT_BLOCK_RE.sub("", text).strip()))
 
 
 def _str(v: object) -> str | None:
@@ -128,6 +129,8 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[UsageEvent], Callable[
     if not base.exists():
         return
     files: dict = wm.setdefault("files", {})
+    keys = RepoKeys(cfg.repo_key_salt)   # cwd -> repo_key cached once per collect() pass
+    act_errors = 0
 
     for path in glob.glob(str(base / "**" / "*.jsonl"), recursive=True):
         fstate = files.get(path, {})
@@ -164,8 +167,12 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[UsageEvent], Callable[
         # Carried across chunks in the file's watermark entry, so a turn that began in an earlier
         # scan is not lost. Dropped when the path now holds a different file (rotated/replaced).
         # shortcut: files first read before this existed start at NULL until their next user record.
-        turn: str | None = (_str(fstate.get("turn"))
-                            if fstate.get("ino") == new_fstate.get("ino") else None)
+        same_file = fstate.get("ino") == new_fstate.get("ino")
+        turn: str | None = _str(fstate.get("turn")) if same_file else None
+        # activity state rides in the same watermark entry and is dropped with it on a new file
+        act = Activity(NAME, path, ident[0], fstate.get("act") if same_file else None, keys)
+        fresh = not same_file or safe_int(fstate.get("off")) == 0     # read from byte 0
+        steers: list = []
         for raw in lines:
             try:
                 o = json.loads(raw)
@@ -178,6 +185,8 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[UsageEvent], Callable[
                 pid = _str(o.get("promptId"))
                 if pid and not (ident[0] and turn):
                     turn = pid
+            act.record(o, _session_of(o, ident, turn))
+            if typ == "user":
                 # A real human prompt: string content (typed text or a slash command) or an
                 # all-text block list. Skip the tool_result user-lines Claude Code injects after
                 # every tool call (they dominate the raw "user" count), plus synthetic
@@ -189,19 +198,21 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[UsageEvent], Callable[
                 if o.get("entrypoint") in _PROGRAM_ENTRYPOINTS or _origin_not_human(o):
                     continue
                 m = o.get("message")
+                text = _text_of(m.get("content")) if isinstance(m, dict) else ""
                 if (isinstance(m, dict) and _is_human_text(m.get("content"))
-                        and not _is_injected(_text_of(m.get("content")))):
-                    if _is_old_loop(o, _text_of(m.get("content"))):
+                        and not _is_injected(text)):
+                    if _is_old_loop(o, text):
                         old_loops += 1
                         if old_loops > 1:        # you typed the first; the rest are firings
                             continue
                     uid = o.get("uuid") or f"{path}:{o.get('timestamp')}"
+                    sess = _session_of(o, ident, turn)
                     human.append(UsageEvent(
                         event_id=make_event_id(NAME, "human", uid),
                         ts=o.get("timestamp"), agent=NAME, model=None, provider=None,
-                        kind="human", project=basename(o.get("cwd")),
-                        session=_session_of(o, ident, turn),
+                        kind="human", project=basename(o.get("cwd")), session=sess,
                     ))
+                    steers.append((act.steer(o, uid, text, sess), _USAGE_CMD in text))
                 continue
             if typ != "assistant":
                 continue
@@ -244,13 +255,28 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[UsageEvent], Callable[
                 project=basename(o.get("cwd")),
                 session=_session_of(o, ident, turn),
             )
-        events = list(best.values()) + human
+        # A session that only ran /usage (no model call, every prompt a /usage) was nobody working
+        # (AgentsView, MIT). Judged only on a read from byte 0, so a /usage typed mid-session and
+        # caught alone by a live scan is kept, as a full re-read keeps it. shortcut: a file whose
+        # first chunk held only the /usage keeps it dropped if real work follows; rare.
+        if fresh and not best and steers and all(is_usage for _s, is_usage in steers):
+            human, steers = [], []
+        events = list(best.values()) + human + [s for s, _u in steers if s] + act.events
+        act_errors += act.errors
         if turn:
             new_fstate["turn"] = turn
         else:
             new_fstate.pop("turn", None)
+        carried = act.state()
+        if carried:
+            new_fstate["act"] = carried
+        else:
+            new_fstate.pop("act", None)
 
         def commit(p: str = path, s: dict = new_fstate) -> None:
             files[p] = s
 
         yield events, commit
+    if act_errors:
+        print(f"aut: {NAME}: {act_errors} activity record(s) skipped (extraction failed); usage "
+              "and session rows are unaffected.", file=sys.stderr)
