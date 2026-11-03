@@ -97,6 +97,13 @@ aut label review       # label gold answers one at a time on a page served on 12
 aut label eval --task steer_intent  # bake-off on your gold labels; `label choose` keeps the winner
 ```
 
+`aut episodes review [--month YYYY-MM]` opens a page on 127.0.0.1 with a sample of 30 of the
+month's episodes (a link shows all; ones you already marked right or not building work are left
+out). Each session shows its agent, folder, when it ran, its first and last prompt, commit
+subjects, PR titles and the files it edited, read from this machine's logs at page time and
+never stored. Answer right, should split, should merge, or not building work; "don't know" is
+the default and writes nothing.
+
 Run it on a timer. See `packaging/` for launchd, systemd, and Task Scheduler units.
 
 Offline runs are safe. The watermark only advances after a push succeeds, so nothing is lost,

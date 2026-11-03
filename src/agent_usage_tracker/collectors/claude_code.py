@@ -101,6 +101,24 @@ def _is_injected(text: str) -> bool:
             or (bool(text.strip()) and not _CONTEXT_BLOCK_RE.sub("", text).strip()))
 
 
+def human_text(o: dict) -> str | None:
+    """The text of a record a person typed, else None. A real human prompt is string content
+    (typed text or a slash command) or an all-text block list. Skipped: the tool_result
+    user-lines Claude Code injects after every tool call (they dominate the raw "user" count),
+    synthetic meta/compact/sidechain lines, and an SDK program driving the session (unknown or
+    absent entrypoints stay counted: only what is positively a program is dropped)."""
+    if o.get("type") != "user" or o.get("isMeta") or o.get("isCompactSummary") \
+            or o.get("isSidechain"):
+        return None
+    if o.get("entrypoint") in _PROGRAM_ENTRYPOINTS or _origin_not_human(o):
+        return None
+    m = o.get("message")
+    if not isinstance(m, dict) or not _is_human_text(m.get("content")):
+        return None
+    text = _text_of(m.get("content"))
+    return None if _is_injected(text) else text
+
+
 def _str(v: object) -> str | None:
     return v if isinstance(v, str) and v else None
 
@@ -200,20 +218,8 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[UsageEvent], Callable[
                     turn = pid
             act.record(o, _session_of(o, ident, turn))
             if typ == "user":
-                # A real human prompt: string content (typed text or a slash command) or an
-                # all-text block list. Skip the tool_result user-lines Claude Code injects after
-                # every tool call (they dominate the raw "user" count), plus synthetic
-                # meta/compact/sidechain lines - none of those are you prompting.
-                if o.get("isMeta") or o.get("isCompactSummary") or o.get("isSidechain"):
-                    continue
-                # An SDK program driving the session is not a person prompting. Unknown/absent
-                # entrypoints stay counted: only drop what is positively identified as a program.
-                if o.get("entrypoint") in _PROGRAM_ENTRYPOINTS or _origin_not_human(o):
-                    continue
-                m = o.get("message")
-                text = _text_of(m.get("content")) if isinstance(m, dict) else ""
-                if (isinstance(m, dict) and _is_human_text(m.get("content"))
-                        and not _is_injected(text)):
+                text = human_text(o)
+                if text is not None:
                     if _is_old_loop(o, text):
                         old_loops += 1
                         if old_loops > 1:        # you typed the first; the rest are firings
