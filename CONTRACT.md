@@ -450,13 +450,20 @@ level; `repo_key` is the current directory's. `packaging/claude/commands/outcome
 `/outcome` and passes the invoking session's id.
 
 `aut episodes review [--month YYYY-MM]` serves the month's `agents.episode` rows (default: the
-last completed month) on `127.0.0.1` at a random port and token, with each seed session's titles
-and branch names read from the local Claude Code and Codex logs. The page and its text never
-leave the machine. Answers become `agents.episode_correction (id, ts, action, a_session,
-b_session, attrs)`: right -> `confirm`, should split -> one `split` per session taken out, should
-merge with #n -> `merge` (b = that episode's first seed session), not an episode -> `reject`;
-`attrs` holds `repo_keys` (and `b_repo_keys`) copied from `episode_member`. It prints the share
-of reviewed episodes marked right.
+last completed month) on `127.0.0.1` at a random port and token. Each seed session shows what the
+local Claude Code, Codex, Pi and Cursor CLI logs say: agent, project folder (last two parts of the
+cwd), local start and run time (first to last record), number of human prompts, the first and
+last prompt (redacted with the ActivityWatch title rules, about 200 characters), up to 5 commit
+subjects (git's commit line, else the `-m` message), up to 3 PR titles (`gh pr create --title`),
+the 3 files it edited most, its titles and branch names; a line per episode sums it up. The page
+and its text never leave the machine and are never logged or stored. Episodes whose first seed
+session already has a `confirm` or `reject` row are left out (and counted); the page shows a
+sample of 30 spread over (outcome, size) with a link to all. Answers become
+`agents.episode_correction (id, ts, action, a_session, b_session, attrs)`: don't know (the
+default) -> nothing, right -> `confirm`, should split -> one `split` per session taken out,
+should merge with #n -> `merge` (b = that episode's first seed session), not building work ->
+`reject`; `attrs` holds `repo_keys` (and `b_repo_keys`) copied from `episode_member`. It prints
+the share of reviewed episodes marked right.
 
 ## Active time: agents.time_interval
 
