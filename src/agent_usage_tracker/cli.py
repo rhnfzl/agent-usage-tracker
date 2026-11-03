@@ -16,6 +16,10 @@
                         the manual outcome of this project's newest interactive session
   aut episodes review [--month YYYY-MM]
                         hand-check a month's episodes on a local page -> agents.episode_correction
+  aut label run [--task T] [--since YYYY-MM-DD] [--dry-run]
+                        a local model labels new units (optional extra aut[label]) -> label rows
+  aut label backfill --task T --days N
+                        the same over the last N days; the nightly watermark is not moved back
 
 The dry-run report doubles as the accuracy check: it prints per-agent, per-model token
 sums straight from your real logs.
@@ -26,7 +30,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
 from . import __version__, pricing
 from .collectors import REGISTRY, activitywatch
@@ -460,6 +464,17 @@ def main(argv: list[str] | None = None) -> int:
     eps_sub = p_eps.add_subparsers(dest="eps_cmd", required=True)
     p_rev = eps_sub.add_parser("review", help="hand-check one month's episodes (local page)")
     p_rev.add_argument("--month", help="YYYY-MM (default: the last completed month)")
+    from .label.tasks import TASK_NAMES
+    p_lab = sub.add_parser("label", help="local model labels (optional extra aut[label])")
+    lab_sub = p_lab.add_subparsers(dest="label_cmd", required=True)
+    p_lrun = lab_sub.add_parser("run", help="label new units since the watermark")
+    p_lrun.add_argument("--task", choices=TASK_NAMES, help="one task (default: label_tasks)")
+    p_lrun.add_argument("--since", type=date.fromisoformat,
+                        help="local YYYY-MM-DD to start from instead of the watermark")
+    p_lrun.add_argument("--dry-run", action="store_true", help="score and count, write nothing")
+    p_lback = lab_sub.add_parser("backfill", help="label one task over the last N days")
+    p_lback.add_argument("--task", choices=TASK_NAMES, required=True)
+    p_lback.add_argument("--days", type=int, required=True)
     args = parser.parse_args(argv)
 
     if args.cmd == "sync-prices":
@@ -519,6 +534,18 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "episodes":
         from . import review
         review.run_review(cfg, args.month)
+        return 0
+
+    if args.cmd == "label":
+        from .label import run as label_run
+        if args.label_cmd == "backfill":
+            since = date.today() - timedelta(days=args.days)
+            tasks, dry = [args.task], False
+        else:
+            since, tasks, dry = args.since, [args.task] if args.task else None, args.dry_run
+        report = label_run.run_label(cfg, tasks, label_run.local_midnight(since) if since
+                                     else None, dry)
+        label_run.print_report(report, dry)
         return 0
 
     if args.cmd == "export":

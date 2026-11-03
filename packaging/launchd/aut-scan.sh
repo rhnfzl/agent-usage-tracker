@@ -2,7 +2,7 @@
 # Timer wrapper for `aut scan`. Optional on every platform -- the bare `aut scan` in the shipped
 # launchd/systemd units is still fine if you need none of this.
 #
-# It adds four things `aut scan` cannot do for itself:
+# It adds five things `aut scan` cannot do for itself:
 #
 #   1. Opens an SSH tunnel first, for a sink that is not directly reachable (a homelab Postgres
 #      behind Tailscale, say). Reuses a tunnel that is already up and only tears down its own.
@@ -11,6 +11,7 @@
 #      the whole timer interval.
 #   3. Timestamps both into one log you can diagnose from afterwards.
 #   4. Runs `aut outcomes` once a day after a delivered scan.
+#   5. Runs `aut label run` once a day after that, where AUT_LABEL=1 (the machine with the model).
 #
 # Per-machine settings live in ~/.config/agent-usage-tracker/scan.env, sourced if it exists, so
 # this file is identical on every machine and stays a single thing to maintain:
@@ -18,6 +19,7 @@
 #   AUT_BIN=/path/to/aut                     # default: ~/.local/bin/aut
 #   AUT_TUNNEL_HOST=user@host                # unset (the default) means no tunnel, scan direct
 #   AUT_TUNNEL_SPEC=15432:10.0.0.5:5432      # ssh -L argument; required with AUT_TUNNEL_HOST
+#   AUT_LABEL=1                              # run the nightly `aut label run` here (needs aut[label])
 #
 # The env file exists because launchd and systemd do not inherit your shell environment. Keep
 # secrets out of it: they belong in config.toml, which is already chmod 600.
@@ -76,6 +78,18 @@ if [ "$rc" -eq 0 ] && [ "$(cat "$DAYMARK" 2>/dev/null)" != "$(date +%F)" ]; then
   echo "$(ts) outcomes start" >>"$LOG"
   "$AUT" outcomes >>"$LOG" 2>&1
   echo "$(ts) outcomes done (exit $?)" >>"$LOG"
+fi
+
+# Once a day after a delivered scan, only where AUT_LABEL=1: `aut label run` (the tasks in
+# label_tasks, inside label_budget_s). After outcomes, and the same rules: a separate step with its
+# own heartbeat (collector `label`), never the scan's exit code, one attempt a day.
+LABELMARK="$CONF/label-day"
+if [ "$rc" -eq 0 ] && [ "${AUT_LABEL:-}" = "1" ] \
+    && [ "$(cat "$LABELMARK" 2>/dev/null)" != "$(date +%F)" ]; then
+  date +%F >"$LABELMARK"
+  echo "$(ts) label start" >>"$LOG"
+  "$AUT" label run >>"$LOG" 2>&1
+  echo "$(ts) label done (exit $?)" >>"$LOG"
 fi
 
 [ -n "$opened" ] && pkill -f "$SPEC" 2>/dev/null

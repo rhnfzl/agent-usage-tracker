@@ -540,6 +540,45 @@ webhook carries the usage and the activity and time rows of the same batch still
 `pg_dsn`. A webhook-only machine skips them with the same one-line note; there is no backfill for
 time, so it does not send time.
 
+## Labels: activity_event kind `label` (`aut label`)
+
+`aut label run [--task T] [--since YYYY-MM-DD] [--dry-run]` and `aut label backfill --task T
+--days N` (optional extra `aut[label]`, Apple silicon) let a local model answer one closed
+question per unit. The text it reads (Claude Code prompts, ActivityWatch titles) comes from this
+machine's logs at run time, goes through the ActivityWatch redaction, and is never stored, sent
+or logged; only the answer is. One `agents.activity_event` row per decision, `agent = 'label'`,
+`ts` = the unit's own time, `session_id`/`turn_id` null:
+
+| task | unit (`unit_id`) | candidates |
+|---|---|---|
+| `steer_intent` | `steer` (the steer's event_id), Claude Code steers with local text | framing, instruction, clarification, correction, redirection, review, acceptance, stop, other |
+| `work_category` | `episode_day` (`<episode_id>:<local date>`), `aw_block` (5+ min of one ActivityWatch category with no steer inside) | planning, research, building, debugging, review, learning, maintenance, collaboration, other |
+| `soft_outcome` | `episode` (episode_id), only `no_code` episodes touched in the last 14 days | ruled_out, blocked, still_open, resolved |
+| `aw_title_relevance` | `aw_title` (HMAC of app + title under the repo-key salt), browser rows only, asked once per title | relevant, not_relevant |
+
+`attrs`: `task`, `task_ver`, `unit`, `unit_id`, `label`, `p` (calibrated probability of the
+label), `dist` (calibrated probability per candidate), `below_tau`, `model_id`, `model_rev` (the
+Hugging Face snapshot), `prompt_ver`, `calib_ver`. `event_id` = `make_event_id('label', task,
+task_ver, unit_id, model_id, model_rev, prompt_ver, calib_ver)`: a rerun is a no-op, a new model,
+prompt or calibration adds a row and never overwrites one. Readers take the newest `task_ver` and
+model per unit, and treat `below_tau = true` as unknown (left out of shares, numerator and
+denominator).
+
+Backends return a distribution over the supplied candidates: `mlx_letter` reads an instruct model
+(default `label_model`, from the local Hugging Face cache only) through the logits of the answer
+letters, scoring the original and the reversed candidate order and averaging them; `encoder` is
+the slot for a small classifier trained on the labels. The choice per task (backend, model,
+temperature, tau per label) is `label.json` next to `config.toml`; without one a task runs
+uncalibrated and every row is `below_tau`. tau = the smallest calibrated p at which the label
+reaches `label_precision` (default 0.90) on the gold labels, at least 0.5.
+
+The nightly run (`aut-scan.sh`, once a day after `outcomes`, where `AUT_LABEL=1`) labels the tasks
+in `label_tasks`, incrementally from a watermark in the state file (`collectors.label`), inside
+`label_budget_s`, in batches that advance the watermark only once delivered over `pg_dsn`. It
+sends one `agents.collector_scan` row, collector `label`. `daily_note` drafts one private note per
+past day from counts only (that day's confident labels and episode facts, never text) into
+`agents.daily_note (day, text, model_id, created_at)`, first draft kept. A dry run writes nothing.
+
 ## Derived artifact: metrics.json (not part of the event contract)
 
 `aut report` produces `metrics.json` — an aggregate of the events above, never a passthrough.
