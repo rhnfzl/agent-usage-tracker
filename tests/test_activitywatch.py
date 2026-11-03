@@ -421,7 +421,7 @@ def test_macos_lookup_guards() -> None:
 
         real_dirs = aw._MAC_APP_DIRS
         try:
-            aw.subprocess.run, aw._DARWIN, aw._MAC_APP_DIRS = run, True, (d + "/",)
+            aw.subprocess.run, aw._DARWIN, aw._MAC_APP_DIRS = run, True, (os.path.join(d, ""),)
             aw._macos_category.cache_clear()
             assert aw._macos_category("Some") == "public.app-category.developer-tools"
             assert aw._macos_category("Some") == "public.app-category.developer-tools"
