@@ -23,6 +23,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 import types
 from pathlib import Path
 
@@ -548,7 +549,22 @@ def test_repo_key_salt() -> None:
                     os.environ.pop(k, None)
                 else:
                     os.environ[k] = v
+        with tempfile.TemporaryDirectory() as d2:
+            os.environ["AUT_STATE"] = str(Path(d2) / "state.json")
+            (Path(d2) / "repo_key.salt").write_text("")        # a broken salt: NULL, not unsalted
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                assert act.RepoKeys(None).of("example.com/owner/repo") is None
+            assert "too short" in err.getvalue()
     print("ok repo_key_salt")
+
+
+def test_commit_regex_is_linear() -> None:
+    t = time.perf_counter()
+    assert act._GIT_COMMIT.search("git " + "--no-pager " * 40 + "status --short") is None
+    assert act._GIT_COMMIT.search("git --no-pager -C x commit -m y")
+    assert time.perf_counter() - t < 0.5
+    print("ok commit_regex_is_linear")
 
 
 def test_usage_filter_only_on_fresh_read() -> None:
@@ -602,8 +618,24 @@ def test_relogged_blocks_across_scans() -> None:
         with f.open("a") as fh:
             fh.write(json.dumps(_tools("m9", *[_use(f"z{i}", "Read") for i in range(250)])) + "\n")
         _collect(home, wm)
-        assert len(wm["files"][str(f)]["act"]["seen"]) == 200
+        assert len(wm["files"][str(f)]["act"]["seen"]) == act._SEEN_MAX
     print("ok relogged_blocks_across_scans")
+
+
+def test_relog_after_turn_end_counts_once() -> None:
+    # Claude Code re-logs earlier blocks after a turn ends; within one read they must not count
+    # again in the next turn.
+    with tempfile.TemporaryDirectory() as d:
+        home = Path(d)
+        _write_jsonl(home / ".claude/projects/-p/S1.jsonl", [
+            _user("h1", "go"), _tools("m1", _use("x1", "Read"), _use("x2", "Bash")),
+            _turn_end("td1", 9, 3),
+            _user("h2", "next"), _tools("m1", _use("x1", "Read"), _use("x2", "Bash")),
+            _tools("m2", _use("x9", "Edit")), _turn_end("td2", 9, 3),
+        ])
+        t1, t2 = _acts(_collect(home), "turn")
+        assert (t1.attrs["tool_calls"], t2.attrs["tool_calls"]) == (2, 1), (t1.attrs, t2.attrs)
+    print("ok relog_after_turn_end_counts_once")
 
 
 def test_subagent_keeps_no_agg() -> None:
@@ -614,7 +646,8 @@ def test_subagent_keeps_no_agg() -> None:
                          _tools("m1", _use("x1", "Read"), agentId="A1")])
         wm: dict = {}
         _collect(home, wm)
-        assert "agg" not in wm["files"][str(f)].get("act", {}), wm["files"][str(f)]
+        carried = wm["files"][str(f)].get("act", {})
+        assert "agg" not in carried and "seen" not in carried, carried
     print("ok subagent_keeps_no_agg")
 
 
@@ -743,6 +776,8 @@ def main() -> int:
     test_repo_key_salt()
     test_usage_filter_only_on_fresh_read()
     test_relogged_blocks_across_scans()
+    test_relog_after_turn_end_counts_once()
+    test_commit_regex_is_linear()
     test_subagent_keeps_no_agg()
     test_pg_one_transaction()
     test_activity_backfill_sends_no_usage()

@@ -17,6 +17,7 @@ import os
 import re
 import secrets
 import subprocess
+import sys
 from urllib.parse import urlparse
 
 from ..event import ActivityEvent, EventSession, make_event_id
@@ -31,7 +32,7 @@ _ARG = r"""(?:[^\s"']|"[^"]*"|'[^']*')+"""
 # options (-C <dir>, -c <k=v>, --flag[=v]), then the commit subcommand itself
 _GIT_COMMIT = re.compile(
     rf"^\s*[({{]?\s*(?:(?:\w+={_ARG}|(?:\S*/)?env|command|timeout\s+\S+|rtk(?:\s+proxy)?)\s+)*"
-    rf"(?:\S*/)?git(?:\s+(?:-[Cc]\s+{_ARG}|--?[\w-]+(?:={_ARG})?))*\s+commit(?:\s|$)")
+    rf"(?:\S*/)?git(?:\s+(?:-[Cc]\s+{_ARG}|--[\w-]+(?:={_ARG})?|-\w+))*\s+commit(?:\s|$)")
 # segments that print nothing, so a commit after only these still owns the output's first line
 _SILENT = re.compile(rf"^\s*(?:(?:cd|pushd|set|export|true|mkdir|rm)\b|cat\s+>|\w+={_ARG}\s*$"
                      rf"|(?:\S*/)?git(?:\s+-C\s+{_ARG})?\s+add\b)")
@@ -40,7 +41,7 @@ _COMMIT_OUT = re.compile(r"^\[[^\]\s]+(?: \(root-commit\))? (?P<sha>[0-9a-f]{7,4
 # or "<sha> <subject>" on the FIRST line. Most commits on a machine with such a proxy look like this.
 _CONDENSED = re.compile(r"(?:ok )?(?P<sha>[0-9a-f]{7,40})(?:\s|$)")
 _OK_LINE = re.compile(r"^ok (?P<sha>[0-9a-f]{7,40})\s*$", re.M)
-_SEEN_MAX = 200                          # tool block ids carried for the open turn
+_SEEN_MAX = 20     # open-turn tool ids carried across scans (re-logs land within ~40 lines)
 
 
 def _text(content: object) -> str:
@@ -81,18 +82,30 @@ def _load_salt(configured: str | None) -> bytes:
         return configured.encode("utf-8")
     p = _state_path().parent / "repo_key.salt"
     try:
-        p.parent.mkdir(parents=True, exist_ok=True)
-        fd = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        with os.fdopen(fd, "w") as fh:
-            fh.write(secrets.token_hex(32))
-    except FileExistsError:
-        pass
+        if not p.exists():
+            # Written in full to a temp file, then linked into place: a crash or a second process
+            # never sees a half-written salt, and the first link wins a race.
+            p.parent.mkdir(parents=True, exist_ok=True)
+            tmp = p.with_name(f"{p.name}.{os.getpid()}.tmp")
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w") as fh:
+                fh.write(secrets.token_hex(32))
+            try:
+                os.link(tmp, p)
+            except FileExistsError:
+                pass
+            finally:
+                tmp.unlink(missing_ok=True)
+        salt = p.read_text().strip()
+        if p.stat().st_mode & 0o077:
+            print(f"aut: warning: {p} is group/other-readable; run: chmod 600 {p}", file=sys.stderr)
     except OSError:
         return b""
-    try:
-        return p.read_text().strip().encode("utf-8")
-    except OSError:
+    if len(salt) < 32:
+        print(f"aut: warning: {p} is too short; repo_key stays NULL until it is fixed",
+              file=sys.stderr)
         return b""
+    return salt.encode("utf-8")
 
 
 class RepoKeys:
@@ -162,9 +175,14 @@ class Activity:
         # so a turn split by a scan boundary still gets one complete row.
         self.agg = s.get("agg") or _blank()
         self.pend: dict = s.get("pend") or {}  # commit tool_use_id -> [is_amend, printed_before]
-        # Tool block ids already counted in the open turn, so a block re-logged just after a scan
-        # boundary counts once. Insertion-ordered; the newest _SEEN_MAX are carried.
-        self.seen: dict[str, None] = dict.fromkeys(s.get("seen") or [])
+        # Tool block ids already counted. Within a chunk the set spans turns (Claude Code re-logs
+        # history after a turn ends). Across scans only the open turn's newest _SEEN_MAX ids are
+        # carried, which is where a re-log split by a scan boundary lands; this keeps the state small.
+        # shortcut: subagent files carry none (they never close a turn, so the ids would never be
+        # dropped); a subagent block re-logged across a scan boundary can count twice.
+        carried_ids = [i for i in (s.get("seen") or []) if isinstance(i, str)]
+        self.seen: dict[str, None] = dict.fromkeys(carried_ids)
+        self.open_ids: list[str] = carried_ids
         # shortcut: per chunk only. An enqueue in an earlier scan is not seen; upgrade if the
         # queued split drifts from a full re-read.
         self.queued: set[str] = set()
@@ -178,8 +196,8 @@ class Activity:
             s["agg"] = self.agg
         if self.pend:
             s["pend"] = self.pend
-        if self.seen:
-            s["seen"] = list(self.seen)[-_SEEN_MAX:]
+        if self.open_ids and not self.subagent:
+            s["seen"] = self.open_ids[-_SEEN_MAX:]
         return s
 
     def _emit(self, kind: str, o: dict, seed: object, sess: EventSession, attrs: dict) -> None:
@@ -273,6 +291,7 @@ class Activity:
         if not isinstance(tid, str) or not isinstance(name, str) or "u" + tid in self.seen:
             return                       # a re-logged block counts once
         self.seen["u" + tid] = None
+        self.open_ids.append("u" + tid)
         inp = b.get("input") if isinstance(b.get("input"), dict) else {}
         a = self.agg
         a["calls"] += 1
@@ -292,6 +311,7 @@ class Activity:
         if not isinstance(tid, str) or "r" + tid in self.seen:
             return
         self.seen["r" + tid] = None
+        self.open_ids.append("r" + tid)
         err = b.get("is_error") is True
         text = _text(b.get("content")).lstrip()
         if err:
@@ -355,4 +375,4 @@ class Activity:
         })
         self.agg = _blank()
         self.pend.clear()                # a commit call still unanswered at turn end never will be
-        self.seen.clear()
+        self.open_ids = []
