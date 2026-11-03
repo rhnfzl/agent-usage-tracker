@@ -550,3 +550,20 @@ def test_scan_script_runs_label_once_a_day_where_enabled():
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-q"]))
+
+
+def test_cached_snapshot_needs_config_and_every_weight():
+    from agent_usage_tracker.label.backends import cached_snapshot
+    with tempfile.TemporaryDirectory() as d:
+        snap = Path(d) / "snapshots" / "abc"
+        snap.mkdir(parents=True)
+        (snap / "config.json").write_text("{}")
+        (snap / "model.safetensors.index.json").write_text(
+            json.dumps({"weight_map": {"a": "w-1.safetensors", "b": "w-2.safetensors"}}))
+        (snap / "w-1.safetensors").write_text("x")
+        look = lambda repo, f, revision=None: str(snap / f)          # noqa: E731
+        assert cached_snapshot(look, "r", None) is None               # a weight file is missing
+        (snap / "w-2.safetensors").write_text("x")
+        assert cached_snapshot(look, "r", None) == snap               # no LICENSE needed
+        assert cached_snapshot(lambda *a, **k: None, "r", None) is None
+    print("ok cached_snapshot")

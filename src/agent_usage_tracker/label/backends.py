@@ -41,6 +41,23 @@ class LetterBackend:
         return letter_distribution(self.letter_logits, req)
 
 
+def cached_snapshot(lookup, repo: str, revision: str | None) -> Path | None:
+    """The cached snapshot directory when its config and every weight file are on disk, else
+    None. Not snapshot_download(local_files_only=True): it refuses a snapshot that lacks files the
+    model never needs (LICENSE, .gitattributes), which partial downloads routinely skip."""
+    cfg = lookup(repo, "config.json", revision=revision)
+    if not isinstance(cfg, str):
+        return None
+    snap = Path(cfg).parent
+    index = snap / "model.safetensors.index.json"
+    try:
+        weights = set(json.loads(index.read_text())["weight_map"].values()) if index.exists() \
+            else {"model.safetensors"}
+    except (OSError, ValueError, KeyError):
+        return None
+    return snap if all((snap / w).is_file() for w in weights) else None
+
+
 class MlxLetter(LetterBackend):
     """mlx_lm on Apple silicon. The model comes from the local Hugging Face cache only (a nightly
     run never downloads several GB); model_rev is the snapshot directory name."""
@@ -51,19 +68,17 @@ class MlxLetter(LetterBackend):
     def _load(self):
         if self._m is None:
             try:
-                from huggingface_hub import snapshot_download
+                from huggingface_hub import try_to_load_from_cache
                 from mlx_lm import load
             except ImportError:
                 raise SystemExit("label: the mlx_letter backend needs the optional extra: "
                                  "pip install 'agent-usage-tracker[label]' (Apple silicon)") \
                     from None
-            try:
-                path = snapshot_download(self.model_id, revision=self._rev, local_files_only=True)
-            except Exception as exc:
-                raise SystemExit(f"label: {self.model_id} is not in the local Hugging Face cache "
-                                 f"({type(exc).__name__}); fetch it once with "
-                                 f"`hf download {self.model_id}`") from None
-            self.model_rev = Path(path).name
+            path = cached_snapshot(try_to_load_from_cache, self.model_id, self._rev)
+            if path is None:
+                raise SystemExit(f"label: {self.model_id} is not fully in the local Hugging Face "
+                                 f"cache; fetch it once with `hf download {self.model_id}`")
+            self.model_rev = path.name
             self.size_mb = round(sum(f.stat().st_size for f in Path(path).rglob("*")
                                      if f.is_file()) / 1e6)
             self._m = load(path)
