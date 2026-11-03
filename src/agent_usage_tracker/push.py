@@ -14,6 +14,7 @@ stored), and any non-2xx is a hard failure.
 from __future__ import annotations
 
 import json
+import sys
 import urllib.error
 import urllib.request
 from typing import Callable
@@ -29,6 +30,14 @@ COLUMNS = (
     "reasoning_tokens", "total_tokens", "est_cost_usd", "project",
 )
 TABLE = "agents.usage_event"
+
+# One row per collector per scan (agents.collector_scan): proof a machine ran and how it ended.
+SCAN_COLUMNS = (
+    "machine", "collector", "started_at", "finished_at", "status", "events", "human",
+    "newest_ts", "error", "aut_version",
+)
+SCAN_TABLE = "agents.collector_scan"
+_ERROR_MAX = 300
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -113,3 +122,34 @@ def make_sender(cfg: Config) -> Callable[[list[UsageEvent]], None]:
         raise RuntimeError(f"webhook delivery failed and no PG fallback: {webhook_err}")
 
     return send
+
+
+def scrub_error(exc: BaseException) -> str:
+    """The error stored in a scan row: the exception TYPE only. Messages can carry a file path
+    (which names a project) or part of a credential, and no redaction pattern catches every
+    form, so the full message stays on this machine's stderr and never reaches the sink."""
+    return type(exc).__name__[:_ERROR_MAX]
+
+
+def send_scan_rows(cfg: Config, rows: list[dict]) -> None:
+    """Deliver scan heartbeat rows over the PG DSN. Idempotent on (machine, collector,
+    finished_at). Raises on failure; the caller decides that a heartbeat never blocks a scan."""
+    if not rows:
+        return
+    if not cfg.has_pg:
+        # shortcut: webhook path for scan rows not built; upgrade when a machine runs webhook-only.
+        print("aut: note: scan heartbeat not sent (needs transport.pg_dsn)", file=sys.stderr)
+        return
+    import psycopg  # optional dependency; install with the [postgres] extra
+
+    cols = ", ".join(SCAN_COLUMNS)
+    placeholders = ", ".join(["%s"] * len(SCAN_COLUMNS))
+    sql = (
+        f"INSERT INTO {SCAN_TABLE} ({cols}) VALUES ({placeholders}) "
+        "ON CONFLICT (machine, collector, finished_at) DO NOTHING"
+    )
+    # 5 s, not 15: usage is already delivered, so an unreachable sink should not hold the exit.
+    with psycopg.connect(cfg.pg_dsn, connect_timeout=5) as conn:
+        with conn.cursor() as cur:
+            cur.executemany(sql, [tuple(r[c] for c in SCAN_COLUMNS) for r in rows])
+        conn.commit()

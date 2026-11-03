@@ -14,12 +14,13 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from datetime import datetime, timezone
 
-from . import pricing
+from . import __version__, pricing
 from .collectors import REGISTRY
 from .config import Config, load_config, _config_path
 from .event import UsageEvent, valid_ts
-from .push import make_sender
+from .push import make_sender, scrub_error, send_scan_rows
 from .state import collector_wm, load_state, save_state
 
 BATCH = 500
@@ -58,10 +59,19 @@ def _add(agg: dict, e: UsageEvent) -> None:
     m["total"] += e.total_tokens
 
 
+def _deliver_scan_rows(cfg: Config, rows: list[dict]) -> None:
+    """The heartbeat is best effort: whatever goes wrong here must not touch the usage scan."""
+    try:
+        send_scan_rows(cfg, rows)
+    except Exception as exc:
+        print(f"aut: warning: scan heartbeat not delivered: {scrub_error(exc)}", file=sys.stderr)
+
+
 def run_scan(cfg: Config, agents: list[str], dry_run: bool) -> dict:
     state = load_state()
     sender = None if dry_run else make_sender(cfg)
     report: dict = {}
+    scan_rows: list[dict] = []      # one heartbeat row per collector that ran (agents.collector_scan)
 
     for name in agents:
         collect = REGISTRY[name]
@@ -75,6 +85,8 @@ def run_scan(cfg: Config, agents: list[str], dry_run: bool) -> dict:
         seen: set[str] = set()
         buf_events: list[UsageEvent] = []
         buf_commits: list = []
+        started_at = datetime.now(timezone.utc)
+        status, error, newest_ts, interrupted = "ok", None, None, False
 
         def flush() -> None:
             if buf_events and sender is not None:   # sender is None in dry-run -> nothing sent
@@ -93,6 +105,12 @@ def run_scan(cfg: Config, agents: list[str], dry_run: bool) -> dict:
                         if not valid_ts(e.ts):
                             agg["skipped_no_ts"] += 1
                             continue
+                        try:                # heartbeat bookkeeping must never stop the scan
+                            ts = datetime.fromisoformat(e.ts.replace("Z", "+00:00"))
+                            ts = ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
+                            newest_ts = ts if newest_ts is None or ts > newest_ts else newest_ts
+                        except Exception:
+                            pass
                         if e.event_id in seen:
                             agg["duplicates"] += 1      # counted once, above
                         else:
@@ -112,10 +130,24 @@ def run_scan(cfg: Config, agents: list[str], dry_run: bool) -> dict:
             else:                           # loop exhausted without draining (astronomically rare)
                 print(f"aut: warning: {name} hit the drain-pass cap ({_MAX_DRAIN_PASSES}); more "
                       "usage remains and will be picked up on the next scan.", file=sys.stderr)
+        except BaseException as exc:
+            status, error = "error", scrub_error(exc)
+            interrupted = not isinstance(exc, Exception)    # Ctrl-C: leave at once, send nothing
+            raise                           # unchanged: the scan still fails as before
         finally:
             if not dry_run:
                 save_state(state)
+                scan_rows.append({
+                    "machine": cfg.machine, "collector": name, "started_at": started_at,
+                    "finished_at": datetime.now(timezone.utc), "status": status,
+                    "events": agg["events"], "human": agg["human"], "newest_ts": newest_ts,
+                    "error": error, "aut_version": __version__,
+                })
+                if status == "error" and not interrupted:   # the loop ends here: one delivery
+                    _deliver_scan_rows(cfg, scan_rows)
 
+    if not dry_run:
+        _deliver_scan_rows(cfg, scan_rows)
     return report
 
 
