@@ -96,3 +96,19 @@ class ActivityEvent:
     turn_id: str | None
     attrs: dict
     machine: str | None = None       # stamped by the runner, like UsageEvent.machine
+
+
+@dataclass(slots=True)
+class TimeInterval:
+    """One agents.time_interval row: a span a person was at the keyboard (source 'aw') or said
+    they worked (source 'manual'). title is private, already redacted and cut on this machine."""
+    event_id: str
+    ts: str                          # start, ISO-8601
+    end_ts: str
+    source: str                      # aw | manual
+    app: str | None
+    title: str | None
+    category: str | None
+    work_relevant: bool
+    attrs: dict
+    machine: str | None = None       # stamped by the runner (aw) or `aut time add` (manual)

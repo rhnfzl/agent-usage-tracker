@@ -353,6 +353,75 @@ them with the same one-line note as session rows. History: `aut backfill --activ
 sends usage rows. For `cursor_cli` the first normal `aut scan` also sends its human rows, which no
 collector sent before.
 
+## Active time: agents.time_interval
+
+One row per span a person was at the keyboard (`source='aw'`, from ActivityWatch) or said they
+worked (`source='manual'`, from `aut time add`). Steer gaps are not sent: the sink derives them
+from `agents.activity_event`. The sink unions all three and merges across machines and agents,
+so parallel agents never count twice; agent runtime is never human time.
+
+| column | aw | manual |
+|---|---|---|
+| `event_id` | `make_event_id('activitywatch', machine, app, start, end, sha256(sent title))` of the clipped piece | `make_event_id('manual', machine, start, end)` |
+| `ts`, `end_ts` | the window event clipped to the scan range, UTC | the typed interval, UTC |
+| `app` | the ActivityWatch app name | null |
+| `title` | **private**: redacted, cut to 300 chars; null when `activitywatch_titles = false` | null |
+| `category` | editor, terminal, agent, comms, docs, design, media, web-work, web, other | null |
+| `work_relevant` | category in editor, terminal, agent, comms, docs, design, web-work | true unless `--not-relevant` |
+| `attrs` | `rule`: config_app, default_app, browser_work_title, browser_other, unknown | `{}` |
+
+**Titles are private.** They are never in a public view (the read-only role sees
+`agents.time_interval_public`, every column but `title` and `event_id`; event_id is built from
+machine, app, start and end only, never the title). **Retention is off by default: titles are
+kept for good**, in the sink and in ActivityWatch. Setting `activitywatch_title_days = N` turns a
+limit on: the collector then deletes ActivityWatch's own window events older than N days through
+its REST API, in batches of 500 until none is left or 20 s pass (a long backlog drains over
+several scans), never failing the scan and logging a count only; the event that spans the cutoff
+is kept until it is wholly older; a dry run purges nothing; and a title older than N days is
+never sent. The sink side (nulling stored titles) is a separate homelab job, off for now.
+
+The `activitywatch` collector is **opt-in**: it is in the valid agent list but not in the default
+used when the config has no `agents`. It reads THIS host's window and AFK buckets with
+aw-server's query API (`filter_keyvals(afk, "status", ["not-afk"])`, then
+`filter_period_intersect`) over `[watermark, now - 5 min]`, at most one day per pass; the first
+scan starts a day before the window bucket's `created` (aw-server-rust writes it in local time
+labelled UTC, so it can be hours late; empty days cost one query each). The watermark is the range end, saved only after
+delivery. aw-server closed or no buckets for this host: no rows, no error.
+
+Guards, all on the machine before anything is sent:
+
+- login window and screen saver rows are dropped (not active time);
+- deny-list: password managers (1Password, Bitwarden, KeePassXC, Keychain Access, Passwords,
+  Dashlane, LastPass, Proton Pass), private-browsing titles (Private Browsing, Incognito,
+  InPrivate) and rows ActivityWatch flags incognito are dropped entirely. `activitywatch_deny_apps`
+  and `activitywatch_deny_titles` (regexes, matched on the title and the browser URL) extend both
+  lists; private names belong there, never in code. Only a count and minutes of dropped rows are
+  logged. Limit: a Chromium private window (Brave, Chrome, Helium) is not detectable, because
+  today's watcher sends no incognito flag and the title has no marker;
+- control characters (NUL included) are removed from the app and title;
+- redaction replaces with `[redacted]`: URL credentials (`user:pass@`), `password=` / `secret=` /
+  `token=` / `api_key=` / `access_key=` values, also with a prefix (`PGPASSWORD=`, `DB_PASSWORD=`,
+  `GITHUB_TOKEN=`, `access_token=`), `Bearer` values, JWTs, `sk-` keys, `github_pat_` and `gh[pousr]_` tokens,
+  `xox[abprs]-` tokens, AWS access key ids, email addresses, and any unbroken run of 32+ base64
+  characters (long hex, base64, and also long slugs or paths). The rest of the title is kept;
+- the browser URL is matched against the work patterns locally and never sent.
+
+Category: `activitywatch_categories` (app -> category) over the code defaults; an app name also
+matches a known name followed by a space ("PyCharm Professional"). A browser row is `web-work`
+when its title or URL matches a work pattern (code hosts, issue trackers, docs, cloud consoles,
+localhost, AI chat, plus `activitywatch_work_titles`), else `web`. Unknown apps are `other`, not
+relevant. `browser_category()` is the seam a model replaces later.
+
+`aut time add --start <local> --end <local>` or `--minutes N [--at <local end>]`, plus
+`--not-relevant`. No note field (nothing to redact). Refused: end at or before start, a span over
+16 hours, an end in the future. Writes over `pg_dsn` only.
+
+Delivery: over `transport.pg_dsn` in the same transaction as the usage, session and activity
+rows of the batch, `ON CONFLICT (event_id, ts) DO NOTHING`. With a webhook and a `pg_dsn`, the
+webhook carries the usage and the activity and time rows of the same batch still go over
+`pg_dsn`. A webhook-only machine skips them with the same one-line note; there is no backfill for
+time, so it does not send time.
+
 ## Derived artifact: metrics.json (not part of the event contract)
 
 `aut report` produces `metrics.json` — an aggregate of the events above, never a passthrough.

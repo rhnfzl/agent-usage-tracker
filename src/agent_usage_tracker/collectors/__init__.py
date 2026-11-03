@@ -8,7 +8,7 @@ watermark). The runner pushes `events`, and only on a successful push calls `com
 
 from __future__ import annotations
 
-from . import claude_code, codex, cursor, cursor_api, cursor_cli, cursor_sdk, pi
+from . import activitywatch, claude_code, codex, cursor, cursor_api, cursor_cli, cursor_sdk, pi
 
 REGISTRY = {
     claude_code.NAME: claude_code.collect,
@@ -18,6 +18,7 @@ REGISTRY = {
     cursor_api.NAME: cursor_api.collect,
     cursor_cli.NAME: cursor_cli.collect,
     pi.NAME: pi.collect,
+    activitywatch.NAME: activitywatch.collect,
 }
 
 __all__ = ["REGISTRY"]

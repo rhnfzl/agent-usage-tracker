@@ -7,7 +7,7 @@
 # Role-based label for this machine (avoid personal names). e.g. laptop, buildbox, workstation.
 machine = "laptop"
 
-# Which agents to collect. Omit to collect all installed ones. IMPORTANT: the three Cursor sources
+# Which agents to collect. Omit to collect all installed ones except the opt-in activitywatch. IMPORTANT: the three Cursor sources
 # OVERLAP - enabling more than one double-counts the same Cursor usage under different event ids:
 #   cursor      = local IDE state.vscdb (a lower bound; no CLI, no model/cache attribution)
 #   cursor_sdk  = SDK-app run manifests  (needs cursor_sdk_manifests below)
@@ -37,6 +37,19 @@ agents = ["claude_code", "codex", "cursor_api", "cursor_cli", "pi"]
 # created as repo_key.salt next to the state file on first use. Set the same value on every machine
 # so their keys match. Treat it as a secret.
 # repo_key_salt = "env:AUT_REPO_KEY_SALT"
+
+# activitywatch: OPT-IN (add "activitywatch" to agents above). Reads not-AFK window time from the
+# local ActivityWatch server and sends it to agents.time_interval with the window title, which is
+# private: redacted on this machine, never public, nulled at the sink after 180 days. Needs pg_dsn.
+# activitywatch_url = "http://localhost:5600"
+# activitywatch_title_days = 180      # also deletes ActivityWatch's own window events older than this
+# activitywatch_titles = false        # this machine sends intervals and categories, but no titles
+# Dropped entirely before sending (password managers and private browsing are built in). Put the
+# names of banks or other private apps HERE, never in code:
+# activitywatch_deny_apps = ["Some Private App"]
+# activitywatch_deny_titles = ["(?i)examplebank"]          # regexes, matched case-insensitively
+# activitywatch_work_titles = ["example-intranet"]         # browser titles that count as work
+# activitywatch_categories = { "My Tool" = "docs" }        # editor terminal agent browser comms docs design media other
 
 [transport]
 # Default transport: POST batches to the n8n ingest webhook (behind Cloudflare Access).
