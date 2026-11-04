@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import copy
-import json
 import os
 import sys
 from collections import Counter
@@ -60,17 +59,6 @@ def count_field(record: dict[str, Any], key: str) -> int:
 
 def noop_advance() -> None:
     """The watermark callback of a full-scan collector: it has no watermark to advance."""
-
-
-def parse_record(raw: bytes | str) -> dict | None:
-    """One complete JSONL line as a dict, else None. read_new_lines holds back partial lines, so
-    there a None is a real anomaly: the caller counts it as malformed and skips it. A reader that
-    only shows local text just skips it."""
-    try:
-        o = json.loads(raw)
-    except ValueError:              # JSONDecodeError and UnicodeDecodeError are ValueErrors
-        return None
-    return o if isinstance(o, dict) else None
 
 
 def warn_skipped(name: str, skipped: Counter, unaffected: str = "usage") -> None:

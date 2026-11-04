@@ -48,8 +48,8 @@ from typing import Sequence
 
 from . import inspector, manual_time, outcomes, pricing, review, scan
 from .collectors import REGISTRY
-from .config import ALL_AGENTS, AutError, Config, load_config, config_path
-from .label.names import DAYS, DECISION_TASKS, TASK_NAMES
+from .config import (ALL_AGENTS, LABEL_DAYS, LABEL_DECISION_TASKS, LABEL_TASK_NAMES, AutError,
+                     Config, load_config, config_path)
 from .push import is_operational_failure, local_error
 from .state import collector_wm, load_state
 
@@ -132,8 +132,8 @@ def cmd_episodes(cfg: Config, args: argparse.Namespace) -> None:
     review.print_review(review.run_episode_review(cfg, args.month))
 
 
-# The label modules are imported where used: every other command must not pay for them (a test
-# holds the CLI to label.names alone).
+# The label modules are imported where used, so every other command skips loading their code (a
+# test holds the CLI to that). The collectors load regardless, for scan and REGISTRY above.
 def _label_run(cfg: Config, args: argparse.Namespace) -> None:
     """run | backfill: label new units, or one task over the last N days."""
     from .label import run as label_run
@@ -251,28 +251,28 @@ def _build_parser() -> argparse.ArgumentParser:
     p_lab = sub.add_parser("label", help="local model labels (optional extra aut[label])")
     lab_sub = p_lab.add_subparsers(dest="label_cmd", required=True)
     p_lrun = lab_sub.add_parser("run", help="label new units since the watermark")
-    p_lrun.add_argument("--task", choices=TASK_NAMES, help="one task (default: label_tasks)")
+    p_lrun.add_argument("--task", choices=LABEL_TASK_NAMES, help="one task (default: label_tasks)")
     p_lrun.add_argument("--since", type=date.fromisoformat,
                         help="local YYYY-MM-DD to start from instead of the watermark")
     p_lrun.add_argument("--dry-run", action="store_true", help="score and count, write nothing")
     p_lback = lab_sub.add_parser("backfill", help="label one task over the last N days")
-    p_lback.add_argument("--task", choices=TASK_NAMES, required=True)
+    p_lback.add_argument("--task", choices=LABEL_TASK_NAMES, required=True)
     p_lback.add_argument("--days", type=int, required=True)
     p_teach = lab_sub.add_parser("teach", help="teacher (silver) labels for a stratified sample")
-    p_teach.add_argument("--task", choices=DECISION_TASKS, required=True)
+    p_teach.add_argument("--task", choices=LABEL_DECISION_TASKS, required=True)
     p_teach.add_argument("--n", type=int, required=True, help="units to label this run")
     p_teach.add_argument("--budget-usd", type=float, default=5.0,
                          help="cap on this run's Sonnet spend (default 5)")
     p_lrev = lab_sub.add_parser("review", help="label gold answers on a local page")
-    p_lrev.add_argument("--task", choices=DECISION_TASKS)
+    p_lrev.add_argument("--task", choices=LABEL_DECISION_TASKS)
     for name, text in (("eval", "score every backend on the gold labels"),
                        ("choose", "write the smallest backend that passes into label.json"),
                        ("train-encoder", "fit the small encoder on gold + silver")):
-        lab_sub.add_parser(name, help=text).add_argument("--task", choices=DECISION_TASKS,
+        lab_sub.add_parser(name, help=text).add_argument("--task", choices=LABEL_DECISION_TASKS,
                                                          required=True)
     for sp in (p_teach, p_lrev, lab_sub.choices["eval"], lab_sub.choices["train-encoder"]):
-        sp.add_argument("--days", type=int, default=DAYS,
-                        help=f"window of whole past days the units come from (default {DAYS})")
+        sp.add_argument("--days", type=int, default=LABEL_DAYS,
+                        help=f"window of whole past days the units come from (default {LABEL_DAYS})")
     return parser
 
 

@@ -116,7 +116,7 @@ def test_teach_never_sends_window_units(tmp_path):
 
 def _req(**kw) -> core.Request:
     base = dict(task="t", task_ver=1, unit="steer", unit_id="u", ts="2026-01-01T00:00:00+00:00",
-                state={"text": "tidy it"}, question="Which?", decision="choice",
+                facts={"text": "tidy it"}, question="Which?", decision="choice",
                 candidates=[{"id": "a", "desc": "desc a"}, {"id": "b", "desc": "desc b"}],
                 none_fits=None)
     return core.Request(**{**base, **kw})

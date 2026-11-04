@@ -9,6 +9,8 @@ import sys
 import tempfile
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from agent_usage_tracker import pricing  # noqa: E402
@@ -108,6 +110,14 @@ def test_sync_prices_refuses_empty_rate_map() -> None:
     assert raised
 
 
+@pytest.mark.parametrize("body", ["[1]", '{"m": 1}'])
+def test_load_prices_refuses_a_file_of_another_shape(tmp_path, body) -> None:
+    bad = tmp_path / "prices.json"
+    bad.write_text(body, encoding="utf-8")
+    with pytest.raises(AutError, match="not a table of models"):
+        pricing.load_prices(bad)
+
+
 def test_load_prices_raises_on_corrupt_file() -> None:
     raised = False
     try:
@@ -137,5 +147,4 @@ def test_cli_sync_prices() -> None:
 
 
 if __name__ == "__main__":
-    import pytest
     raise SystemExit(pytest.main([__file__, "-q"]))

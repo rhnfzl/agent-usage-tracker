@@ -13,9 +13,9 @@ import math
 import os
 import sys
 from dataclasses import dataclass, field
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable, Protocol
+from typing import Any, Callable, Iterable, Iterator, Protocol, runtime_checkable
 
 from ..config import config_path
 from ..event import ActivityEvent, make_event_id
@@ -27,6 +27,14 @@ TAU_FLOOR = 0.5
 
 def local_midnight(d: date) -> datetime:
     return datetime(d.year, d.month, d.day).astimezone()
+
+
+def local_days(since: datetime, until: datetime) -> Iterator[date]:
+    """The local dates from `since`'s up to, not including, `until`'s."""
+    d, end = since.astimezone().date(), until.astimezone().date()
+    while d < end:
+        yield d
+        d += timedelta(days=1)
 
 
 def data_dir() -> Path:
@@ -47,12 +55,12 @@ class Request:
     unit: str                  # steer | episode_day | aw_block | episode | aw_title
     unit_id: str
     ts: str                    # the unit's own time (ISO-8601): the label row's ts
-    state: dict                # the facts the decision reads; text in it is redacted, never stored
+    facts: dict                # what the decision reads; text in it is redacted, never stored
     question: str
     decision: str              # choice | boolean
     candidates: list[dict]     # [{"id", "desc"}]: the task's closed list
     none_fits: str | None      # the explicit out-of-list candidate ("other"), or None
-    rev: str | None = None     # the unit's state version, when a changed unit is re-asked (episode)
+    rev: str | None = None     # the unit's version, when a changed unit is re-asked (episode)
 
     @property
     def prompt_ver(self) -> str:
@@ -93,6 +101,7 @@ class Backend(Protocol):
     def distribution(self, req: Request) -> dict[str, float]: ...
 
 
+@runtime_checkable
 class NoteBackend(Backend, Protocol):
     """A backend that can also write free text, for the private nightly note."""
 
@@ -110,11 +119,26 @@ def read_choices() -> dict[str, Any]:
     return obj
 
 
+def _is_number(x: object) -> bool:
+    return isinstance(x, (int, float)) and not isinstance(x, bool)
+
+
+def _check_entry(task: str, c: object) -> None:
+    """Raises ValueError for a label.json entry whose values decide() could not use."""
+    if not isinstance(c, dict):
+        raise ValueError(f"its entry for {task} is not a table")
+    t, tau = c.get("temperature", 1.0), c.get("tau", {})
+    if not _is_number(t) or t <= 0:
+        raise ValueError(f"the temperature of {task} is not a positive number")
+    if not isinstance(tau, dict) or not all(v is None or _is_number(v) for v in tau.values()):
+        raise ValueError(f"the tau of {task} is not a table of numbers")
+
+
 def load_choice(task: str) -> Choice:
     try:
         c = read_choices().get("tasks", {}).get(task)
-        if c is not None and not isinstance(c, dict):
-            raise ValueError(f"its entry for {task} is not a table")
+        if c is not None:
+            _check_entry(task, c)
     except (OSError, ValueError) as exc:
         print(f"aut: warning: {choice_path()} is unusable ({exc}); {task} runs uncalibrated, so "
               "none of its labels pass tau. Fix it or move it aside and re-run `aut label choose`.", file=sys.stderr)
@@ -129,7 +153,7 @@ def render(req: Request, order: list[str]) -> str:
     desc = {c["id"]: c["desc"] for c in req.candidates}
     lines = [req.question, "", "Facts:"]
     lines += [f"- {k}: {v if isinstance(v, str) else json.dumps(v, ensure_ascii=False)}"
-              for k, v in req.state.items()]
+              for k, v in req.facts.items()]
     lines += ["", "Options:"] + [f"{LETTERS[i]}. {c}: {desc[c]}" for i, c in enumerate(order)]
     lines += ["", f"Answer with one letter ({', '.join(LETTERS[:len(order)])}) and nothing else."]
     return "\n".join(lines)
@@ -220,7 +244,7 @@ def decide(req: Request, raw: dict[str, float], choice: Choice, model_id: str,
 
 
 def label_event(req: Request, res: Response, labelled_at: str | None = None) -> ActivityEvent:
-    """The activity_event row of one decision: enums, numbers and versions, never the state.
+    """The activity_event row of one decision: enums, numbers and versions, never the facts.
     Same unit, task version, model and calibration -> same id, so a rerun is a no-op at the sink;
     a new model, prompt or calibration (or a changed episode, req.rev) adds a row and never
     overwrites one. labelled_at (UTC, fixed width) is the run's start: agents.label_latest takes
@@ -237,3 +261,21 @@ def label_event(req: Request, res: Response, labelled_at: str | None = None) -> 
                "below_tau": res.below_tau, "model_id": res.model_id, "model_rev": res.model_rev,
                "prompt_ver": res.prompt_ver, "calib_ver": res.calib_ver,
                "labelled_at": labelled_at})
+
+
+def current_labels(rows: Iterable[tuple]) -> list[dict]:
+    """The one current label per (task, unit, unit_id) of (event_id, ts, attrs) rows, picked as
+    agents.label_latest picks it: newest task_ver, then newest labelled_at (a row without one
+    loses), then event_id. A row with no below_tau counts as below: readers treat it as unknown."""
+    best: dict[tuple, tuple] = {}
+    for eid, ts, a in rows:
+        a = a or {}
+        key = (a.get("task"), a.get("unit"), a.get("unit_id"))
+        rank = (int(a.get("task_ver") or 0), a.get("labelled_at") or "", eid)
+        if key not in best or rank > best[key][0]:
+            below = a.get("below_tau")
+            best[key] = (rank, {"task": key[0], "unit": key[1], "unit_id": key[2], "ts": ts,
+                                "label": a.get("label"), "p": a.get("p"),
+                                "below_tau": True if below is None else bool(below),
+                                "model_id": a.get("model_id"), "task_ver": rank[0]})
+    return [v for _r, v in best.values()]

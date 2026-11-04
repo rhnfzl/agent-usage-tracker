@@ -15,16 +15,16 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable, cast
+from typing import Any, Callable
 
-from ..config import Config
+from ..config import LABEL_NOTE, Config
 from ..event import ActivityEvent
-from ..push import deliver_scan_rows, scan_row, scrub_error, send_activity_rows
+from ..push import job_heartbeat, send_activity_rows
 from ..sink import connect
 from ..state import atomic_write_text, collector_wm, load_json_dict, load_state, save_state
 from .backends import BackendUnavailable, make_backend
-from .core import Backend, Choice, NoteBackend, data_dir, decide, label_event, load_choice, local_midnight
-from .names import NOTE
+from .core import (Backend, Choice, NoteBackend, current_labels, data_dir, decide, label_event,
+                   load_choice, local_days, local_midnight)
 from .tasks import OUTCOME_DAYS, TASKS, Source, SourceUnavailable, Task, units
 
 BATCH = 50
@@ -63,7 +63,7 @@ def _window(name: str, wm: dict, since: datetime | None,
             now: datetime) -> tuple[datetime, datetime | None]:
     """(since, until) of one task. until None: up to now, and the watermark becomes the newest
     unit's ts. A day task covers whole past days, so until is today's local midnight."""
-    window = "day" if name == NOTE else TASKS[name].window
+    window = "day" if name == LABEL_NOTE else TASKS[name].window
     if window == "recent":
         if since:
             print(f"aut: label {name}: --since and --days do not apply; it always covers the last "
@@ -76,12 +76,9 @@ def _window(name: str, wm: dict, since: datetime | None,
     return start, None
 
 
-def _note_prompt(day: date, labels: list[dict], episodes: list[dict]) -> str:
+def _note_prompt(day: date, labels: list[tuple], episodes: list[dict]) -> str:
     """Counts only: the day's accepted labels and episode facts, never a steer text or title."""
-    # the row agents.label_latest picks: newest task_ver, then newest labelled_at
-    latest = {(a.get("task"), a.get("unit_id")): a for a in sorted(
-        labels, key=lambda a: (a.get("task_ver") or 0, a.get("labelled_at") or ""))}
-    by = Counter((a["task"], a["label"]) for a in latest.values() if not a.get("below_tau"))
+    by = Counter((a["task"], a["label"]) for a in current_labels(labels) if not a["below_tau"])
     lines = [f"Write a short private note (3 to 5 sentences) about the work day {day}. Use only "
              "these facts and invent nothing.", "", "Confident labels (task: label count):"]
     lines += [f"- {t}: {lab} {n}" for (t, lab), n in sorted(by.items())] or ["- none"]
@@ -103,8 +100,7 @@ def _insert_note(dsn: str, day: date, text: str, model_id: str) -> None:
 
 def _run_notes(run: _Run, backend: NoteBackend, since: datetime, until: datetime) -> TaskReport:
     c: TaskReport = defaultdict(int)
-    d = since.astimezone().date()
-    while d < until.astimezone().date():
+    for d in local_days(since, until):
         if time.monotonic() >= run.deadline:
             c["cut"] = 1
             break
@@ -114,8 +110,7 @@ def _run_notes(run: _Run, backend: NoteBackend, since: datetime, until: datetime
         c["notes"] += 1
         if not run.dry_run:
             _insert_note(run.dsn, d, text, backend.model_id)
-            run.advance(NOTE, end.isoformat())
-        d += timedelta(1)
+            run.advance(LABEL_NOTE, end.isoformat())
     return c
 
 
@@ -172,12 +167,13 @@ def _label_one(run: _Run, name: str, since: datetime, until: datetime | None, ch
     on, and the heartbeat row records it."""
     try:
         backend = backend_for(name, choice)
-        if name != NOTE:
+        if name != LABEL_NOTE:
             return _run_task(run, TASKS[name], choice, backend, since, until), None
-        # `aut label choose` never picks a note's backend: no encoder
+        if not isinstance(backend, NoteBackend):    # label.json can name the encoder for it
+            raise BackendUnavailable(f"label: {name} needs a backend that can write text")
         if until is None:               # a note's window is whole days
             raise ValueError(f"label {name}: a day window has no end")
-        return _run_notes(run, cast(NoteBackend, backend), since, until), None
+        return _run_notes(run, backend, since, until), None
     except SourceUnavailable as exc:
         print(f"aut: label {name}: {exc}; retried on the next run", file=sys.stderr)
         return defaultdict(int, unavailable=1), exc
@@ -213,23 +209,14 @@ def run_label(cfg: Config, tasks: list[str] | None = None, since: datetime | Non
                deadline=time.monotonic() + cfg.label_budget_s, wm=wm, state=state,
                cache=load_json_dict(_cache_path()), labelled_at=labelled_at)
     report: dict[str, TaskReport] = {}
-    status, error, interrupted = "ok", None, False
-    try:
+    with job_heartbeat(cfg, NAME, started, dry_run=dry_run) as beat:
         for name in tasks if tasks is not None else cfg.label_tasks:
             s, u = _window(name, wm, since, now)
             report[name], stopped = _label_one(run, name, s, u, load_choice(name), backend_for)
+            beat.events += report[name]["rows"] + report[name]["notes"]
             if stopped:
-                status, error = "error", scrub_error(stopped)
-        return report
-    except BaseException as exc:
-        status, error = "error", scrub_error(exc)
-        interrupted = isinstance(exc, KeyboardInterrupt)    # leave at once, send nothing
-        raise
-    finally:
-        if not dry_run and not interrupted:
-            events = sum(c["rows"] + c["notes"] for c in report.values())
-            deliver_scan_rows(cfg, [scan_row(cfg, NAME, started, status=status, error=error,
-                                             events=events)], NAME)
+                beat.fail(stopped)
+    return report
 
 
 def print_report(report: dict[str, TaskReport], dry_run: bool) -> None:
@@ -238,7 +225,7 @@ def print_report(report: dict[str, TaskReport], dry_run: bool) -> None:
         if c["failed"]:      # its reason is already on stderr
             continue
         labels = dict(sorted(c.get("labels", {}).items()))
-        what = f"{c['notes']} notes" if name == NOTE else \
+        what = f"{c['notes']} notes" if name == LABEL_NOTE else \
             f"{c['rows']} rows ({c['below_tau']} below tau), by label {json.dumps(labels)}"
         print(f"label {name} {mode}: {what}")
         if c["cut"]:

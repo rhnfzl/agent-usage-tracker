@@ -144,6 +144,17 @@ def load_json_dict(path: Path) -> dict[str, Any]:
     return obj if isinstance(obj, dict) else {}
 
 
+def parse_record(raw: bytes | str) -> dict | None:
+    """One complete JSONL line as a dict, else None. read_new_lines holds back partial lines, so
+    there a None is a real anomaly: the caller counts it as malformed and skips it. A reader that
+    only shows local text just skips it, as does one of a file a crash can cut mid-write."""
+    try:
+        o = json.loads(raw)
+    except ValueError:              # JSONDecodeError and UnicodeDecodeError are ValueErrors
+        return None
+    return o if isinstance(o, dict) else None
+
+
 def collector_wm(state: dict, name: str) -> dict[str, Any]:
     """Return (creating if needed) the private watermark dict for one collector. Resets a
     non-dict value (from external corruption) to an empty dict so a scan can't crash on it."""

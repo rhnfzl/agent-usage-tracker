@@ -69,7 +69,7 @@ class FakeSource(tasks.Source):
 
     def steers(self, since):
         sids = {s["session_id"] for s in self._s if s["ts"] >= since}
-        return [s for s in self._s if s["session_id"] in sids]
+        return sorted((s for s in self._s if s["session_id"] in sids), key=lambda s: s["ts"])
 
     def episodes(self, since):
         return [e for e in self._e if e["last_ts"] >= since]
@@ -151,6 +151,6 @@ def _gold(tmp: Path, golds: list[str]):
     reqs = evalset.window_units(cfg, TASK, src=src, today=TODAY)
     for u, r in reqs.items():
         evalset.append_jsonl(evalset.eval_path(TASK, "gold"), {
-            "unit_id": u, "gold": r.state["text"].split()[0], "labeller": "human", "date": "d",
+            "unit_id": u, "gold": r.facts["text"].split()[0], "labeller": "human", "date": "d",
             "task_ver": 1})
     return cfg, src, reqs

@@ -177,7 +177,8 @@ def test_label_source_reads_and_note(dsn, episode):
     assert "steer3" in {r["event_id"] for r in src.steers(since)}
     assert src.episodes(since)[0]["sessions"] == ["s1"]
     assert "turn" in {a["kind"] for a in src.activity(["s1"], since, until)}
-    assert {"unit_id": "steer2", "task": "steer_intent"} in src.labels(since, until)
+    assert {"unit_id": "steer2", "task": "steer_intent"} in [a for _e, _t, a in
+                                                            src.labels(since, until)]
     for text in ("first", "second"):   # the first draft is kept
         label_run._insert_note(dsn, date(2026, 6, 15), text, "m")
     with connect(dsn) as conn:

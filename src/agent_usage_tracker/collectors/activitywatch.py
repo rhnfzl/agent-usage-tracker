@@ -37,9 +37,8 @@ from typing import Any, Callable, Iterator
 
 from ..config import Config
 from ..event import CollectorUnavailable, TimeInterval, make_event_id
-from ..net import HTTP_ERRORS
+from ..net import HTTP_ERRORS, LOCAL_HOSTS
 from ..redact import clean_text
-from ..sink import LOCAL_HOSTS
 from ._util import dict_or_empty, warn_skipped
 
 NAME = "activitywatch"
@@ -344,6 +343,21 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[TimeInterval], Callabl
         w["end"] = end_iso
 
     yield rows, advance_watermark
+
+
+def intervals(cfg: Config, since: datetime, until: datetime) -> list[TimeInterval]:
+    """The rows from `since` until `until` is covered, through the same guards as a scan, one day
+    per query: the last row can run past `until`. Raises CollectorUnavailable."""
+    wm = {"end": since.astimezone(timezone.utc).isoformat()}
+    out: list[TimeInterval] = []
+    while _parse(wm["end"]) < until:
+        before = wm["end"]
+        for rows, advance_watermark in collect(cfg, wm):
+            out += rows
+            advance_watermark()
+        if wm["end"] == before:     # the range is too short to read yet
+            break
+    return out
 
 
 def purge(cfg: Config) -> int:

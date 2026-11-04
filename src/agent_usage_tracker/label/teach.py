@@ -19,10 +19,10 @@ from dataclasses import dataclass
 from datetime import date
 from typing import Callable
 
-from ..config import AutError, Config
+from ..config import LABEL_DAYS, AutError, Config
 from .backends import make_backend
 from .core import Backend, Choice, Request, render
-from .evalset import DAYS, append_jsonl, eval_path, read_jsonl, stratified, unit_day, window_units
+from .evalset import append_jsonl, eval_path, read_jsonl, stratified, unit_day, window_units
 from .tasks import TASKS, Source
 
 SONNET = "claude-sonnet-5-5"
@@ -105,7 +105,7 @@ def _sonnet_dist(r: Request, ask: Callable[[str], tuple[str, float]], run: _Sonn
     return dist
 
 
-def run_teach(cfg: Config, task: str, n: int, budget_usd: float = 5.0, days: int = DAYS, *,
+def run_teach(cfg: Config, task: str, n: int, budget_usd: float = 5.0, days: int = LABEL_DAYS, *,
               src: Source | None = None, local: Backend | None = None,
               ask: Callable[[str], tuple[str, float]] | None = None,
               today: date | None = None) -> Counter:

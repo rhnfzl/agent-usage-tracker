@@ -110,8 +110,8 @@ def _reqs(*ids) -> dict:
     return {u: tasks.TASKS[TASK].request("steer", u, BASE, {"text": u}) for u in ids}
 
 
-def _session(*ids) -> gold._Session:
-    return gold._Session(TASK, _reqs(*ids), TODAY)
+def _sitting(*ids) -> gold._Sitting:
+    return gold._Sitting(TASK, _reqs(*ids), TODAY)
 
 
 def _gold_rows() -> list[dict]:
@@ -172,13 +172,13 @@ def test_session_skips_what_already_has_gold(tmp_path):
     with _env(tmp_path):
         evalset.append_jsonl(evalset.eval_path(TASK, "gold"),
                              {"unit_id": "u1", "gold": "stop", "task_ver": tasks.TASKS[TASK].ver})
-        s = _session("u1", "u2")
+        s = _sitting("u1", "u2")
         assert [r.unit_id for r in s.queue] == ["u2"]
 
 
 def test_session_ignores_a_stale_page_and_an_unknown_answer(tmp_path):
     with _env(tmp_path):
-        s = _session("u1", "u2")
+        s = _sitting("u1", "u2")
         shown = s.queue[0].unit_id
         assert s.act({"a": ["stop"], "u": ["other"]}) is False
         assert s.act({"a": ["not-a-label"], "u": [shown]}) is False
@@ -190,7 +190,7 @@ def test_session_ignores_a_stale_page_and_an_unknown_answer(tmp_path):
 
 def test_session_answer_writes_a_row_and_undo_takes_it_back(tmp_path):
     with _env(tmp_path):
-        s = _session("u1", "u2")
+        s = _sitting("u1", "u2")
         shown = s.queue[0].unit_id
         assert s.act({"a": ["stop"], "u": [shown]}) is False
         assert _gold_rows() == [{"unit_id": shown, "gold": "stop", "labeller": gold.LABELLER,
@@ -203,7 +203,7 @@ def test_session_answer_writes_a_row_and_undo_takes_it_back(tmp_path):
 
 def test_session_skip_moves_on_and_undo_comes_back(tmp_path):
     with _env(tmp_path):
-        s = _session("u1", "u2")
+        s = _sitting("u1", "u2")
         first = s.queue[0].unit_id
         s.act({"a": [":skip"], "u": [first]})
         assert (s.pos, s.counts["skipped"]) == (1, 1) and _gold_rows() == []
@@ -213,7 +213,7 @@ def test_session_skip_moves_on_and_undo_comes_back(tmp_path):
 
 def test_session_past_the_end_ignores_answers_and_quit_ends_it(tmp_path):
     with _env(tmp_path):
-        s = _session("u1")
+        s = _sitting("u1")
         s.act({"a": ["stop"], "u": ["u1"]})
         assert s.act({"a": ["stop"], "u": ["u1"]}) is False and len(_gold_rows()) == 1
         assert b"Nothing left to label" in s.page("tok")

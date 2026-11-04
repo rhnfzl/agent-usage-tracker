@@ -40,7 +40,7 @@ from .collectors import claude_code
 from .config import AutError, Config
 from .outcome_git import (DAY, DECIDE_S, Clone, GitFailed, Hit, Repo, fetch_clones, find_clones,
                           gh_merged, lookup, read_repo, run_git, survival)
-from .push import deliver_scan_rows, scan_row, scrub_error
+from .push import job_heartbeat
 from .repo_keys import RepoKeys
 from .sink import connect, write_many
 from .state import state_path, atomic_write_text, load_json_dict
@@ -350,8 +350,7 @@ def run_outcomes(cfg: Config, *, refresh: bool, dry_run: bool,
     dsn = cfg.require_pg("outcomes (it reads the commit rows)")
     started = datetime.now(timezone.utc)
     decided = (now or started).astimezone(timezone.utc)
-    written, status, error, interrupted = 0, "ok", None, False
-    try:
+    with job_heartbeat(cfg, "outcomes", started, dry_run=dry_run) as beat:
         rows = _load_rows(dsn)
         clones = find_clones(list(cfg.outcome_repo_roots), RepoKeys(cfg.repo_key_salt))
         stats: dict[str, Any] = {"clones": len(clones)}
@@ -375,16 +374,8 @@ def run_outcomes(cfg: Config, *, refresh: bool, dry_run: bool,
         if not dry_run:
             _insert(dsn, [{"sha": o["sha"], "repo_key": o["repo_key"], "state": o["state"],
                            "survival": o["survival"], "decided_at": decided} for o in todo])
-            written = len(todo)
-        return stats
-    except BaseException as exc:
-        status, error = "error", scrub_error(exc)
-        interrupted = isinstance(exc, KeyboardInterrupt)    # leave at once, send nothing
-        raise
-    finally:
-        if not dry_run and not interrupted:
-            deliver_scan_rows(cfg, [scan_row(cfg, "outcomes", started, status=status, error=error,
-                                             events=written)], "outcomes")
+            beat.events = len(todo)
+    return stats
 
 
 def print_outcomes(report: dict[str, Any], dry_run: bool) -> None:

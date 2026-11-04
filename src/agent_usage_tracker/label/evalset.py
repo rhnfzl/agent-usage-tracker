@@ -19,11 +19,9 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Callable, TypeVar
 
-from ..collectors._util import parse_record
-from ..config import AutError, Config
-from ..state import atomic_write_text
+from ..config import LABEL_DAYS, AutError, Config
+from ..state import atomic_write_text, parse_record
 from .core import Request, data_dir, local_midnight, top_label
-from .names import DAYS
 from .tasks import TASKS, Source, units
 
 T = TypeVar("T")
@@ -85,7 +83,7 @@ def stratum(teachers: dict | None) -> str:
 
 def stratified(items: list[T], key: Callable[[T], object], seed: str) -> list[T]:
     """Round-robin over the strata of `key`, each stratum shuffled: rare strata come up as often
-    as common ones. Deterministic for a seed, so a resumed session sees the same order."""
+    as common ones. Deterministic for a seed, so a resumed sitting sees the same order."""
     rng = random.Random(seed)  # nosec B311 # a repeatable sample order, not security
     groups: dict[object, list[T]] = defaultdict(list)
     for x in items:
@@ -119,7 +117,7 @@ def in_encoder_train_split(req: Request) -> bool:
     return _side("encoder|" + req.unit_id) == 1
 
 
-def window_units(cfg: Config, task: str, days: int = DAYS, src: Source | None = None,
+def window_units(cfg: Config, task: str, days: int = LABEL_DAYS, src: Source | None = None,
                  today: date | None = None) -> dict[str, Request]:
     """unit_id -> request for the task's units over the last `days` whole local days."""
     if src is None:

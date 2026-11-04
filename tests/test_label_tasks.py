@@ -18,7 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from agent_usage_tracker.event import make_event_id  # noqa: E402
 from agent_usage_tracker.label import core  # noqa: E402
-from agent_usage_tracker.label import names  # noqa: E402
+from agent_usage_tracker import config  # noqa: E402
 from agent_usage_tracker.label import run  # noqa: E402
 from agent_usage_tracker.label import tasks  # noqa: E402
 from label_helpers import DAY1, FakeSource, NOW, _cfg, _claude_log, _steer, _win  # noqa: E402
@@ -52,12 +52,12 @@ def test_steer_units_read_local_redacted_text(tmp_path):
     reqs = tasks.units("steer_intent", src, t0 + timedelta(seconds=1), None)
     assert [r.unit_id for r in reqs] == [make_event_id("claude_code", "steer", u)
                                          for u in ("u2", "u3")]
-    st = reqs[0].state
+    st = reqs[0].facts
     assert st["text"] == "no, mail [redacted] first"
     assert "sk-" not in st["previous_text"] and "[redacted]" in st["previous_text"]
     assert st["index_in_session"] == 1 and st["seconds_since_previous"] == 90
     assert st["after_interrupt"] is True
-    assert len(reqs[1].state["text"]) <= tasks.TEXT_MAX
+    assert len(reqs[1].facts["text"]) <= tasks.TEXT_MAX
 
 
 def test_work_category_units(tmp_path):
@@ -87,13 +87,13 @@ def test_work_category_units(tmp_path):
                            NOW.astimezone().date()))
     by = {r.unit: r for r in reqs}
     assert set(by) == {"episode_day", "aw_block"} and len(reqs) == 2
-    st = by["episode_day"].state
+    st = by["episode_day"].facts
     assert st["first_steer"] == "plan the export" and st["last_steers"] == ["now write it"]
     assert st["tool_calls_by_tool"] == {"Edit": 3, "Bash": 1} and st["commits"] == 1
     assert st["steers"] == 2 and st["sessions"] == 1 and st["tool_errors"] == 1
     assert by["episode_day"].unit_id == f"e1:{t0.astimezone().date().isoformat()}"
     # the 7-minute Slack block counts; the one with a steer inside and the 2-minute one do not
-    assert by["aw_block"].state["minutes"] == 7 and by["aw_block"].state["apps"] == ["Slack"]
+    assert by["aw_block"].facts["minutes"] == 7 and by["aw_block"].facts["apps"] == ["Slack"]
 
 
 def test_soft_outcome_only_no_code(tmp_path):
@@ -107,9 +107,9 @@ def test_soft_outcome_only_no_code(tmp_path):
     reqs = tasks.units("soft_outcome", FakeSource(_cfg(tmp_path), steers, eps),
                        NOW - timedelta(days=14), NOW)
     assert [r.unit_id for r in reqs] == ["e1"]
-    assert reqs[0].state["last_steers"] == ["look into the queue"]
-    assert reqs[0].none_fits is None and reqs[0].state["days_idle"] == 1
-    assert reqs[0].state["steers"] == 1 and reqs[0].state["sessions"] == 1     # Claude Code only
+    assert reqs[0].facts["last_steers"] == ["look into the queue"]
+    assert reqs[0].none_fits is None and reqs[0].facts["days_idle"] == 1
+    assert reqs[0].facts["steers"] == 1 and reqs[0].facts["sessions"] == 1     # Claude Code only
     # the row's ts is the episode start (stable); new activity re-asks with a new id
     assert reqs[0].ts == start.isoformat()
     res = core.decide(reqs[0], {"resolved": 1.0}, core.Choice(), "m", "r")
@@ -121,7 +121,8 @@ def test_soft_outcome_only_no_code(tmp_path):
 
 
 def test_task_names_match_the_tasks():
-    assert names.DECISION_TASKS == tuple(tasks.TASKS) and names.NOTE not in tasks.TASKS
+    assert config.LABEL_DECISION_TASKS == tuple(tasks.TASKS)
+    assert config.LABEL_NOTE not in tasks.TASKS
 
 
 if __name__ == "__main__":

@@ -23,10 +23,11 @@ from typing import Any, Iterator
 from ..config import Config
 from ..event import ActivityKind, Batch, ActivityEvent, EventSession, UsageEvent, make_event_id
 from ..repo_keys import RepoKeys
+from ..state import parse_record
 from .activity_common import (Link, TurnAgg, add_call, blank_tool_tally, commit_rows, first_record, ms_between,
                               pad_pending, text_of, tool_key, turn_attrs)
 from .commits import commit_call, commit_dir, commit_shas
-from ._util import (changed_files, count_field, dict_or_empty, parse_record, project_name,
+from ._util import (changed_files, count_field, dict_or_empty, project_name,
                     raise_if_unreadable, safe_int, str_or_none, warn_skipped)
 
 NAME = "pi"

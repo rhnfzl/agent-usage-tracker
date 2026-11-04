@@ -20,16 +20,18 @@ import json
 import sys
 import urllib.error
 import urllib.request
+from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 from urllib.parse import urlparse
 
 from . import __version__
 from .config import AutError, Config
 from .event import ActivityEvent, Row, TimeInterval, UsageEvent
-from .net import HTTP_ERRORS, NoRedirect
+from .net import HTTP_ERRORS, LOCAL_HOSTS, NoRedirect
 from .redact import redact
-from .sink import LOCAL_HOSTS, connect, write_many
+from .sink import connect, write_many
 
 # Column order shared with the homelab schema (agents.usage_event). Keep in sync.
 COLUMNS = (
@@ -287,3 +289,34 @@ def deliver_scan_rows(cfg: Config, rows: list[dict], what: str = "scan") -> None
         send_scan_rows(cfg.pg_dsn, rows)
     except Exception as exc:
         print(f"aut: warning: {what} heartbeat not delivered: {local_error(exc)}", file=sys.stderr)
+
+
+@dataclass(slots=True)
+class JobBeat:
+    """What a one-row job's heartbeat will say; the job's body fills it in."""
+    status: str = "ok"
+    error: str | None = None
+    events: int = 0
+
+    def fail(self, exc: BaseException) -> None:
+        self.status, self.error = "error", scrub_error(exc)
+
+
+@contextmanager
+def job_heartbeat(cfg: Config, name: str, started: datetime, *,
+                  dry_run: bool) -> Iterator[JobBeat]:
+    """One heartbeat row when the body ends: a failure still reports and re-raises, Ctrl-C leaves
+    at once and sends nothing, a dry run stays silent. run_scan keeps its own: it sends one row per
+    collector in a single delivery."""
+    beat = JobBeat()
+    interrupted = False
+    try:
+        yield beat
+    except BaseException as exc:
+        beat.fail(exc)
+        interrupted = isinstance(exc, KeyboardInterrupt)
+        raise
+    finally:
+        if not dry_run and not interrupted:
+            deliver_scan_rows(cfg, [scan_row(cfg, name, started, status=beat.status,
+                                             error=beat.error, events=beat.events)], name)

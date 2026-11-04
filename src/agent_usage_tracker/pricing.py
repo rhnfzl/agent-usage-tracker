@@ -177,6 +177,9 @@ def load_prices(path: str | Path) -> dict[str, dict[str, float]]:
     if not p.exists():
         return {}
     try:
-        return json.loads(p.read_text(encoding="utf-8"))
+        obj = json.loads(p.read_text(encoding="utf-8"))
     except (ValueError, OSError) as exc:
         raise AutError(f"price file {p} is unreadable/corrupt; re-run `aut sync-prices`: {exc}")
+    if not isinstance(obj, dict) or not all(isinstance(v, dict) for v in obj.values()):
+        raise AutError(f"price file {p} is not a table of models; re-run `aut sync-prices`")
+    return obj

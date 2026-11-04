@@ -1,5 +1,6 @@
-"""What a failed urllib call can raise. URLError and HTTPError are OSErrors; a truncated body or a
-garbled status line (IncompleteRead, BadStatusLine) is an HTTPException, which is not."""
+"""What a failed urllib call can raise, and which hosts count as this machine. URLError and
+HTTPError are OSErrors; a truncated body or a garbled status line (IncompleteRead, BadStatusLine)
+is an HTTPException, which is not."""
 
 from __future__ import annotations
 
@@ -9,6 +10,7 @@ from email.message import Message
 from typing import IO
 
 HTTP_ERRORS = (OSError, http.client.HTTPException)
+LOCAL_HOSTS = ("localhost", "127.0.0.1", "::1")
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):

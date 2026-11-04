@@ -24,8 +24,9 @@ from typing import Iterator
 from ..config import Config
 from ..event import Batch, EventSession, RunOrigin, UsageEvent, make_event_id
 from ..repo_keys import RepoKeys
+from ..state import parse_record
 from .activity_common import IDLE_S, pad_pending, text_of
-from ._util import (count_field, parse_record, project_name, raise_if_unreadable, safe_int,
+from ._util import (count_field, project_name, raise_if_unreadable, safe_int,
                     scan_file, str_or_none, warn_skipped)
 from .claude_code_activity import Activity
 

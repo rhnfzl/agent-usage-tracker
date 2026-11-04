@@ -13,7 +13,6 @@ import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .label.names import TASK_NAMES
 from .state import warn_if_group_readable
 
 # Must name what collectors.REGISTRY names (a test asserts it): collectors import this module, so
@@ -22,6 +21,12 @@ ALL_AGENTS = ("claude_code", "codex", "cursor", "cursor_sdk", "cursor_api", "cur
               "activitywatch")
 # activitywatch reads window titles, so it is opt-in: a config without `agents` never enables it.
 DEFAULT_AGENTS = tuple(a for a in ALL_AGENTS if a != "activitywatch")
+# Must name what label.tasks.TASKS names (tests/test_label_tasks.py asserts it): label.tasks imports
+# this module, so this module cannot derive the list from it.
+LABEL_DECISION_TASKS = ("work_category", "steer_intent", "soft_outcome", "aw_title_relevance")
+LABEL_NOTE = "daily_note"    # generative, private: one draft per day (label/run.py), not a decision
+LABEL_TASK_NAMES = (*LABEL_DECISION_TASKS, LABEL_NOTE)
+LABEL_DAYS = 90              # the window units are rebuilt over (teach, review, eval, train)
 DEFAULT_AW_URL = "http://localhost:5600"
 DEFAULT_LABEL_MODEL = "mlx-community/gemma-4-31b-it-4bit"
 DEFAULT_REPO_ROOTS = ("~/projects",)
@@ -201,8 +206,8 @@ def _aw_title_days(data: dict) -> int:
 
 def _label_tasks(data: dict) -> tuple[str, ...]:
     tasks = data.get("label_tasks") or []
-    if not isinstance(tasks, list) or any(t not in TASK_NAMES for t in tasks):
-        raise AutError(f"config: label_tasks must be a list of {list(TASK_NAMES)}")
+    if not isinstance(tasks, list) or any(t not in LABEL_TASK_NAMES for t in tasks):
+        raise AutError(f"config: label_tasks must be a list of {list(LABEL_TASK_NAMES)}")
     return tuple(tasks)
 
 

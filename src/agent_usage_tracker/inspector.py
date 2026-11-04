@@ -123,20 +123,10 @@ def fetch(dsn: str, episode: str | None = None, day: str | None = None,
 
 
 def latest_labels(rows: list) -> list[dict]:
-    """One current label per (task, unit, unit_id), picked as agents.label_latest picks it:
-    newest task_ver, then newest labelled_at (a row without one loses), then event_id."""
-    best: dict[tuple, tuple] = {}
-    for eid, ts, a in rows:
-        a = a or {}
-        key = (a.get("task"), a.get("unit"), a.get("unit_id"))
-        rank = (int(a.get("task_ver") or 0), a.get("labelled_at") or "", eid)
-        if key not in best or rank > best[key][0]:
-            below = a.get("below_tau")
-            best[key] = (rank, {"task": key[0], "unit": key[1], "unit_id": key[2], "ts": ts,
-                                "label": a.get("label"), "p": a.get("p"),
-                                "below_tau": True if below is None else bool(below),
-                                "model_id": a.get("model_id"), "task_ver": rank[0]})
-    return sorted((v for _r, v in best.values()), key=lambda d: (d["ts"], d["task"] or ""))
+    """The current labels (core.current_labels), oldest first."""
+    from .label.core import current_labels     # imported where used, as in cli.py
+
+    return sorted(current_labels(rows), key=lambda d: (d["ts"], d["task"] or ""))
 
 
 def _add_anchors(anchors: dict[str, dict[str, set]], sid: str, a: dict) -> None:

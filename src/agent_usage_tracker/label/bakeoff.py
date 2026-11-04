@@ -17,21 +17,29 @@ import sys
 import time
 from collections import Counter
 from datetime import date, datetime, timezone
-from typing import Any
+from typing import Any, NamedTuple
 
-from ..config import AutError, Config
+from ..config import LABEL_DAYS, AutError, Config
 from ..event import ActivityEvent, make_event_id
 from ..push import send_activity_rows
 from ..state import atomic_write_text
 from .backends import MODELS, Encoder, encoder_path, features, make_backend
 from .core import (Backend, Choice, Request, choice_path, fit_tau, fit_temperature, read_choices,
                    softmax, temper, top_label)
-from .evalset import (DAYS, append_jsonl, eval_path, gold_latest, held_out,
+from .evalset import (append_jsonl, eval_path, gold_latest, held_out,
                       in_encoder_train_split, read_jsonl, silver_by_unit, stratum, window_units)
 from .tasks import TASKS, Source
 
 SHARE_ERROR_PP = 5.0         # a label's share on known items may be off this much (CONTRACT.md)
 GOLD_WEIGHT = 3.0            # train-encoder: one gold answer counts as three silver ones
+
+
+class _Item(NamedTuple):
+    """One gold unit of a bake-off."""
+    req: Request
+    gold: str
+    held_out: bool
+    weight: float
 
 
 def _round4(x: float | None) -> float | None:
@@ -105,31 +113,31 @@ def _label_metrics(lab: str, rep: list[int], top: list[str], gold: dict[int, str
                                       * 100) if wk else None}
 
 
-def evaluate(task: str, backend: Backend, items: list[tuple], precision: float,
+def evaluate(task: str, backend: Backend, items: list[_Item], precision: float,
              today: date) -> dict[str, Any]:
-    """items: (request, gold, held_out, weight). The eval record of one backend (numbers)."""
+    """The eval record of one backend (numbers)."""
     ver, labels = TASKS[task].ver, [c for c, _d in TASKS[task].candidates]
     t0 = time.monotonic()
-    raws = [backend.distribution(r) for r, *_ in items]
+    raws = [backend.distribution(it.req) for it in items]
     secs = (time.monotonic() - t0) / max(len(items), 1)
     enc = isinstance(backend, Encoder)      # its training half never calibrates it
     cal = [i for i, it in enumerate(items)
-           if not it[2] and not (enc and in_encoder_train_split(it[0]))]
-    held = [i for i, it in enumerate(items) if it[2]]
-    t = fit_temperature([raws[i] for i in cal], [items[i][1] for i in cal])
+           if not it.held_out and not (enc and in_encoder_train_split(it.req))]
+    held = [i for i, it in enumerate(items) if it.held_out]
+    t = fit_temperature([raws[i] for i in cal], [items[i].gold for i in cal])
     dists = [temper(d, t) for d in raws]
     top = [top_label(d) for d in dists]
-    tau = fit_tau([(top[i], dists[i][top[i]], items[i][1]) for i in cal], precision)
+    tau = fit_tau([(top[i], dists[i][top[i]], items[i].gold) for i in cal], precision)
     rep = held or cal        # with too few days for a split, report on what there is (n_held 0)
-    gold = {i: items[i][1] for i in rep}
-    w = {i: items[i][3] for i in rep}
+    gold = {i: items[i].gold for i in rep}
+    w = {i: items[i].weight for i in rep}
     passed = [i for i in rep
               if (cut := tau.get(top[i])) is not None and dists[i][top[i]] >= cut]
     per = {lab: _label_metrics(lab, rep, top, gold, passed, w, tau.get(lab)) for lab in labels}
     f1s = [v["f1"] for v in per.values() if v["f1"] is not None]
     return {"task": task, "task_ver": ver, "backend": "encoder" if isinstance(backend, Encoder)
             else "mlx_letter", "model_id": backend.model_id, "model_rev": backend.model_rev,
-            "size_mb": backend.size_mb, "prompt_ver": items[0][0].prompt_ver,
+            "size_mb": backend.size_mb, "prompt_ver": items[0].req.prompt_ver,
             "calib_ver": f"{task}@{ver}/{today.isoformat()}", "temperature": t, "n": len(items),
             "n_cal": len(cal), "n_held": len(held),
             "macro_f1": _round4(sum(f1s) / len(f1s)) if f1s else None,
@@ -142,14 +150,14 @@ def evaluate(task: str, backend: Backend, items: list[tuple], precision: float,
 
 
 def gold_items(cfg: Config, task: str, days: int, src: Source | None,
-               today: date | None = None) -> tuple[list[tuple], int]:
-    """(request, gold, held_out, weight) for every gold unit still in the window; and how many
-    gold units fell out of it."""
+               today: date | None = None) -> tuple[list[_Item], int]:
+    """An item for every gold unit still in the window; and how many gold units fell out of it."""
     gold = gold_latest(task)
     reqs = window_units(cfg, task, days, src, today)
     found = [u for u in gold if u in reqs]
     w = weights(task, found)
-    return [(reqs[u], gold[u], held_out(reqs[u]), w[u]) for u in found], len(gold) - len(found)
+    return [_Item(reqs[u], gold[u], held_out(reqs[u]), w[u]) for u in found], \
+        len(gold) - len(found)
 
 
 def default_backends(cfg: Config, task: str) -> list[Backend]:
@@ -165,7 +173,7 @@ def default_backends(cfg: Config, task: str) -> list[Backend]:
     return out
 
 
-def run_eval(cfg: Config, task: str, days: int = DAYS, *, src: Source | None = None,
+def run_eval(cfg: Config, task: str, days: int = LABEL_DAYS, *, src: Source | None = None,
              backends: list[Backend] | None = None, now: datetime | None = None) -> list[dict]:
     now = now or datetime.now(timezone.utc)
     today = now.astimezone().date()
@@ -256,11 +264,11 @@ def _training_data(gold: dict[str, str], silver: dict[str, dict], reqs: dict[str
     data = []
     for u, g in gold.items():
         if u in reqs and u not in test and in_encoder_train_split(reqs[u]):
-            data.append((features(reqs[u].state), [float(x == g) for x in labels], GOLD_WEIGHT))
+            data.append((features(reqs[u].facts), [float(x == g) for x in labels], GOLD_WEIGHT))
     for u, ts in silver.items():
         if u in reqs and u not in test and u not in gold and ts:
             avg = [sum(d.get(x, 0.0) for d in ts.values()) / len(ts) for x in labels]
-            data.append((features(reqs[u].state), avg, 1.0))
+            data.append((features(reqs[u].facts), avg, 1.0))
     return data
 
 
@@ -274,7 +282,7 @@ def _macro_f1(pairs: list[tuple[str, str]], labels: list[str]) -> float | None:
     return _round4(sum(f1s) / len(f1s)) if f1s else None
 
 
-def train_encoder(cfg: Config, task: str, days: int = DAYS, *, src: Source | None = None,
+def train_encoder(cfg: Config, task: str, days: int = LABEL_DAYS, *, src: Source | None = None,
                   today: date | None = None) -> dict[str, Any]:
     """Fit the encoder on half the calibration-day gold (in_encoder_train_split, GOLD_WEIGHT) and
     silver (teachers averaged), never on a held-out gold unit nor on the gold eval calibrates it with;

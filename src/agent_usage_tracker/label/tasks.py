@@ -10,17 +10,17 @@ from __future__ import annotations
 
 from collections import Counter, defaultdict
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta, timezone
-from typing import Callable, Iterator
+from datetime import date, datetime, timezone
+from typing import Callable
 
-from ..collectors import activitywatch as aw, drain
+from ..collectors import activitywatch as aw
 from ..collectors import claude_code
 from ..config import AutError, Config
-from ..event import CollectorUnavailable, TimeInterval, make_event_id
+from ..event import CollectorUnavailable, make_event_id
 from ..redact import redact
 from ..repo_keys import RepoKeys
 from ..sink import connect
-from .core import Request, local_midnight
+from .core import Request, local_days
 
 TEXT_MAX = 1500              # chars of one steer text a prompt carries
 AW_BLOCK_MIN_S = 300
@@ -40,10 +40,10 @@ class Task:
     #                                                 | recent: the last OUTCOME_DAYS, no watermark
     cached: bool = False                            # skip a unit_id already labelled (aw titles)
 
-    def request(self, unit: str, unit_id: str, ts: datetime, state: dict,
+    def request(self, unit: str, unit_id: str, ts: datetime, facts: dict,
                 rev: str | None = None) -> Request:
         return Request(task=self.name, task_ver=self.ver, unit=unit, unit_id=unit_id,
-                       ts=ts.astimezone(timezone.utc).isoformat(), state=state,
+                       ts=ts.astimezone(timezone.utc).isoformat(), facts=facts,
                        question=self.question, decision=self.decision,
                        candidates=[{"id": i, "desc": d} for i, d in self.candidates],
                        none_fits=self.none_fits, rev=rev)
@@ -104,7 +104,8 @@ class Source:
         self.cfg, self.keys = cfg, RepoKeys(cfg.repo_key_salt)
 
     def steers(self, since: datetime) -> list[dict]:
-        """Every steer of each session that has one since `since` (for index and previous)."""
+        """Every steer of each session that has one since `since` (for index and previous), in ts
+        order: the unit builders rely on it."""
         rows = _sql(self.cfg.require_pg("label"),
                     "SELECT event_id, ts, agent, session_id, attrs FROM agents.activity_event "
                     "WHERE kind = 'steer' AND session_id IN (SELECT session_id FROM "
@@ -128,10 +129,11 @@ class Source:
                     "AND ts >= %s AND ts < %s", (sessions, since, until))
         return [dict(zip(("session_id", "ts", "kind", "attrs"), r)) for r in rows]
 
-    def labels(self, since: datetime, until: datetime) -> list[dict]:
-        rows = _sql(self.cfg.require_pg("label"), "SELECT attrs FROM agents.activity_event WHERE kind = "
-                    "'label' AND ts >= %s AND ts < %s ORDER BY ts", (since, until))
-        return [r[0] for r in rows]
+    def labels(self, since: datetime, until: datetime) -> list[tuple]:
+        """(event_id, ts, attrs) of each label row: what core.current_labels reads."""
+        return _sql(self.cfg.require_pg("label"), "SELECT event_id, ts, attrs FROM "
+                    "agents.activity_event WHERE kind = 'label' AND ts >= %s AND ts < %s ORDER BY ts",
+                    (since, until))
 
     def texts(self, steers: list[dict]) -> dict[str, str]:
         """steer event_id -> its redacted text, from this machine's Claude Code logs.
@@ -148,32 +150,17 @@ class Source:
         activitywatch is not enabled; SourceUnavailable when it is but aw-server cannot be read."""
         if aw.NAME not in self.cfg.agents:
             return []
-        out: list[TimeInterval] = []
-        wm = {"end": since.astimezone(timezone.utc).isoformat()}
-        for batches in drain(aw.collect, self.cfg, wm, aw.NAME):
-            if datetime.fromisoformat(wm["end"]) >= until:
-                break
-            try:
-                for rows, advance_watermark in batches:
-                    out += [r for r in rows if isinstance(r, TimeInterval)]
-                    advance_watermark()
-            except CollectorUnavailable as exc:
-                raise SourceUnavailable(str(exc)) from exc
+        try:
+            rows = aw.intervals(self.cfg, since, until)
+        except CollectorUnavailable as exc:
+            raise SourceUnavailable(str(exc)) from exc
         res = []
-        for t in out:
+        for t in rows:
             s, e = datetime.fromisoformat(t.ts), min(datetime.fromisoformat(t.end_ts), until)
             if s < until and e > s:
                 res.append({"start": s, "end": e, "app": t.app or "", "title": t.title,
                             "category": t.category, "rule": t.attrs.get("rule", "")})
         return sorted(res, key=lambda w: w["start"])
-
-
-def _days(since: datetime, until: datetime) -> Iterator[tuple[date, datetime, datetime]]:
-    d, end = since.astimezone().date(), until.astimezone().date()
-    while d < end:
-        start = local_midnight(d)
-        yield d, start, start + timedelta(days=1)
-        d += timedelta(days=1)
 
 
 def _steer_units(task: Task, src: Source, since: datetime, until: datetime | None) -> list:
@@ -184,7 +171,6 @@ def _steer_units(task: Task, src: Source, since: datetime, until: datetime | Non
         by_session[r["session_id"]].append(r)
     out = []
     for rs in by_session.values():
-        rs.sort(key=lambda r: r["ts"])
         for i, r in enumerate(rs):
             prev = rs[i - 1] if i else None
             if r["event_id"] not in text or r["ts"] < since or (until and r["ts"] >= until):
@@ -254,7 +240,7 @@ def _episode_days(mine: list[dict], acts: list[dict], of_session: dict[str, list
 
 def _episode_day_unit(task: Task, ep: str, d: date, u: dict, text: dict[str, str]) -> Request | None:
     """The unit of one episode day; None when none of its steers has local text."""
-    st = sorted(u["steers"], key=lambda r: r["ts"])
+    st = u["steers"]
     said = [text[r["event_id"]] for r in st if r["event_id"] in text]
     if not said:
         return None
@@ -285,7 +271,7 @@ def _category_units(task: Task, src: Source, since: datetime, until: datetime | 
             of_session[sid].append(episode["episode_id"])
     sids = sorted(claude_sessions & set(of_session))
     acts = src.activity(sids, since, until) if sids else []
-    day_of = {d for d, _s, _e in _days(since, until)}
+    day_of = set(local_days(since, until))
     days = _episode_days(mine, acts, of_session, day_of)
     built = (_episode_day_unit(task, ep, d, u, text) for (ep, d), u in days.items())
     out = [r for r in built if r]
@@ -303,7 +289,7 @@ def _outcome_units(task: Task, src: Source, since: datetime, until: datetime | N
     out = []
     for ep in eps:
         mine = set(ep["sessions"])
-        st = [r for r in sorted(steers, key=lambda r: r["ts"]) if r["session_id"] in mine]
+        st = [r for r in steers if r["session_id"] in mine]
         said = [text[r["event_id"]] for r in st if r["event_id"] in text]
         if not said:
             continue

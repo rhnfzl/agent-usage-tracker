@@ -139,7 +139,7 @@ def test_choice_file_and_backend_slots(tmp_path, monkeypatch):
 
 def _two_options(**kw) -> core.Request:
     base = dict(task="t", task_ver=2, unit="steer", unit_id="u", ts="2026-01-01T00:00:00+00:00",
-                state={"text": "go", "n": 3, "names": ["é"]}, question="Which?", decision="choice",
+                facts={"text": "go", "n": 3, "names": ["é"]}, question="Which?", decision="choice",
                 candidates=[{"id": "b", "desc": "desc b"}, {"id": "a", "desc": "desc a"}],
                 none_fits=None)
     return core.Request(**{**base, **kw})
@@ -182,6 +182,16 @@ def test_load_choice_keeps_known_fields_and_warns_on_a_bad_entry(tmp_path, monke
     assert core.load_choice("bad") == core.Choice()
     err = capsys.readouterr().err
     assert "its entry for bad is not a table" in err and "uncalibrated" in err
+
+
+@pytest.mark.parametrize("entry", [{"temperature": "hot"}, {"temperature": 0}, {"tau": 0.5},
+                                   {"tau": {"stop": "high"}}])
+def test_load_choice_treats_a_bad_field_as_a_bad_entry(tmp_path, monkeypatch, capsys, entry):
+    p = tmp_path / "label.json"
+    monkeypatch.setattr(core, "choice_path", lambda: p)
+    p.write_text(json.dumps({"tasks": {"t": entry}}))
+    assert core.load_choice("t") == core.Choice()
+    assert "uncalibrated" in capsys.readouterr().err
 
 
 def test_render_shows_the_facts_the_options_in_order_and_the_letters():

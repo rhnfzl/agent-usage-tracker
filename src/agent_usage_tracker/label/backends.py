@@ -117,12 +117,12 @@ def encoder_path(task: str) -> Path:
     return data_dir() / "label" / "encoder" / f"{task}.json"
 
 
-def features(state: dict) -> list[int]:
-    """Hashed binary features of a unit's state: words and word pairs of each text field (per
+def features(facts: dict) -> list[int]:
+    """Hashed binary features of a unit's facts: words and word pairs of each text field (per
     field name), and the other facts as name=value (numbers in log2 buckets). Bucket ids only:
     the trained file holds weights, never a word."""
     toks: set[str] = set()
-    for k, v in state.items():
+    for k, v in facts.items():
         if isinstance(v, (str, list)):
             for t in [v] if isinstance(v, str) else [x for x in v if isinstance(x, str)]:
                 w = re.findall(r"\w+", t.lower())
@@ -172,7 +172,7 @@ class Encoder:
                                      "version; run `aut label train-encoder` again")
         w, labels = m["w"], m["labels"]
         z = [0.0] * len(labels)
-        for f in features(req.state):
+        for f in features(req.facts):
             for k, x in enumerate(w.get(str(f), ())):
                 z[k] += x
         p = dict(zip(labels, softmax(z)))

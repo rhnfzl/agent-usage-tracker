@@ -113,7 +113,8 @@ def test_train_encoder_and_backend(tmp_path):
         assert 0 < len(fit) < len(reqs) - len(held) and r["trained_on"] == len(fit)
         # eval calibrates the encoder only on the gold it never trained on
         rec = bakeoff.evaluate(TASK, backends.Encoder(TASK), [
-            (q, q.state["text"].split()[0], u in held, 1.0) for u, q in reqs.items()], 0.9, TODAY)
+            bakeoff._Item(q, q.facts["text"].split()[0], u in held, 1.0)
+            for u, q in reqs.items()], 0.9, TODAY)
         assert rec["n_cal"] == len(reqs) - len(held) - len(fit) and rec["n_held"] == len(held)
         raw = backends.encoder_path(TASK).read_text()
         assert WORD not in raw and json.loads(raw)["labels"] == LABELS
@@ -121,7 +122,7 @@ def test_train_encoder_and_backend(tmp_path):
         enc = backends.make_backend(TASK, core.Choice(backend="encoder"), "unused")
         req = next(iter(reqs.values()))
         d = enc.distribution(req)
-        assert max(d, key=d.get) == req.state["text"].split()[0] and abs(sum(d.values()) - 1) < 1e-9
+        assert max(d, key=d.get) == req.facts["text"].split()[0] and abs(sum(d.values()) - 1) < 1e-9
         assert enc.model_rev and enc.size_mb is not None
         with pytest.raises(backends.BackendUnavailable):                            # retrained since chosen
             backends.make_backend(TASK, core.Choice(backend="encoder", model_rev="0" * 12), "x")
@@ -261,7 +262,7 @@ def test_training_data_keeps_held_out_and_eval_gold_away():
               eval_half[2]: {}}
     data = bakeoff._training_data(gold_, silver, reqs, {train[1]}, labels)
     assert [(t, w) for _f, t, w in data] == [([1.0, 0.0], bakeoff.GOLD_WEIGHT), ([0.75, 0.25], 1.0)]
-    assert data[0][0] == backends.features(reqs[train[0]].state)
+    assert data[0][0] == backends.features(reqs[train[0]].facts)
 
 
 def test_gold_items_says_how_many_fell_out_of_the_window(tmp_path):
@@ -272,7 +273,7 @@ def test_gold_items_says_how_many_fell_out_of_the_window(tmp_path):
         items, gone = bakeoff.gold_items(cfg, TASK, 30, src, TODAY)
         assert gone == 1 and {r.unit_id for r, *_ in items} == set(reqs)
         for r, g, held, weight in items:
-            assert g == r.state["text"].split()[0] and held == evalset.held_out(r) and weight == 1.0
+            assert g == r.facts["text"].split()[0] and held == evalset.held_out(r) and weight == 1.0
 
 
 def test_default_backends_dedups_models_and_names_the_ones_left_out(tmp_path, monkeypatch, capsys):

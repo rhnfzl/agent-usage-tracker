@@ -14,8 +14,7 @@ from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
 
 from .config import AutError
-
-LOCAL_HOSTS = ("localhost", "127.0.0.1", "::1")
+from .net import LOCAL_HOSTS
 
 
 def _host_and_mode(dsn: str) -> tuple[str, str] | None:

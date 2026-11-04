@@ -27,9 +27,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from agent_usage_tracker import cli, push  # noqa: E402
 from agent_usage_tracker.collectors import activitywatch as aw  # noqa: E402
-from agent_usage_tracker.config import AutError  # noqa: E402
+from agent_usage_tracker.config import LABEL_DAYS, AutError  # noqa: E402
 from agent_usage_tracker.label import backends, core, run, tasks  # noqa: E402
-from agent_usage_tracker.label import bakeoff, evalset, gold, teach  # noqa: E402
+from agent_usage_tracker.label import bakeoff, gold, teach  # noqa: E402
 from label_helpers import ById, DAY1, FakeSource, NOW, TASK, _cfg, _claude_log, _env, _steer, _win  # noqa: E402
 
 REPO = Path(__file__).resolve().parents[1]
@@ -193,7 +193,7 @@ def test_title_units_are_browser_only_salted_and_cached(tmp_path, sink):
     cfg = _cfg(tmp_path)
     reqs = tasks.units("aw_title_relevance", FakeSource(cfg, wins=wins), t0 - timedelta(1),
                        NOW)
-    assert len(reqs) == 1 and reqs[0].state["minutes"] == 5.0
+    assert len(reqs) == 1 and reqs[0].facts["minutes"] == 5.0
     plain = hashlib.sha256(b"aw_title|safari|docs - a page").hexdigest()
     assert reqs[0].unit_id != plain and len(reqs[0].unit_id) == 64       # an HMAC, not a hash
     assert [c["id"] for c in reqs[0].candidates] == ["relevant", "not_relevant"]
@@ -214,13 +214,17 @@ def test_title_units_are_browser_only_salted_and_cached(tmp_path, sink):
 
 
 def test_notes_prompt_counts_only(tmp_path, sink):
-    labels = [{"task": "steer_intent", "unit_id": "a", "label": "correction", "below_tau": False},
-              {"task": "steer_intent", "unit_id": "a", "label": "correction", "below_tau": False},
+    labels = [("e1", DAY1, {"task": "steer_intent", "unit_id": "a", "label": "correction",
+                            "below_tau": False}),
+              ("e2", DAY1, {"task": "steer_intent", "unit_id": "a", "label": "correction",
+                            "below_tau": False}),
               # same unit and ts: the newer calibrated run wins over the uncalibrated one
-              {"task": "steer_intent", "unit_id": "b", "label": "stop", "below_tau": False,
-               "task_ver": 1, "labelled_at": "2026-11-05T02:00:00.000+00:00"},
-              {"task": "steer_intent", "unit_id": "b", "label": "stop", "below_tau": True,
-               "task_ver": 1, "labelled_at": "2026-11-03T02:00:00.000+00:00"}]
+              ("e3", DAY1, {"task": "steer_intent", "unit_id": "b", "label": "stop",
+                            "below_tau": False, "task_ver": 1,
+                            "labelled_at": "2026-11-05T02:00:00.000+00:00"}),
+              ("e4", DAY1, {"task": "steer_intent", "unit_id": "b", "label": "stop",
+                            "below_tau": True, "task_ver": 1,
+                            "labelled_at": "2026-11-03T02:00:00.000+00:00"})]
     eps = [{"episode_id": "e1", "first_ts": DAY1, "last_ts": DAY1, "n_sessions": 2,
             "n_steers": 4, "n_commits": 3, "outcome": "shipped", "sessions": ["s1"]}]
     cfg = _cfg(tmp_path)
@@ -234,6 +238,27 @@ def test_notes_prompt_counts_only(tmp_path, sink):
     assert "steer_intent: correction 1" in p and "steer_intent: stop 1" in p and "commits 3" in p
     assert run._note_prompt(DAY1.date(), labels[3:] + labels[2:3], []) == \
         run._note_prompt(DAY1.date(), labels[2:4], [])
+
+
+def test_note_prompt_reads_the_one_latest_label_rule():
+    a = {"task": "steer_intent", "label": "stop"}
+    rows = [("e1", DAY1, {**a, "unit": "steer", "unit_id": "x"}),           # no below_tau: unknown
+            # the same unit_id under two units is two labels
+            ("e2", DAY1, {**a, "unit": "steer", "unit_id": "y", "below_tau": False}),
+            ("e3", DAY1, {**a, "unit": "episode", "unit_id": "y", "below_tau": False}),
+            # a tie on task_ver and labelled_at goes to the larger event_id, in any order
+            ("e5", DAY1, {**a, "unit": "steer", "unit_id": "z", "below_tau": False}),
+            ("e4", DAY1, {**a, "unit": "steer", "unit_id": "z", "below_tau": True})]
+    assert "steer_intent: stop 3" in run._note_prompt(DAY1.date(), rows, [])
+
+
+def test_a_note_task_on_the_encoder_fails_alone(tmp_path, sink, capsys):
+    cfg = _cfg(tmp_path)
+    with _env(tmp_path):
+        rep = run.run_label(cfg, ["daily_note"], src=FakeSource(cfg),
+                            backend_for=lambda t, c: backends.Encoder(t), now=NOW)
+    assert rep["daily_note"]["failed"] == 1 and sink.notes == []
+    assert "daily_note needs a backend that can write text" in capsys.readouterr().err
 
 
 def test_windows_go_through_the_collector(tmp_path, monkeypatch):
@@ -261,6 +286,10 @@ def test_windows_go_through_the_collector(tmp_path, monkeypatch):
     assert [x["title"] for x in w] == ["page 0 password=[redacted]", "page 1 password=[redacted]"]
     assert all(x["rule"].startswith("browser_") for x in w)
     assert tasks.Source(_cfg(tmp_path)).windows(t0, NOW) == []       # activitywatch not enabled
+    # a range of several days reads day by day and stops once it is covered
+    far = t0 - timedelta(days=3)
+    assert len(aw.intervals(cfg, far, t0 + timedelta(minutes=2))) == 3
+    assert aw.intervals(cfg, t0, t0) == []
 
     def down(cfg, method, path, body=None):
         raise OSError("connection refused")
@@ -296,11 +325,10 @@ def test_config_and_evalset_stay_below_their_callers():
                                   check=True, env=env).stdout.split())
 
     assert not {m for m in loaded("agent_usage_tracker.config")
-                if ".collectors" in m or m.endswith((".tasks", ".core"))}
+                if ".collectors" in m or ".label" in m}
     assert "agent_usage_tracker.push" not in loaded("agent_usage_tracker.label.evalset")
-    # building the parser reads only the names: every `aut` command would pay for the rest
-    assert not {m for m in loaded("agent_usage_tracker.cli")
-                if ".label." in m and not m.endswith(".names")}
+    # building the parser loads no label module: every `aut` command would pay for them
+    assert not {m for m in loaded("agent_usage_tracker.cli") if ".label" in m}
 
 
 def test_cli_and_config(tmp_path, monkeypatch):
@@ -391,7 +419,7 @@ def test_cli_wiring(tmp_path, monkeypatch):
         assert cli.main(["label", "eval", "--task", TASK, "--days", "30"]) == 0
         assert cli.main(["label", "choose", "--task", TASK]) == 0
         assert cli.main(["label", "train-encoder", "--task", TASK]) == 0
-    assert seen == [("teach", TASK, 5, 5.0, evalset.DAYS), ("review", None, evalset.DAYS),
+    assert seen == [("teach", TASK, 5, 5.0, LABEL_DAYS), ("review", None, LABEL_DAYS),
                     ("eval", TASK, 30), ("choose", TASK), ("train", TASK)]
     with pytest.raises(SystemExit):
         cli.main(["label", "teach", "--task", "daily_note", "--n", "1"])
