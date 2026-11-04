@@ -124,8 +124,8 @@ def encoder_fit(req: Request) -> bool:
 def window_units(cfg: Config, task: str, days: int = DAYS, src: Source | None = None,
                  today: date | None = None) -> dict[str, Request]:
     """unit_id -> request for the task's units over the last `days` whole local days."""
-    if src is None and not cfg.has_pg:
-        raise SystemExit("label needs transport.pg_dsn (it reads the steer and episode rows)")
+    if src is None:
+        cfg.require_pg("label (it reads the steer and episode rows)")
     today = today or date.today()
     reqs = units(task, src or Source(cfg), local_midnight(today - timedelta(days=days)),
                  local_midnight(today))

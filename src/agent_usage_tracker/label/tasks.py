@@ -18,10 +18,11 @@ from typing import Callable
 
 from ..collectors import activitywatch as aw
 from ..collectors.activity_common import text_of
-from ..config import Config, load_psycopg
+from ..config import Config
 from ..event import make_event_id
 from ..redact import redact
 from ..repo_keys import RepoKeys
+from ..sink import connect
 from .core import Request, local_midnight
 
 TEXT_MAX = 1500              # chars of one steer text a prompt carries
@@ -94,9 +95,7 @@ class SourceUnavailable(RuntimeError):
 
 
 def _sql(dsn: str, sql: str, params: tuple) -> list[tuple]:
-    psycopg = load_psycopg()
-
-    with psycopg.connect(dsn, connect_timeout=15) as conn:
+    with connect(dsn) as conn:
         return conn.execute(sql, params).fetchall()
 
 
@@ -108,7 +107,7 @@ class Source:
 
     def steers(self, since: datetime) -> list[dict]:
         """Every steer of each session that has one since `since` (for index and previous)."""
-        rows = _sql(self.cfg.pg_dsn,
+        rows = _sql(self.cfg.require_pg("label"),
                     "SELECT event_id, ts, agent, session_id, attrs FROM agents.activity_event "
                     "WHERE kind = 'steer' AND session_id IN (SELECT session_id FROM "
                     "agents.activity_event WHERE kind = 'steer' AND ts >= %s) ORDER BY ts",
@@ -116,7 +115,7 @@ class Source:
         return [dict(zip(("event_id", "ts", "agent", "session_id", "attrs"), r)) for r in rows]
 
     def episodes(self, since: datetime) -> list[dict]:
-        rows = _sql(self.cfg.pg_dsn,
+        rows = _sql(self.cfg.require_pg("label"),
                     "SELECT e.episode_id::text, e.first_ts, e.last_ts, e.n_sessions, e.n_steers, "
                     "e.n_commits, e.outcome, array_agg(m.session_id) FROM agents.episode e "
                     "JOIN agents.episode_member m USING (episode_id) WHERE e.last_ts >= %s "
@@ -125,14 +124,14 @@ class Source:
                           "n_commits", "outcome", "sessions"), r)) for r in rows]
 
     def activity(self, sessions: list[str], since: datetime, until: datetime) -> list[dict]:
-        rows = _sql(self.cfg.pg_dsn,
+        rows = _sql(self.cfg.require_pg("label"),
                     "SELECT session_id, ts, kind, attrs FROM agents.activity_event WHERE kind IN "
                     "('turn', 'interrupt', 'rejection', 'commit') AND session_id = ANY(%s) "
                     "AND ts >= %s AND ts < %s", (sessions, since, until))
         return [dict(zip(("session_id", "ts", "kind", "attrs"), r)) for r in rows]
 
     def labels(self, since: datetime, until: datetime) -> list[dict]:
-        rows = _sql(self.cfg.pg_dsn, "SELECT attrs FROM agents.activity_event WHERE kind = "
+        rows = _sql(self.cfg.require_pg("label"), "SELECT attrs FROM agents.activity_event WHERE kind = "
                     "'label' AND ts >= %s AND ts < %s ORDER BY ts", (since, until))
         return [r[0] for r in rows]
 

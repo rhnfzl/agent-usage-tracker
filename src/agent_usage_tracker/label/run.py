@@ -14,9 +14,9 @@ import time
 from collections import Counter
 from datetime import date, datetime, timedelta, timezone
 
-from .. import __version__
-from ..config import Config, load_psycopg
-from ..push import scrub_error, send_activity_rows, send_scan_rows
+from ..config import Config
+from ..push import deliver_scan_rows, scan_row, scrub_error, send_activity_rows
+from ..sink import connect
 from ..state import atomic_write_text, collector_wm, load_json_dict, load_state, save_state
 from .backends import make_backend
 from .core import data_dir, decide, label_event, load_choice, local_midnight
@@ -68,9 +68,7 @@ def _note_prompt(day: date, labels: list[dict], episodes: list[dict]) -> str:
 
 
 def _insert_note(dsn: str, day: date, text: str, model_id: str) -> None:
-    psycopg = load_psycopg()
-
-    with psycopg.connect(dsn, connect_timeout=15) as conn:
+    with connect(dsn) as conn:
         conn.execute("INSERT INTO agents.daily_note (day, text, model_id, created_at) "
                      "VALUES (%s, %s, %s, now()) ON CONFLICT (day) DO NOTHING",
                      (day, text, model_id))
@@ -144,8 +142,7 @@ def run_label(cfg: Config, tasks: list[str] | None = None, since: datetime | Non
     """Label each task (default: config label_tasks). backend_for(task, choice) -> backend
     (tests pass a fake). A dry run scores and counts, and writes nothing: no rows, watermark,
     cache or heartbeat."""
-    if not cfg.has_pg:
-        raise SystemExit("label needs transport.pg_dsn (it reads the steer and episode rows)")
+    cfg.require_pg("label (it reads the steer and episode rows)")
     started = datetime.now(timezone.utc)
     labelled_at = started.isoformat(timespec="milliseconds")
     now = now or started
@@ -164,7 +161,7 @@ def run_label(cfg: Config, tasks: list[str] | None = None, since: datetime | Non
     cache = load_json_dict(_cache_path())
     deadline = time.monotonic() + cfg.label_budget_s
     report: dict[str, Counter] = {}
-    status, error = "ok", None
+    status, error, interrupted = "ok", None, False
     try:
         for name in tasks if tasks is not None else cfg.label_tasks:
             s, u = _window(name, wm, since, now)
@@ -183,18 +180,12 @@ def run_label(cfg: Config, tasks: list[str] | None = None, since: datetime | Non
         return report
     except BaseException as exc:
         status, error = "error", scrub_error(exc)
+        interrupted = isinstance(exc, KeyboardInterrupt)    # leave at once, send nothing
         raise
     finally:
-        if not dry_run:
-            try:            # best effort, like the scan heartbeat
-                send_scan_rows(cfg, [{
-                    "machine": cfg.machine, "collector": NAME, "started_at": started,
-                    "finished_at": datetime.now(timezone.utc), "status": status,
-                    "events": sum(c["rows"] + c["notes"] for c in report.values()), "human": 0,
-                    "newest_ts": None, "error": error, "aut_version": __version__}])
-            except Exception as exc:
-                print(f"aut: warning: label heartbeat not delivered: {scrub_error(exc)}",
-                      file=sys.stderr)
+        if not dry_run and not interrupted:
+            events = sum(c["rows"] + c["notes"] for c in report.values())
+            deliver_scan_rows(cfg, [scan_row(cfg, NAME, started, status, error, events)], NAME)
 
 
 def print_report(report: dict[str, Counter], dry_run: bool) -> None:

@@ -34,7 +34,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from agent_usage_tracker import cli  # noqa: E402
+from agent_usage_tracker import cli, push  # noqa: E402
 from agent_usage_tracker.collectors import activitywatch as aw  # noqa: E402
 from agent_usage_tracker.config import Config  # noqa: E402
 from agent_usage_tracker.event import make_event_id  # noqa: E402
@@ -259,7 +259,7 @@ class Sink:
     def activity(self, dsn, rows):
         self.rows.append(list(rows))
 
-    def scan(self, cfg, rows):
+    def scan(self, dsn, rows):
         self.scans += rows
 
 
@@ -267,7 +267,7 @@ class Sink:
 def sink(monkeypatch):
     s = Sink()
     monkeypatch.setattr(run, "send_activity_rows", s.activity)
-    monkeypatch.setattr(run, "send_scan_rows", s.scan)
+    monkeypatch.setattr(push, "send_scan_rows", s.scan)
     monkeypatch.setattr(run, "_insert_note", lambda dsn, day, text, m: s.notes.append(
         (day, text, m)))
     monkeypatch.setattr(run, "BATCH", 2)
@@ -324,6 +324,18 @@ def test_time_budget_and_error_heartbeat(tmp_path, sink):
         assert sink.scans[-1]["status"] == "error" and sink.scans[-1]["error"] == "RuntimeError"
     with pytest.raises(SystemExit):
         run.run_label(_cfg(tmp_path, pg_dsn=None), ["steer_intent"])
+
+
+def test_ctrl_c_sends_no_heartbeat_but_another_exit_does(tmp_path, sink):
+    cfg = _cfg(tmp_path)
+    src = FakeSource(cfg, [])
+    for exc, sent in ((KeyboardInterrupt, 0), (SystemExit("no mlx"), 1)):
+        def stop(task, choice, exc=exc):
+            raise exc
+        sink.scans.clear()
+        with _env(tmp_path), pytest.raises((KeyboardInterrupt, SystemExit)):
+            run.run_label(cfg, ["steer_intent"], src=src, backend_for=stop, now=NOW)
+        assert len(sink.scans) == sent, exc
 
 
 def _win(start, minutes, app="Safari", title="Docs - a page", category="web-work",

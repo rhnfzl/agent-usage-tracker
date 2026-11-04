@@ -118,7 +118,8 @@ webhook_secret = "env:AUT_WEBHOOK_SECRET"      # shared secret sent as the X-AUT
 # activity, time, outcome, label and heartbeat rows arrive. `aut outcomes`, `aut outcome`,
 # `aut episodes review`, `aut inspect`, `aut time add` and `aut label` need it too. With both
 # set, usage goes over the webhook and falls back to pg_dsn when the webhook is unreachable.
-# While the webhook works, a scan does NOT send session rows: run `aut backfill --sessions-only`
-# from time to time to fill them. Requires the [postgres] (or [label]) extra:
+# For a remote host add sslmode=require; without it aut warns, because libpq can fall back to
+# plaintext. On a private link such as Tailscale, sslmode=disable says that is intended.
+# Requires the [postgres] (or [label]) extra:
 #   uv tool install "agent-usage-tracker[postgres] @ git+https://github.com/rhnfzl/agent-usage-tracker"
-# pg_dsn = "env:AUT_PG_DSN"                     # e.g. postgresql://agents_writer@db.example:5432/agents
+# pg_dsn = "env:AUT_PG_DSN"                     # e.g. postgresql://agents_writer@db.example:5432/agents?sslmode=require

@@ -16,6 +16,7 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Callable
 
+from .net import HTTP_ERRORS
 from .state import atomic_write_text
 
 _MODELS_DEV_PRICE_SCALE = 1_000_000  # models.dev prices are per-1M tokens
@@ -131,7 +132,7 @@ def _fetch_json(
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             data = json.loads(resp.read().decode("utf-8"))
-    except (OSError, ValueError):
+    except (*HTTP_ERRORS, ValueError):
         return None
     return data if isinstance(data, dict) else None
 

@@ -8,9 +8,15 @@ watermark). The runner pushes `events`, and only on a successful push calls `com
 
 from __future__ import annotations
 
+from typing import Callable, Iterator
+
+from ..config import Config
+from ..event import Batch
 from . import activitywatch, claude_code, codex, cursor, cursor_api, cursor_cli, cursor_sdk, pi
 
-REGISTRY = {
+Collector = Callable[[Config, dict], Iterator[Batch]]
+
+REGISTRY: dict[str, Collector] = {
     claude_code.NAME: claude_code.collect,
     codex.NAME: codex.collect,
     cursor.NAME: cursor.collect,

@@ -16,6 +16,7 @@ from __future__ import annotations
 import hashlib
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
+from typing import Callable, Sequence
 
 
 def valid_ts(ts: object) -> bool:
@@ -112,3 +113,10 @@ class TimeInterval:
     work_relevant: bool
     attrs: dict
     machine: str | None = None       # stamped by the runner (aw) or `aut time add` (manual)
+
+
+# What the sender takes and collectors yield: one source unit's rows, mixed, and the callback that
+# advances its watermark once they are delivered. Sequence, so a collector that emits one row type
+# can say which.
+Row = UsageEvent | ActivityEvent | TimeInterval
+Batch = tuple[Sequence[Row], Callable[[], None]]

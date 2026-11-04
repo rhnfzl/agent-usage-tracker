@@ -30,16 +30,6 @@ def config_path() -> Path:
     return Path(base) / "agent-usage-tracker" / "config.toml"
 
 
-def load_psycopg():
-    """The optional Postgres driver, or the operator's error naming the extra that installs it."""
-    try:
-        import psycopg
-    except ImportError as exc:
-        raise SystemExit("this needs the Postgres driver, which is not usable here: install "
-                         f"agent-usage-tracker[postgres] ({exc})") from None
-    return psycopg
-
-
 def _resolve(value):
     """Resolve an "env:VAR" indirection to its environment value; pass through otherwise."""
     if isinstance(value, str) and value.startswith("env:"):
@@ -110,6 +100,12 @@ class Config:
     @property
     def has_pg(self) -> bool:
         return bool(self.pg_dsn)
+
+    def require_pg(self, what: str) -> str:
+        """The DSN, or the operator's error saying that `what` cannot run without it."""
+        if not self.pg_dsn:
+            raise SystemExit(f"{what} needs transport.pg_dsn")
+        return self.pg_dsn
 
 
 def load_config() -> Config:

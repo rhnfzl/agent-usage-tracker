@@ -33,6 +33,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from agent_usage_tracker import outcomes as oc  # noqa: E402
+from agent_usage_tracker import push  # noqa: E402
 from agent_usage_tracker.repo_keys import RepoKeys, repo_identity  # noqa: E402
 from agent_usage_tracker.config import Config  # noqa: E402
 from agent_usage_tracker.git_safe import git_argv, git_env  # noqa: E402
@@ -263,11 +264,11 @@ def test_run_outcomes_dry_run_writes_nothing():
         key = _key(str(Path(d) / "origin.git"))
         os.environ["AUT_STATE"] = str(Path(d) / "state" / "state.json")
         sent: dict = {"rows": [], "scan": []}
-        saved = (oc._load_rows, oc._load_stored, oc._insert, oc.send_scan_rows)
+        saved = (oc._load_rows, oc._load_stored, oc._insert, push.send_scan_rows)
         oc._load_rows = lambda dsn: [_row(s["A"], key, 30), _row(s["D"], key, 40)]
         oc._load_stored = lambda dsn: {}
         oc._insert = lambda dsn, rows: sent["rows"].extend(rows)
-        oc.send_scan_rows = lambda cfg, rows: sent["scan"].extend(rows)
+        push.send_scan_rows = lambda dsn, rows: sent["scan"].extend(rows)
         try:
             cfg = _cfg(Path(d), (str(Path(d) / "projects"),))
             stats = oc.run_outcomes(cfg, fetch=False, dry_run=True, now=NOW)
@@ -282,7 +283,7 @@ def test_run_outcomes_dry_run_writes_nothing():
             cache = json.loads((Path(d) / "state" / oc.CACHE_NAME).read_text())
             assert cache == {s["A"]: 1.0, s["D"]: 0.0}, cache
         finally:
-            (oc._load_rows, oc._load_stored, oc._insert, oc.send_scan_rows) = saved
+            (oc._load_rows, oc._load_stored, oc._insert, push.send_scan_rows) = saved
             os.environ.pop("AUT_STATE")
         print("ok run_outcomes_dry_run_writes_nothing")
 
@@ -457,10 +458,10 @@ def test_cache_is_saved_before_the_sink_is_written():
         work, s = _world(Path(d))
         key = _key(str(Path(d) / "origin.git"))
         os.environ["AUT_STATE"] = str(Path(d) / "state" / "state.json")
-        saved = (oc._load_rows, oc._load_stored, oc.send_scan_rows)
+        saved = (oc._load_rows, oc._load_stored, push.send_scan_rows)
         oc._load_rows = lambda dsn: [_row(s["D"], key, 40)]
         oc._load_stored = lambda dsn: (_ for _ in ()).throw(RuntimeError("no table"))
-        oc.send_scan_rows = lambda cfg, rows: None
+        push.send_scan_rows = lambda dsn, rows: None
         try:
             try:
                 oc.run_outcomes(_cfg(Path(d), (str(Path(d) / "projects"),)), fetch=False,
@@ -470,7 +471,7 @@ def test_cache_is_saved_before_the_sink_is_written():
             cache = json.loads((Path(d) / "state" / oc.CACHE_NAME).read_text())
             assert cache == {s["D"]: 0.0}, cache
         finally:
-            (oc._load_rows, oc._load_stored, oc.send_scan_rows) = saved
+            (oc._load_rows, oc._load_stored, push.send_scan_rows) = saved
             os.environ.pop("AUT_STATE")
         print("ok cache_is_saved_before_the_sink_is_written")
 
@@ -705,6 +706,24 @@ def test_fetch_only_clones_with_a_row_key():
         finally:
             oc._load_rows, oc.load_json_dict, oc._load_stored, oc.fetch_clones = saved
     print("ok fetch_only_clones_with_a_row_key")
+
+
+def test_ctrl_c_sends_no_heartbeat():
+    def stop(dsn):
+        raise KeyboardInterrupt
+    sent: list = []
+    saved = (oc._load_rows, push.send_scan_rows)
+    oc._load_rows, push.send_scan_rows = stop, lambda dsn, rows: sent.extend(rows)
+    try:
+        try:
+            oc.run_outcomes(_cfg(Path(tempfile.gettempdir())), fetch=False, dry_run=False, now=NOW)
+            raise AssertionError("KeyboardInterrupt must propagate")
+        except KeyboardInterrupt:
+            pass
+    finally:
+        oc._load_rows, push.send_scan_rows = saved
+    assert sent == [], sent
+    print("ok ctrl_c_sends_no_heartbeat")
 
 
 def main() -> int:

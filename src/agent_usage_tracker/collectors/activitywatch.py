@@ -20,7 +20,6 @@ means no rows.
 
 from __future__ import annotations
 
-import http.client
 import json
 import os
 import plistlib
@@ -36,6 +35,7 @@ from typing import Any, Callable, Iterator
 
 from ..config import Config
 from ..event import TimeInterval, make_event_id
+from ..net import HTTP_ERRORS
 from ..redact import clean_text
 
 NAME = "activitywatch"
@@ -256,8 +256,7 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[TimeInterval], Callabl
         res = _http(cfg, "POST", "/api/0/query/",
                     {"query": query, "timeperiods": [f"{start.isoformat()}/{end.isoformat()}"]})
         raw = res[0] if isinstance(res, list) and res and isinstance(res[0], list) else []
-    except (urllib.error.URLError, http.client.HTTPException, OSError, ValueError, TypeError,
-            AttributeError, KeyError) as exc:
+    except (*HTTP_ERRORS, ValueError, TypeError, AttributeError, KeyError) as exc:
         print(f"aut: activitywatch: aw-server not usable ({type(exc).__name__}); skipping",
               file=sys.stderr)
         return

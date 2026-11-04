@@ -20,10 +20,10 @@ import os
 import re
 import sys
 from pathlib import Path
-from typing import Callable, Iterator
+from typing import Iterator
 
 from ..config import Config
-from ..event import ActivityEvent, EventSession, UsageEvent, make_event_id
+from ..event import Batch, ActivityEvent, EventSession, UsageEvent, make_event_id
 from ..repo_keys import RepoKeys
 from .activity_common import (Link, add_call, blank_agg, commit_call, commit_dir,
                               commit_repo, commit_shas, first_record, ms_between, text_of,
@@ -163,7 +163,7 @@ class _Activity:
         a["prev"] = role
 
 
-def collect(cfg: Config, wm: dict) -> Iterator[tuple[list, Callable[[], None]]]:
+def collect(cfg: Config, wm: dict) -> Iterator[Batch]:
     base = cfg.home / ".pi" / "agent" / "sessions"
     if not base.exists():
         return

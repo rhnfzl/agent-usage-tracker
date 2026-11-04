@@ -20,10 +20,10 @@ import re
 import sys
 import time
 from pathlib import Path
-from typing import Callable, Iterator
+from typing import Iterator
 
 from ..config import Config
-from ..event import EventSession, UsageEvent, make_event_id
+from ..event import Batch, EventSession, UsageEvent, make_event_id
 from ..repo_keys import RepoKeys
 from .activity_common import IDLE_S, text_of
 from ._util import basename, safe_int, scan_file, str_or_none
@@ -151,7 +151,7 @@ def _complete(path: str, off: int) -> bool:
     return off >= st.st_size and time.time() - st.st_mtime >= IDLE_S
 
 
-def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[UsageEvent], Callable[[], None]]]:
+def collect(cfg: Config, wm: dict) -> Iterator[Batch]:
     base = cfg.home / ".claude" / "projects"
     if not base.exists():
         return

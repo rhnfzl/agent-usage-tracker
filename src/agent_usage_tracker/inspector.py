@@ -16,7 +16,8 @@ from collections import Counter
 from datetime import datetime, timedelta, timezone
 
 from . import review
-from .config import Config, load_psycopg
+from .config import Config
+from .sink import connect
 
 # (shown name, link row attrs): a commit key is a printed commit (commit_keys) or a quoted SHA
 # (sha_refs), both HMACs of the first 7 hex, so they meet in one type
@@ -56,8 +57,6 @@ def _episode_prefix(episode: str) -> str:
 def fetch(dsn: str, episode: str | None = None, day: str | None = None,
           label: str | None = None) -> dict:
     """Raw rows for one view. Read-only; every SELECT is ids, keys, enums and numbers."""
-    psycopg = load_psycopg()
-
     start = end = _EPOCH
     if episode is not None:
         where, params = "e.episode_id::text LIKE %s", (_episode_prefix(episode) + "%",)
@@ -74,7 +73,7 @@ def fetch(dsn: str, episode: str | None = None, day: str | None = None,
                  "agents.episode_member m JOIN agents.activity_event a ON a.session_id = "
                  "m.session_id WHERE a.kind = 'steer' AND a.event_id = %s)")
         params = (label.split(":")[0], label)
-    with psycopg.connect(dsn, connect_timeout=15) as conn:
+    with connect(dsn) as conn:
         def q(sql, p):
             return conn.execute(sql, p).fetchall()
         eps = review.load_episodes(conn, where, params)
@@ -292,20 +291,19 @@ machine's logs and are never sent.</p>"""]
 
 def run_inspect(cfg: Config, episode: str | None = None, day: str | None = None,
                 label: str | None = None, fetch_fn=fetch, serve_fn=review.serve) -> dict:
-    if not cfg.has_pg:
-        raise SystemExit("inspect needs transport.pg_dsn")
+    dsn = cfg.require_pg("inspect")
     if episode is not None:
         episode = _episode_prefix(episode)
     title = f"Episode {episode}" if episode is not None else \
         f"Day {day}" if day is not None else f"Label {label}"
-    view = build(fetch_fn(cfg.pg_dsn, episode=episode, day=day, label=label))
+    view = build(fetch_fn(dsn, episode=episode, day=day, label=label))
     if not view["episodes"] and not view["labels"]:
         raise SystemExit(f"inspect: nothing found for {title.lower()}")
     info = review.local_info(cfg.home, {s["session_id"] for ep in view["episodes"]
                                         for s in ep["sessions"][:4 * _SHOW]
                                         if s["role"] == "seed"})   # children have no title
     summary = serve_fn(view["episodes"], info, title.lower(),
-                       lambda rows: review.insert_corrections(cfg.pg_dsn, rows),
+                       lambda rows: review.insert_corrections(dsn, rows),
                        front=lambda tok: render(view, info, tok, title, label))
     if summary["reviewed"]:
         print(f"inspect: {summary['reviewed']} corrections saved")

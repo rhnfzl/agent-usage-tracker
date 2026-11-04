@@ -29,7 +29,6 @@ import re
 import shutil
 import signal
 import subprocess
-import sys
 import time
 from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor
@@ -39,11 +38,11 @@ from glob import glob
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import __version__
-from .config import Config, load_psycopg
+from .config import Config
 from .git_safe import git_argv, git_env
-from .push import scrub_error, send_scan_rows
+from .push import deliver_scan_rows, scan_row, scrub_error
 from .repo_keys import RepoKeys, repo_identity
+from .sink import connect, write_many
 from .state import state_path, atomic_write_text, load_json_dict
 
 DAY = 86400
@@ -440,9 +439,7 @@ def _cache_path() -> Path:
 
 
 def _load_rows(dsn: str) -> list[dict]:
-    psycopg = load_psycopg()
-
-    with psycopg.connect(dsn, connect_timeout=15) as conn:
+    with connect(dsn) as conn:
         rows = conn.execute(
             "SELECT session_id, ts, attrs->>'sha', attrs->>'repo_key', "
             "coalesce((attrs->>'amend')::boolean, false) "
@@ -452,9 +449,7 @@ def _load_rows(dsn: str) -> list[dict]:
 
 
 def _load_stored(dsn: str) -> dict[tuple[str, str], tuple]:
-    psycopg = load_psycopg()
-
-    with psycopg.connect(dsn, connect_timeout=15) as conn:
+    with connect(dsn) as conn:
         rows = conn.execute(
             "SELECT DISTINCT ON (sha, repo_key) sha, repo_key, state, survival "
             "FROM agents.commit_outcome ORDER BY sha, repo_key, decided_at DESC").fetchall()
@@ -463,28 +458,21 @@ def _load_stored(dsn: str) -> dict[tuple[str, str], tuple]:
 
 
 def _insert(dsn: str, rows: list[dict]) -> None:
-    psycopg = load_psycopg()
-
-    with psycopg.connect(dsn, connect_timeout=15) as conn:
-        with conn.cursor() as cur:
-            cur.executemany(
-                "INSERT INTO agents.commit_outcome (sha, repo_key, state, survival, decided_at) "
-                "VALUES (%s, %s, %s, %s, %s) ON CONFLICT DO NOTHING",
-                [(r["sha"], r["repo_key"], r["state"], r["survival"], r["decided_at"])
-                 for r in rows])
-        conn.commit()
+    write_many(dsn, "INSERT INTO agents.commit_outcome (sha, repo_key, state, survival, decided_at) "
+               "VALUES (%s, %s, %s, %s, %s) ON CONFLICT DO NOTHING",
+               [(r["sha"], r["repo_key"], r["state"], r["survival"], r["decided_at"])
+                for r in rows])
 
 
 def run_outcomes(cfg: Config, fetch: bool, dry_run: bool, now: float | None = None) -> Counter:
     """Score every commit row and write the changed states. --fetch also turns on gh. A dry run
     reads the sink and the clones and writes nothing: no rows, no cache, no heartbeat."""
-    if not cfg.has_pg:
-        raise SystemExit("outcomes needs transport.pg_dsn (it reads the commit rows)")
+    dsn = cfg.require_pg("outcomes (it reads the commit rows)")
     started = datetime.now(timezone.utc)
     now = now if now is not None else started.timestamp()
-    written, status, error = 0, "ok", None
+    written, status, error, interrupted = 0, "ok", None, False
     try:
-        rows = _load_rows(cfg.pg_dsn)
+        rows = _load_rows(dsn)
         clones = find_clones(list(cfg.outcome_repo_roots), RepoKeys(cfg.repo_key_salt))
         stats: Counter = Counter(clones=len(clones))
         if fetch:
@@ -498,28 +486,22 @@ def run_outcomes(cfg: Config, fetch: bool, dry_run: bool, now: float | None = No
         stats.update(ev)
         if not dry_run:
             atomic_write_text(_cache_path(), json.dumps(cache))     # before the sink: a failing write never redoes the blame
-        todo = pending(outs, _load_stored(cfg.pg_dsn))
+        todo = pending(outs, _load_stored(dsn))
         stats["to_write"] = len(todo)
         if not dry_run:
             decided = datetime.fromtimestamp(now, timezone.utc)
-            _insert(cfg.pg_dsn, [{"sha": o["sha"], "repo_key": o["repo_key"], "state": o["state"],
-                                  "survival": o["survival"], "decided_at": decided} for o in todo])
+            _insert(dsn, [{"sha": o["sha"], "repo_key": o["repo_key"], "state": o["state"],
+                           "survival": o["survival"], "decided_at": decided} for o in todo])
             written = len(todo)
         return stats
     except BaseException as exc:
         status, error = "error", scrub_error(exc)
+        interrupted = isinstance(exc, KeyboardInterrupt)    # leave at once, send nothing
         raise
     finally:
-        if not dry_run:
-            try:            # best effort, like the scan heartbeat
-                send_scan_rows(cfg, [{
-                    "machine": cfg.machine, "collector": "outcomes", "started_at": started,
-                    "finished_at": datetime.now(timezone.utc), "status": status,
-                    "events": written, "human": 0, "newest_ts": None, "error": error,
-                    "aut_version": __version__}])
-            except Exception as exc:
-                print(f"aut: warning: outcomes heartbeat not delivered: {scrub_error(exc)}",
-                      file=sys.stderr)
+        if not dry_run and not interrupted:
+            deliver_scan_rows(cfg, [scan_row(cfg, "outcomes", started, status, error, written)],
+                              "outcomes")
 
 
 def claude_project_dir(path: str) -> str:
@@ -578,9 +560,7 @@ def build_manual_outcome(cfg: Config, outcome: str, cwd: str, session: str | Non
 
 
 def insert_manual(dsn: str, row: dict) -> None:
-    psycopg = load_psycopg()
-
-    with psycopg.connect(dsn, connect_timeout=15) as conn:
+    with connect(dsn) as conn:
         conn.execute("INSERT INTO agents.manual_outcome (session_id, outcome, ts, repo_key) "
                      "VALUES (%s, %s, %s, %s)",
                      (row["session_id"], row["outcome"], row["ts"], row["repo_key"]))

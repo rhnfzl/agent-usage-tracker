@@ -161,8 +161,9 @@ it ran, after the usage for that collector has been delivered:
 All rows of a scan go out in one `INSERT ... ON CONFLICT (machine, collector, finished_at) DO
 NOTHING` over `transport.pg_dsn`, also when a collector raised. A webhook-only config skips it
 with one stderr note. The heartbeat **never blocks usage delivery**: any failure sending it
-prints one warning and is swallowed, so usage rows, the watermark and the exit status are the
-same as without it.
+prints one warning (type and redacted message, on local stderr) and is swallowed, so usage rows,
+the watermark and the exit status are the same as without it. Ctrl-C leaves at once and sends no
+heartbeat, in `aut scan`, `aut outcomes` and `aut label` alike.
 
 ## Session identity: agents.event_session
 
@@ -225,8 +226,10 @@ origin by joining on `(session_id, turn_id)`.
 
 Delivery: over `transport.pg_dsn`, usage rows and session rows are written on one connection in
 **one transaction** (`ON CONFLICT (event_id) DO NOTHING` for sessions), so a failure stores
-neither and the watermark does not move. The webhook carries usage only and says so once on
-stderr.
+neither and the watermark does not move. The webhook carries usage only: with a `pg_dsn` too, the
+session rows of the batch go over `pg_dsn` in one transaction with its activity and time rows, and
+a failure there leaves the watermark in place. A webhook-only machine skips them and says so once
+on stderr.
 
 History: `aut backfill --sessions-only [--agents claude_code,codex,pi,cursor_cli] [--dry-run]` re-reads every file from
 the start on a throwaway watermark (the live one is neither read nor saved) and sends **only**
@@ -387,8 +390,8 @@ not written yet). A message after a summary and before the next prompt sits in n
 the chat went quiet is lost.
 
 Delivery: over `transport.pg_dsn` in the same transaction as the usage and session rows of that
-batch, `ON CONFLICT (event_id, ts) DO NOTHING` (the writer has INSERT only). The webhook skips
-them with the same one-line note as session rows. History: `aut backfill --activity-only
+batch, `ON CONFLICT (event_id, ts) DO NOTHING` (the writer has INSERT only). A webhook-only machine
+skips them with the same one-line note as session rows. History: `aut backfill --activity-only
 [--dry-run]` works exactly like `--sessions-only` (both flags may be given together) and never
 sends usage rows. For `cursor_cli` the first normal `aut scan` also sends its human rows, which no
 collector sent before.
@@ -553,7 +556,7 @@ up. Limit: a browser missing from the defaults is classified by its bundle (ofte
 Delivery: over `transport.pg_dsn` in the same transaction as the usage, session and activity
 rows of the batch, `ON CONFLICT (event_id, ts) DO NOTHING`. With a webhook and a `pg_dsn`, the
 webhook carries the usage and the activity and time rows of the same batch still go over
-`pg_dsn`. A webhook-only machine skips them with the same one-line note; there is no backfill for
+`pg_dsn`, with the batch's session rows. A webhook-only machine skips them with the same one-line note; there is no backfill for
 time, so it does not send time.
 
 ## Labels: activity_event kind `label` (`aut label`)

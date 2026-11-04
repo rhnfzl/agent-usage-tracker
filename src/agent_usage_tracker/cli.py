@@ -42,13 +42,13 @@ import os
 import sys
 from datetime import date, datetime, timedelta, timezone
 
-from . import __version__, pricing
+from . import pricing
 from .collectors import REGISTRY, activitywatch
 from .config import Config, load_config, config_path
-from .event import ActivityEvent, TimeInterval, UsageEvent, make_event_id, valid_ts
+from .event import ActivityEvent, Row, TimeInterval, UsageEvent, make_event_id, valid_ts
 from .label.names import DAYS, DECISION_TASKS, TASK_NAMES
-from .push import (COLUMNS, insert_pg, make_sender, scrub_error, send_activity_rows, send_scan_rows,
-                   send_session_rows)
+from .push import (COLUMNS, deliver_scan_rows, insert_pg, make_sender, scan_row, scrub_error,
+                   send_activity_rows, send_session_rows)
 from .state import collector_wm, load_state, save_state
 
 BATCH = 500
@@ -72,7 +72,7 @@ def _blank_agg() -> dict:
             "intervals": 0, "time": {}, "relevant_s": 0.0}    # time: category -> seconds
 
 
-def _add(agg: dict, e: UsageEvent | ActivityEvent | TimeInterval) -> None:
+def _add(agg: dict, e: Row) -> None:
     if isinstance(e, TimeInterval):      # active time; no tokens, kept out of events/human
         secs = (datetime.fromisoformat(e.end_ts) - datetime.fromisoformat(e.ts)).total_seconds()
         agg["intervals"] += 1
@@ -97,14 +97,6 @@ def _add(agg: dict, e: UsageEvent | ActivityEvent | TimeInterval) -> None:
     m["total"] += e.total_tokens
 
 
-def _deliver_scan_rows(cfg: Config, rows: list[dict]) -> None:
-    """The heartbeat is best effort: whatever goes wrong here must not touch the usage scan."""
-    try:
-        send_scan_rows(cfg, rows)
-    except Exception as exc:
-        print(f"aut: warning: scan heartbeat not delivered: {scrub_error(exc)}", file=sys.stderr)
-
-
 def run_scan(cfg: Config, agents: list[str], dry_run: bool) -> dict:
     state = load_state()
     sender = None if dry_run else make_sender(cfg)
@@ -121,7 +113,7 @@ def run_scan(cfg: Config, agents: list[str], dry_run: bool) -> dict:
         # the sink stores one and the numbers there are right; without this set the PRINTED tally
         # counted both and overstated the scan. Per-agent, discarded when the agent finishes.
         seen: set[str] = set()
-        buf_events: list[UsageEvent] = []
+        buf_events: list[Row] = []
         buf_commits: list = []
         started_at = datetime.now(timezone.utc)
         status, error, newest_ts, interrupted = "ok", None, None, False
@@ -143,12 +135,9 @@ def run_scan(cfg: Config, agents: list[str], dry_run: bool) -> dict:
                         if not valid_ts(e.ts):
                             agg["skipped_no_ts"] += 1
                             continue
-                        try:                # heartbeat bookkeeping must never stop the scan
-                            ts = datetime.fromisoformat(e.ts.replace("Z", "+00:00"))
-                            ts = ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
-                            newest_ts = ts if newest_ts is None or ts > newest_ts else newest_ts
-                        except Exception:
-                            pass
+                        ts = datetime.fromisoformat(e.ts.replace("Z", "+00:00"))    # valid_ts: parses
+                        ts = ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
+                        newest_ts = ts if newest_ts is None or ts > newest_ts else newest_ts
                         if e.event_id in seen:
                             agg["duplicates"] += 1      # counted once, above
                         else:
@@ -172,23 +161,19 @@ def run_scan(cfg: Config, agents: list[str], dry_run: bool) -> dict:
                 activitywatch.purge(cfg)                       # never raises
         except BaseException as exc:
             status, error = "error", scrub_error(exc)
-            interrupted = not isinstance(exc, Exception)    # Ctrl-C: leave at once, send nothing
+            interrupted = isinstance(exc, KeyboardInterrupt)    # leave at once, send nothing
             raise                           # unchanged: the scan still fails as before
         finally:
             if not dry_run:
                 save_state(state)
-                scan_rows.append({
-                    "machine": cfg.machine, "collector": name, "started_at": started_at,
-                    "finished_at": datetime.now(timezone.utc), "status": status,
-                    "events": agg["events"] + agg["intervals"], "human": agg["human"],
-                    "newest_ts": newest_ts,
-                    "error": error, "aut_version": __version__,
-                })
+                scan_rows.append(scan_row(cfg, name, started_at, status, error,
+                                          agg["events"] + agg["intervals"], agg["human"],
+                                          newest_ts))
                 if status == "error" and not interrupted:   # the loop ends here: one delivery
-                    _deliver_scan_rows(cfg, scan_rows)
+                    deliver_scan_rows(cfg, scan_rows)
 
     if not dry_run:
-        _deliver_scan_rows(cfg, scan_rows)
+        deliver_scan_rows(cfg, scan_rows)
     return report
 
 
@@ -271,9 +256,8 @@ def run_session_backfill(cfg: Config, agents: list[str], dry_run: bool, sessions
     can differ from the stored ones (see the ts note in collectors/claude_code.py), and those would
     land as new duplicates. Works on a throwaway watermark, so the live one is neither read nor
     saved. ON CONFLICT makes a re-run free."""
-    if not dry_run and not cfg.has_pg:
-        raise SystemExit("backfill --sessions-only/--activity-only needs transport.pg_dsn "
-                         "(or use --dry-run).")
+    dsn = "" if dry_run else cfg.require_pg("backfill --sessions-only/--activity-only without "
+                                            "--dry-run")
     counts: dict = {"rows": 0, "by_origin": {}, "turn_null": 0, "subagent_no_parent": 0,
                     "activity": 0, "by_kind": {}, "via": {}, "link": {}}
     buf: list[dict] = []
@@ -281,9 +265,9 @@ def run_session_backfill(cfg: Config, agents: list[str], dry_run: bool, sessions
 
     def flush() -> None:
         if buf and not dry_run:
-            send_session_rows(cfg.pg_dsn, buf)      # raises -> the command fails, nothing to undo
+            send_session_rows(dsn, buf)      # raises -> the command fails, nothing to undo
         if abuf and not dry_run:
-            send_activity_rows(cfg.pg_dsn, abuf)
+            send_activity_rows(dsn, abuf)
         buf.clear()
         abuf.clear()
 
@@ -414,9 +398,7 @@ def build_manual(cfg: Config, start: str | None = None, end: str | None = None,
 
 def cmd_time_add(cfg: Config, args) -> None:
     row = build_manual(cfg, args.start, args.end, args.minutes, args.at, args.not_relevant)
-    if not cfg.has_pg:
-        raise SystemExit("time add needs transport.pg_dsn")
-    insert_pg(cfg.pg_dsn, [row])
+    insert_pg(cfg.require_pg("time add"), [row])
     s, e = (datetime.fromisoformat(x).astimezone() for x in (row.ts, row.end_ts))
     mins = (e - s).total_seconds() / 60
     print(f"added manual interval {s:%Y-%m-%d %H:%M} -> {e:%Y-%m-%d %H:%M} ({mins:.0f} min, "
@@ -567,10 +549,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.cmd == "outcome":
         from . import outcomes
-        if not cfg.has_pg:
-            raise SystemExit("outcome needs transport.pg_dsn")
+        dsn = cfg.require_pg("outcome")
         row = outcomes.build_manual_outcome(cfg, args.outcome, os.getcwd(), args.session)
-        outcomes.insert_manual(cfg.pg_dsn, row)
+        outcomes.insert_manual(dsn, row)
         print(f"marked session {row['session_id'][:8]} {row['outcome']}")
         return 0
 

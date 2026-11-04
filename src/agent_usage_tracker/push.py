@@ -1,10 +1,13 @@
-"""Transport: push normalized events to the sink.
+"""Transport: push normalized rows to the sink.
 
-Default = n8n webhook (one auth story from any machine, behind Cloudflare Access).
-Fallback = direct Postgres over Tailscale (only used if the webhook is unavailable and
-transport.pg_dsn is set). Both are idempotent at the sink via event_id + ON CONFLICT, so
-re-delivery is harmless. A sender that cannot deliver RAISES, so the watermark is not
-committed and the events are re-sent on the next scan.
+A scan's usage rows go over the n8n webhook (behind Cloudflare Access) when one is configured, and
+fall back to direct Postgres (transport.pg_dsn) when it fails, or go to Postgres alone without a
+webhook. Everything else (session, activity, time, outcome, label and heartbeat rows) goes over
+pg_dsn only. All of it is idempotent at the sink via ON CONFLICT, so re-delivery is harmless.
+
+A sender that cannot deliver RAISES, so the watermark is not committed and the events are re-sent
+on the next scan. The one exception is a webhook-only machine: it has no route for the non-usage
+rows, so they are skipped with one stderr note and the watermark still moves.
 
 Delivery is strict on purpose: redirects are NOT followed (a 3xx that turns the POST into a
 GET could otherwise look like success and advance the watermark over data the sink never
@@ -17,11 +20,16 @@ import json
 import sys
 import urllib.error
 import urllib.request
+from datetime import datetime, timezone
 from typing import Callable
 from urllib.parse import urlparse
 
-from .config import Config, load_psycopg
-from .event import ActivityEvent, TimeInterval, UsageEvent
+from . import __version__
+from .config import Config
+from .event import ActivityEvent, Row, TimeInterval, UsageEvent
+from .net import HTTP_ERRORS
+from .redact import redact
+from .sink import LOCAL_HOSTS, connect, write_many
 
 # Column order shared with the homelab schema (agents.usage_event). Keep in sync.
 COLUMNS = (
@@ -49,7 +57,7 @@ ACTIVITY_COLUMNS = ("event_id", "ts", "machine", "agent", "kind", "session_id", 
 ACTIVITY_TABLE = "agents.activity_event"
 
 # One row per active-time interval (agents.time_interval): ActivityWatch window time and manual
-# entries. title is private (redacted on this machine, nulled at the sink after 180 days).
+# entries. title is private (redacted on this machine; retention is off by default, see CONTRACT.md).
 TIME_COLUMNS = ("event_id", "ts", "end_ts", "machine", "source", "app", "title", "category",
                 "work_relevant", "attrs")
 TIME_TABLE = "agents.time_interval"
@@ -70,7 +78,7 @@ def _post_webhook(url: str, secret: str, batch: list[UsageEvent],
     req = urllib.request.Request(url, data=body, method="POST", headers=headers)
     try:
         with urllib.request.build_opener(_NoRedirect).open(req, timeout=30) as resp:
-            status = getattr(resp, "status", None) or resp.getcode()
+            status = resp.status
     except urllib.error.HTTPError as exc:            # 3xx (no-follow) / 4xx / 5xx
         raise RuntimeError(f"webhook HTTP {exc.code}") from exc
     if not (200 <= status < 300):
@@ -91,6 +99,7 @@ def _activity_rows(acts: list[ActivityEvent]) -> list[tuple]:
              json.dumps(a.attrs, sort_keys=True)) for a in acts]
 
 
+_SESSION_SQL = _insert_sql(SESSION_TABLE, SESSION_COLUMNS, "event_id")
 _ACTIVITY_SQL = _insert_sql(ACTIVITY_TABLE, ACTIVITY_COLUMNS, "event_id, ts").replace(
     "%s)", "%s::jsonb)")                 # the last placeholder is attrs
 
@@ -103,27 +112,25 @@ def _time_rows(times: list[TimeInterval]) -> list[tuple]:
              t.work_relevant, json.dumps(t.attrs, sort_keys=True)) for t in times]
 
 
-def _split(batch: list) -> tuple[list[UsageEvent], list[ActivityEvent], list[TimeInterval]]:
+def _split(batch: list[Row]) -> tuple[list[UsageEvent], list[ActivityEvent], list[TimeInterval]]:
     usage = [e for e in batch if isinstance(e, UsageEvent)]
     acts = [e for e in batch if isinstance(e, ActivityEvent)]
     return usage, acts, [e for e in batch if isinstance(e, TimeInterval)]
 
 
-def insert_pg(dsn: str, batch: list) -> None:
+def insert_pg(dsn: str, batch: list[Row], with_usage: bool = True) -> None:
     """Usage rows, their session rows, and the activity and time rows of the batch in ONE
     transaction: all land or none does, so a raise leaves the watermark where it was and the batch
-    is re-sent."""
-    psycopg = load_psycopg()
-
+    is re-sent. with_usage=False: the webhook already carried the usage rows."""
     usage, acts, times = _split(batch)
-    rows = [tuple(e.to_dict()[c] for c in COLUMNS) for e in usage]
+    rows = [tuple(e.to_dict()[c] for c in COLUMNS) for e in usage] if with_usage else []
     sessions = _session_rows(usage)
-    with psycopg.connect(dsn, connect_timeout=15) as conn:
+    with connect(dsn) as conn:
         with conn.cursor() as cur:
             if rows:
                 cur.executemany(_insert_sql(TABLE, COLUMNS, "event_id, ts"), rows)
             if sessions:
-                cur.executemany(_insert_sql(SESSION_TABLE, SESSION_COLUMNS, "event_id"), sessions)
+                cur.executemany(_SESSION_SQL, sessions)
             if acts:
                 cur.executemany(_ACTIVITY_SQL, _activity_rows(acts))
             if times:
@@ -133,93 +140,79 @@ def insert_pg(dsn: str, batch: list) -> None:
 
 def send_activity_rows(dsn: str, acts: list[ActivityEvent]) -> None:
     """Activity rows only (the activity backfill). Idempotent on (event_id, ts); raises on failure."""
-    if not acts:
-        return
-    psycopg = load_psycopg()
-
-    with psycopg.connect(dsn, connect_timeout=15) as conn:
-        with conn.cursor() as cur:
-            cur.executemany(_ACTIVITY_SQL, _activity_rows(acts))
-        conn.commit()
+    write_many(dsn, _ACTIVITY_SQL, _activity_rows(acts))
 
 
 def send_session_rows(dsn: str, rows: list[dict]) -> None:
     """Session rows only (the sessions-only backfill). Idempotent on event_id; raises on failure."""
-    if not rows:
-        return
-    psycopg = load_psycopg()
-
-    with psycopg.connect(dsn, connect_timeout=15) as conn:
-        with conn.cursor() as cur:
-            cur.executemany(_insert_sql(SESSION_TABLE, SESSION_COLUMNS, "event_id"),
-                            [tuple(r[c] for c in SESSION_COLUMNS) for r in rows])
-        conn.commit()
+    write_many(dsn, _SESSION_SQL, [tuple(r[c] for c in SESSION_COLUMNS) for r in rows])
 
 
-def make_sender(cfg: Config) -> Callable[[list[UsageEvent]], None]:
-    """Return a send(batch) that tries the webhook, then the PG fallback. Raises (before any
-    send) if nothing is configured or a configured webhook is missing its secret."""
-    if not cfg.has_webhook and not cfg.has_pg:
+def make_sender(cfg: Config) -> Callable[[list[Row]], None]:
+    """Return a send(batch): usage over the webhook, or over pg_dsn without one or when it fails,
+    and every other row over pg_dsn. Raises (before any send) if nothing is configured or a
+    configured webhook is missing its secret."""
+    url, secret, dsn = cfg.webhook_url, cfg.webhook_secret, cfg.pg_dsn
+    if not url and not dsn:
         raise SystemExit(
             "no transport configured: set [transport].webhook_url (and/or pg_dsn) in your "
             "config, or run with --dry-run to preview without sending."
         )
-    if cfg.has_webhook and not cfg.webhook_secret:
+    if url and not secret:
         raise SystemExit(
             "transport.webhook_url is set but webhook_secret is missing or unresolved; "
             "refusing to send unauthenticated. Set webhook_secret (or its env: value)."
         )
-    if cfg.has_webhook:
-        parsed = urlparse(cfg.webhook_url)
+    if url:
+        parsed = urlparse(url)
         scheme = parsed.scheme.lower()
         host = (parsed.hostname or "").lower()
-        local = host in ("localhost", "127.0.0.1", "::1")
         # Allowlist, not blocklist: only https, or http to localhost for testing. Anything else
         # (http to a remote host, or ftp:/file:/no-scheme) could leak the secret or misfire.
-        if not (scheme == "https" or (scheme == "http" and local)):
+        if not (scheme == "https" or (scheme == "http" and host in LOCAL_HOSTS)):
             raise SystemExit(
-                f"refusing to send the webhook secret to '{cfg.webhook_url}': only https:// "
+                f"refusing to send the webhook secret to '{url}': only https:// "
                 f"(or http:// to localhost for testing) is allowed, not '{scheme or 'no'}-scheme'."
             )
+        # A warning, not a refusal: a webhook outside Access works today without these headers.
+        if bool(cfg.cf_access_client_id) != bool(cfg.cf_access_client_secret):
+            print("aut: warning: only one of cf_access_client_id and cf_access_client_secret is "
+                  "set, so no Cloudflare Access headers are sent.", file=sys.stderr)
 
-    note_shown = False
+    note_shown = fallback_shown = False
 
-    def note_sessions_skipped(batch: list, pg: bool = False) -> None:
-        nonlocal note_shown
-        if note_shown or not any(not isinstance(e, UsageEvent) or e.session for e in batch):
-            return
-        note_shown = True
-        # shortcut: the webhook carries usage only; upgrade when a machine runs webhook-only (until
-        # then `aut backfill --sessions-only` / `--activity-only` over pg_dsn fills the gap; time
-        # rows have no backfill, so a webhook-only machine loses them).
-        if pg:
-            print("aut: note: session rows not sent over the webhook (`aut backfill "
-                  "--sessions-only` fills them over pg_dsn)", file=sys.stderr)
-            return
-        print("aut: note: session/activity/time rows not sent over the webhook (needs "
-              "transport.pg_dsn)", file=sys.stderr)
-
-    def send(batch: list[UsageEvent]) -> None:
+    def send(batch: list[Row]) -> None:
+        nonlocal note_shown, fallback_shown
         if not batch:
             return
+        usage, acts, times = _split(batch)
         webhook_err: Exception | None = None
-        if cfg.has_webhook:
-            usage, acts, times = _split(batch)
+        if url and secret:
             try:
                 if usage:
-                    _post_webhook(cfg.webhook_url, cfg.webhook_secret, usage,
-                                  cfg.cf_access_headers)
-            except (urllib.error.URLError, RuntimeError, OSError) as exc:
+                    _post_webhook(url, secret, usage, cfg.cf_access_headers)
+            except (*HTTP_ERRORS, RuntimeError) as exc:
                 webhook_err = exc
+                if dsn and not fallback_shown:      # printed first, so a PG failure shows both
+                    fallback_shown = True
+                    print(f"aut: warning: webhook delivery failed, using transport.pg_dsn: "
+                          f"{_local_error(exc)}", file=sys.stderr)
             else:
-                if cfg.has_pg and (acts or times):     # the webhook carries usage only
-                    insert_pg(cfg.pg_dsn, acts + times)
-                note_sessions_skipped(usage if cfg.has_pg else batch, cfg.has_pg)
+                if acts or times or any(e.session for e in usage):
+                    if dsn:
+                        insert_pg(dsn, batch, with_usage=False)
+                    elif not note_shown:
+                        # shortcut: the webhook carries usage only; upgrade when a machine runs
+                        # webhook-only (time rows have no backfill, so that machine loses them).
+                        note_shown = True
+                        print("aut: note: session/activity/time rows not sent over the webhook "
+                              "(needs transport.pg_dsn)", file=sys.stderr)
                 return
-        if cfg.has_pg:
-            insert_pg(cfg.pg_dsn, batch)
+        if dsn:
+            insert_pg(dsn, batch)
             return
-        raise RuntimeError(f"webhook delivery failed and no PG fallback: {webhook_err}")
+        raise RuntimeError(f"webhook delivery failed and no PG fallback: {webhook_err}") \
+            from webhook_err
 
     return send
 
@@ -231,28 +224,37 @@ def scrub_error(exc: BaseException) -> str:
     return type(exc).__name__[:_ERROR_MAX]
 
 
-def send_scan_rows(cfg: Config, rows: list[dict]) -> None:
-    """Deliver scan heartbeat rows over the PG DSN. Idempotent on (machine, collector,
-    finished_at). Raises on failure; the caller decides that a heartbeat never blocks a scan."""
+def _local_error(exc: BaseException) -> str:
+    """The error for this machine's stderr: type and message on one line, credentials redacted."""
+    return f"{type(exc).__name__}: {redact(' '.join(str(exc).split()))}"
+
+
+def scan_row(cfg: Config, collector: str, started_at: datetime, status: str = "ok",
+             error: str | None = None, events: int = 0, human: int = 0,
+             newest_ts: datetime | None = None) -> dict:
+    """One agents.collector_scan row, finished now."""
+    return {"machine": cfg.machine, "collector": collector, "started_at": started_at,
+            "finished_at": datetime.now(timezone.utc), "status": status, "events": events,
+            "human": human, "newest_ts": newest_ts, "error": error, "aut_version": __version__}
+
+
+def send_scan_rows(dsn: str, rows: list[dict]) -> None:
+    """Scan heartbeat rows. Idempotent on (machine, collector, finished_at); raises on failure."""
+    # 5 s, not 15: usage is already delivered, so an unreachable sink should not hold the exit.
+    write_many(dsn, _insert_sql(SCAN_TABLE, SCAN_COLUMNS, "machine, collector, finished_at"),
+               [tuple(r[c] for c in SCAN_COLUMNS) for r in rows], timeout=5)
+
+
+def deliver_scan_rows(cfg: Config, rows: list[dict], what: str = "scan") -> None:
+    """The heartbeat is best effort: whatever goes wrong here must not touch the job it reports
+    on, and that includes a missing driver's SystemExit. No pg_dsn: skipped with a note."""
     if not rows:
         return
-    if not cfg.has_pg:
+    if not cfg.pg_dsn:
         # shortcut: webhook path for scan rows not built; upgrade when a machine runs webhook-only.
-        print("aut: note: scan heartbeat not sent (needs transport.pg_dsn)", file=sys.stderr)
+        print(f"aut: note: {what} heartbeat not sent (needs transport.pg_dsn)", file=sys.stderr)
         return
     try:
-        psycopg = load_psycopg()
-    except SystemExit as exc:           # a heartbeat never stops a scan: its callers catch Exception
-        raise RuntimeError(str(exc)) from None
-
-    cols = ", ".join(SCAN_COLUMNS)
-    placeholders = ", ".join(["%s"] * len(SCAN_COLUMNS))
-    sql = (
-        f"INSERT INTO {SCAN_TABLE} ({cols}) VALUES ({placeholders}) "
-        "ON CONFLICT (machine, collector, finished_at) DO NOTHING"
-    )
-    # 5 s, not 15: usage is already delivered, so an unreachable sink should not hold the exit.
-    with psycopg.connect(cfg.pg_dsn, connect_timeout=5) as conn:
-        with conn.cursor() as cur:
-            cur.executemany(sql, [tuple(r[c] for c in SCAN_COLUMNS) for r in rows])
-        conn.commit()
+        send_scan_rows(cfg.pg_dsn, rows)
+    except (Exception, SystemExit) as exc:
+        print(f"aut: warning: {what} heartbeat not delivered: {_local_error(exc)}", file=sys.stderr)

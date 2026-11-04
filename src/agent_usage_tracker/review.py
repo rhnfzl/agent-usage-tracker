@@ -42,8 +42,9 @@ from .collectors import pi as _pi
 from .collectors.activity_common import (COMMIT_LINE, commit_call, first_record, ms_between,
                                           text_of)
 from .collectors._util import epoch_ms_to_iso, safe_int
-from .config import Config, load_psycopg
+from .config import Config
 from .redact import clean_text
+from .sink import connect, write_many
 
 _TITLE = re.compile(r'"(?:aiTitle|customTitle)":\s*"((?:[^"\\]|\\.)*)"')
 _BRANCH = re.compile(r'"(?:gitBranch|worktreeBranch)":\s*"((?:[^"\\]|\\.)*)"')
@@ -586,9 +587,7 @@ def _month_bounds(month: str | None) -> tuple[str, datetime, datetime]:
 
 
 def load_month(dsn: str, start: datetime, end: datetime) -> list[dict]:
-    psycopg = load_psycopg()
-
-    with psycopg.connect(dsn, connect_timeout=15) as conn:
+    with connect(dsn) as conn:
         return load_episodes(conn, "e.first_ts >= %s AND e.first_ts < %s", (start, end))
 
 
@@ -613,9 +612,7 @@ def load_episodes(conn, where: str, params: tuple) -> list[dict]:
 
 def answered_sessions(dsn: str, sessions: list[str]) -> set[str]:
     """Seed sessions that already have a confirm or reject correction (the episodes to hide)."""
-    psycopg = load_psycopg()
-
-    with psycopg.connect(dsn, connect_timeout=15) as conn:
+    with connect(dsn) as conn:
         rows = conn.execute(
             "SELECT DISTINCT a_session FROM agents.episode_correction "
             "WHERE action IN ('confirm', 'reject') AND a_session = ANY(%s)",
@@ -624,33 +621,24 @@ def answered_sessions(dsn: str, sessions: list[str]) -> set[str]:
 
 
 def insert_corrections(dsn: str, rows: list[dict]) -> None:
-    if not rows:
-        return
-    psycopg = load_psycopg()
-
-    with psycopg.connect(dsn, connect_timeout=15) as conn:
-        with conn.cursor() as cur:
-            cur.executemany(
-                "INSERT INTO agents.episode_correction (id, ts, action, a_session, b_session, "
-                "attrs) VALUES (%s, %s, %s, %s, %s, %s::jsonb)",
-                [(r["id"], r["ts"], r["action"], r["a_session"], r["b_session"],
-                  json.dumps(r["attrs"], sort_keys=True)) for r in rows])
-        conn.commit()
+    write_many(dsn, "INSERT INTO agents.episode_correction (id, ts, action, a_session, b_session, "
+               "attrs) VALUES (%s, %s, %s, %s, %s, %s::jsonb)",
+               [(r["id"], r["ts"], r["action"], r["a_session"], r["b_session"],
+                 json.dumps(r["attrs"], sort_keys=True)) for r in rows])
 
 
 def run_review(cfg: Config, month: str | None) -> dict:
-    if not cfg.has_pg:
-        raise SystemExit("episodes review needs transport.pg_dsn")
+    dsn = cfg.require_pg("episodes review")
     label, start, end = _month_bounds(month)
-    episodes = load_month(cfg.pg_dsn, start, end)
+    episodes = load_month(dsn, start, end)
     if not episodes:
         raise SystemExit(f"episodes review: no episodes start in {label}")
-    done = answered_sessions(cfg.pg_dsn, [_seeds(ep)[0]["session_id"] for ep in episodes])
+    done = answered_sessions(dsn, [_seeds(ep)[0]["session_id"] for ep in episodes])
     left = [ep for ep in episodes if _seeds(ep)[0]["session_id"] not in done]
     if not left:
         raise SystemExit(f"episodes review: all {len(episodes)} episodes of {label} are answered")
     info = local_info(cfg.home, {m["session_id"] for ep in left for m in _seeds(ep)})
-    summary = serve(left, info, label, lambda rows: insert_corrections(cfg.pg_dsn, rows),
+    summary = serve(left, info, label, lambda rows: insert_corrections(dsn, rows),
                     answered=len(episodes) - len(left))
     share = summary["right"] / summary["reviewed"] if summary["reviewed"] else 0.0
     print(f"episodes review {label}: {summary['reviewed']} of {len(left)} episodes reviewed "

@@ -16,7 +16,7 @@ import os
 import sys
 import tempfile
 from pathlib import Path
-from agent_usage_tracker import cli, push  # noqa: E402
+from agent_usage_tracker import push  # noqa: E402
 from agent_usage_tracker.config import Config, load_config  # noqa: E402
 from agent_usage_tracker.state import atomic_write_text, load_json_dict, load_state  # noqa: E402
 
@@ -147,8 +147,9 @@ def test_missing_psycopg_names_the_extra_and_spares_the_heartbeat() -> None:
         except SystemExit as exc:
             assert "agent-usage-tracker[postgres]" in str(exc), exc
         with contextlib.redirect_stderr(io.StringIO()) as err:
-            cli._deliver_scan_rows(cfg, [row])      # best effort: returns
+            push.deliver_scan_rows(cfg, [row])      # best effort: returns
         assert "heartbeat not delivered" in err.getvalue()
+        assert "agent-usage-tracker[postgres]" in err.getvalue(), err.getvalue()
     finally:
         sys.modules.pop("psycopg") if prev is None else sys.modules.update(psycopg=prev)
     print("ok missing_psycopg_names_the_extra_and_spares_the_heartbeat")

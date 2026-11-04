@@ -31,6 +31,7 @@ from typing import Any, Callable, Iterator
 
 from ..config import Config
 from ..event import UsageEvent, make_event_id
+from ..net import HTTP_ERRORS
 from ._util import epoch_ms_to_iso, safe_int
 from .cursor import cursor_db
 
@@ -84,7 +85,7 @@ def _auth(cfg: Config) -> tuple[str, int] | None:
 
 def _post(cookie: str, name: str, body: dict) -> Any:
     """POST a dashboard endpoint. Origin/Referer clear Cursor's CSRF ('Invalid origin') guard.
-    Raises urllib.error on transport/HTTP failure; the caller decides how to handle it."""
+    Raises one of HTTP_ERRORS on transport/HTTP failure; the caller decides how to handle it."""
     req = urllib.request.Request(
         f"{_BASE}/{name}", method="POST", data=json.dumps(body).encode(),
         headers={"Cookie": cookie, "Content-Type": "application/json",
@@ -187,8 +188,8 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[UsageEvent], Callable[
             # Never happens for 6h deltas; only a huge first backfill. Flag it (don't silently orphan).
             print(f"aut: cursor_api: reached the {_MAX_PAGES}-page cap; older events this window may "
                   "be unread -- shorten cursor_api_lookback_days or run again.", file=sys.stderr)
-    except (urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError,
-            UnicodeDecodeError, AttributeError, TypeError, OSError) as exc:
+    except (*HTTP_ERRORS, json.JSONDecodeError, UnicodeDecodeError, AttributeError,
+            TypeError) as exc:
         print(f"aut: cursor_api: usage fetch failed ({exc}); skipping this run", file=sys.stderr)
         return
 

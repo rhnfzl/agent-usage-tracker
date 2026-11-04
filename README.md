@@ -172,8 +172,8 @@ matter:
 | `agents` | every collector except `activitywatch` | which collectors run (see below). The default turns on `cursor`, `cursor_sdk` and `cursor_api` together, so set `agents` yourself before `cursor_api = true`, or Cursor tokens count twice |
 | `[transport] webhook_url` | unset | n8n ingest webhook. `https://` only (or `http://` to localhost) |
 | `[transport] webhook_secret` | unset | sent as `X-AUT-Secret`; a webhook without it is refused |
-| `[transport] cf_access_client_id`, `cf_access_client_secret` | unset | Cloudflare Access service token, to push from any network without a VPN |
-| `[transport] pg_dsn` | unset | direct Postgres. The webhook carries usage only, so this is also how activity, time, outcome, label and heartbeat rows arrive. Session rows are the exception: with both transports set and the webhook working, `aut scan` does not send them. Run `aut backfill --sessions-only` from time to time to fill them. A scan sends them only when `pg_dsn` is the only transport or the webhook fails |
+| `[transport] cf_access_client_id`, `cf_access_client_secret` | unset | Cloudflare Access service token, to push from any network without a VPN. With only one of the two set, aut warns and sends no Access headers |
+| `[transport] pg_dsn` | unset | direct Postgres. The webhook carries usage only, so this is also how activity, time, outcome, label and heartbeat rows arrive. It also carries session rows, and usage when the webhook fails. Add `sslmode=require` when the host is remote: without it aut warns on each run, because libpq can fall back to plaintext. `sslmode=disable` states that a private link such as Tailscale is intended and silences the warning |
 | `repo_key_salt` | random `repo_key.salt` next to the state file | HMAC key for repo, branch, ticket, PR and SHA keys. Set the same value on every machine so keys match |
 | `cursor_api` | `false` | opt-in accurate Cursor usage from the dashboard API |
 | `cursor_api_lookback_days` | `90` | how far back the first `cursor_api` scan reaches. Older history is never fetched |
@@ -327,7 +327,7 @@ A download stopped half way fails the same check: run it again until it finishes
 the cache somewhere else (`HF_HOME`), the timer does not see your shell's value: add
 `export HF_HOME=...` to `scan.env`.
 
-**`No module named 'psycopg'`** (or `scan heartbeat not delivered: ModuleNotFoundError`). You
+**`this needs the Postgres driver`** (also inside `scan heartbeat not delivered: ...`). You
 set `pg_dsn` but installed aut without the extra. Reinstall with the `[postgres]` (or
 `[label]`) install line above, adding `--reinstall`.
 
@@ -335,10 +335,17 @@ set `pg_dsn` but installed aut without the extra. Reinstall with the `[postgres]
 only. Set `pg_dsn` as well, then fill history with
 `aut backfill --sessions-only --activity-only`. Time rows have no backfill.
 
-**Session rows are missing although `pg_dsn` is set** (`note: session rows not sent over the
-webhook`). With both transports set and the webhook working, a scan sends activity and time rows
-over `pg_dsn` but not session rows. Run `aut backfill --sessions-only` to fill them, for example
-from the same timer.
+**Session rows are missing for old scans although `pg_dsn` is set.** Older versions did not send
+session rows while the webhook worked. New scans do. Run `aut backfill --sessions-only` once to
+fill the history.
+
+**`webhook delivery failed, using transport.pg_dsn`.** The webhook is broken (often a rejected
+secret or an expired Cloudflare Access token) and usage is going over Postgres instead. Nothing is
+lost, but fix the webhook. The warning prints once per scan and names the failure.
+
+**`transport.pg_dsn reaches <host> without requiring TLS`.** A warning only: the connection still
+goes ahead, and libpq may fall back to plaintext. Add `sslmode=require` to the DSN. On a private
+link such as Tailscale, `sslmode=disable` says that is intended and silences it.
 
 **The tunnel.** `AUT_TUNNEL_HOST` without `AUT_TUNNEL_SPEC` makes the wrapper refuse to scan
 (exit 2, logged in `scan.log`). An unreachable host is not a failure: the wrapper arms

@@ -63,16 +63,16 @@ def _bad_collector(cfg, wm):
 def _patched(registry: dict, send_scan_rows):
     """Swap in fake collectors, a recording usage sender and a scan-row sink; isolate state."""
     sent: list[list[str]] = []
-    saved = (cli.REGISTRY, cli.make_sender, cli.send_scan_rows, os.environ.get("AUT_STATE"))
+    saved = (cli.REGISTRY, cli.make_sender, push.send_scan_rows, os.environ.get("AUT_STATE"))
     with tempfile.TemporaryDirectory() as d:
         os.environ["AUT_STATE"] = str(Path(d) / "state.json")
         cli.REGISTRY = registry
         cli.make_sender = lambda cfg: (lambda batch: sent.append([e.event_id for e in batch]))
-        cli.send_scan_rows = send_scan_rows
+        push.send_scan_rows = send_scan_rows
         try:
             yield sent, Path(d) / "state.json"
         finally:
-            cli.REGISTRY, cli.make_sender, cli.send_scan_rows, prev = saved
+            cli.REGISTRY, cli.make_sender, push.send_scan_rows, prev = saved
             if prev is None:
                 os.environ.pop("AUT_STATE", None)
             else:
@@ -197,10 +197,10 @@ def test_send_scan_rows_transport() -> None:
     try:
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
-            push.send_scan_rows(_cfg(webhook_url="https://hooks.example/h"), [row])
+            push.deliver_scan_rows(_cfg(webhook_url="https://hooks.example/h"), [row])
         assert executed == [] and err.getvalue().count("\n") == 1, (executed, err.getvalue())
 
-        push.send_scan_rows(_cfg(pg_dsn="postgresql://x"), [row])
+        push.send_scan_rows("postgresql://x", [row])
         sql, rows = executed[0]
         assert "INSERT INTO agents.collector_scan" in sql
         assert "ON CONFLICT (machine, collector, finished_at) DO NOTHING" in sql

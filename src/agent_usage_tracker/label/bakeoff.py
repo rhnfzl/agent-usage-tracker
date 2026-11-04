@@ -168,7 +168,7 @@ def run_eval(cfg: Config, task: str, days: int = DAYS, src: Source | None = None
     for b in backends if backends is not None else default_backends(cfg, task):
         rec = evaluate(task, b, items, cfg.label_precision, now.astimezone().date().isoformat())
         append_jsonl(path(task, "eval"), {"ts": now.isoformat(), **rec})
-        if cfg.has_pg:
+        if cfg.pg_dsn:
             send_activity_rows(cfg.pg_dsn, [ActivityEvent(
                 event_id=make_event_id("eval", json.dumps(rec, sort_keys=True)),
                 ts=now.isoformat(), agent="label", kind="eval", session_id=None, turn_id=None,
