@@ -23,6 +23,10 @@ AW_CATEGORIES = ("editor", "terminal", "agent", "dev", "browser", "comms", "docs
                  "media", "other")
 
 
+class AutError(Exception):
+    """An error for the operator: main prints the message and exits 1, with no traceback."""
+
+
 def config_path() -> Path:
     if os.environ.get("AUT_CONFIG"):
         return Path(os.environ["AUT_CONFIG"]).expanduser()
@@ -104,7 +108,7 @@ class Config:
     def require_pg(self, what: str) -> str:
         """The DSN, or the operator's error saying that `what` cannot run without it."""
         if not self.pg_dsn:
-            raise SystemExit(f"{what} needs transport.pg_dsn")
+            raise AutError(f"{what} needs transport.pg_dsn")
         return self.pg_dsn
 
 
@@ -116,21 +120,21 @@ def load_config() -> Config:
             with open(path, "rb") as fh:
                 data = tomllib.load(fh)
         except (tomllib.TOMLDecodeError, UnicodeDecodeError, OSError) as exc:
-            raise SystemExit(f"config: {path} is not readable TOML ({exc})") from None
+            raise AutError(f"config: {path} is not readable TOML ({exc})") from None
 
     transport = data.get("transport", {})
     machine = data.get("machine") or socket.gethostname().split(".")[0]
     agents = tuple(data.get("agents") or DEFAULT_AGENTS)
     unknown = [a for a in agents if a not in ALL_AGENTS]
     if unknown:
-        raise SystemExit(f"config: unknown agent(s) {unknown}; valid = {list(ALL_AGENTS)}")
+        raise AutError(f"config: unknown agent(s) {unknown}; valid = {list(ALL_AGENTS)}")
 
     aw_cats = {str(k).strip().lower(): v
                for k, v in (data.get("activitywatch_categories") or {}).items()}
     bad = sorted(k for k, v in aw_cats.items() if v not in AW_CATEGORIES)
     if bad:
-        raise SystemExit(f"config: activitywatch_categories {bad}: category must be one of "
-                         f"{list(AW_CATEGORIES)}")
+        raise AutError(f"config: activitywatch_categories {bad}: category must be one of "
+                       f"{list(AW_CATEGORIES)}")
     aw_titles = {k: tuple(str(p) for p in data.get(k) or ())
                  for k in ("activitywatch_deny_titles", "activitywatch_work_titles")}
     for key, patterns in aw_titles.items():
@@ -138,23 +142,23 @@ def load_config() -> Config:
             try:
                 re.compile(pat)
             except re.error as exc:     # the pattern itself may name a bank: never echo it
-                raise SystemExit(f"config: {key}[{i}] is not a valid regex ({exc.msg})") from None
+                raise AutError(f"config: {key}[{i}] is not a valid regex ({exc.msg})") from None
     roots = data.get("outcome_repo_roots") or ["~/projects"]
     roots = [roots] if isinstance(roots, str) else roots
     if not isinstance(roots, list) or not all(isinstance(r, str) and r for r in roots):
-        raise SystemExit("config: outcome_repo_roots must be a list of directory strings")
+        raise AutError("config: outcome_repo_roots must be a list of directory strings")
     # 0 (the default) keeps titles for good; a number of days turns the limit on.
     aw_days = int(data.get("activitywatch_title_days") or 0)
     if aw_days < 0:
-        raise SystemExit("config: activitywatch_title_days must be 0 (keep) or a number of days")
+        raise AutError("config: activitywatch_title_days must be 0 (keep) or a number of days")
 
     label_tasks = data.get("label_tasks") or []
     if not isinstance(label_tasks, list) or any(t not in TASK_NAMES for t in label_tasks):
-        raise SystemExit(f"config: label_tasks must be a list of {list(TASK_NAMES)}")
+        raise AutError(f"config: label_tasks must be a list of {list(TASK_NAMES)}")
     label_precision, label_coverage = (float(data.get(k, d)) for k, d in
                                        (("label_precision", 0.90), ("label_coverage", 0.75)))
     if not (0 < label_precision <= 1 and 0 <= label_coverage <= 1):
-        raise SystemExit("config: label_precision and label_coverage must lie in 0..1")
+        raise AutError("config: label_precision and label_coverage must lie in 0..1")
 
     webhook_secret = _resolve(transport.get("webhook_secret"))
     pg_dsn = _resolve(transport.get("pg_dsn"))

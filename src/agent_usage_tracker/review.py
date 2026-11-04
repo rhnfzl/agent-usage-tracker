@@ -26,7 +26,7 @@ from typing import Callable
 
 from . import episode_store, local_page
 from .collectors.session_digest import local_info
-from .config import Config
+from .config import AutError, Config
 
 _ACTIONS = {"right": "confirm", "split": "split", "merge": "merge", "reject": "reject"}
 SAMPLE = 30
@@ -206,7 +206,7 @@ def _month_bounds(month: str | None) -> tuple[str, datetime, datetime]:
         try:
             start = datetime.strptime(month, "%Y-%m")
         except ValueError:
-            raise SystemExit("episodes review: --month is YYYY-MM") from None
+            raise AutError("episodes review: --month is YYYY-MM") from None
     else:
         start = (datetime.now().replace(day=1) - timedelta(days=1)).replace(day=1)
     start = start.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
@@ -219,11 +219,11 @@ def run_review(cfg: Config, month: str | None) -> dict:
     label, start, end = _month_bounds(month)
     episodes = episode_store.load_month(dsn, start, end)
     if not episodes:
-        raise SystemExit(f"episodes review: no episodes start in {label}")
+        raise AutError(f"episodes review: no episodes start in {label}")
     done = episode_store.answered_sessions(dsn, [_seeds(ep)[0]["session_id"] for ep in episodes])
     left = [ep for ep in episodes if _seeds(ep)[0]["session_id"] not in done]
     if not left:
-        raise SystemExit(f"episodes review: all {len(episodes)} episodes of {label} are answered")
+        raise AutError(f"episodes review: all {len(episodes)} episodes of {label} are answered")
     info = local_info(cfg.home, {m["session_id"] for ep in left for m in _seeds(ep)})
     summary = serve(left, lambda rows: episode_store.insert_corrections(dsn, rows),
                     month_pages(left, info, label, len(episodes) - len(left)))

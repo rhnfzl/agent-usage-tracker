@@ -15,6 +15,7 @@ import sys
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from pathlib import Path
+from typing import Protocol
 
 from ..config import config_path
 from ..event import ActivityEvent, make_event_id
@@ -77,8 +78,25 @@ class Choice:
     model_id: str | None = None
     model_rev: str | None = None
     temperature: float = 1.0
-    tau: dict = field(default_factory=dict)     # label -> tau; a missing or null label never passes
+    # label -> tau; a missing or null label never passes
+    tau: dict[str, float | None] = field(default_factory=dict)
     calib_ver: str = "none"
+
+
+class Backend(Protocol):
+    """What a decision reads. model_rev and size_mb may only be final after the first distribution
+    call, and model_rev goes into the label row's event_id: read them after scoring."""
+    model_id: str
+    model_rev: str
+    size_mb: float | None
+
+    def distribution(self, req: Request) -> dict[str, float]: ...
+
+
+class NoteBackend(Backend, Protocol):
+    """A backend that can also write free text, for the private nightly note."""
+
+    def generate(self, prompt: str, max_tokens: int = 300) -> str: ...
 
 
 def read_choices() -> dict:

@@ -38,7 +38,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from agent_usage_tracker import outcomes as oc  # noqa: E402
 from agent_usage_tracker import push  # noqa: E402
 from agent_usage_tracker.repo_keys import RepoKeys, repo_identity  # noqa: E402
-from agent_usage_tracker.config import Config  # noqa: E402
+from agent_usage_tracker.config import AutError, Config  # noqa: E402
 from agent_usage_tracker.git_safe import git_argv, git_env  # noqa: E402
 
 os.environ["GIT_CONFIG_GLOBAL"] = os.devnull      # the user's git config never reaches the tests
@@ -422,7 +422,7 @@ def test_outcome_repo_roots_must_be_a_list_of_strings():
             conf.write_text('machine = "t"\noutcome_repo_roots = 3\n')
             try:
                 config.load_config()
-            except SystemExit as exc:
+            except AutError as exc:
                 assert "outcome_repo_roots" in str(exc)
             else:
                 raise AssertionError("a non-list must refuse")
@@ -506,7 +506,7 @@ def test_manual_outcome_picks_newest_interactive_session():
         assert row["session_id"] == "given" and row["outcome"] == "shipped"
         try:
             oc.build_manual_outcome(cfg, "open", cwd=str(home / "nowhere"), now=NOW)
-        except SystemExit as exc:
+        except AutError as exc:
             assert "--session" in str(exc)
         else:
             raise AssertionError("no session must refuse")

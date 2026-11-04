@@ -27,6 +27,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from agent_usage_tracker import cli, inspector, review  # noqa: E402
+from agent_usage_tracker.config import AutError  # noqa: E402
 
 K1, K2 = "a1" * 32, "b2" * 32
 T0 = datetime(2001, 1, 5, 9, tzinfo=timezone.utc)
@@ -172,10 +173,10 @@ def test_run_inspect_passes_mode_and_stops_on_empty():
         empty = {k: [] for k in _raw()}
         try:
             inspector.run_inspect(cfg, episode="0f0f", fetch_fn=lambda dsn, **kw: empty)
-        except SystemExit as exc:
+        except AutError as exc:
             assert "nothing found" in str(exc)
         else:
-            raise AssertionError("no SystemExit")
+            raise AssertionError("no AutError")
     print("ok run_inspect_passes_mode_and_stops_on_empty")
 
 
@@ -213,7 +214,7 @@ def test_fetch_checks_episode_and_day_uses_activity_rows():
         for bad in (" ", "", "0f_f", "0f%", "nope", "0f0"):
             try:
                 inspector.fetch("dsn", episode=bad)
-            except SystemExit as exc:
+            except AutError as exc:
                 assert "episode id or prefix" in str(exc)
             else:
                 raise AssertionError(f"accepted --episode {bad!r}")
@@ -238,7 +239,7 @@ def test_day_bounds_are_local_midnights():
     assert (s.hour, e.hour, (e.date() - s.date()).days) == (0, 0, 1)
     try:
         inspector._day_bounds("25-03-2001")
-    except SystemExit:
+    except AutError:
         pass
     else:
         raise AssertionError("bad day accepted")

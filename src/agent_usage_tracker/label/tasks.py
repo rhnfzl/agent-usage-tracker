@@ -15,7 +15,7 @@ from typing import Callable
 
 from ..collectors import activitywatch as aw, drain
 from ..collectors import claude_code
-from ..config import Config
+from ..config import AutError, Config
 from ..event import CollectorUnavailable, make_event_id
 from ..redact import redact
 from ..repo_keys import RepoKeys
@@ -87,8 +87,9 @@ TASKS: dict[str, Task] = {t.name: t for t in (
 )}
 
 
-class SourceUnavailable(RuntimeError):
-    """A source the units need could not be read: the task's watermark must not move."""
+class SourceUnavailable(AutError):
+    """aw-server could not be read: the task's watermark must not move. A sink read's own error
+    (a raw psycopg one) is not this: the sink being down stops the whole run."""
 
 
 def _sql(dsn: str, sql: str, params: tuple) -> list[tuple]:

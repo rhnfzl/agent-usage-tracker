@@ -27,6 +27,7 @@ import re
 import subprocess
 import sys
 import tempfile
+from collections import Counter
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
@@ -36,7 +37,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from agent_usage_tracker import cli, push  # noqa: E402
 from agent_usage_tracker.collectors import activitywatch as aw  # noqa: E402
-from agent_usage_tracker.config import Config  # noqa: E402
+from agent_usage_tracker.config import AutError, Config  # noqa: E402
 from agent_usage_tracker.event import make_event_id  # noqa: E402
 from agent_usage_tracker.label import backends, core, names, run, tasks  # noqa: E402
 
@@ -174,9 +175,9 @@ def test_choice_file_and_backend_slots(tmp_path, monkeypatch):
     assert c.temperature == 1.4 and c.tau == {"stop": 0.7}
     b = backends.make_backend("steer_intent", c, "unused")
     assert isinstance(b, backends.MlxLetter) and b.model_id == backends.MODELS["gemma-4-31b"]
-    with pytest.raises(SystemExit):
+    with pytest.raises(backends.BackendUnavailable):
         backends.make_backend("x", core.Choice(model_id="pplx-decider-flash-v1.2"), "m")
-    with pytest.raises(SystemExit):
+    with pytest.raises(backends.BackendUnavailable):
         backends.Encoder("steer_intent").distribution(_req())
 
 
@@ -335,7 +336,7 @@ def test_time_budget_and_error_heartbeat(tmp_path, sink):
             run.run_label(_cfg(tmp_path), ["steer_intent"], src=src,
                           backend_for=lambda t, c: Boom(), now=NOW)
         assert sink.scans[-1]["status"] == "error" and sink.scans[-1]["error"] == "RuntimeError"
-    with pytest.raises(SystemExit):
+    with pytest.raises(AutError):
         run.run_label(_cfg(tmp_path, pg_dsn=None), ["steer_intent"])
 
 
@@ -349,6 +350,59 @@ def test_ctrl_c_sends_no_heartbeat_but_another_exit_does(tmp_path, sink):
         with _env(tmp_path), pytest.raises((KeyboardInterrupt, SystemExit)):
             run.run_label(cfg, ["steer_intent"], src=src, backend_for=stop, now=NOW)
         assert len(sink.scans) == sent, exc
+
+
+def test_a_task_whose_backend_cannot_run_leaves_the_others_running(tmp_path, sink, capsys):
+    _claude_log(tmp_path, "s1", [("u1", "go")])
+    cfg = _cfg(tmp_path)
+    src = FakeSource(cfg, [_steer("u1", "s1", DAY1)])
+
+    class NotLoaded(ById):           # the way a lazy model load fails: on the first decision
+        def distribution(self, req):
+            raise backends.BackendUnavailable("label: not ready")
+
+    def not_trained(task, choice):
+        if task == "work_category":
+            raise backends.BackendUnavailable("label: no encoder is trained")
+        return ById()
+
+    with _env(tmp_path):
+        rep = run.run_label(cfg, ["steer_intent"], src=src, backend_for=lambda t, c: NotLoaded(),
+                            now=NOW)
+        assert rep["steer_intent"]["failed"] == 1
+        assert not (tmp_path / "state.json").exists() or "steer_intent" not in json.loads(
+            (tmp_path / "state.json").read_text()).get("collectors", {}).get("label", {})
+        rep = run.run_label(cfg, ["work_category", "steer_intent"], src=src,
+                            backend_for=not_trained, now=NOW)
+        assert rep["work_category"]["failed"] == 1 and rep["steer_intent"]["rows"] == 1
+        wm = json.loads((tmp_path / "state.json").read_text())["collectors"]["label"]
+        assert "steer_intent" in wm and "work_category" not in wm
+    assert sink.scans[-1]["status"] == "error"
+    assert sink.scans[-1]["error"] == "BackendUnavailable"
+    assert "no encoder is trained" in capsys.readouterr().err
+
+
+def test_main_exits_1_with_the_message_for_an_operator_error(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(cli, "load_config", lambda: _cfg(tmp_path))
+    monkeypatch.setattr(run, "run_label", lambda *a: {"steer_intent": Counter(failed=1)})
+    assert cli.main(["label", "run"]) == 1
+    assert "could not run steer_intent" in capsys.readouterr().err
+
+    def refuse():
+        raise AutError("config: nope")
+    monkeypatch.setattr(cli, "load_config", refuse)
+    assert cli.main(["status"]) == 1
+    assert capsys.readouterr().err == "config: nope\n"
+
+
+def test_missing_mlx_gives_the_install_hint(monkeypatch):
+    for mod in ("mlx", "mlx.core", "mlx_lm"):
+        monkeypatch.setitem(sys.modules, mod, None)     # makes the import raise ImportError
+    b = backends.MlxLetter("some/model")
+    with pytest.raises(backends.BackendUnavailable, match=r"agent-usage-tracker\[label\]"):
+        b.letter_logits("p", ["A"])
+    with pytest.raises(backends.BackendUnavailable, match=r"agent-usage-tracker\[label\]"):
+        b.generate("p")
 
 
 def _win(start, minutes, app="Safari", title="Docs - a page", category="web-work",
@@ -559,7 +613,7 @@ def test_cli_and_config(tmp_path, monkeypatch):
     c = config.load_config()
     assert c.label_tasks == ("steer_intent", "daily_note") and c.label_precision == 0.95
     p.write_text('label_tasks = ["vibes"]\n')
-    with pytest.raises(SystemExit):
+    with pytest.raises(AutError):
         config.load_config()
 
 

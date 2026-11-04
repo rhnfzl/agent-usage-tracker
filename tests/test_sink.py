@@ -19,7 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from agent_usage_tracker import pricing, push, sink  # noqa: E402
 from agent_usage_tracker.collectors import cursor_api  # noqa: E402
-from agent_usage_tracker.config import Config  # noqa: E402
+from agent_usage_tracker.config import AutError, Config  # noqa: E402
 from agent_usage_tracker.event import (ActivityEvent, CollectorUnavailable, EventSession,  # noqa: E402
                                        UsageEvent)
 from test_activity import _fake_psycopg  # noqa: E402
@@ -183,7 +183,7 @@ def test_require_pg() -> None:
     try:
         _cfg(dsn=None).require_pg("time add")
         raise AssertionError("no DSN must be an operator error")
-    except SystemExit as exc:
+    except AutError as exc:
         assert str(exc) == "time add needs transport.pg_dsn"
     print("ok require_pg")
 

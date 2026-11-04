@@ -10,6 +10,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from agent_usage_tracker import pricing  # noqa: E402
+from agent_usage_tracker.config import AutError  # noqa: E402
 
 
 def test_normalize_model_key() -> None:
@@ -61,7 +62,7 @@ def test_sync_prices_refuses_empty() -> None:
     raised = False
     try:
         pricing.sync_prices("/tmp/should-not-write.json", fetch=lambda url: None)
-    except SystemExit:
+    except AutError:
         raised = True
     assert raised
 
@@ -72,7 +73,7 @@ def test_sync_prices_refuses_empty_rate_map() -> None:
     try:
         with tempfile.TemporaryDirectory() as d:
             pricing.sync_prices(Path(d) / "x.json", fetch=lambda url: bad)
-    except SystemExit:
+    except AutError:
         raised = True
     assert raised
 
@@ -84,7 +85,7 @@ def test_load_prices_raises_on_corrupt_file() -> None:
             bad = Path(d) / "prices.json"
             bad.write_text("{not json", encoding="utf-8")
             pricing.load_prices(bad)
-    except SystemExit:
+    except AutError:
         raised = True
     assert raised
 

@@ -42,7 +42,7 @@ from datetime import date, datetime, timedelta, timezone
 
 from . import pricing, scan
 from .collectors import REGISTRY
-from .config import ALL_AGENTS, Config, load_config, config_path
+from .config import ALL_AGENTS, AutError, Config, load_config, config_path
 from .event import TimeInterval, make_event_id
 from .label.names import DAYS, DECISION_TASKS, TASK_NAMES
 from .push import insert_pg
@@ -176,6 +176,9 @@ def _label_run(cfg: Config, args) -> None:
         since, tasks, dry = args.since, [args.task] if args.task else None, args.dry_run
     report = label_run.run_label(cfg, tasks, local_midnight(since) if since else None, dry)
     label_run.print_report(report, dry)
+    failed = [name for name, c in report.items() if c["failed"]]
+    if failed:
+        raise AutError(f"label: could not run {', '.join(failed)} (reasons above)")
 
 
 def _label_bakeoff(cfg: Config, args) -> None:
@@ -303,9 +306,18 @@ def _build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
+    try:
+        _dispatch(parser, args)
+    except AutError as exc:
+        print(exc, file=sys.stderr)
+        return 1
+    return 0
+
+
+def _dispatch(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
     if args.cmd in _NO_CONFIG_COMMANDS:
         _NO_CONFIG_COMMANDS[args.cmd](args)
-        return 0
+        return
 
     cfg = load_config()
     agents = cfg.agents
@@ -319,7 +331,6 @@ def main(argv: list[str] | None = None) -> int:
                      "backfill resets the watermark; preview it with `aut scan --dry-run`)")
 
     _COMMANDS[args.cmd](cfg, agents, args)
-    return 0
 
 
 if __name__ == "__main__":

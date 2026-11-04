@@ -25,7 +25,7 @@ from typing import Callable
 from urllib.parse import urlparse
 
 from . import __version__
-from .config import Config
+from .config import AutError, Config
 from .event import ActivityEvent, Row, TimeInterval, UsageEvent
 from .net import HTTP_ERRORS, NoRedirect
 from .redact import redact
@@ -149,12 +149,12 @@ def make_sender(cfg: Config) -> Callable[[list[Row]], None]:
     configured webhook is missing its secret."""
     url, secret, dsn = cfg.webhook_url, cfg.webhook_secret, cfg.pg_dsn
     if not url and not dsn:
-        raise SystemExit(
+        raise AutError(
             "no transport configured: set [transport].webhook_url (and/or pg_dsn) in your "
             "config, or run with --dry-run to preview without sending."
         )
     if url and not secret:
-        raise SystemExit(
+        raise AutError(
             "transport.webhook_url is set but webhook_secret is missing or unresolved; "
             "refusing to send unauthenticated. Set webhook_secret (or its env: value)."
         )
@@ -165,7 +165,7 @@ def make_sender(cfg: Config) -> Callable[[list[Row]], None]:
         # Allowlist, not blocklist: only https, or http to localhost for testing. Anything else
         # (http to a remote host, or ftp:/file:/no-scheme) could leak the secret or misfire.
         if not (scheme == "https" or (scheme == "http" and host in LOCAL_HOSTS)):
-            raise SystemExit(
+            raise AutError(
                 f"refusing to send the webhook secret to '{url}': only https:// "
                 f"(or http:// to localhost for testing) is allowed, not '{scheme or 'no'}-scheme'."
             )
@@ -242,7 +242,7 @@ def send_scan_rows(dsn: str, rows: list[dict]) -> None:
 
 def deliver_scan_rows(cfg: Config, rows: list[dict], what: str = "scan") -> None:
     """The heartbeat is best effort: whatever goes wrong here must not touch the job it reports
-    on, and that includes a missing driver's SystemExit. No pg_dsn: skipped with a note."""
+    on, and that includes a missing driver's AutError. No pg_dsn: skipped with a note."""
     if not rows:
         return
     if not cfg.pg_dsn:
@@ -251,5 +251,5 @@ def deliver_scan_rows(cfg: Config, rows: list[dict], what: str = "scan") -> None
         return
     try:
         send_scan_rows(cfg.pg_dsn, rows)
-    except (Exception, SystemExit) as exc:
+    except Exception as exc:
         print(f"aut: warning: {what} heartbeat not delivered: {_local_error(exc)}", file=sys.stderr)

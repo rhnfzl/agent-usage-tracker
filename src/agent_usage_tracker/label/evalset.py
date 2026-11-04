@@ -17,7 +17,7 @@ from collections import defaultdict
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
-from ..config import Config
+from ..config import AutError, Config
 from ..state import atomic_write_text
 from .core import Request, data_dir, local_midnight
 from .names import DAYS
@@ -28,7 +28,7 @@ FLOORS = {"work_category": (30, 50), "steer_intent": (30, 50), "soft_outcome": (
           "aw_title_relevance": (150, 150)}
 
 
-def path(task: str, kind: str) -> Path:
+def eval_path(task: str, kind: str) -> Path:
     """kind: silver | gold | eval."""
     return data_dir() / "eval" / (f"{task}.jsonl" if kind == "gold" else f"{task}.{kind}.jsonl")
 
@@ -40,7 +40,7 @@ def read_jsonl(p: Path) -> list[dict]:
     except FileNotFoundError:
         return []
     except (OSError, UnicodeDecodeError) as exc:    # never "no labels": those labels exist
-        raise SystemExit(f"label: cannot read {p}: {exc}") from None
+        raise AutError(f"label: cannot read {p}: {exc}") from None
     out = []
     for line in lines:
         try:
@@ -65,14 +65,14 @@ def write_jsonl(p: Path, rows: list[dict]) -> None:
 def gold_latest(task: str) -> dict[str, str]:
     """unit_id -> gold label of the current task version; a later answer for a unit wins."""
     ver, ids = TASKS[task].ver, {c for c, _d in TASKS[task].candidates}
-    return {r["unit_id"]: r["gold"] for r in read_jsonl(path(task, "gold"))
+    return {r["unit_id"]: r["gold"] for r in read_jsonl(eval_path(task, "gold"))
             if r.get("task_ver") == ver and r.get("gold") in ids}
 
 
 def silver_by_unit(task: str) -> dict[str, dict[str, dict[str, float]]]:
     """unit_id -> {teacher: dist} of the current task version."""
     out: dict[str, dict] = defaultdict(dict)
-    for r in read_jsonl(path(task, "silver")):
+    for r in read_jsonl(eval_path(task, "silver")):
         if r.get("task_ver") == TASKS[task].ver and isinstance(r.get("dist"), dict):
             out[r["unit_id"]][r["teacher"]] = r["dist"]
     return dict(out)
@@ -115,7 +115,7 @@ def held_out(req: Request) -> bool:
     return _side(req.unit_id if req.unit == "aw_title" else unit_day(req).isoformat()) == 1
 
 
-def encoder_fit(req: Request) -> bool:
+def in_encoder_train_split(req: Request) -> bool:
     """Of the non-held-out gold, the half the encoder trains on; the other half fits its
     temperature and tau in eval, so they are never fitted on the encoder's own training data."""
     return _side("encoder|" + req.unit_id) == 1

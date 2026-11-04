@@ -603,6 +603,10 @@ in `label_tasks`, incrementally from a watermark in the state file (`collectors.
 sends one `agents.collector_scan` row, collector `label`. `daily_note` drafts one private note per
 past day from counts only (that day's confident labels and episode facts, never text) into
 `agents.daily_note (day, text, model_id, created_at)`, first draft kept. A dry run writes nothing.
+A task that cannot run stops only itself: its watermark stays and the run goes on to the next task.
+A stopped aw-server is retried on the next run and exits 0 (`error` = `SourceUnavailable`); a backend
+that is not ready (the extra or model missing, an encoder untrained or retrained since it was chosen)
+prints its reason and the run exits 1 once the other tasks are done (`error` = `BackendUnavailable`).
 
 ### The eval set and the bake-off (`aut label teach | review | eval | choose | train-encoder`)
 

@@ -23,7 +23,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from agent_usage_tracker.config import Config  # noqa: E402
+from agent_usage_tracker.config import AutError, Config  # noqa: E402
 from agent_usage_tracker.event import CollectorUnavailable  # noqa: E402
 from agent_usage_tracker.collectors import claude_code, codex, cursor, cursor_sdk, pi  # noqa: E402
 
@@ -938,16 +938,16 @@ def test_sender_config() -> None:
     # nothing configured -> refuse to send
     try:
         make_sender(_cfg(Path("/tmp")))
-        raise AssertionError("expected SystemExit for no transport")
-    except SystemExit:
+        raise AssertionError("expected AutError for no transport")
+    except AutError:
         pass
     # webhook url set but secret missing -> fail closed (no unauthenticated POST)
     c = Config(machine="t", agents=(), webhook_url="https://n8n.example/webhook/x",
                webhook_secret=None, pg_dsn=None, home=Path("/tmp"))
     try:
         make_sender(c)
-        raise AssertionError("expected SystemExit for missing secret")
-    except SystemExit:
+        raise AssertionError("expected AutError for missing secret")
+    except AutError:
         pass
     # Allowlist, not blocklist: plaintext http:// to a non-local host AND any non-http(s) scheme
     # (ftp/file/no-scheme) must all be refused so the secret can't leak or misfire.
@@ -957,8 +957,8 @@ def test_sender_config() -> None:
                     pg_dsn=None, home=Path("/tmp"))
         try:
             make_sender(cc)
-            raise AssertionError(f"expected SystemExit for {url}")
-        except SystemExit:
+            raise AssertionError(f"expected AutError for {url}")
+        except AutError:
             pass
     # http://localhost (testing) and any https:// are allowed
     for url in ("http://localhost:5678/h", "HTTPS://ok.example/h"):

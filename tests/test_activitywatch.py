@@ -34,7 +34,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from agent_usage_tracker import cli, push, scan  # noqa: E402
 from agent_usage_tracker.collectors import REGISTRY  # noqa: E402
 from agent_usage_tracker.collectors import activitywatch as aw  # noqa: E402
-from agent_usage_tracker.config import ALL_AGENTS, AW_CATEGORIES, DEFAULT_AGENTS, Config, load_config  # noqa: E402
+from agent_usage_tracker.config import (ALL_AGENTS, AW_CATEGORIES, DEFAULT_AGENTS, AutError,  # noqa: E402
+                                        Config, load_config)
 from agent_usage_tracker.redact import PATTERNS, clean_text  # noqa: E402
 from agent_usage_tracker.event import CollectorUnavailable, TimeInterval, UsageEvent  # noqa: E402
 from test_activity import _fake_psycopg  # noqa: E402
@@ -175,13 +176,13 @@ def test_default_agents_exclude_activitywatch() -> None:
             try:
                 load_config()
                 raise AssertionError("an unknown category must be refused")
-            except SystemExit:
+            except AutError:
                 pass
             path.write_text('activitywatch_deny_titles = ["("]\n')
             try:
                 load_config()
                 raise AssertionError("a bad regex must be refused")
-            except SystemExit:
+            except AutError:
                 pass
         finally:
             if prev is None:

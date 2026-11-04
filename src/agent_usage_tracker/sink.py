@@ -10,6 +10,8 @@ import re
 import sys
 from urllib.parse import parse_qs, urlparse
 
+from .config import AutError
+
 LOCAL_HOSTS = ("localhost", "127.0.0.1", "::1")
 
 
@@ -45,8 +47,8 @@ def connect(dsn: str, timeout: int = 15):
     try:
         import psycopg
     except ImportError as exc:
-        raise SystemExit("this needs the Postgres driver, which is not usable here: install "
-                         f"agent-usage-tracker[postgres] ({exc})") from None
+        raise AutError("this needs the Postgres driver, which is not usable here: install "
+                       f"agent-usage-tracker[postgres] ({exc})") from None
     _warn_if_plaintext(dsn)
     return psycopg.connect(dsn, connect_timeout=timeout)
 

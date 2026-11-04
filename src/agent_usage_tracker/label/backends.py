@@ -13,7 +13,8 @@ import math
 import re
 from pathlib import Path
 
-from .core import Choice, Request, data_dir, letter_distribution, softmax
+from ..config import AutError
+from .core import Backend, Choice, Request, data_dir, letter_distribution, softmax
 
 ENCODER_DIM = 1 << 18
 
@@ -25,6 +26,10 @@ MODELS: dict[str, str | None] = {
     "gemma-4-31b": "mlx-community/gemma-4-31b-it-4bit",
     "pplx-decider-flash-v1.2": None,
 }
+
+
+class BackendUnavailable(AutError):
+    """This task's backend cannot run here yet; a nightly run still labels the other tasks."""
 
 
 class LetterBackend:
@@ -60,7 +65,8 @@ def cached_snapshot(lookup, repo: str, revision: str | None) -> Path | None:
 
 class MlxLetter(LetterBackend):
     """mlx_lm on Apple silicon. The model comes from the local Hugging Face cache only (a nightly
-    run never downloads several GB); model_rev is the snapshot directory name."""
+    run never downloads several GB). model_rev (the snapshot directory name) and size_mb are final
+    after the first distribution or generate call, which loads the model."""
 
     def __init__(self, model_id: str, revision: str | None = None) -> None:
         self.model_id, self.model_rev, self._rev, self._m = model_id, revision or "", revision, None
@@ -71,13 +77,14 @@ class MlxLetter(LetterBackend):
                 from huggingface_hub import try_to_load_from_cache
                 from mlx_lm import load
             except ImportError:
-                raise SystemExit("label: the mlx_letter backend needs the optional extra: "
-                                 "pip install 'agent-usage-tracker[label]' (Apple silicon)") \
-                    from None
+                raise BackendUnavailable(
+                    "label: the mlx_letter backend needs the optional extra: "
+                    "pip install 'agent-usage-tracker[label]' (Apple silicon)") from None
             path = cached_snapshot(try_to_load_from_cache, self.model_id, self._rev)
             if path is None:
-                raise SystemExit(f"label: {self.model_id} is not fully in the local Hugging Face "
-                                 f"cache; fetch it once with `hf download {self.model_id}`")
+                raise BackendUnavailable(
+                    f"label: {self.model_id} is not fully in the local Hugging Face "
+                    f"cache; fetch it once with `hf download {self.model_id}`")
             self.model_rev = path.name
             self.size_mb = round(sum(f.stat().st_size for f in Path(path).rglob("*")
                                      if f.is_file()) / 1e6)
@@ -89,17 +96,17 @@ class MlxLetter(LetterBackend):
                                        add_generation_prompt=True, tokenize=False)
 
     def letter_logits(self, prompt: str, letters: list[str]) -> list[float]:
+        model, tok = self._load()       # first: it turns a missing mlx into the install hint
         import mlx.core as mx
 
-        model, tok = self._load()
         ids = tok.encode(self._chat(tok, prompt), add_special_tokens=False)
         last = model(mx.array([ids]))[0, -1].astype(mx.float32)
         return [last[tok.encode(x, add_special_tokens=False)[0]].item() for x in letters]
 
     def generate(self, prompt: str, max_tokens: int = 300) -> str:
+        model, tok = self._load()       # first: it turns a missing mlx into the install hint
         from mlx_lm import generate
 
-        model, tok = self._load()
         return generate(model, tok, prompt=self._chat(tok, prompt), max_tokens=max_tokens,
                         verbose=False)
 
@@ -141,8 +148,8 @@ class Encoder:
         p = encoder_path(task)
         rev = hashlib.sha256(p.read_bytes()).hexdigest()[:12] if p.exists() else ""
         if model_rev and rev and model_rev != rev:
-            raise SystemExit(f"label: the {task} encoder was retrained after it was chosen; "
-                             "run `aut label eval` and `aut label choose` again")
+            raise BackendUnavailable(f"label: the {task} encoder was retrained after it was "
+                                     "chosen; run `aut label eval` and `aut label choose` again")
         self.model_rev = rev or model_rev or ""
         self.size_mb = round(p.stat().st_size / 1e6, 3) if p.exists() else None
 
@@ -151,14 +158,15 @@ class Encoder:
             try:
                 self._m = json.loads(encoder_path(self.task).read_text())
             except (OSError, ValueError):
-                raise SystemExit(f"label: no encoder is trained for {self.task} yet") from None
+                raise BackendUnavailable(f"label: no encoder is trained for {self.task} yet") \
+                    from None
         return self._m
 
     def distribution(self, req: Request) -> dict[str, float]:
         m = self._load()
         if m.get("task_ver") != req.task_ver:
-            raise SystemExit(f"label: the {self.task} encoder is for another task version; "
-                             "run `aut label train-encoder` again")
+            raise BackendUnavailable(f"label: the {self.task} encoder is for another task "
+                                     "version; run `aut label train-encoder` again")
         w, labels = m["w"], m["labels"]
         z = [0.0] * len(labels)
         for f in features(req.state):
@@ -170,13 +178,13 @@ class Encoder:
         return {k: v / s for k, v in out.items()}
 
 
-def make_backend(task: str, choice: Choice, default_model: str):
+def make_backend(task: str, choice: Choice, default_model: str) -> Backend:
     if choice.backend == "encoder":
         return Encoder(task, choice.model_id, choice.model_rev)
     if choice.backend != "mlx_letter":
-        raise SystemExit(f"label: unknown backend {choice.backend!r} for {task}")
+        raise BackendUnavailable(f"label: unknown backend {choice.backend!r} for {task}")
     name = choice.model_id or default_model
     repo = MODELS.get(name, name)
     if repo is None:
-        raise SystemExit(f"label: {name} has no official MLX build yet")
+        raise BackendUnavailable(f"label: {name} has no official MLX build yet")
     return MlxLetter(repo, choice.model_rev)

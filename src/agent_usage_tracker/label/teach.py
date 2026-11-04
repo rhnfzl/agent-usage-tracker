@@ -17,10 +17,10 @@ import tempfile
 from collections import Counter
 from datetime import date
 
-from ..config import Config
+from ..config import AutError, Config
 from .backends import make_backend
 from .core import Choice, Request, render
-from .evalset import DAYS, append_jsonl, path, read_jsonl, stratified, unit_day, window_units
+from .evalset import DAYS, append_jsonl, eval_path, read_jsonl, stratified, unit_day, window_units
 from .tasks import TASKS, Source
 
 SONNET = "claude-sonnet-5-5"
@@ -61,7 +61,7 @@ def ask_claude(prompt: str, timeout: int = 180) -> tuple[str, float]:
     never carries the prompt or claude's output."""
     exe = shutil.which("claude")
     if not exe:
-        raise SystemExit("label teach: the claude CLI is not on PATH")
+        raise AutError("label teach: the claude CLI is not on PATH")
     with tempfile.TemporaryDirectory() as d:
         p = subprocess.run([exe, *CLAUDE_ARGS], input=prompt, capture_output=True, text=True,
                            encoding="utf-8", timeout=timeout, cwd=d)
@@ -83,7 +83,7 @@ def run_teach(cfg: Config, task: str, n: int, budget_usd: float = 5.0, days: int
     reqs = window_units(cfg, task, days, src, today)
     local = local or make_backend(task, Choice(), cfg.label_model)
     ask = ask or ask_claude
-    out = path(task, "silver")
+    out = eval_path(task, "silver")
     have = {(r.get("unit_id"), r.get("teacher")) for r in read_jsonl(out)
             if r.get("task_ver") == t.ver}
 
@@ -125,4 +125,4 @@ def print_teach(task: str, c: Counter, budget_usd: float) -> None:
     print(f"label teach {task}: {c['units']} units, local {c['local']}, sonnet {c['sonnet']} "
           f"(unusable {c['sonnet_unusable']}, failed {c['sonnet_failed']}, skipped "
           f"{c['sonnet_skipped']}), spent ${c['spent_usd_milli'] / 1000:.2f} of "
-          f"${budget_usd:.2f} -> {path(task, 'silver')}")
+          f"${budget_usd:.2f} -> {eval_path(task, 'silver')}")

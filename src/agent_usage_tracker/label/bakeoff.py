@@ -18,14 +18,14 @@ import time
 from collections import Counter
 from datetime import datetime, timezone
 
-from ..config import Config
+from ..config import AutError, Config
 from ..event import ActivityEvent, make_event_id
 from ..push import send_activity_rows
 from ..state import atomic_write_text
 from .backends import MODELS, Encoder, encoder_path, features, make_backend
-from .core import Choice, choice_path, fit_tau, fit_temperature, read_choices, softmax, temper
-from .evalset import (DAYS, append_jsonl, encoder_fit, gold_latest, held_out, path, read_jsonl,
-                      silver_by_unit, stratum, window_units)
+from .core import Backend, Choice, choice_path, fit_tau, fit_temperature, read_choices, softmax, temper
+from .evalset import (DAYS, append_jsonl, eval_path, gold_latest, held_out,
+                      in_encoder_train_split, read_jsonl, silver_by_unit, stratum, window_units)
 from .tasks import TASKS, Source
 
 SHARE_ERROR_PP = 5.0         # map.md 4.5: a label's share on known items may be off this much
@@ -80,7 +80,7 @@ def weights(task: str, golds: list[str]) -> dict[str, float]:
             for u in golds for s in [stratum(silver.get(u))]}
 
 
-def evaluate(task: str, backend, items: list[tuple], precision: float,
+def evaluate(task: str, backend: Backend, items: list[tuple], precision: float,
              today: str) -> dict:
     """items: (request, gold, held_out, weight). The eval record of one backend (numbers)."""
     ver, labels = TASKS[task].ver, [c for c, _d in TASKS[task].candidates]
@@ -88,7 +88,8 @@ def evaluate(task: str, backend, items: list[tuple], precision: float,
     raws = [backend.distribution(r) for r, *_ in items]
     secs = (time.monotonic() - t0) / max(len(items), 1)
     enc = isinstance(backend, Encoder)      # its training half never calibrates it
-    cal = [i for i, it in enumerate(items) if not it[2] and not (enc and encoder_fit(it[0]))]
+    cal = [i for i, it in enumerate(items)
+           if not it[2] and not (enc and in_encoder_train_split(it[0]))]
     held = [i for i, it in enumerate(items) if it[2]]
     t = fit_temperature([raws[i] for i in cal], [items[i][1] for i in cal])
     dists = [temper(d, t) for d in raws]
@@ -119,7 +120,7 @@ def evaluate(task: str, backend, items: list[tuple], precision: float,
     f1s = [v["f1"] for v in per.values() if v["f1"] is not None]
     return {"task": task, "task_ver": ver, "backend": "encoder" if isinstance(backend, Encoder)
             else "mlx_letter", "model_id": backend.model_id, "model_rev": backend.model_rev,
-            "size_mb": getattr(backend, "size_mb", None), "prompt_ver": items[0][0].prompt_ver,
+            "size_mb": backend.size_mb, "prompt_ver": items[0][0].prompt_ver,
             "calib_ver": f"{task}@{ver}/{today}", "temperature": t, "n": len(items),
             "n_cal": len(cal), "n_held": len(held),
             "macro_f1": _round4(sum(f1s) / len(f1s)) if f1s else None,
@@ -141,7 +142,7 @@ def gold_items(cfg: Config, task: str, days: int, src: Source | None) -> tuple[l
     return [(reqs[u], gold[u], held_out(reqs[u]), w[u]) for u in found], len(gold) - len(found)
 
 
-def default_backends(cfg: Config, task: str) -> list:
+def default_backends(cfg: Config, task: str) -> list[Backend]:
     """Every local model with an MLX build, plus the encoder once trained."""
     repos = list(dict.fromkeys([r for r in MODELS.values() if r] + [cfg.label_model]))
     out = [make_backend(task, Choice(model_id=r), cfg.label_model) for r in repos]
@@ -155,19 +156,19 @@ def default_backends(cfg: Config, task: str) -> list:
 
 
 def run_eval(cfg: Config, task: str, days: int = DAYS, src: Source | None = None,
-             backends: list | None = None, now: datetime | None = None) -> list[dict]:
+             backends: list[Backend] | None = None, now: datetime | None = None) -> list[dict]:
     now = now or datetime.now(timezone.utc)
     items, gone = gold_items(cfg, task, days, src)
     if not items:
-        raise SystemExit(f"label eval: no gold labels for {task} in the last {days} days "
-                         "(label some with `aut label review`)")
+        raise AutError(f"label eval: no gold labels for {task} in the last {days} days "
+                       "(label some with `aut label review`)")
     if gone:
         print(f"aut: label eval: {gone} gold units are outside the {days}-day window; left out",
               file=sys.stderr)
     recs = []
     for b in backends if backends is not None else default_backends(cfg, task):
         rec = evaluate(task, b, items, cfg.label_precision, now.astimezone().date().isoformat())
-        append_jsonl(path(task, "eval"), {"ts": now.isoformat(), **rec})
+        append_jsonl(eval_path(task, "eval"), {"ts": now.isoformat(), **rec})
         if cfg.pg_dsn:
             send_activity_rows(cfg.pg_dsn, [ActivityEvent(
                 event_id=make_event_id("eval", json.dumps(rec, sort_keys=True)),
@@ -192,21 +193,21 @@ def passes(rec: dict, coverage: float, precision: float) -> bool:
 def choose(cfg: Config, task: str) -> dict:
     """Write the smallest backend whose newest eval passes into label.json; others untouched."""
     newest: dict[str, dict] = {}
-    for r in read_jsonl(path(task, "eval")):
+    for r in read_jsonl(eval_path(task, "eval")):
         if r.get("task_ver") == TASKS[task].ver:
             newest[r["model_id"]] = r                   # the file is in time order
     ok = [r for r in newest.values() if passes(r, cfg.label_coverage, cfg.label_precision)]
     if not ok:
         why = {m: {"coverage": r["coverage"], "n_held": r["n_held"]} for m, r in newest.items()}
-        raise SystemExit(f"label choose: no backend passes the bar for {task}: {json.dumps(why)}")
+        raise AutError(f"label choose: no backend passes the bar for {task}: {json.dumps(why)}")
     win = min(ok, key=lambda r: (r["size_mb"] if r["size_mb"] is not None else math.inf,
                                  -(r["macro_f1"] or 0)))
     p = choice_path()
     try:
         obj = read_choices()
     except (OSError, ValueError) as exc:    # overwriting would lose every other task's choice
-        raise SystemExit(f"label choose: {p} is unusable ({exc}); nothing written. Fix or move "
-                         "it aside and run choose again for each task.") from None
+        raise AutError(f"label choose: {p} is unusable ({exc}); nothing written. Fix or move "
+                       "it aside and run choose again for each task.") from None
     obj.setdefault("tasks", {})[task] = {
         "backend": win["backend"], "model_id": win["model_id"], "model_rev": win["model_rev"],
         "temperature": win["temperature"], "calib_ver": win["calib_ver"],
@@ -239,8 +240,8 @@ def _fit(data: list[tuple[list[int], list[float], float]], k: int, epochs: int =
 
 
 def train_encoder(cfg: Config, task: str, days: int = DAYS, src: Source | None = None) -> dict:
-    """Fit the encoder on half the calibration-day gold (encoder_fit, GOLD_WEIGHT) and silver
-    (teachers averaged), never on a held-out gold unit nor on the gold eval calibrates it with;
+    """Fit the encoder on half the calibration-day gold (in_encoder_train_split, GOLD_WEIGHT) and
+    silver (teachers averaged), never on a held-out gold unit nor on the gold eval calibrates it with;
     report accuracy and macro-F1 on the held-out gold only."""
     labels = [c for c, _d in TASKS[task].candidates]
     reqs = window_units(cfg, task, days, src)
@@ -248,14 +249,14 @@ def train_encoder(cfg: Config, task: str, days: int = DAYS, src: Source | None =
     test = {u for u in gold if u in reqs and held_out(reqs[u])}
     data = []
     for u, g in gold.items():
-        if u in reqs and u not in test and encoder_fit(reqs[u]):
+        if u in reqs and u not in test and in_encoder_train_split(reqs[u]):
             data.append((features(reqs[u].state), [float(x == g) for x in labels], GOLD_WEIGHT))
     for u, ts in silver.items():
         if u in reqs and u not in test and u not in gold and ts:
             avg = [sum(d.get(x, 0.0) for d in ts.values()) / len(ts) for x in labels]
             data.append((features(reqs[u].state), avg, 1.0))
     if not data:
-        raise SystemExit(f"label train-encoder: no gold or silver labels for {task} yet")
+        raise AutError(f"label train-encoder: no gold or silver labels for {task} yet")
     w = _fit(data, len(labels))
     p = encoder_path(task)
     p.parent.mkdir(parents=True, exist_ok=True)

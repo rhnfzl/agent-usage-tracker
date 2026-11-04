@@ -19,8 +19,8 @@ from datetime import date
 from .. import local_page
 from ..config import Config
 from .core import Request
-from .evalset import (DAYS, FLOORS, append_jsonl, gold_latest, path, read_jsonl, silver_by_unit,
-                      stratified, stratum, window_units, write_jsonl)
+from .evalset import (DAYS, FLOORS, append_jsonl, eval_path, gold_latest, read_jsonl,
+                      silver_by_unit, stratified, stratum, window_units, write_jsonl)
 from .tasks import TASKS, Source
 
 LABELLER = "human"
@@ -103,7 +103,7 @@ def _teachers(silver: dict | None) -> list[tuple[str, str, float]]:
 
 def _drop_last(task: str, unit_id: str) -> None:
     """Undo: remove the newest gold row of the unit (the file is otherwise append-only)."""
-    p = path(task, "gold")
+    p = eval_path(task, "gold")
     rows = read_jsonl(p)
     for i in range(len(rows) - 1, -1, -1):
         if rows[i].get("unit_id") == unit_id:
@@ -152,7 +152,7 @@ def serve(task: str, reqs: dict[str, Request], open_browser: bool = True, on_rea
             st["pos"] += 1
             session["skipped"] += 1
         elif a in ids:
-            append_jsonl(path(task, "gold"), {"unit_id": u, "gold": a, "labeller": LABELLER,
+            append_jsonl(eval_path(task, "gold"), {"unit_id": u, "gold": a, "labeller": LABELLER,
                                               "date": day, "task_ver": TASKS[task].ver})
             gold[u] = a
             st["hist"].append(("gold", u))

@@ -41,7 +41,7 @@ from pathlib import Path
 from typing import Literal, NamedTuple, NotRequired, TypedDict
 
 from .collectors import claude_code
-from .config import Config
+from .config import AutError, Config
 from .git_safe import git_argv, git_env
 from .push import deliver_scan_rows, scan_row, scrub_error
 from .repo_keys import RepoKeys, repo_identity
@@ -664,13 +664,13 @@ def latest_session(home: Path, cwd: str) -> str | None:
 
 def build_manual_outcome(cfg: Config, outcome: str, cwd: str, session: str | None = None,
                          now: float | None = None) -> dict:
-    """One agents.manual_outcome row, or SystemExit with the reason it was refused."""
+    """One agents.manual_outcome row, or AutError with the reason it was refused."""
     if outcome not in MANUAL:
-        raise SystemExit(f"outcome: one of {', '.join(MANUAL)}")
+        raise AutError(f"outcome: one of {', '.join(MANUAL)}")
     sid = session or latest_session(cfg.home, cwd)
     if not sid:
-        raise SystemExit("outcome: no interactive session found for this directory; "
-                         "pass --session ID")
+        raise AutError("outcome: no interactive session found for this directory; "
+                       "pass --session ID")
     ts = datetime.fromtimestamp(now if now is not None else datetime.now().timestamp(),
                                 timezone.utc)
     return {"session_id": sid, "outcome": MANUAL[outcome], "ts": ts,

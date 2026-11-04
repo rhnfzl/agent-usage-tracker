@@ -16,6 +16,7 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Callable
 
+from .config import AutError
 from .net import HTTP_ERRORS
 from .state import atomic_write_text
 
@@ -145,19 +146,19 @@ def sync_prices(
     fetch: Callable[[str], dict[str, Any] | None] | None = None,
 ) -> int:
     """Fetch -> build -> atomic write. Returns the number of priced models. Raises
-    SystemExit if the primary source is unreachable or the map is empty, so a
+    AutError if the primary source is unreachable or the map is empty, so a
     good file is never overwritten with junk. `fetch` defaults to the network
     fetcher; inject a fake in tests."""
     fetch = fetch or _fetch_json
     litellm = fetch(litellm_url)
     if not litellm:
-        raise SystemExit(
+        raise AutError(
             "sync-prices: LiteLLM source unreachable; keeping the existing "
             "price file."
         )
     rates = build_rate_map(litellm, fetch(models_dev_url))
     if not rates:
-        raise SystemExit(
+        raise AutError(
             "sync-prices: built an empty rate map; keeping the existing "
             "price file."
         )
@@ -175,4 +176,4 @@ def load_prices(path: str | Path) -> dict[str, dict[str, float]]:
     try:
         return json.loads(p.read_text(encoding="utf-8"))
     except (ValueError, OSError) as exc:
-        raise SystemExit(f"price file {p} is unreadable/corrupt; re-run `aut sync-prices`: {exc}")
+        raise AutError(f"price file {p} is unreadable/corrupt; re-run `aut sync-prices`: {exc}")

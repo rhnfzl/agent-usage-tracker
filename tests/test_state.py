@@ -17,7 +17,7 @@ import sys
 import tempfile
 from pathlib import Path
 from agent_usage_tracker import push  # noqa: E402
-from agent_usage_tracker.config import Config, load_config  # noqa: E402
+from agent_usage_tracker.config import AutError, Config, load_config  # noqa: E402
 from agent_usage_tracker.state import atomic_write_text, load_json_dict, load_state  # noqa: E402
 
 
@@ -117,7 +117,7 @@ def test_config_errors_and_permission_warning() -> None:
             try:
                 load_config()
                 raise AssertionError("bad TOML must be an operator error")
-            except SystemExit as exc:
+            except AutError as exc:
                 assert str(p) in str(exc) and "TOML" in str(exc), exc
             if os.name != "nt":
                 p.write_text('[transport]\nwebhook_secret = "env:AUT_TEST_UNSET"\n')
@@ -144,7 +144,7 @@ def test_missing_psycopg_names_the_extra_and_spares_the_heartbeat() -> None:
         try:
             push.insert_pg("pg://x", [])
             raise AssertionError("a missing driver must be an operator error")
-        except SystemExit as exc:
+        except AutError as exc:
             assert "agent-usage-tracker[postgres]" in str(exc), exc
         with contextlib.redirect_stderr(io.StringIO()) as err:
             push.deliver_scan_rows(cfg, [row])      # best effort: returns

@@ -35,6 +35,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from test_label import FakeSource, _cfg, _claude_log, _env, _steer, _win  # noqa: E402
 
 from agent_usage_tracker import cli  # noqa: E402
+from agent_usage_tracker.config import AutError  # noqa: E402
 from agent_usage_tracker.label import (backends, bakeoff, core, evalset, gold, tasks,  # noqa: E402
                                        teach)
 
@@ -119,26 +120,26 @@ def test_teach_sonnet_only_for_claude_units_resumable_and_capped(tmp_path):
         c = teach.run_teach(cfg, TASK, 3, budget_usd=2.0, src=src, local=Oracle(), ask=ask)
         assert c["units"] == 3 and c["local"] == 3 and c["sonnet"] == 2
         assert c["sonnet_skipped"] == 1 and c["spent_usd_milli"] == 2000
-        rows = evalset.read_jsonl(evalset.path(TASK, "silver"))
+        rows = evalset.read_jsonl(evalset.eval_path(TASK, "silver"))
         assert {r["teacher"] for r in rows} == {"fake/oracle", teach.SONNET}
         assert all(set(r) == {"unit_id", "teacher", "dist", "date", "task_ver"} for r in rows)
-        assert WORD not in evalset.path(TASK, "silver").read_text()
+        assert WORD not in evalset.eval_path(TASK, "silver").read_text()
         assert WORD in asked[0]                         # Sonnet saw the (Claude Code) text
         # a rerun adds only what is missing: Sonnet for the skipped unit, then the fourth unit
         asked.clear()
         c = teach.run_teach(cfg, TASK, 10, budget_usd=5.0, src=src, local=Oracle(), ask=ask)
         assert c["units"] == 2 and c["local"] == 1 and c["sonnet"] == 2
         per = Counter((r["unit_id"], r["teacher"]) for r in
-                      evalset.read_jsonl(evalset.path(TASK, "silver")))
+                      evalset.read_jsonl(evalset.eval_path(TASK, "silver")))
         assert len(per) == 8 and set(per.values()) == {1}
         # failures and unusable answers are counted, and claude gives up after MAX_FAILS
-        evalset.path(TASK, "silver").unlink()
+        evalset.eval_path(TASK, "silver").unlink()
 
         def broken(prompt):
             raise RuntimeError("down")
         c = teach.run_teach(cfg, TASK, 4, src=src, local=Oracle(), ask=broken)
         assert c["sonnet_failed"] == teach.MAX_FAILS and c["sonnet_skipped"] == 1
-        evalset.path(TASK, "silver").unlink()
+        evalset.eval_path(TASK, "silver").unlink()
         c = teach.run_teach(cfg, TASK, 1, src=src, local=Oracle(), ask=lambda p: ("no", 0.0))
         assert c["sonnet_unusable"] == 1 and c["local"] == 1
 
@@ -152,7 +153,7 @@ def test_teach_never_sends_window_units(tmp_path):
         c = teach.run_teach(cfg, "aw_title_relevance", 5, src=src, local=Oracle("relevant"),
                             ask=lambda p: asked.append(p) or ("{}", 0.0))
         assert c["local"] == 1 and c["sonnet"] == 0 and asked == []
-        assert "bank" not in evalset.path("aw_title_relevance", "silver").read_text()
+        assert "bank" not in evalset.eval_path("aw_title_relevance", "silver").read_text()
     assert {"aw_block", "aw_title"}.isdisjoint(teach.CLAUDE_UNITS)
 
 
@@ -214,7 +215,7 @@ def test_gold_page_hides_silver_until_answered_and_writes_no_text(tmp_path):
     with _env(tmp_path):
         reqs = evalset.window_units(cfg, TASK, src=src)
         for u in reqs:
-            evalset.append_jsonl(evalset.path(TASK, "silver"), {
+            evalset.append_jsonl(evalset.eval_path(TASK, "silver"), {
                 "unit_id": u, "teacher": "fake/teacher", "task_ver": 1, "date": "d",
                 "dist": {"acceptance": 0.8, "stop": 0.2}})
         t, box = _serve(reqs)
@@ -243,10 +244,10 @@ def test_gold_page_hides_silver_until_answered_and_writes_no_text(tmp_path):
         assert _post(url, a=":quit")[0] == 200
         t.join(10)
         assert not t.is_alive() and box["res"] == Counter(answered=1, skipped=0)
-        rows = evalset.read_jsonl(evalset.path(TASK, "gold"))
+        rows = evalset.read_jsonl(evalset.eval_path(TASK, "gold"))
         assert rows == [{"unit_id": shown, "gold": "stop", "labeller": "human",
                          "date": rows[0]["date"], "task_ver": 1}]
-        assert WORD not in evalset.path(TASK, "gold").read_text()
+        assert WORD not in evalset.eval_path(TASK, "gold").read_text()
         # the next session starts with what is left
         t, box = _serve(reqs)
         assert re.search(r'name=u value="(\w+)"', _get(box["url"])).group(1) != shown
@@ -259,7 +260,7 @@ def _gold(tmp: Path, golds: list[str]):
     cfg, src = _src(tmp, golds)
     reqs = evalset.window_units(cfg, TASK, src=src)
     for u, r in reqs.items():
-        evalset.append_jsonl(evalset.path(TASK, "gold"), {
+        evalset.append_jsonl(evalset.eval_path(TASK, "gold"), {
             "unit_id": u, "gold": r.state["text"].split()[0], "labeller": "human", "date": "d",
             "task_ver": 1})
     return cfg, src, reqs
@@ -296,8 +297,8 @@ def test_eval_record_choose_and_event(tmp_path, monkeypatch):
         assert sent[0].agent == "label" and sent[0].machine == "test"
         blob = json.dumps([e.attrs for e in sent])
         assert WORD not in blob and not any(u in blob for u in reqs)     # no unit ids, no text
-        assert WORD not in evalset.path(TASK, "eval").read_text()
-        assert len(evalset.read_jsonl(evalset.path(TASK, "eval"))) == 2
+        assert WORD not in evalset.eval_path(TASK, "eval").read_text()
+        assert len(evalset.read_jsonl(evalset.eval_path(TASK, "eval"))) == 2
         # the small backend fails the bar, so the big one wins; the choice reads back
         win = bakeoff.choose(cfg, TASK)
         assert win["model_id"] == "fake/oracle" and win["temperature"] == good["temperature"]
@@ -310,13 +311,13 @@ def test_eval_record_choose_and_event(tmp_path, monkeypatch):
         rec["per_label"]["stop"]["precision_at_tau"] = 0.7
         assert not bakeoff.passes(rec, 0.75, 0.9)
         # nothing passes -> no choice is written over the old one
-        evalset.path(TASK, "eval").unlink()
+        evalset.eval_path(TASK, "eval").unlink()
         bakeoff.run_eval(cfg, TASK, src=src, backends=[Oracle("stop")])
-        with pytest.raises(SystemExit):
+        with pytest.raises(AutError):
             bakeoff.choose(cfg, TASK)
         assert core.load_choice(TASK).model_rev == "r1"
-        evalset.path(TASK, "gold").unlink()
-        with pytest.raises(SystemExit):
+        evalset.eval_path(TASK, "gold").unlink()
+        with pytest.raises(AutError):
             bakeoff.run_eval(cfg, TASK, src=src, backends=[Oracle()])
 
 
@@ -324,12 +325,12 @@ def test_share_error_is_reweighted_to_natural_frequency(tmp_path):
     with _env(tmp_path):
         # silver says 9 of 10 units are `stop`, gold oversampled the rare label 1:1
         for i in range(10):
-            evalset.append_jsonl(evalset.path(TASK, "silver"), {
+            evalset.append_jsonl(evalset.eval_path(TASK, "silver"), {
                 "unit_id": f"p{i}", "teacher": "t", "task_ver": 1, "date": "d",
                 "dist": {"stop": 0.9, "framing": 0.1} if i < 9 else {"framing": 0.9,
                                                                      "stop": 0.1}})
         for u, d in (("g1", "stop"), ("g2", "framing")):
-            evalset.append_jsonl(evalset.path(TASK, "silver"), {
+            evalset.append_jsonl(evalset.eval_path(TASK, "silver"), {
                 "unit_id": u, "teacher": "t", "task_ver": 1, "date": "d",
                 "dist": {d: 0.9}})
         w = bakeoff.weights(TASK, ["g1", "g2", "g3"])
@@ -341,7 +342,7 @@ def test_train_encoder_and_backend(tmp_path):
     golds = (["stop", "framing", "correction"] * 24)
     with _env(tmp_path):
         cfg, src, reqs = _gold(tmp_path, golds)
-        with pytest.raises(SystemExit):
+        with pytest.raises(backends.BackendUnavailable):
             backends.Encoder(TASK).distribution(next(iter(reqs.values())))
         r = bakeoff.train_encoder(cfg, TASK, src=src)
         # the held-out split follows today's date, and each steer also carries its neighbour's
@@ -349,7 +350,7 @@ def test_train_encoder_and_backend(tmp_path):
         # 14 dates checked it scored 0.89 to 1.0
         assert r["held_out"] > 0 and r["accuracy"] >= 0.8 and r["macro_f1"] >= 0.8
         held = {u for u, q in reqs.items() if evalset.held_out(q)}
-        fit = {u for u, q in reqs.items() if u not in held and evalset.encoder_fit(q)}
+        fit = {u for u, q in reqs.items() if u not in held and evalset.in_encoder_train_split(q)}
         assert 0 < len(fit) < len(reqs) - len(held) and r["trained_on"] == len(fit)
         # eval calibrates the encoder only on the gold it never trained on
         rec = bakeoff.evaluate(TASK, backends.Encoder(TASK), [
@@ -363,10 +364,10 @@ def test_train_encoder_and_backend(tmp_path):
         d = enc.distribution(req)
         assert max(d, key=d.get) == req.state["text"].split()[0] and abs(sum(d.values()) - 1) < 1e-9
         assert enc.model_rev and enc.size_mb is not None
-        with pytest.raises(SystemExit):                            # retrained since chosen
+        with pytest.raises(backends.BackendUnavailable):                            # retrained since chosen
             backends.make_backend(TASK, core.Choice(backend="encoder", model_rev="0" * 12), "x")
         req.task_ver = 2
-        with pytest.raises(SystemExit):
+        with pytest.raises(backends.BackendUnavailable):
             enc.distribution(req)
         assert any(isinstance(b, backends.Encoder) for b in
                    bakeoff.default_backends(_cfg(tmp_path), TASK))
@@ -414,12 +415,12 @@ def test_corrupt_choice_file_warns_and_choose_keeps_it(tmp_path, monkeypatch, ca
          "temperature": 1.0, "calib_ver": "c", "per_label": {}, "coverage": 1.0, "n_held": 9,
          "size_mb": 1, "macro_f1": 1.0}])
     monkeypatch.setattr(bakeoff, "passes", lambda *a: True)
-    with pytest.raises(SystemExit, match="unusable"):
+    with pytest.raises(AutError, match="unusable"):
         bakeoff.choose(_cfg(tmp_path), TASK)
     assert p.read_text() == "{not json", "another task's choice must survive"
 
 
 def test_unreadable_jsonl_is_not_an_empty_one(tmp_path):
     assert evalset.read_jsonl(tmp_path / "gone.jsonl") == []
-    with pytest.raises(SystemExit, match="cannot read"):
+    with pytest.raises(AutError, match="cannot read"):
         evalset.read_jsonl(tmp_path)        # a directory: OSError that is not "missing"

@@ -18,7 +18,7 @@ from typing import Callable
 
 from . import episode_store, local_page, review
 from .collectors.session_digest import local_info
-from .config import Config
+from .config import AutError, Config
 from .sink import connect
 
 # (shown name, link row attrs): a commit key is a printed commit (commit_keys) or a quoted SHA
@@ -51,7 +51,7 @@ def _day_bounds(day: str) -> tuple[datetime, datetime]:
     try:
         d = datetime.strptime(day, "%Y-%m-%d")
     except ValueError:
-        raise SystemExit("inspect: --day is YYYY-MM-DD") from None
+        raise AutError("inspect: --day is YYYY-MM-DD") from None
     return d.astimezone(), (d + timedelta(days=1)).astimezone()   # local midnights, DST-safe
 
 
@@ -59,7 +59,7 @@ def _episode_prefix(episode: str) -> str:
     """An episode id or prefix: uuid characters only, so no LIKE wildcard gets through."""
     ep = episode.strip().lower()
     if not _EP_PREFIX.fullmatch(ep):
-        raise SystemExit("inspect: --episode is an episode id or prefix (4 or more of 0-9a-f-)")
+        raise AutError("inspect: --episode is an episode id or prefix (4 or more of 0-9a-f-)")
     return ep
 
 
@@ -306,7 +306,7 @@ def run_inspect(cfg: Config, episode: str | None = None, day: str | None = None,
         f"Day {day}" if day is not None else f"Label {label}"
     view = build(fetch_fn(dsn, episode=episode, day=day, label=label))
     if not view["episodes"] and not view["labels"]:
-        raise SystemExit(f"inspect: nothing found for {title.lower()}")
+        raise AutError(f"inspect: nothing found for {title.lower()}")
     info = local_info(cfg.home, {s["session_id"] for ep in view["episodes"]
                                         for s in ep["sessions"][:4 * _SHOW]
                                         if s["role"] == "seed"})   # children have no title
