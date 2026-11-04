@@ -466,7 +466,7 @@ def _resolve(anchors: list[_Anchor], clones: list[Clone], stats: Counter) -> Non
         a.pick = _Pick(clones[best.clone], repos[best.clone], best.full)
         a.unread |= not all(repos[j].ok for j, _ in cands)
         stats["found"] += 1
-        stats["null_key_resolved"] += a.key is None and clones[i].key is not None
+        stats["null_key_resolved"] += a.key is None and clones[best.clone].key is not None
 
 
 def _decide(a: _Anchor, now_ts: float, cache: dict, gh: bool,

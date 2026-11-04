@@ -172,6 +172,22 @@ def test_null_key_resolution_needs_matching_time():
         print("ok null_key_resolution_needs_matching_time")
 
 
+def test_null_key_resolved_counts_the_chosen_clone_of_each_anchor():
+    with tempfile.TemporaryDirectory() as d:
+        _, s = _world(Path(d))
+        local = Path(d) / "projects" / "local"             # no origin, so a clone without a key
+        local.mkdir()
+        _g(local, "init", "-q", "-b", "main")
+        only_local = _commit(local, "l.txt", _lines("l"), 30)
+        clones = oc.find_clones([str(Path(d) / "projects")], RepoKeys(SALT))
+        assert sorted(c.key is None for c in clones) == [False, True], clones
+        rows = [_row(s["A"], None, 30), _row(only_local, None, 30)]
+        for order in (rows, rows[::-1]):                   # one anchor resolves to a keyed clone
+            _, stats = oc.evaluate(order, clones, NOW, cache={})
+            assert stats["found"] == 2 and stats["null_key_resolved"] == 1, stats
+        print("ok null_key_resolved_counts_the_chosen_clone_of_each_anchor")
+
+
 def test_young_missing_commit_is_undecided():
     outs, stats = oc.evaluate([_row("abcdef1234", None, 3, short=10)], [], NOW, cache={})
     assert _states(outs)["abcdef1234"][0] == "undecided", outs
