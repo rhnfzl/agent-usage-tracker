@@ -21,9 +21,9 @@ import sys
 import urllib.error
 import urllib.request
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
-from typing import Any, Callable, Iterator
+from typing import Any, Callable, Iterator, Literal
 from urllib.parse import urlparse
 
 from . import __version__
@@ -64,6 +64,8 @@ TIME_COLUMNS = ("event_id", "ts", "end_ts", "machine", "source", "app", "title",
                 "work_relevant", "attrs")
 TIME_TABLE = "agents.time_interval"
 _ERROR_MAX = 300
+_JSONB_COLUMN = "attrs"              # the one jsonb column of these tables
+ScanStatus = Literal["ok", "degraded", "error"]
 
 
 class DeliveryError(RuntimeError):
@@ -87,30 +89,25 @@ def _post_webhook(url: str, secret: str, batch: list[UsageEvent],
 
 
 def _insert_sql(table: str, columns: tuple[str, ...], conflict: str) -> str:
+    marks = ", ".join("%s::jsonb" if c == _JSONB_COLUMN else "%s" for c in columns)
     return (f"INSERT INTO {table} ({', '.join(columns)}) VALUES "  # nosec B608 # constants only
-            f"({', '.join(['%s'] * len(columns))}) ON CONFLICT ({conflict}) DO NOTHING")
+            f"({marks}) ON CONFLICT ({conflict}) DO NOTHING")
 
 
-def _session_rows(batch: list[UsageEvent]) -> list[tuple]:
-    return [tuple(r[c] for c in SESSION_COLUMNS) for r in map(UsageEvent.session_row, batch) if r]
+def _params(row: dict[str, Any], columns: tuple[str, ...]) -> tuple[Any, ...]:
+    return tuple(json.dumps(row[c], sort_keys=True) if c == _JSONB_COLUMN else row[c]
+                 for c in columns)
 
 
-def _activity_rows(acts: list[ActivityEvent]) -> list[tuple]:
-    return [(a.event_id, a.ts, a.machine, a.agent, a.kind, a.session_id, a.turn_id,
-             json.dumps(a.attrs, sort_keys=True)) for a in acts]
+def _session_rows(batch: list[UsageEvent]) -> list[tuple[Any, ...]]:
+    return [_params(r, SESSION_COLUMNS) for r in map(UsageEvent.session_row, batch) if r]
 
 
+_USAGE_SQL = _insert_sql(TABLE, COLUMNS, "event_id, ts")
 _SESSION_SQL = _insert_sql(SESSION_TABLE, SESSION_COLUMNS, "event_id")
-_ACTIVITY_SQL = _insert_sql(ACTIVITY_TABLE, ACTIVITY_COLUMNS, "event_id, ts").replace(
-    "%s)", "%s::jsonb)")                 # the last placeholder is attrs
-
-
-_TIME_SQL = _insert_sql(TIME_TABLE, TIME_COLUMNS, "event_id, ts").replace("%s)", "%s::jsonb)")
-
-
-def _time_rows(times: list[TimeInterval]) -> list[tuple]:
-    return [(t.event_id, t.ts, t.end_ts, t.machine, t.source, t.app, t.title, t.category,
-             t.work_relevant, json.dumps(t.attrs, sort_keys=True)) for t in times]
+_ACTIVITY_SQL = _insert_sql(ACTIVITY_TABLE, ACTIVITY_COLUMNS, "event_id, ts")
+_TIME_SQL = _insert_sql(TIME_TABLE, TIME_COLUMNS, "event_id, ts")
+_SCAN_SQL = _insert_sql(SCAN_TABLE, SCAN_COLUMNS, "machine, collector, finished_at")
 
 
 def _split(batch: list[Row]) -> tuple[list[UsageEvent], list[ActivityEvent], list[TimeInterval]]:
@@ -124,31 +121,30 @@ def insert_pg(dsn: str, batch: list[Row], with_usage: bool = True) -> None:
     transaction: all land or none does, so a raise leaves the watermark where it was and the batch
     is re-sent. with_usage=False: the webhook already carried the usage rows."""
     usage, acts, times = _split(batch)
-    rows = [tuple(e.to_dict()[c] for c in COLUMNS) for e in usage] if with_usage else []
+    rows = [_params(e.to_dict(), COLUMNS) for e in usage] if with_usage else []
     sessions = _session_rows(usage)
     with connect(dsn) as conn:
         with conn.cursor() as cur:
             if rows:
-                cur.executemany(_insert_sql(TABLE, COLUMNS, "event_id, ts"), rows)
+                cur.executemany(_USAGE_SQL, rows)
             if sessions:
                 cur.executemany(_SESSION_SQL, sessions)
             if acts:
-                cur.executemany(_ACTIVITY_SQL, _activity_rows(acts))
+                cur.executemany(_ACTIVITY_SQL, [_params(asdict(a), ACTIVITY_COLUMNS) for a in acts])
             if times:
-                cur.executemany(_TIME_SQL, _time_rows(times))
+                cur.executemany(_TIME_SQL, [_params(asdict(t), TIME_COLUMNS) for t in times])
         conn.commit()
 
 
 def send_activity_rows(dsn: str, acts: list[ActivityEvent]) -> None:
     """Activity rows only (the activity backfill). Idempotent on (event_id, ts); raises on failure."""
-    write_many(dsn, _ACTIVITY_SQL, _activity_rows(acts))
+    write_many(dsn, _ACTIVITY_SQL, [_params(asdict(a), ACTIVITY_COLUMNS) for a in acts])
 
 
-def send_session_rows(dsn: str, rows: list[dict]) -> None:
-    """Session rows only (the sessions-only backfill), as UsageEvent.session_row() dicts: that
-    backfill holds them already, unlike send_activity_rows' events. Idempotent on event_id; raises
+def send_session_rows(dsn: str, events: list[UsageEvent]) -> None:
+    """The events' session rows only (the sessions-only backfill). Idempotent on event_id; raises
     on failure."""
-    write_many(dsn, _SESSION_SQL, [tuple(r[c] for c in SESSION_COLUMNS) for r in rows])
+    write_many(dsn, _SESSION_SQL, _session_rows(events))
 
 
 def _check_webhook(cfg: Config) -> None:
@@ -197,7 +193,7 @@ class _Sender:
             insert_pg(cfg.pg_dsn, batch)
             return
         raise DeliveryError("webhook delivery failed and no PG fallback: "
-                            f"{local_error(webhook_err) if webhook_err else 'not sent'}") \
+                            f"{redacted_error(webhook_err) if webhook_err else 'not sent'}") \
             from webhook_err
 
     def _post_usage(self, batch: list[Row], url: str, secret: str) -> Exception | None:
@@ -210,7 +206,7 @@ class _Sender:
             if self.cfg.pg_dsn and not self.fallback_shown:  # printed first: a PG failure shows both
                 self.fallback_shown = True
                 print(f"aut: warning: webhook delivery failed, using transport.pg_dsn: "
-                      f"{local_error(exc)}", file=sys.stderr)
+                      f"{redacted_error(exc)}", file=sys.stderr)
             return exc
         return None
 
@@ -242,14 +238,14 @@ def make_sender(cfg: Config) -> Callable[[list[Row]], None]:
     return _Sender(cfg)
 
 
-def scrub_error(exc: BaseException) -> str:
+def error_type_name(exc: BaseException) -> str:
     """The error stored in a scan row: the exception TYPE only. Messages can carry a file path
     (which names a project) or part of a credential, and no redaction pattern catches every
     form, so the full message stays on this machine's stderr and never reaches the sink."""
     return type(exc).__name__[:_ERROR_MAX]
 
 
-def local_error(exc: BaseException) -> str:
+def redacted_error(exc: BaseException) -> str:
     """The error for this machine's stderr: type and message on one line, credentials redacted."""
     return f"{type(exc).__name__}: {redact(' '.join(str(exc).split()))}"
 
@@ -262,7 +258,7 @@ def is_operational_failure(exc: Exception) -> bool:
         or type(exc).__module__.partition(".")[0] == "psycopg"
 
 
-def scan_row(cfg: Config, collector: str, started_at: datetime, *, status: str = "ok",
+def scan_row(cfg: Config, collector: str, started_at: datetime, *, status: ScanStatus = "ok",
              error: str | None = None, events: int = 0, human: int = 0,
              newest_ts: datetime | None = None) -> dict[str, Any]:
     """One agents.collector_scan row, finished now."""
@@ -271,14 +267,13 @@ def scan_row(cfg: Config, collector: str, started_at: datetime, *, status: str =
             "human": human, "newest_ts": newest_ts, "error": error, "aut_version": __version__}
 
 
-def send_scan_rows(dsn: str, rows: list[dict]) -> None:
+def send_scan_rows(dsn: str, rows: list[dict[str, Any]]) -> None:
     """Scan heartbeat rows. Idempotent on (machine, collector, finished_at); raises on failure."""
     # 5 s, not 15: usage is already delivered, so an unreachable sink should not hold the exit.
-    write_many(dsn, _insert_sql(SCAN_TABLE, SCAN_COLUMNS, "machine, collector, finished_at"),
-               [tuple(r[c] for c in SCAN_COLUMNS) for r in rows], timeout=5)
+    write_many(dsn, _SCAN_SQL, [_params(r, SCAN_COLUMNS) for r in rows], timeout=5)
 
 
-def deliver_scan_rows(cfg: Config, rows: list[dict], what: str = "scan") -> None:
+def deliver_scan_rows(cfg: Config, rows: list[dict[str, Any]], what: str = "scan") -> None:
     """The heartbeat is best effort: whatever goes wrong here must not touch the job it reports
     on, and that includes a missing driver's AutError. No pg_dsn: skipped with a note."""
     if not rows:
@@ -290,18 +285,18 @@ def deliver_scan_rows(cfg: Config, rows: list[dict], what: str = "scan") -> None
     try:
         send_scan_rows(cfg.pg_dsn, rows)
     except Exception as exc:
-        print(f"aut: warning: {what} heartbeat not delivered: {local_error(exc)}", file=sys.stderr)
+        print(f"aut: warning: {what} heartbeat not delivered: {redacted_error(exc)}", file=sys.stderr)
 
 
 @dataclass(slots=True)
 class JobBeat:
     """What a one-row job's heartbeat will say; the job's body fills it in."""
-    status: str = "ok"
+    status: ScanStatus = "ok"
     error: str | None = None
     events: int = 0
 
     def fail(self, exc: BaseException) -> None:
-        self.status, self.error = "error", scrub_error(exc)
+        self.status, self.error = "error", error_type_name(exc)
 
 
 @contextmanager

@@ -5,6 +5,7 @@ written as "env:VAR" is resolved from the environment at run time.
 
 from __future__ import annotations
 
+from typing import Any
 import os
 import re
 import socket
@@ -45,7 +46,7 @@ def config_path() -> Path:
     return Path(base) / "agent-usage-tracker" / "config.toml"
 
 
-def _text(section: dict, key: str) -> str | None:
+def _text(section: dict[str, Any], key: str) -> str | None:
     """A string setting, or None when absent. A TypeError names the key, never the value."""
     value = section.get(key)
     if value is not None and not isinstance(value, str):
@@ -53,7 +54,7 @@ def _text(section: dict, key: str) -> str | None:
     return value
 
 
-def _resolve(section: dict, key: str) -> str | None:
+def _resolve(section: dict[str, Any], key: str) -> str | None:
     """A string setting, with an "env:VAR" indirection resolved from the environment. An unset
     variable reads as not configured, and says so: a scheduled job often lacks the variable."""
     value = _text(section, key)
@@ -139,7 +140,7 @@ class Config:
 
 def load_config() -> Config:
     path = config_path()
-    data: dict = {}
+    data: dict[str, Any] = {}
     if path.exists():
         try:
             with open(path, "rb") as fh:
@@ -153,7 +154,7 @@ def load_config() -> Config:
         raise AutError(f"config: {path} has a value of the wrong type ({exc})") from None
 
 
-def _agents_of(data: dict) -> tuple[str, ...]:
+def _agents_of(data: dict[str, Any]) -> tuple[str, ...]:
     agents = tuple(data.get("agents") or DEFAULT_AGENTS)
     unknown = [a for a in agents if a not in ALL_AGENTS]
     if unknown:
@@ -161,7 +162,7 @@ def _agents_of(data: dict) -> tuple[str, ...]:
     return agents
 
 
-def _aw_categories(data: dict) -> dict[str, str]:
+def _aw_categories(data: dict[str, Any]) -> dict[str, str]:
     cats = {str(k).strip().lower(): v
             for k, v in (data.get("activitywatch_categories") or {}).items()}
     bad = sorted(k for k, v in cats.items() if v not in AW_CATEGORIES)
@@ -171,7 +172,7 @@ def _aw_categories(data: dict) -> dict[str, str]:
     return cats
 
 
-def _regex_list(data: dict, key: str) -> tuple[str, ...]:
+def _regex_list(data: dict[str, Any], key: str) -> tuple[str, ...]:
     patterns = tuple(str(p) for p in data.get(key) or ())
     for i, pat in enumerate(patterns):
         try:
@@ -181,7 +182,7 @@ def _regex_list(data: dict, key: str) -> tuple[str, ...]:
     return patterns
 
 
-def _repo_roots(data: dict) -> tuple[str, ...]:
+def _repo_roots(data: dict[str, Any]) -> tuple[str, ...]:
     roots = data.get("outcome_repo_roots") or list(DEFAULT_REPO_ROOTS)
     roots = [roots] if isinstance(roots, str) else roots
     if not isinstance(roots, list) or not all(isinstance(r, str) and r for r in roots):
@@ -189,14 +190,14 @@ def _repo_roots(data: dict) -> tuple[str, ...]:
     return tuple(roots)
 
 
-def _aw_url(data: dict) -> str:
+def _aw_url(data: dict[str, Any]) -> str:
     url = str(data.get("activitywatch_url") or DEFAULT_AW_URL)
     if not url.startswith(("http://", "https://")):
         raise AutError("config: activitywatch_url must start with http:// or https://")
     return url
 
 
-def _aw_title_days(data: dict) -> int:
+def _aw_title_days(data: dict[str, Any]) -> int:
     # 0 (the default) keeps titles for good; a number of days turns the limit on.
     days = int(data.get("activitywatch_title_days") or 0)
     if days < 0:
@@ -204,14 +205,14 @@ def _aw_title_days(data: dict) -> int:
     return days
 
 
-def _label_tasks(data: dict) -> tuple[str, ...]:
+def _label_tasks(data: dict[str, Any]) -> tuple[str, ...]:
     tasks = data.get("label_tasks") or []
     if not isinstance(tasks, list) or any(t not in LABEL_TASK_NAMES for t in tasks):
         raise AutError(f"config: label_tasks must be a list of {list(LABEL_TASK_NAMES)}")
     return tuple(tasks)
 
 
-def _label_bars(data: dict) -> tuple[float, float]:
+def _label_bars(data: dict[str, Any]) -> tuple[float, float]:
     precision, coverage = (float(data.get(k, d)) for k, d in
                            (("label_precision", 0.90), ("label_coverage", 0.75)))
     if not (0 < precision <= 1 and 0 <= coverage <= 1):
@@ -219,7 +220,7 @@ def _label_bars(data: dict) -> tuple[float, float]:
     return precision, coverage
 
 
-def _warn_if_secrets_written(path: Path, transport: dict, data: dict) -> None:
+def _warn_if_secrets_written(path: Path, transport: dict[str, Any], data: dict[str, Any]) -> None:
     # Only a value written in the file counts: an env:VAR reference keeps the secret out of it.
     written = (transport.get("webhook_secret"), transport.get("pg_dsn"),
                transport.get("cf_access_client_secret"), data.get("repo_key_salt"))
@@ -227,7 +228,7 @@ def _warn_if_secrets_written(path: Path, transport: dict, data: dict) -> None:
         warn_if_group_readable(path)
 
 
-def _config_from(data: dict, path: Path) -> Config:
+def _config_from(data: dict[str, Any], path: Path) -> Config:
     transport = data.get("transport", {})
     agents = _agents_of(data)
     aw_cats = _aw_categories(data)

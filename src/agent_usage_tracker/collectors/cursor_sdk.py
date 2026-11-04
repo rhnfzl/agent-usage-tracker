@@ -24,7 +24,7 @@ import glob
 import json
 import os
 from collections import Counter
-from typing import Callable, Iterator
+from typing import Any, Callable, Iterator
 
 from ..config import Config
 from ..event import UsageEvent, make_event_id
@@ -65,13 +65,13 @@ def _run_event(r: object, pos: int, ticket: object, project: str | None) -> Usag
     )
 
 
-def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[UsageEvent], Callable[[], None]]]:
+def collect(cfg: Config, wm: dict[str, Any]) -> Iterator[tuple[list[UsageEvent], Callable[[], None]]]:
     pattern = cfg.cursor_sdk_manifests
     if not pattern:
         return
     pattern = os.path.expanduser(pattern)   # glob does not expand ~; the documented form uses it
     events: list[UsageEvent] = []
-    skipped: Counter = Counter()
+    skipped: Counter[str] = Counter()
     for path in glob.glob(pattern, recursive=True):
         try:
             with open(path, encoding="utf-8") as fh:

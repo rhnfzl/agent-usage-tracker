@@ -186,7 +186,7 @@ def test_branch_never_crosses_repos() -> None:
     assert attrs(K1, "ok abc1234") == (K1, _bk(K1, "feat/x"))     # same repo: the record's
     assert attrs(None, "[feat/y abc1234] x") == (K1, _bk(K1, "feat/x"))
     old = ac.Link(keys, {"at": {"0": [K2, None], "3": [K1, _bk(K1, "feat/x")]}})  # older state
-    assert (old.attrs(None)["repo_key"], old.attrs(None)["branch_key"]) == (K2, None)
+    assert (old.attrs("interactive")["repo_key"], old.attrs("interactive")["branch_key"]) == (K2, None)
     print("ok branch_never_crosses_repos")
 
 

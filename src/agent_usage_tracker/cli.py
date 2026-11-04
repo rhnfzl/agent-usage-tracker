@@ -50,7 +50,7 @@ from . import inspector, manual_time, outcomes, pricing, review, scan
 from .collectors import REGISTRY
 from .config import (ALL_AGENTS, LABEL_DAYS, LABEL_DECISION_TASKS, LABEL_TASK_NAMES, AutError,
                      Config, load_config, config_path)
-from .push import is_operational_failure, local_error
+from .push import is_operational_failure, redacted_error
 from .state import collector_wm, load_state
 
 
@@ -63,7 +63,7 @@ def _fail_if_partial(what: str, failed: set[str]) -> None:
 
 def cmd_scan(cfg: Config, agents: Sequence[str], args: argparse.Namespace) -> None:
     report = scan.run_scan(cfg, agents, dry_run=args.dry_run)
-    scan.print_scan(cfg, report, args.dry_run)
+    scan.print_scan(cfg, report, dry_run=args.dry_run)
 
 
 def cmd_backfill(cfg: Config, agents: Sequence[str], args: argparse.Namespace) -> None:
@@ -113,7 +113,7 @@ def cmd_time_add(cfg: Config, args: argparse.Namespace) -> None:
 def cmd_outcomes(cfg: Config, args: argparse.Namespace) -> None:
     report = outcomes.run_outcomes(cfg, refresh=args.fetch or cfg.outcome_fetch,
                                    dry_run=args.dry_run)
-    outcomes.print_outcomes(report, args.dry_run)
+    outcomes.print_outcomes(report, dry_run=args.dry_run)
 
 
 def cmd_outcome(cfg: Config, args: argparse.Namespace) -> None:
@@ -124,8 +124,10 @@ def cmd_outcome(cfg: Config, args: argparse.Namespace) -> None:
 
 
 def cmd_inspect(cfg: Config, args: argparse.Namespace) -> None:
-    inspector.print_inspect(inspector.run_inspect(cfg, episode=args.episode, day=args.day,
-                                                  label=args.label))
+    selected: tuple[inspector.Selector, str] = (
+        ("episode", args.episode) if args.episode is not None else
+        ("day", args.day) if args.day is not None else ("label", args.label))
+    inspector.print_inspect(inspector.run_inspect(cfg, *selected))
 
 
 def cmd_episodes(cfg: Config, args: argparse.Namespace) -> None:
@@ -146,7 +148,7 @@ def _label_run(cfg: Config, args: argparse.Namespace) -> None:
         since, tasks, dry = args.since, [args.task] if args.task else None, args.dry_run
     report = label_run.run_label(cfg, tasks, local_midnight(since) if since else None,
                                  dry_run=dry)
-    label_run.print_report(report, dry)
+    label_run.print_report(report, dry_run=dry)
     failed = [name for name, c in report.items() if c["failed"]]
     if failed:
         raise AutError(f"label: could not run {', '.join(failed)} (reasons above)")
@@ -168,8 +170,9 @@ def cmd_label(cfg: Config, args: argparse.Namespace) -> None:
         _label_run(cfg, args)
     elif args.label_cmd == "teach":
         from .label import teach
-        teach.print_teach(args.task, teach.run_teach(cfg, args.task, args.n, args.budget_usd,
-                                                     args.days), args.budget_usd)
+        teach.print_teach(args.task, teach.run_teach(cfg, args.task, args.n,
+                                                     budget_usd=args.budget_usd, days=args.days),
+                          args.budget_usd)
     elif args.label_cmd == "review":
         from .label import gold
         gold.print_review(gold.run_gold_review(cfg, args.task, args.days))
@@ -287,7 +290,7 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as exc:
         if not is_operational_failure(exc):     # a bug keeps its traceback
             raise
-        print(f"aut: {local_error(exc)}", file=sys.stderr)
+        print(f"aut: {redacted_error(exc)}", file=sys.stderr)
         return 1
     return 0
 

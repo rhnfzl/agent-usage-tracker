@@ -104,7 +104,7 @@ def test_train_encoder_and_backend(tmp_path):
         cfg, src, reqs = _gold(tmp_path, golds)
         with pytest.raises(backends.BackendUnavailable):
             backends.Encoder(TASK).distribution(next(iter(reqs.values())))
-        r = bakeoff.train_encoder(cfg, TASK, src=src, today=TODAY)
+        r = bakeoff.train_encoder(cfg, TASK, src=src, now=BASE)
         # each steer also carries its neighbour's text, so a small fit is not perfect
         assert (r["trained_on"], r["held_out"]) == (16, 38)
         assert (r["accuracy"], r["macro_f1"]) == (0.8947, 0.8916)

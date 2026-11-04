@@ -17,7 +17,7 @@ from collections import Counter
 from datetime import datetime, timezone
 from functools import partial
 from pathlib import Path, PurePath
-from typing import Any, Callable, Iterator
+from typing import Any, Callable, Iterator, TypedDict
 
 from ..redact import clean_text
 from ..state import parse_record
@@ -61,10 +61,11 @@ def clip(text: str, n: int = _TEXT_MAX) -> str:
     return t if len(t) <= n else t[:n - 1].rstrip() + "\u2026"
 
 
-def _quoted(rx: re.Pattern, cmd: str, at: int) -> str | None:
+def _quoted(rx: re.Pattern[str], cmd: str, at: int) -> str | None:
     """First line of the quoted argument rx finds after `at`; for -m "$(cat <<EOF ...)" the
     heredoc's first line. Only the command segment at `at` is searched."""
     seg = _SEGMENT.match(cmd, at)
+    # _SEGMENT also matches empty, so seg is never None; the check narrows its type
     m = rx.search(cmd[:seg.end() if seg else len(cmd)], at)
     if not m:
         return None
@@ -82,6 +83,23 @@ def _when(ts: object) -> datetime | None:
     return d if d.tzinfo else None
 
 
+class SessionView(TypedDict, total=False):
+    """What Digest.view shows. Digest.view sets every key; total=False so a session with no local
+    log can be the empty view."""
+    agent: str
+    folder: str
+    start: datetime | None
+    minutes: int | None
+    n_prompts: int
+    first: str
+    last: str
+    commits: list[str]
+    prs: list[str]
+    files: list[str]
+    titles: list[str]
+    branches: list[str]
+
+
 class Digest:
     """What one session's local log says, for the page only."""
 
@@ -93,7 +111,7 @@ class Digest:
         self.prompts: list[str] = []
         self.commits: list[str] = []
         self.prs: list[str] = []
-        self.files: Counter = Counter()
+        self.files: Counter[str] = Counter()
         self.titles: list[str] = []
         self.branches: list[str] = []
 
@@ -133,7 +151,7 @@ class Digest:
             return p[len(base) + 1:]
         return "/".join(PurePath(p).parts[-2:])
 
-    def view(self) -> dict[str, Any]:
+    def view(self) -> SessionView:
         mins = int((self.last - self.first).total_seconds() // 60) \
             if self.first and self.last else None
         return {"agent": self.agent,
@@ -149,7 +167,7 @@ class Digest:
                 "branches": [clean_text(b) for b in _uniq(self.branches)]}
 
 
-def _claude_blocks(content: object, d: Digest, pend: dict, seen: set) -> None:
+def _claude_blocks(content: object, d: Digest, pend: dict[object, Any], seen: set[object]) -> None:
     for b in content if isinstance(content, list) else ():
         if not isinstance(b, dict):
             continue
@@ -164,8 +182,8 @@ def _claude_blocks(content: object, d: Digest, pend: dict, seen: set) -> None:
 
 
 def _digest_claude_log(f: str, d: Digest) -> None:
-    pend: dict = {}
-    seen: set = set()
+    pend: dict[object, Any] = {}
+    seen: set[object] = set()
     loops = 0
     with open(f, encoding="utf-8", errors="replace") as fh:
         for line in fh:
@@ -185,7 +203,7 @@ def _digest_claude_log(f: str, d: Digest) -> None:
             _claude_blocks(m.get("content") if isinstance(m, dict) else None, d, pend, seen)
 
 
-def _codex_item(it: dict, d: Digest) -> None:
+def _codex_item(it: dict[str, Any], d: Digest) -> None:
     if it.get("type") == "CommandExecution":
         code = it.get("exit_code")
         d.note_shell(codex.script_of(it.get("command")), it.get("aggregated_output"),
@@ -194,7 +212,7 @@ def _codex_item(it: dict, d: Digest) -> None:
         d.files.update(k for k in it["changes"] if isinstance(k, str))
 
 
-def _codex_record(t: object, p: dict, has_um: bool, human: bool, d: Digest) -> None:
+def _codex_record(t: object, p: dict[str, Any], has_um: bool, human: bool, d: Digest) -> None:
     pr = codex.prompt_of(t, p, has_um)
     if pr is not None:
         if human and not codex.is_scheduled_automation(pr[0]):
@@ -209,12 +227,12 @@ def _digest_codex_log(f: str, title: str, d: Digest) -> None:
         recs = codex.parsed_records([line.encode() for line in fh], 0, {}, Counter())
     if not recs:
         return
-    meta = recs[0][2] if recs[0][1] == "session_meta" else {}
+    meta = recs[0].payload if recs[0].type == "session_meta" else {}
     git = dict_or_empty(meta.get("git"))
     if isinstance(git.get("branch"), str):
         d.branches.append(git["branch"])
     human = codex.run_origin(meta) not in ("subagent", "automated")
-    has_um = any(t == "event_msg" and p.get("type") == "user_message" for _o, t, p, _c in recs)
+    has_um = any(r.type == "event_msg" and r.payload.get("type") == "user_message" for r in recs)
     for i, (o, t, p, copied) in enumerate(recs):
         if copied and i:
             continue
@@ -222,7 +240,7 @@ def _digest_codex_log(f: str, title: str, d: Digest) -> None:
         _codex_record(t, p, has_um, human, d)
 
 
-def _pi_message(m: dict, d: Digest, pend: dict) -> None:
+def _pi_message(m: dict[str, Any], d: Digest, pend: dict[object, Any]) -> None:
     role, content = m.get("role"), m.get("content")
     if role == "user":
         text = text_of(content)
@@ -239,9 +257,9 @@ def _pi_message(m: dict, d: Digest, pend: dict) -> None:
         d.note_shell(pend.pop(m["toolCallId"]), text_of(content), m.get("isError") is True)
 
 
-def _digest_pi_log(f: str, hdr: dict, d: Digest) -> None:
+def _digest_pi_log(f: str, hdr: dict[str, Any], d: Digest) -> None:
     d.note_time(hdr["ts"], hdr["cwd"])
-    pend: dict = {}
+    pend: dict[object, Any] = {}
     with open(f, encoding="utf-8", errors="replace") as fh:
         for line in fh:
             o = parse_record(line)      # a malformed line holds nothing to show
@@ -252,8 +270,9 @@ def _digest_pi_log(f: str, hdr: dict, d: Digest) -> None:
             _pi_message(o["message"], d, pend)
 
 
-def _cursor_prompts(msgs: dict[str, dict], created: str | None, d: Digest, calls: dict) -> None:
-    prompts: dict = {}
+def _cursor_prompts(msgs: dict[str, dict[str, Any]], created: str | None, d: Digest,
+                    calls: dict[object, Any]) -> None:
+    prompts: dict[str, Any] = {}
     for m in msgs.values():
         r = cursor_cli.request_id(m)
         if r and r not in prompts:
@@ -271,7 +290,8 @@ def _cursor_prompts(msgs: dict[str, dict], created: str | None, d: Digest, calls
     d.prompts = [t for _ts, t in sorted(prompts.values(), key=lambda x: x[0])]
 
 
-def _cursor_shell_results(msgs: dict[str, dict], d: Digest, calls: dict) -> None:
+def _cursor_shell_results(msgs: dict[str, dict[str, Any]], d: Digest,
+                          calls: dict[object, Any]) -> None:
     for m in msgs.values():
         content = m.get("content") if m.get("role") == "tool" else None
         for b in content if isinstance(content, list) else ():
@@ -296,12 +316,12 @@ def _digest_cursor_chat(f: str, d: Digest) -> None:
         con.close()
     created = epoch_ms_to_iso(meta.get("createdAt"))
     d.note_time(created)
-    calls: dict = {}
+    calls: dict[object, Any] = {}
     _cursor_prompts(msgs, created, d, calls)
     _cursor_shell_results(msgs, d, calls)
 
 
-def _pi_logs(home: Path, sessions: set[str]) -> Iterator[tuple[str, str, dict]]:
+def _pi_logs(home: Path, sessions: set[str]) -> Iterator[tuple[str, str, dict[str, Any]]]:
     """(session id, file, header) of each wanted Pi session. The id is in the file name, except
     where only the header has it."""
     for f in pi.session_files(home):
@@ -335,13 +355,13 @@ def _session_logs(home: Path, sessions: set[str]) -> Iterator[tuple[str, str,
             yield sid, "Cursor", partial(_digest_cursor_chat, f)
 
 
-def local_info(home: Path, sessions: set[str]) -> dict[str, dict]:
+def local_info(home: Path, sessions: set[str]) -> dict[str, SessionView]:
     """session id -> what the logs on this machine say about it (see Digest.view). Best effort: a
     session that cannot be read or shown is skipped, and only its count and the exception's type
     reach stderr, because a message or traceback could print local text. shortcut: Cursor IDE chats
     (state.vscdb) are not read; their sessions show no local text."""
-    info: dict[str, dict] = {}
-    failed: Counter = Counter()
+    info: dict[str, SessionView] = {}
+    failed: Counter[str] = Counter()
     for sid, agent, read in _session_logs(home, sessions):
         d = Digest(agent)
         try:

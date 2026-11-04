@@ -110,7 +110,7 @@ def test_scan_rows_insert_once(dsn):
     counts = {t: _rows(dsn, t) for t in ("usage_event", "event_session", "time_interval")}
     assert counts == {"usage_event": 1, "event_session": 1, "time_interval": 1}
     push.send_activity_rows(dsn, [batch[1]])
-    push.send_session_rows(dsn, [batch[0].session_row()])
+    push.send_session_rows(dsn, [batch[0]])
 
 
 def test_heartbeat_inserts(dsn):
@@ -156,12 +156,12 @@ def test_episode_store(dsn, episode):
     assert episode_store.answered_sessions(dsn, ["s1", "s2"]) == {"s1"}
 
 
-@pytest.mark.parametrize("selector", [{"episode": "0f0f"}, {"day": DAY},
-                                      {"label": f"{EPISODE}:2026-06-15"}])
+@pytest.mark.parametrize("selector", [("episode", "0f0f"), ("day", DAY),
+                                      ("label", f"{EPISODE}:2026-06-15")])
 def test_inspector_fetch(dsn, episode, selector):
     push.send_activity_rows(dsn, [_activity("steer2", "steer", via="typed"),
                                   _activity("c2", "commit", sha="abcdef1234", repo_key="k1")])
-    raw = inspector.fetch(dsn, **selector)
+    raw = inspector.fetch(dsn, *selector)
     assert [ep["id"] for ep in raw["episodes"]] == [str(EPISODE)]
     assert inspector.build(raw)["episodes"], "the rows the sink returns fit what build reads"
 
@@ -175,7 +175,7 @@ def test_label_source_reads_and_note(dsn, episode):
     src = Source(cfg)
     since, until = T0 - timedelta(days=1), T0 + timedelta(days=1)
     assert "steer3" in {r["event_id"] for r in src.steers(since)}
-    assert src.episodes(since)[0]["sessions"] == ["s1"]
+    assert [m["session_id"] for m in src.episodes(since)[0]["members"]] == ["s1"]
     assert "turn" in {a["kind"] for a in src.activity(["s1"], since, until)}
     assert {"unit_id": "steer2", "task": "steer_intent"} in [a for _e, _t, a in
                                                             src.labels(since, until)]

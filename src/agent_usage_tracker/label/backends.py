@@ -117,7 +117,7 @@ def encoder_path(task: str) -> Path:
     return data_dir() / "label" / "encoder" / f"{task}.json"
 
 
-def features(facts: dict) -> list[int]:
+def features(facts: dict[str, Any]) -> list[int]:
     """Hashed binary features of a unit's facts: words and word pairs of each text field (per
     field name), and the other facts as name=value (numbers in log2 buckets). Bucket ids only:
     the trained file holds weights, never a word."""
@@ -147,7 +147,7 @@ class Encoder:
 
     def __init__(self, task: str, model_id: str | None = None, model_rev: str | None = None):
         self.task, self.model_id = task, model_id or f"encoder/{task}"
-        self._m: dict | None = None
+        self._m: dict[str, Any] | None = None
         p = encoder_path(task)
         rev = hashlib.sha256(p.read_bytes()).hexdigest()[:12] if p.exists() else ""
         if model_rev and rev and model_rev != rev:
@@ -156,7 +156,7 @@ class Encoder:
         self.model_rev = rev or model_rev or ""
         self.size_mb = round(p.stat().st_size / 1e6, 3) if p.exists() else None
 
-    def _load(self) -> dict:
+    def _load(self) -> dict[str, Any]:
         if self._m is None:
             try:
                 self._m = json.loads(encoder_path(self.task).read_text())

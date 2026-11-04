@@ -14,7 +14,7 @@ from __future__ import annotations
 import html
 import json
 from collections import Counter
-from datetime import date
+from datetime import date, datetime, timezone
 from typing import Any, Callable
 
 from .. import local_page
@@ -42,7 +42,7 @@ _JS = """document.addEventListener('keydown', e => {
   if (b) { e.preventDefault(); b.click(); } });"""
 
 
-def _facts(facts: dict) -> str:
+def _facts(facts: dict[str, Any]) -> str:
     e = html.escape
     parts = ["<dl>"]
     for k, v in facts.items():
@@ -66,8 +66,8 @@ def _progress(task: str, gold: dict[str, str]) -> str:
             f"<table>{rows}</table></details>")
 
 
-def render(task: str, token: str, item: Request | None, gold: dict, last: dict | None,
-           left: int, counts: Counter) -> str:
+def render(task: str, token: str, item: Request | None, gold: dict[str, Any], last: dict[str, Any] | None,
+           left: int, counts: Counter[str]) -> str:
     e = html.escape
     head = (local_page.head("Gold labels", "52rem", _CSS) + f"<h1>{e(task)}</h1>"
             "<p class=mut>Private page on this machine only. Only your answer (a label and the "
@@ -97,7 +97,7 @@ def render(task: str, token: str, item: Request | None, gold: dict, last: dict |
     return "".join(parts)
 
 
-def _teachers(silver: dict | None) -> list[tuple[str, str, float]]:
+def _teachers(silver: dict[str, Any] | None) -> list[tuple[str, str, float]]:
     return [(t, top_label(d), max(d.values())) for t, d in sorted((silver or {}).items())
             if d]
 
@@ -122,8 +122,8 @@ class _Sitting:
                                 lambda r: stratum(self.silver.get(r.unit_id)), seed=task)
         self.pos = 0
         self.hist: list[tuple[str, str]] = []
-        self.last: dict | None = None
-        self.counts: Counter = Counter(answered=0, skipped=0)
+        self.last: dict[str, Any] | None = None
+        self.counts: Counter[str] = Counter(answered=0, skipped=0)
         self.ids = {c for c, _d in TASKS[task].candidates}
         self.day = (today or date.today()).isoformat()
 
@@ -155,7 +155,7 @@ class _Sitting:
         self.last = {"gold": a, "teachers": _teachers(self.silver.get(u))}
         self.counts["answered"] += 1
 
-    def act(self, form: dict) -> bool:
+    def act(self, form: dict[str, Any]) -> bool:
         """Apply one answer; True when the sitting ends."""
         a, u = (form.get("a") or [""])[0], (form.get("u") or [""])[0]
         item = self._item()
@@ -175,12 +175,12 @@ class _Sitting:
 
 
 def serve(task: str, reqs: dict[str, Request], *, open_browser: bool = True,
-          on_ready: Callable[[str], None] | None = None, today: date | None = None) -> Counter:
+          on_ready: Callable[[str], None] | None = None, today: date | None = None) -> Counter[str]:
     """Serve the page until q (or Ctrl-C). Returns {answered, skipped} of this sitting."""
     token = local_page.new_token()
     sitting = _Sitting(task, reqs, today)
 
-    def on_post(form: dict) -> bytes | None:
+    def on_post(form: dict[str, Any]) -> bytes | None:
         if sitting.act(form):
             return f"<p>Saved {sitting.counts['answered']} answers. You can close this tab.</p>".encode()
         return None
@@ -193,15 +193,17 @@ def serve(task: str, reqs: dict[str, Request], *, open_browser: bool = True,
 
 def run_gold_review(cfg: Config, task: str | None, days: int = LABEL_DAYS, *, src: Source | None = None,
                     open_browser: bool = True,
-                    on_ready: Callable[[str], None] | None = None) -> dict[str, Any]:
+                    on_ready: Callable[[str], None] | None = None,
+                    now: datetime | None = None) -> dict[str, Any]:
     task = task or next((t for t in cfg.label_tasks if t in TASKS), "steer_intent")
-    counts = serve(task, window_units(cfg, task, days, src), open_browser=open_browser,
-                    on_ready=on_ready)
+    today = (now or datetime.now(timezone.utc)).astimezone().date()
+    counts = serve(task, window_units(cfg, task, days, src, today), open_browser=open_browser,
+                   on_ready=on_ready, today=today)
     n = Counter(gold_latest(task).values())
     return {**counts, "task": task, "gold": {c: n[c] for c, _d in TASKS[task].candidates}}
 
 
-def print_review(report: dict) -> None:
+def print_review(report: dict[str, Any]) -> None:
     task = report["task"]
     print(f"label review {task}: {report['answered']} answered, {report['skipped']} skipped; "
           f"gold per label {json.dumps(report['gold'])} (floor {FLOORS[task][0]})")

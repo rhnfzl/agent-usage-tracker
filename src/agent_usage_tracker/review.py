@@ -25,10 +25,11 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
 from . import episode_store, local_page
-from .collectors.session_digest import local_info
+from .episode_store import Episode, EpisodeMember
+from .collectors.session_digest import SessionView, local_info
 from .config import AutError, Config
 
-_ACTIONS = {"right": "confirm", "split": "split", "merge": "merge", "reject": "reject"}
+_ACTIONS = {"right": "confirm", "reject": "reject"}
 SAMPLE = 30
 _CSS = """body { overflow-wrap: anywhere; }
 fieldset { border: 1px solid var(--line); border-radius: 6px; margin: 0 0 1rem; }
@@ -38,14 +39,14 @@ label { margin-right: 1rem; display: inline-block; }
 """
 
 
-def _seeds(ep: dict) -> list[dict]:
+def _seeds(ep: Episode) -> list[EpisodeMember]:
     return [m for m in ep["members"] if m["role"] == "seed"] or ep["members"]
 
 
-def sample(episodes: list[dict], n: int = SAMPLE) -> list[int]:
+def sample(episodes: list[Episode], n: int = SAMPLE) -> list[int]:
     """Indices of up to n episodes, taken in turn from each (outcome, size) group so every kind
     shows up; the same month gives the same sample."""
-    groups: dict = {}
+    groups: dict[tuple[str, int], list[int]] = {}
     for i, ep in enumerate(episodes):
         k = ep["n_sessions"] or 0
         groups.setdefault((str(ep["outcome"]), 0 if k <= 1 else 1 if k <= 3 else 2), []).append(i)
@@ -63,7 +64,7 @@ def _plural(n: int, word: str) -> str:
     return f"{n} {word}{'' if n == 1 else 's'}"
 
 
-def _summary(ep: dict, views: list[dict]) -> str:
+def _summary(ep: Episode, views: list[SessionView]) -> str:
     days = (ep["last_ts"].date() - ep["first_ts"].date()).days + 1
     when = f"on {ep['first_ts']:%a %d %b}" if days == 1 else f"over {days} days"
     folders = Counter(v["folder"] for v in views if v.get("folder"))
@@ -72,28 +73,28 @@ def _summary(ep: dict, views: list[dict]) -> str:
             f"{_plural(ep['n_commits'], 'commit')}, {_plural(ep['n_prs'], 'PR')}")
 
 
-def _ran(v: dict) -> str:
-    if not v.get("start"):
+def _start_and_duration(v: SessionView) -> str:
+    start, m = v.get("start"), v.get("minutes")
+    if start is None or m is None:      # a session with no local log: both unset
         return ""
-    m = v["minutes"] or 0
-    return f"{v['start']:%a %d %b %H:%M}, ran " + (f"{m // 60}h {m % 60}m" if m >= 60
-                                                     else f"{m}m")
+    return f"{start:%a %d %b %H:%M}, ran " + (f"{m // 60}h {m % 60}m" if m >= 60 else f"{m}m")
 
 
-def _session_html(v: dict, sid: str, i: int) -> str:
+def _session_html(v: SessionView, sid: str, i: int) -> str:
     e = html.escape
     head = "; ".join(v.get("titles", [])[-3:]) or v.get("first") or "(nothing in the local logs)"
-    meta = [x for x in (v.get("agent"), v.get("folder"), _ran(v),
+    meta = [x for x in (v.get("agent"), v.get("folder"), _start_and_duration(v),
                         _plural(v["n_prompts"], "prompt") if v.get("agent") else "",
                         ", ".join(v.get("branches", [])[:3])) if x]
     out = [f"<li><b>{e(head)}</b>"
            f" <span class=meta>{e(' · '.join(meta))}</span>"]
-    for label, key in (("First prompt", "first"), ("Last prompt", "last")):
-        if v.get(key):
-            out.append(f"<div><span class=meta>{label}:</span> {e(v[key])}</div>")
-    for label, key in (("Commits", "commits"), ("PRs", "prs"), ("Files", "files")):
-        if v.get(key):
-            out.append(f"<div class=meta>{label}: {e('; '.join(v[key]))}</div>")
+    for label, said in (("First prompt", v.get("first")), ("Last prompt", v.get("last"))):
+        if said:
+            out.append(f"<div><span class=meta>{label}:</span> {e(said)}</div>")
+    for label, items in (("Commits", v.get("commits")), ("PRs", v.get("prs")),
+                         ("Files", v.get("files"))):
+        if items:
+            out.append(f"<div class=meta>{label}: {e('; '.join(items))}</div>")
     out.append(f'<label><input type=checkbox name="split{i}" value="{e(sid)}"> take out</label>'
                "</li>")
     return "".join(out)
@@ -104,7 +105,7 @@ _ANSWERS = (("skip", "don't know"), ("right", "right"), ("split", "should split"
             ("reject", "not building work (admin, personal, a quick question)"))
 
 
-def render(episodes: list[dict], info: dict, token: str, heading: str,
+def render(episodes: list[Episode], info: dict[str, SessionView], token: str, heading: str,
            shown: list[int] | None = None, answered: int = 0) -> str:
     """The page. `shown`: indices of the episodes on it (default all); form fields keep each
     episode's index in `episodes`, so the sample and the full page post the same answers."""
@@ -138,7 +139,8 @@ def render(episodes: list[dict], info: dict, token: str, heading: str,
     return "".join(parts)
 
 
-def _correction(now: datetime, action: str, a: dict, b: dict | None = None) -> dict[str, Any]:
+def _correction(now: datetime, action: str, a: EpisodeMember,
+                b: EpisodeMember | None = None) -> dict[str, Any]:
     attrs = {"repo_keys": a["repo_keys"]}
     if b:
         attrs["b_repo_keys"] = b["repo_keys"]
@@ -146,38 +148,41 @@ def _correction(now: datetime, action: str, a: dict, b: dict | None = None) -> d
             "b_session": b["session_id"] if b else None, "attrs": attrs}
 
 
-def _answer_rows(form: dict[str, list[str]], i: int, episodes: list[dict],
-                 now: datetime) -> list[dict]:
+def _field(form: dict[str, list[str]], name: str) -> str:
+    return (form.get(name) or [""])[0]
+
+
+def _answer_rows(form: dict[str, list[str]], i: int, episodes: list[Episode],
+                 now: datetime) -> list[dict[str, Any]]:
     """The rows of episode i's answer."""
-    ans = (form.get(f"a{i}") or [""])[0]
+    ans = _field(form, f"a{i}")
     seeds = _seeds(episodes[i])
     if ans == "split":
         by_id = {m["session_id"]: m for m in seeds}
         return [_correction(now, "split", by_id[s]) for s in form.get(f"split{i}", [])
                 if s in by_id]
     if ans == "merge":
-        j = (form.get(f"merge{i}") or [""])[0].strip().lstrip("#")
+        j = _field(form, f"merge{i}").strip().lstrip("#")
         ok = j.isdecimal() and len(j) < 10 and int(j) < len(episodes) and int(j) != i
         return [_correction(now, "merge", seeds[0], _seeds(episodes[int(j)])[0])] if ok else []
-    return [_correction(now, _ACTIONS[ans], seeds[0])] if ans in ("right", "reject") else []
+    return [_correction(now, _ACTIONS[ans], seeds[0])] if ans in _ACTIONS else []
 
 
-def corrections(form: dict[str, list[str]], episodes: list[dict],
-                now: datetime) -> tuple[list[dict], dict[str, int]]:
+def corrections(form: dict[str, list[str]], episodes: list[Episode],
+                now: datetime) -> tuple[list[dict[str, Any]], dict[str, int]]:
     """episode_correction rows for the answers, and {reviewed, right}. Answers that name a
     session or episode the page did not show are dropped."""
-    rows: list[dict] = []
+    rows: list[dict[str, Any]] = []
     reviewed = right = 0
     for i in range(len(episodes)):
-        ans = (form.get(f"a{i}") or [""])[0]
         new = _answer_rows(form, i, episodes, now)
         rows += new
         reviewed += bool(new)
-        right += bool(new) and ans == "right"
+        right += bool(new) and _field(form, f"a{i}") == "right"
     return rows, {"reviewed": reviewed, "right": right}
 
 
-def month_pages(episodes: list[dict], info: dict, heading: str,
+def month_pages(episodes: list[Episode], info: dict[str, SessionView], heading: str,
                 answered: int = 0) -> Callable[[str], dict[str, str]]:
     """The sample at /<token>, every episode at /<token>?all=1."""
     return lambda token: {
@@ -185,7 +190,7 @@ def month_pages(episodes: list[dict], info: dict, heading: str,
         "?all=1": render(episodes, info, token, heading, None, answered)}
 
 
-def serve(episodes: list[dict], write: Callable[[list[dict]], None],
+def serve(episodes: list[Episode], write: Callable[[list[dict[str, Any]]], None],
           pages: Callable[[str], dict[str, str]], *, open_browser: bool = True,
           on_ready: Callable[[str], None] | None = None,
           now: datetime | None = None) -> dict[str, int]:
@@ -238,7 +243,7 @@ def run_episode_review(cfg: Config, month: str | None) -> dict[str, Any]:
             "answered_before": len(episodes) - len(left)}
 
 
-def print_review(report: dict) -> None:
+def print_review(report: dict[str, Any]) -> None:
     share = report["right"] / report["reviewed"] if report["reviewed"] else 0.0
     print(f"episodes review {report['month']}: {report['reviewed']} of {report['open']} episodes "
           f"reviewed ({report['answered_before']} answered before), {report['right']} marked "

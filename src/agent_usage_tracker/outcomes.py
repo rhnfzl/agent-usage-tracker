@@ -38,8 +38,8 @@ from typing import Any, Literal, NamedTuple, NotRequired, TypedDict
 
 from .collectors import claude_code
 from .config import AutError, Config
-from .outcome_git import (DAY, DECIDE_S, Clone, GitFailed, Hit, Repo, fetch_clones, find_clones,
-                          gh_merged, lookup, read_repo, run_git, survival)
+from .outcome_git import (DAY, DECIDE_S, Clone, CloneRead, GitFailed, ResolvedCommit, fetch_clones,
+                          find_clones, gh_merged, read_clone, resolve_shas, run_git, survival)
 from .push import job_heartbeat
 from .repo_keys import RepoKeys
 from .sink import connect, write_many
@@ -71,7 +71,7 @@ class _Candidate(NamedTuple):
 
 class _Pick(NamedTuple):
     clone: Clone
-    repo: Repo
+    read: CloneRead
     full: str
 
 
@@ -87,21 +87,27 @@ class _Anchor:
 
 
 class _SurvivalJob(NamedTuple):
-    o: Outcome
     clone: Clone
     target: str
     merge_t: float
 
 
 class _GhJob(NamedTuple):
-    o: Outcome
-    repo: str
+    github_slug: str
     full: str
     ts: float
     on_branch: bool
 
 
-def _anchors(rows: list[dict], stats: Counter) -> list[_Anchor]:
+class _JobResult(NamedTuple):
+    """What a finished job says about its outcome; evaluate applies it on its own thread."""
+    state: OutcomeState
+    survival: float | None
+    sticky: bool
+    counts: dict[str, int]    # the stats to add
+
+
+def _anchors(rows: list[dict[str, Any]], stats: Counter[str]) -> list[_Anchor]:
     """The distinct commits of the rows, a pre-amend one marked as amended."""
     anchors: dict[tuple[str, str | None], _Anchor] = {}
     by_session = defaultdict(list)
@@ -121,90 +127,90 @@ def _anchors(rows: list[dict], stats: Counter) -> list[_Anchor]:
     return list(anchors.values())
 
 
-def _candidates(a: _Anchor, readable: dict[int, dict[str, Hit]], failed: list[int],
+def _candidates(a: _Anchor, readable: dict[int, dict[str, ResolvedCommit]],
                 clones: list[Clone]) -> list[_Candidate]:
-    """The clones that may hold the anchor, its own repo's first; marks it `unread` when a clone
-    that might know more could not be read."""
+    """The clones that may hold the anchor, its own repo's first."""
     cands = [_Candidate(i, h[a.sha].full) for i, h in readable.items()
              if a.sha in h and abs(h[a.sha].committed - a.ts) <= DAY]
     own = [c for c in cands if a.key and clones[c.clone].key == a.key]
-    a.unread = any(not own or clones[i].key == a.key for i in failed)
     return own or sorted(cands, key=lambda c: clones[c.clone].key is None)
 
 
-def _advance(rp: Repo, full: str) -> int:
-    """How far along a commit is in one clone: merged < open < unreachable."""
-    return 0 if full in rp.on_default or full in rp.twin else 1 if full in rp.on_branch else 2
+def _distance_from_merged(read: CloneRead, full: str) -> int:
+    """How far a commit is from merged in one clone: merged 0, open 1, unreachable 2."""
+    return 0 if full in read.on_default or full in read.twin else 1 if full in read.on_branch else 2
 
 
-def _resolve(anchors: list[_Anchor], clones: list[Clone], stats: Counter) -> None:
-    """Point each anchor at the clone where it is furthest along, and mark the ones a failed git
+def _resolve(anchors: list[_Anchor], clones: list[Clone], stats: Counter[str]) -> None:
+    """Point each anchor at the clone where it is closest to merged, and mark the ones a failed git
     read could change."""
     shas = sorted({a.sha for a in anchors})
-    held = {i: lookup(c, shas) for i, c in enumerate(clones)} if shas else {}
+    held = {i: resolve_shas(c, shas) for i, c in enumerate(clones)} if shas else {}
     failed = [i for i, h in held.items() if h is None]
     readable = {i: h for i, h in held.items() if h is not None}
     found: list[tuple[_Anchor, list[_Candidate]]] = []
     per_clone: dict[int, list[tuple[str, int]]] = defaultdict(list)
     for a in anchors:
-        cands = _candidates(a, readable, failed, clones)
+        cands = _candidates(a, readable, clones)
+        has_own = any(a.key and clones[c.clone].key == a.key for c in cands)
+        a.unread = any(not has_own or clones[i].key == a.key for i in failed)
         if cands:
             found.append((a, cands))
             for i, full in cands:
                 per_clone[i].append((full, readable[i][a.sha].committed))
         else:
             stats["not_found"] += 1
-    repos = {i: read_repo(clones[i], int(min(t for _, t in got)) - 2 * DAY, [f for f, _ in got])
+    reads = {i: read_clone(clones[i], int(min(t for _, t in got)) - 2 * DAY, [f for f, _ in got])
              for i, got in per_clone.items()}
     for a, cands in found:
-        best = min(cands, key=lambda c: _advance(repos[c.clone], c.full))
-        a.pick = _Pick(clones[best.clone], repos[best.clone], best.full)
-        a.unread |= not all(repos[j].ok for j, _ in cands)
+        best = min(cands, key=lambda c: _distance_from_merged(reads[c.clone], c.full))
+        a.pick = _Pick(clones[best.clone], reads[best.clone], best.full)
+        a.unread |= not all(reads[j].ok for j, _ in cands)
         stats["found"] += 1
         stats["null_key_resolved"] += a.key is None and clones[best.clone].key is not None
 
 
-def _decide_merged(o: Outcome, pick: _Pick, target: str, now_ts: float, cache: dict,
-                   stats: Counter) -> tuple[Outcome, _SurvivalJob | None]:
-    """The outcome of a commit (or its twin) on the default branch, once 14 days have passed."""
-    c, rp, full = pick
-    merge_t = rp.on_default[target]            # when it landed on the default branch
-    rv = rp.revert_time(full) or rp.revert_time(target)
+def _decide_merged(o: Outcome, pick: _Pick, target: str, now_ts: float, cache: dict[str, Any],
+                   stats: Counter[str]) -> _SurvivalJob | None:
+    """Settle a commit (or its twin) on the default branch once 14 days have passed; the job that
+    measures its survival, if it needs one."""
+    c, read, full = pick
+    merge_t = read.on_default[target]            # when it landed on the default branch
+    rv = read.revert_time(full) or read.revert_time(target)
     if now_ts - merge_t < DECIDE_S:
-        return o, None
+        return None
     if rv is not None and rv - merge_t <= DECIDE_S:
         o["state"] = "reverted"
-        return o, None
-    if target in cache or max(rp.tip_t, c.fetched_at) >= merge_t + DECIDE_S:
-        o["state"] = "merged"
-        return o, _SurvivalJob(o, c, target, merge_t)
+        return None
+    if target in cache or max(read.tip_t, c.fetched_at) >= merge_t + DECIDE_S:
+        return _SurvivalJob(c, target, merge_t)
     # shortcut: the default ref was last updated before merge + 14 d, so survival
     # cannot be measured yet; a repo nobody fetches stays undecided. Upgrade with a
     # per-repo "inactive" signal if that holds months back.
     o["sticky"] = True
     stats["stale_default"] += 1
-    return o, None
+    return None
 
 
-def _decide_unmerged(o: Outcome, a: _Anchor, pick: _Pick, young: bool, cache: dict,
-                     gh: bool) -> tuple[Outcome, _GhJob | None]:
-    """The outcome of a commit off the default branch."""
-    c, rp, full = pick
-    on_branch = full in rp.on_branch
+def _decide_unmerged(o: Outcome, a: _Anchor, pick: _Pick, young: bool, cache: dict[str, Any],
+                     use_gh: bool) -> _GhJob | None:
+    """Settle a commit off the default branch; the job that asks gh, if it needs one."""
+    c, read, full = pick
+    on_branch = full in read.on_branch
     if not on_branch and a.amended:
         o["state"] = "superseded"
     elif not young:
         # a squash-merged PR leaves its commits off the default branch; a cached answer needs no gh
-        if f"gh:{full}" in cache or (gh and c.gh):
-            return o, _GhJob(o, c.gh or "", full, a.ts, on_branch)
+        if f"gh:{full}" in cache or (use_gh and c.github_slug):
+            return _GhJob(c.github_slug or "", full, a.ts, on_branch)
         o["state"] = "open" if on_branch else "abandoned"
-    return o, None
+    return None
 
 
-def _decide(a: _Anchor, now_ts: float, cache: dict, gh: bool,
-            stats: Counter) -> tuple[Outcome, _SurvivalJob | _GhJob | None]:
+def _decide(a: _Anchor, now_ts: float, cache: dict[str, Any], use_gh: bool,
+            stats: Counter[str]) -> tuple[Outcome, _SurvivalJob | _GhJob | None]:
     """The anchor's outcome, and the job that finishes it if one is needed. Returning with the
-    state untouched means undecided."""
+    state untouched and no job means undecided."""
     o: Outcome = {"sha": a.sha, "repo_key": a.key or "", "state": "undecided", "survival": None}
     if a.pick:
         o["repo_key"] = a.key or a.pick.clone.key or ""
@@ -221,70 +227,79 @@ def _decide(a: _Anchor, now_ts: float, cache: dict, gh: bool,
         o["state"], o["sticky"] = ("undecided" if young else "abandoned"), True
         stats["abandoned_not_found"] += not young
         return o, None
-    _c, rp, full = a.pick
-    target = full if full in rp.on_default else rp.twin.get(full)
+    _c, read, full = a.pick
+    target = full if full in read.on_default else read.twin.get(full)
     if target:
-        return _decide_merged(o, a.pick, target, now_ts, cache, stats)
-    return _decide_unmerged(o, a, a.pick, young, cache, gh)
+        return o, _decide_merged(o, a.pick, target, now_ts, cache, stats)
+    return o, _decide_unmerged(o, a, a.pick, young, cache, use_gh)
 
 
-def _ask_gh(job: _GhJob, now_ts: float, cache: dict) -> tuple[int, int]:
-    """Settle a commit off the default branch by its PR; (gh lookups, gh failures)."""
-    o, repo, full, ts, on_branch = job
+def _ask_gh(job: _GhJob, now_ts: float, cache: dict[str, Any]) -> _JobResult:
+    """Settle a commit off the default branch by its PR."""
+    github_slug, full, ts, on_branch = job
     k = f"gh:{full}"
     looked = 0
     merged: bool | None
     if k in cache:
         merged = bool(cache[k])
     else:
-        merged = gh_merged(repo, full)
+        merged = gh_merged(github_slug, full)
         looked = 1
         if merged is None:          # gh could not answer: decide nothing, keep what is stored
-            o["sticky"] = True
-            return 1, 1
+            return _JobResult("undecided", None, True, {"gh_lookups": 1, "gh_failed": 1})
         if merged or now_ts - ts >= _GH_STABLE_S:
             cache[k] = merged       # a merge never undoes itself; an old "no" stays no
-    o["state"] = "merged" if merged else "open" if on_branch else "abandoned"
-    return looked, 0
+    state: OutcomeState = "merged" if merged else "open" if on_branch else "abandoned"
+    return _JobResult(state, None, False, {"gh_lookups": looked, "gh_failed": 0})
 
 
-def _measure(job: _SurvivalJob, cache: dict) -> str:
-    """Fill in a merged commit's survival; the stat to count."""
-    o, c, target, merge_t = job
+def _measure(job: _SurvivalJob, cache: dict[str, Any]) -> _JobResult:
+    """Measure a merged commit's survival."""
+    c, target, merge_t = job
     fresh = target not in cache
     if fresh:
         try:
             cache[target] = survival(c, target, merge_t)
         except GitFailed:          # not cached: the next run measures it again
-            o["state"], o["sticky"] = "undecided", True
-            return "survival_failed"
-    o["survival"] = cache[target]
-    if o["survival"] is not None and o["survival"] < 0.5:
-        o["state"] = "reworked"
-    return "survival_computed" if fresh else "survival_cached"
+            return _JobResult("undecided", None, True, {"survival_failed": 1})
+    alive = cache[target]
+    return _JobResult("reworked" if alive is not None and alive < 0.5 else "merged", alive, False,
+                      {"survival_computed" if fresh else "survival_cached": 1})
 
 
-def evaluate(rows: list[dict], clones: list[Clone], now_ts: float, cache: dict,
-             gh: bool = False) -> tuple[list[Outcome], Counter]:
+def _apply(o: Outcome, result: _JobResult, stats: Counter[str]) -> None:
+    o["state"], o["survival"] = result.state, result.survival
+    if result.sticky:
+        o["sticky"] = True
+    stats.update(result.counts)
+
+
+def evaluate(rows: list[dict[str, Any]], clones: list[Clone], now_ts: float, cache: dict[str, Any],
+             use_gh: bool = False) -> tuple[list[Outcome], Counter[str]]:
     """One outcome per (sha, repo_key) of the commit rows, as of the epoch now_ts. rows: sha, repo_key, ts (epoch),
     session_id, amend. cache: full sha -> survival (filled in place); gh answers sit under 'gh:', its version under 'v'."""
-    stats: Counter = Counter(rows=len(rows))
+    stats: Counter[str] = Counter(rows=len(rows))
     anchors = _anchors(rows, stats)
     _resolve(anchors, clones, stats)
-    outs, jobs, gh_jobs = [], [], []
+    outs: list[Outcome] = []
+    gh_outs: list[Outcome] = []
+    gh_jobs: list[_GhJob] = []
+    survival_outs: list[Outcome] = []
+    survival_jobs: list[_SurvivalJob] = []
     for a in anchors:
-        o, job = _decide(a, now_ts, cache, gh, stats)
+        o, job = _decide(a, now_ts, cache, use_gh, stats)
         outs.append(o)
         if isinstance(job, _GhJob):
+            gh_outs.append(o)
             gh_jobs.append(job)
         elif job:
-            jobs.append(job)
-    with ThreadPoolExecutor(_WORKERS) as pool:     # tallies stay on this thread
-        for looked, failed in pool.map(lambda j: _ask_gh(j, now_ts, cache), gh_jobs):
-            stats["gh_lookups"] += looked
-            stats["gh_failed"] += failed
-        for stat in pool.map(lambda j: _measure(j, cache), jobs):
-            stats[stat] += 1
+            survival_outs.append(o)
+            survival_jobs.append(job)
+    with ThreadPoolExecutor(_WORKERS) as pool:     # outcomes and tallies change on this thread only
+        for o, result in zip(gh_outs, pool.map(lambda j: _ask_gh(j, now_ts, cache), gh_jobs)):
+            _apply(o, result, stats)
+        for o, result in zip(survival_outs, pool.map(lambda j: _measure(j, cache), survival_jobs)):
+            _apply(o, result, stats)
     # a NULL-key row resolved to a clone can repeat a keyed row of the same commit: keep the keyed
     # anchor's, whatever order the rows came in, because it alone says which repo it means
     kept: dict[tuple[str, str], Outcome] = {}
@@ -294,7 +309,7 @@ def evaluate(rows: list[dict], clones: list[Clone], now_ts: float, cache: dict,
     return list(kept.values()), stats
 
 
-def pending(outs: list[Outcome], stored: dict[tuple[str, str], tuple]) -> list[Outcome]:
+def pending(outs: list[Outcome], stored: dict[tuple[str, str], tuple[str, float | None]]) -> list[Outcome]:
     """The outcomes whose (state, survival) differs from the latest stored row. A sticky outcome
     (this run could not see the commit or decide it) never replaces a stored row of its sha,
     under any repo_key: readers match on the sha alone."""
@@ -307,7 +322,7 @@ def _cache_path() -> Path:
     return state_path().parent / CACHE_NAME
 
 
-def _load_cache() -> dict:
+def _load_cache() -> dict[str, Any]:
     """The cache; survivals of an older version are dropped, so they are measured again."""
     cache = load_json_dict(_cache_path())
     if cache.get("v") != _CACHE_V:
@@ -316,7 +331,7 @@ def _load_cache() -> dict:
     return cache
 
 
-def _load_rows(dsn: str) -> list[dict]:
+def _load_rows(dsn: str) -> list[dict[str, Any]]:
     with connect(dsn) as conn:
         rows = conn.execute(
             "SELECT session_id, ts, attrs->>'sha', attrs->>'repo_key', "
@@ -326,7 +341,7 @@ def _load_rows(dsn: str) -> list[dict]:
             for s, ts, sha, k, am in rows]
 
 
-def _load_stored(dsn: str) -> dict[tuple[str, str], tuple]:
+def _load_stored(dsn: str) -> dict[tuple[str, str], tuple[str, float | None]]:
     with connect(dsn) as conn:
         rows = conn.execute(
             "SELECT DISTINCT ON (sha, repo_key) sha, repo_key, state, survival "
@@ -335,7 +350,7 @@ def _load_stored(dsn: str) -> dict[tuple[str, str], tuple]:
             for sha, k, st, sv in rows}
 
 
-def _insert(dsn: str, rows: list[dict]) -> None:
+def _insert(dsn: str, rows: list[dict[str, Any]]) -> None:
     write_many(dsn, "INSERT INTO agents.commit_outcome (sha, repo_key, state, survival, decided_at) "
                "VALUES (%s, %s, %s, %s, %s) ON CONFLICT DO NOTHING",
                [(r["sha"], r["repo_key"], r["state"], r["survival"], r["decided_at"])
@@ -364,7 +379,7 @@ def run_outcomes(cfg: Config, *, refresh: bool, dry_run: bool,
             want = [c for c in clones if c.key in keys]
             stats["fetch_ok"], stats["fetch_failed"] = fetch_clones(want)
         cache = _load_cache()
-        outs, ev = evaluate(rows, clones, decided.timestamp(), cache, gh=refresh)
+        outs, ev = evaluate(rows, clones, decided.timestamp(), cache, use_gh=refresh)
         stats.update(ev)
         stats["states"] = Counter(o["state"] for o in outs)
         if not dry_run:
@@ -378,7 +393,7 @@ def run_outcomes(cfg: Config, *, refresh: bool, dry_run: bool,
     return stats
 
 
-def print_outcomes(report: dict[str, Any], dry_run: bool) -> None:
+def print_outcomes(report: dict[str, Any], *, dry_run: bool) -> None:
     states = dict(sorted(report["states"].items()))
     rest = {k: v for k, v in sorted(report.items()) if k != "states"}
     print(f"outcomes {'DRY-RUN (nothing written)' if dry_run else 'written'}: "
@@ -422,7 +437,7 @@ def build_manual_outcome(cfg: Config, outcome: str, cwd: str, session: str | Non
             "repo_key": RepoKeys(cfg.repo_key_salt).of_cwd(cwd)}
 
 
-def insert_manual_outcome(dsn: str, row: dict) -> None:
+def insert_manual_outcome(dsn: str, row: dict[str, Any]) -> None:
     with connect(dsn) as conn:
         conn.execute("INSERT INTO agents.manual_outcome (session_id, outcome, ts, repo_key) "
                      "VALUES (%s, %s, %s, %s)",

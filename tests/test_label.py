@@ -225,8 +225,9 @@ def test_notes_prompt_counts_only(tmp_path, sink):
               ("e4", DAY1, {"task": "steer_intent", "unit_id": "b", "label": "stop",
                             "below_tau": True, "task_ver": 1,
                             "labelled_at": "2026-11-03T02:00:00.000+00:00"})]
-    eps = [{"episode_id": "e1", "first_ts": DAY1, "last_ts": DAY1, "n_sessions": 2,
-            "n_steers": 4, "n_commits": 3, "outcome": "shipped", "sessions": ["s1"]}]
+    eps = [{"id": "e1", "first_ts": DAY1, "last_ts": DAY1, "n_sessions": 2,
+            "n_steers": 4, "n_commits": 3, "outcome": "shipped",
+            "members": [{"session_id": "s1", "role": "seed", "repo_keys": []}]}]
     cfg = _cfg(tmp_path)
     b = ById()
     with _env(tmp_path):
@@ -276,8 +277,8 @@ def test_windows_go_through_the_collector(tmp_path, monkeypatch):
                                             "created": "2026-10-01T00:00:00+00:00"},
                     "aw-watcher-afk_h": {"type": "afkstatus", "hostname": "h",
                                          "created": "2026-10-01T00:00:00+00:00"}}
-        s, e = (aw._parse(x) for x in body["timeperiods"][0].split("/"))
-        return [[x for x in evs if s <= aw._parse(x["timestamp"]) < e]]
+        s, e = (aw._parse_aw_ts(x) for x in body["timeperiods"][0].split("/"))
+        return [[x for x in evs if s <= aw._parse_aw_ts(x["timestamp"]) < e]]
     monkeypatch.setattr(aw, "_http", http)
     monkeypatch.setattr(aw, "_now", lambda: NOW)
     monkeypatch.setattr(aw, "_MAC", lambda app: None)
@@ -404,8 +405,8 @@ def test_cached_snapshot_needs_config_and_every_weight():
 def test_cli_wiring(tmp_path, monkeypatch):
     seen = []
     monkeypatch.setattr(cli, "load_config", lambda: _cfg(tmp_path))
-    monkeypatch.setattr(teach, "run_teach", lambda cfg, t, n, b, d: seen.append(
-        ("teach", t, n, b, d)) or Counter())
+    monkeypatch.setattr(teach, "run_teach", lambda cfg, t, n, budget_usd, days: seen.append(
+        ("teach", t, n, budget_usd, days)) or Counter())
     monkeypatch.setattr(gold, "run_gold_review", lambda cfg, t, d: seen.append(("review", t, d)) or {
         "task": TASK, "answered": 0, "skipped": 0, "gold": {}})
     monkeypatch.setattr(bakeoff, "run_eval", lambda cfg, t, d: seen.append(("eval", t, d)) or [])

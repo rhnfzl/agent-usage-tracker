@@ -17,7 +17,7 @@ import random
 from collections import defaultdict
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Callable, TypeVar
+from typing import Any, Callable, TypeVar
 
 from ..config import LABEL_DAYS, AutError, Config
 from ..state import atomic_write_text, parse_record
@@ -35,7 +35,7 @@ def eval_path(task: str, kind: str) -> Path:
     return data_dir() / "eval" / (f"{task}.jsonl" if kind == "gold" else f"{task}.{kind}.jsonl")
 
 
-def read_jsonl(p: Path) -> list[dict]:
+def read_jsonl(p: Path) -> list[dict[str, Any]]:
     try:
         with open(p, encoding="utf-8") as fh:
             lines = fh.read().splitlines()
@@ -47,14 +47,14 @@ def read_jsonl(p: Path) -> list[dict]:
     return [o for line in lines if (o := parse_record(line)) is not None]
 
 
-def append_jsonl(p: Path, row: dict) -> None:
+def append_jsonl(p: Path, row: dict[str, Any]) -> None:
     p.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)  # private, as write_jsonl's is
     with os.fdopen(fd, "a", encoding="utf-8") as fh:
         fh.write(json.dumps(row, sort_keys=True) + "\n")
 
 
-def write_jsonl(p: Path, rows: list[dict]) -> None:
+def write_jsonl(p: Path, rows: list[dict[str, Any]]) -> None:
     atomic_write_text(p, "".join(json.dumps(r, sort_keys=True) + "\n" for r in rows))
 
 
@@ -67,14 +67,14 @@ def gold_latest(task: str) -> dict[str, str]:
 
 def silver_by_unit(task: str) -> dict[str, dict[str, dict[str, float]]]:
     """unit_id -> {teacher: dist} of the current task version."""
-    out: dict[str, dict] = defaultdict(dict)
+    out: dict[str, dict[str, Any]] = defaultdict(dict)
     for r in read_jsonl(eval_path(task, "silver")):
         if r.get("task_ver") == TASKS[task].ver and isinstance(r.get("dist"), dict):
             out[r["unit_id"]][r["teacher"]] = r["dist"]
     return dict(out)
 
 
-def stratum(teachers: dict | None) -> str:
+def stratum(teachers: dict[str, Any] | None) -> str:
     """The silver stratum of a unit: the teachers' common top label, `disagree`, or
     `unlabelled`."""
     tops = {top_label(d) for d in (teachers or {}).values() if d}

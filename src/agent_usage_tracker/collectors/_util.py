@@ -19,12 +19,12 @@ MS_PER_S = 1000
 MALFORMED_RECORD = (KeyError, TypeError, ValueError, AttributeError, OverflowError)
 
 
-def describe_files(cfg: object, wm: dict) -> str:
+def describe_files(cfg: object, wm: dict[str, Any]) -> str:
     """`aut status` line of a collector whose watermark tracks files."""
     return f"{len(wm['files'])} files tracked" if "files" in wm else "never scanned"
 
 
-def describe_full_scan(cfg: object, wm: dict) -> str:
+def describe_full_scan(cfg: object, wm: dict[str, Any]) -> str:
     """`aut status` line of a collector that keeps no watermark."""
     return "full-scan each run (no watermark)"
 
@@ -63,7 +63,7 @@ def noop_advance() -> None:
     """The watermark callback of a full-scan collector: it has no watermark to advance."""
 
 
-def warn_skipped(name: str, skipped: Counter, unaffected: str = "usage") -> None:
+def warn_skipped(name: str, skipped: Counter[str], unaffected: str = "usage") -> None:
     """Report a collector's skips. Skipping is best effort on purpose: a failed activity extraction
     never blocks the usage and session rows of the same chunk, and one bad record never wedges a
     scan at its offset. But a malformed usage record's tokens are gone, so neither stays silent.
@@ -80,7 +80,7 @@ def warn_skipped(name: str, skipped: Counter, unaffected: str = "usage") -> None
               "held is not counted.", file=sys.stderr)
 
 
-def raise_if_unreadable(name: str, skipped: Counter) -> None:
+def raise_if_unreadable(name: str, skipped: Counter[str]) -> None:
     """After a collector's last batch: files that are there but could not be read make the scan
     degraded instead of looking like files with nothing new."""
     if skipped["unreadable"]:
@@ -114,7 +114,7 @@ def read_new_lines(path: str, offset: int) -> tuple[list[bytes], int]:
     return lines, consumed
 
 
-def same_file(fstate: dict, st: os.stat_result) -> bool:
+def same_file(fstate: dict[str, Any], st: os.stat_result) -> bool:
     """May a tail resume from this watermark entry? False on first sight (empty entry), when the
     file behind the path changed (rotated/replaced), and when it was truncated in place, so the
     beginning of a replacement is never skipped.
@@ -133,8 +133,8 @@ def same_file(fstate: dict, st: os.stat_result) -> bool:
     return fstate.get("ino") == st.st_ino and st.st_size >= safe_int(fstate.get("off"))
 
 
-def changed_files(paths: Iterable[str], files: dict, fresh: Callable[[os.stat_result], Any],
-                  skipped: Counter, revisit: Callable[[Any], bool] | None = None,
+def changed_files(paths: Iterable[str], files: dict[str, Any], fresh: Callable[[os.stat_result], Any],
+                  skipped: Counter[str], revisit: Callable[[Any], bool] | None = None,
                   ) -> Iterator[tuple[str, Any, int, list[bytes], int]]:
     """Each file of `paths` with something to do: (path, private copy of its entry in `files`,
     offset read from, complete new lines, new offset). That is a file with bytes past its entry,
@@ -161,19 +161,19 @@ def changed_files(paths: Iterable[str], files: dict, fresh: Callable[[os.stat_re
         yield path, copy.deepcopy(prev), off, lines, new_off
 
 
-def file_batches(name: str, paths: Iterable[str], files: dict,
+def file_batches(name: str, paths: Iterable[str], files: dict[str, Any],
                  fresh: Callable[[os.stat_result], Any],
-                 chunk_rows: Callable[[str, Any, int, list[bytes], Counter], Sequence[Row]],
+                 chunk_rows: Callable[[str, Any, int, list[bytes], Counter[str]], Sequence[Row]],
                  revisit: Callable[[Any], bool] | None = None) -> Iterator[Batch]:
     """A tailing collector's batches over changed_files. `chunk_rows(path, cur, off, lines, skipped)`
     makes one file's rows and updates `cur`, the private copy of its entry, whose "off" already
     holds the new offset; the entry is published only when the batch's callback runs."""
-    skipped: Counter = Counter()
+    skipped: Counter[str] = Counter()
     for path, cur, off, lines, new_off in changed_files(paths, files, fresh, skipped, revisit):
         cur["off"] = new_off
         events = chunk_rows(path, cur, off, lines, skipped)
 
-        def advance_watermark(p: str = path, c: dict = cur) -> None:
+        def advance_watermark(p: str = path, c: dict[str, Any] = cur) -> None:
             files[p] = c
 
         yield events, advance_watermark

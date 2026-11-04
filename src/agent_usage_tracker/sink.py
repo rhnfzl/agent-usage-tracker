@@ -61,7 +61,7 @@ def connect(dsn: str, timeout: int = 15) -> Any:
     return psycopg.connect(dsn, connect_timeout=timeout)
 
 
-def write_many(dsn: str, sql: str, rows: list[tuple], timeout: int = 15) -> None:
+def write_many(dsn: str, sql: str, rows: list[tuple[Any, ...]], timeout: int = 15) -> None:
     """One statement over many rows in one transaction. Raises on failure."""
     if not rows:
         return

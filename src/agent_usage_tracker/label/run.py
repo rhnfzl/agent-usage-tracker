@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from ..config import LABEL_NOTE, Config
+from ..episode_store import Episode
 from ..event import ActivityEvent
 from ..push import job_heartbeat, send_activity_rows
 from ..sink import connect
@@ -45,9 +46,9 @@ class _Run:
     src: Source
     dry_run: bool
     deadline: float
-    wm: dict
-    state: dict
-    cache: dict
+    wm: dict[str, Any]
+    state: dict[str, Any]
+    cache: dict[str, Any]
     labelled_at: str
 
     def advance(self, name: str, ts: str | None) -> None:
@@ -59,24 +60,38 @@ class _Run:
         save_state(self.state, [NAME])
 
 
-def _window(name: str, wm: dict, since: datetime | None,
+def _window(name: str, wm: dict[str, Any], since: datetime | None,
             now: datetime) -> tuple[datetime, datetime | None]:
     """(since, until) of one task. until None: up to now, and the watermark becomes the newest
-    unit's ts. A day task covers whole past days, so until is today's local midnight."""
-    window = "day" if name == LABEL_NOTE else TASKS[name].window
+    unit's ts. A day task covers whole past days (see _day_window)."""
+    window = TASKS[name].window
     if window == "recent":
         if since:
             print(f"aut: label {name}: --since and --days do not apply; it always covers the last "
                   f"{OUTCOME_DAYS} days", file=sys.stderr)
         return now - timedelta(days=OUTCOME_DAYS), None
-    today = local_midnight(now.astimezone().date())
-    start = since or (datetime.fromisoformat(wm[name]) if wm.get(name) else today - timedelta(1))
     if window == "day":
-        return local_midnight(start.astimezone().date()), today
-    return start, None
+        return _day_window(name, wm, since, now)
+    return _start(name, wm, since, now), None
 
 
-def _note_prompt(day: date, labels: list[tuple], episodes: list[dict]) -> str:
+def _start(name: str, wm: dict[str, Any], since: datetime | None, now: datetime) -> datetime:
+    """Where a task picks up: `since`, else its watermark, else a day ago."""
+    if since:
+        return since
+    if wm.get(name):
+        return datetime.fromisoformat(wm[name])
+    return local_midnight(now.astimezone().date()) - timedelta(1)
+
+
+def _day_window(name: str, wm: dict[str, Any], since: datetime | None,
+                now: datetime) -> tuple[datetime, datetime]:
+    """(since, until) over whole past days: until is today's local midnight."""
+    start = _start(name, wm, since, now)
+    return local_midnight(start.astimezone().date()), local_midnight(now.astimezone().date())
+
+
+def _note_prompt(day: date, labels: list[tuple[Any, ...]], episodes: list[Episode]) -> str:
     """Counts only: the day's accepted labels and episode facts, never a steer text or title."""
     by = Counter((a["task"], a["label"]) for a in current_labels(labels) if not a["below_tau"])
     lines = [f"Write a short private note (3 to 5 sentences) about the work day {day}. Use only "
@@ -131,7 +146,7 @@ def _flush(run: _Run, task: Task, key: str, pending: list[ActivityEvent],
 def _run_task(run: _Run, task: Task, choice: Choice, backend: Backend, since: datetime,
               until: datetime | None) -> TaskReport:
     c: TaskReport = defaultdict(int)
-    labels: Counter = Counter()
+    labels: Counter[str] = Counter()
     c["labels"] = labels
     key = f"{task.name}@{task.ver}|{backend.model_id}|{choice.calib_ver}"
     done = set(run.cache.get(key, ())) if task.cached else set()
@@ -161,19 +176,19 @@ def _run_task(run: _Run, task: Task, choice: Choice, backend: Backend, since: da
     return c
 
 
-def _label_one(run: _Run, name: str, since: datetime, until: datetime | None, choice: Choice,
+def _label_one(run: _Run, name: str, since: datetime | None, now: datetime, choice: Choice,
                backend_for: Callable[[str, Choice], Backend]) -> tuple[TaskReport, Exception | None]:
     """One task's report, and the error that stopped only it: its watermark stays, the others go
     on, and the heartbeat row records it."""
     try:
-        backend = backend_for(name, choice)
         if name != LABEL_NOTE:
-            return _run_task(run, TASKS[name], choice, backend, since, until), None
+            start, until = _window(name, run.wm, since, now)
+            return _run_task(run, TASKS[name], choice, backend_for(name, choice), start, until), None
+        note_start, note_end = _day_window(name, run.wm, since, now)
+        backend = backend_for(name, choice)
         if not isinstance(backend, NoteBackend):    # label.json can name the encoder for it
             raise BackendUnavailable(f"label: {name} needs a backend that can write text")
-        if until is None:               # a note's window is whole days
-            raise ValueError(f"label {name}: a day window has no end")
-        return _run_notes(run, backend, since, until), None
+        return _run_notes(run, backend, note_start, note_end), None
     except SourceUnavailable as exc:
         print(f"aut: label {name}: {exc}; retried on the next run", file=sys.stderr)
         return defaultdict(int, unavailable=1), exc
@@ -194,7 +209,7 @@ def run_label(cfg: Config, tasks: list[str] | None = None, since: datetime | Non
     labelled_at = started.isoformat(timespec="milliseconds")
     now = now or started
     src = src or Source(cfg)
-    loaded: dict = {}
+    loaded: dict[tuple[str | None, str | None, str | None], Backend] = {}
 
     def default_backend(task: str, choice: Choice) -> Backend:
         k = (choice.backend, choice.model_id or cfg.label_model, choice.model_rev)
@@ -211,15 +226,14 @@ def run_label(cfg: Config, tasks: list[str] | None = None, since: datetime | Non
     report: dict[str, TaskReport] = {}
     with job_heartbeat(cfg, NAME, started, dry_run=dry_run) as beat:
         for name in tasks if tasks is not None else cfg.label_tasks:
-            s, u = _window(name, wm, since, now)
-            report[name], stopped = _label_one(run, name, s, u, load_choice(name), backend_for)
+            report[name], stopped = _label_one(run, name, since, now, load_choice(name), backend_for)
             beat.events += report[name]["rows"] + report[name]["notes"]
             if stopped:
                 beat.fail(stopped)
     return report
 
 
-def print_report(report: dict[str, TaskReport], dry_run: bool) -> None:
+def print_report(report: dict[str, TaskReport], *, dry_run: bool) -> None:
     mode = "DRY-RUN (nothing written)" if dry_run else "written"
     for name, c in report.items():
         if c["failed"]:      # its reason is already on stderr

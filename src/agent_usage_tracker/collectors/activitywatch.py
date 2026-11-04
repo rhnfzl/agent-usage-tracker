@@ -129,13 +129,13 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _parse(ts: str) -> datetime:
+def _parse_aw_ts(ts: str) -> datetime:
     dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
     return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
 
-def _event_span(ev: dict) -> tuple[datetime, datetime]:
-    start = _parse(ev["timestamp"])
+def _event_span(ev: dict[str, Any]) -> tuple[datetime, datetime]:
+    start = _parse_aw_ts(ev["timestamp"])
     return start, start + timedelta(seconds=float(ev.get("duration") or 0))
 
 
@@ -154,10 +154,10 @@ def _buckets(cfg: Config) -> tuple[str, str, datetime] | None:
         return None
     meta = buckets[win].get("metadata") or {}
     if meta.get("start"):
-        return win, afk, _parse(meta["start"])
+        return win, afk, _parse_aw_ts(meta["start"])
     # aw-server-rust writes 'created' in local time labelled UTC, up to 14 h late: start a day
     # earlier (empty chunks cost one query each)
-    return win, afk, _parse(buckets[win]["created"]) - timedelta(days=1)
+    return win, afk, _parse_aw_ts(buckets[win]["created"]) - timedelta(days=1)
 
 
 def _norm(app: str) -> str:
@@ -226,7 +226,7 @@ def _category_from_declared(declared: str) -> str:
     return "media" if kind.endswith("games") else _MAC_CATEGORIES.get(kind, "other")
 
 
-def denied(cfg: Config, app: str, title: str, data: dict | None = None) -> bool:
+def denied(cfg: Config, app: str, title: str, data: dict[str, Any] | None = None) -> bool:
     """Password managers, private browsing, and config deny patterns, matched on title + URL.
     A Chromium private window (Brave, Chrome, Helium) has neither a title marker nor an
     incognito flag from today's watcher, so it is not detectable here."""
@@ -263,11 +263,11 @@ def classify(cfg: Config, app: str, title: str, url: str = "") -> tuple[str, boo
     return cat, cat in _RELEVANT, rule
 
 
-def describe(cfg: Config, wm: dict) -> str:
+def describe(cfg: Config, wm: dict[str, Any]) -> str:
     return f"read until {wm['end']}" if "end" in wm else "never scanned"
 
 
-def _read_range(cfg: Config, wm: dict) -> tuple[list, datetime, datetime] | None:
+def _read_range(cfg: Config, wm: dict[str, Any]) -> tuple[list[dict[str, Any]], datetime, datetime] | None:
     """(raw events, start, end) of this pass; None while the range is too short to read yet."""
     try:
         found = _buckets(cfg)
@@ -275,7 +275,7 @@ def _read_range(cfg: Config, wm: dict) -> tuple[list, datetime, datetime] | None
             raise CollectorUnavailable("activitywatch: aw-server has no window and AFK buckets for "
                                        "this host; skipping")
         win, afk, first = found
-        start = _parse(wm["end"]) if wm.get("end") else first
+        start = _parse_aw_ts(wm["end"]) if wm.get("end") else first
         end = min(_now() - _LAG, start + _CHUNK)
         if end - start < _MIN_RANGE:
             return None
@@ -289,7 +289,7 @@ def _read_range(cfg: Config, wm: dict) -> tuple[list, datetime, datetime] | None
                                    "skipping") from exc
 
 
-def _interval(cfg: Config, s: datetime, e: datetime, app: str, title: str, data: dict,
+def _interval(cfg: Config, s: datetime, e: datetime, app: str, title: str, data: dict[str, Any],
               title_from: datetime | None) -> TimeInterval:
     category, relevant, rule = classify(cfg, app, title, str(data.get("url") or ""))
     keep = cfg.activitywatch_titles and (title_from is None or s >= title_from)
@@ -303,7 +303,7 @@ def _interval(cfg: Config, s: datetime, e: datetime, app: str, title: str, data:
         category=category, work_relevant=relevant, attrs={"rule": rule})
 
 
-def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[TimeInterval], Callable[[], None]]]:
+def collect(cfg: Config, wm: dict[str, Any]) -> Iterator[tuple[list[TimeInterval], Callable[[], None]]]:
     read = _read_range(cfg, wm)
     if read is None:
         return
@@ -312,7 +312,7 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[TimeInterval], Callabl
     days = cfg.activitywatch_title_days
     title_from = _now() - timedelta(days=days) if days else None
     denied_n, denied_s, idle_s = 0, 0.0, 0.0
-    skipped: Counter = Counter()
+    skipped: Counter[str] = Counter()
     for ev in raw:
         try:
             s, e = _event_span(ev)
@@ -339,7 +339,7 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[TimeInterval], Callabl
               f"deny-list, {idle_s / 60:.1f} min idle (login window / screen saver)",
               file=sys.stderr)
 
-    def advance_watermark(w: dict = wm, end_iso: str = end.isoformat()) -> None:
+    def advance_watermark(w: dict[str, Any] = wm, end_iso: str = end.isoformat()) -> None:
         w["end"] = end_iso
 
     yield rows, advance_watermark
@@ -350,7 +350,7 @@ def intervals(cfg: Config, since: datetime, until: datetime) -> list[TimeInterva
     per query: the last row can run past `until`. Raises CollectorUnavailable."""
     wm = {"end": since.astimezone(timezone.utc).isoformat()}
     out: list[TimeInterval] = []
-    while _parse(wm["end"]) < until:
+    while _parse_aw_ts(wm["end"]) < until:
         before = wm["end"]
         for rows, advance_watermark in collect(cfg, wm):
             out += rows

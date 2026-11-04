@@ -60,13 +60,17 @@ def test_steer_units_read_local_redacted_text(tmp_path):
     assert len(reqs[1].facts["text"]) <= tasks.TEXT_MAX
 
 
+def _member(session_id):
+    return {"session_id": session_id, "role": "seed", "repo_keys": []}
+
+
 def test_work_category_units(tmp_path):
     t0 = DAY1.replace(minute=0)
     _claude_log(tmp_path, "s1", [("u1", "plan the export"), ("u2", "now write it")])
     steers = [_steer("u1", "s1", t0), _steer("u2", "s1", t0 + timedelta(minutes=5))]
-    eps = [{"episode_id": "e1", "first_ts": t0, "last_ts": t0 + timedelta(minutes=5),
+    eps = [{"id": "e1", "first_ts": t0, "last_ts": t0 + timedelta(minutes=5),
             "n_sessions": 1, "n_steers": 2, "n_commits": 1, "outcome": "open",
-            "sessions": ["s1"]}]
+            "members": [_member("s1")]}]
     acts = [{"session_id": "s1", "ts": t0 + timedelta(minutes=1), "kind": "turn",
              "attrs": {"by_tool": {"Edit": 3, "Bash": 1}, "tool_errors": 1}},
             {"session_id": "s1", "ts": t0 + timedelta(minutes=2), "kind": "commit", "attrs": {}}]
@@ -78,7 +82,7 @@ def test_work_category_units(tmp_path):
             _win(t0 + timedelta(minutes=50), 2, app="Notes", category="docs")]
     # a Codex session in the same episode: its steer and turns stay out of the episode facts
     steers.append(_steer("c1", "s2", t0 + timedelta(minutes=6), agent="codex"))
-    eps[0]["sessions"].append("s2")
+    eps[0]["members"].append(_member("s2"))
     acts.append({"session_id": "s2", "ts": t0 + timedelta(minutes=7), "kind": "turn",
                  "attrs": {"by_tool": {"shell": 9}, "tool_errors": 4}})
     cfg = _cfg(tmp_path)
@@ -102,8 +106,8 @@ def test_soft_outcome_only_no_code(tmp_path):
     steers = [_steer("u1", "s1", DAY1), _steer("u2", "s2", DAY1),
               _steer("x1", "s3", DAY1, agent="codex")]
     ep = {"first_ts": start, "last_ts": DAY1, "n_sessions": 2, "n_steers": 2, "n_commits": 0}
-    eps = [{**ep, "episode_id": "e1", "outcome": "no_code", "sessions": ["s1", "s3"]},
-           {**ep, "episode_id": "e2", "outcome": "shipped", "sessions": ["s1"]}]
+    eps = [{**ep, "id": "e1", "outcome": "no_code", "members": [_member("s1"), _member("s3")]},
+           {**ep, "id": "e2", "outcome": "shipped", "members": [_member("s1")]}]
     reqs = tasks.units("soft_outcome", FakeSource(_cfg(tmp_path), steers, eps),
                        NOW - timedelta(days=14), NOW)
     assert [r.unit_id for r in reqs] == ["e1"]

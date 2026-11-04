@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any, Iterator, TypedDict
 
 from ..config import Config
-from ..event import ActivityKind, Batch, ActivityEvent, EventSession, UsageEvent, make_event_id
+from ..event import Row, ActivityKind, Batch, ActivityEvent, EventSession, UsageEvent, make_event_id
 from ..repo_keys import RepoKeys
 from ..state import parse_record
 from .activity_common import (Link, TurnAgg, add_call, best_effort, blank_tool_tally, drop_raw_shas,
@@ -78,7 +78,7 @@ def uuid_in(path: str) -> str | None:
     return m.group(1) if m else None
 
 
-def header(o: dict, path: str) -> dict[str, Any]:
+def header(o: dict[str, Any], path: str) -> dict[str, Any]:
     """What the watermark keeps of line 1. A fork's parent is the header id of the file named in
     parentSession, else the uuid in that name; the path itself is never kept."""
     ps = str_or_none(o.get("parentSession"))
@@ -92,7 +92,7 @@ def header(o: dict, path: str) -> dict[str, Any]:
             "fork": bool(ps)}
 
 
-def is_fork_copy(o: dict, hdr: dict) -> bool:
+def is_fork_copy(o: dict[str, Any], hdr: dict[str, Any]) -> bool:
     """A fork copies its parent's entries, with their ids and timestamps, all before its own header."""
     gap = ms_between(o.get("timestamp"), hdr["ts"]) if hdr["fork"] else None
     return gap is not None and gap > 0
@@ -101,12 +101,12 @@ def is_fork_copy(o: dict, hdr: dict) -> bool:
 class _Activity:
     """Per-file activity state machine; `carried` is the watermark's state (a private copy)."""
 
-    def __init__(self, carried: dict, sid: str, cwd: str | None, keys: RepoKeys) -> None:
+    def __init__(self, carried: dict[str, Any], sid: str, cwd: str | None, keys: RepoKeys) -> None:
         self.carried, self.sid, self.cwd, self.keys = carried, sid, cwd, keys
         self.events: list[ActivityEvent] = []
-        self.errors: Counter = Counter()      # records whose extraction raised (skipped)
+        self.errors: Counter[str] = Counter()      # records whose extraction raised (skipped)
 
-    def _emit(self, kind: ActivityKind, ts: object, seed: str, turn: str | None, attrs: dict) -> None:
+    def _emit(self, kind: ActivityKind, ts: object, seed: str, turn: str | None, attrs: dict[str, Any]) -> None:
         self.events.append(ActivityEvent(
             event_id=make_event_id(NAME, kind, f"{self.sid}|{seed}"), ts=str_or_none(ts), agent=NAME,
             kind=kind, session_id=self.sid, turn_id=turn, attrs=attrs))
@@ -122,7 +122,7 @@ class _Activity:
         self.carried.pop("agg", None)
         self.carried.pop("pend", None)       # a commit call unanswered at turn end never will be
 
-    def record(self, o: dict, sess: EventSession) -> None:
+    def record(self, o: dict[str, Any], sess: EventSession) -> None:
         carried, ts, eid = self.carried, o.get("timestamp"), o.get("id")
         if o.get("type") == "compaction":
             tb = o.get("tokensBefore")
@@ -151,7 +151,7 @@ class _Activity:
         carried["prev"] = role
 
     def _prompt(self, ts: object, eid: object, content: object, sess: EventSession,
-                open_: dict | None) -> None:
+                open_: dict[str, Any] | None) -> None:
         carried = self.carried
         if open_:
             self._close(open_["last"])
@@ -168,8 +168,8 @@ class _Activity:
         Link(self.keys, carried.setdefault("link", {})).note_text(text)
         carried["agg"] = blank_tool_tally()
 
-    def _assistant(self, m: dict, ts: object, eid: object, sess: EventSession, agg: TurnAgg,
-                   open_: dict | None) -> None:
+    def _assistant(self, m: dict[str, Any], ts: object, eid: object, sess: EventSession, agg: TurnAgg,
+                   open_: dict[str, Any] | None) -> None:
         carried, content = self.carried, m.get("content")
         for b in content if isinstance(content, list) else ():
             if isinstance(b, dict) and b.get("type") == "toolCall" and isinstance(b.get("name"), str):
@@ -182,7 +182,7 @@ class _Activity:
         if stop in _ENDS and open_:
             self._close(ts)
 
-    def _tool_call(self, b: dict, agg: TurnAgg) -> None:
+    def _tool_call(self, b: dict[str, Any], agg: TurnAgg) -> None:
         args = b.get("arguments")
         add_call(agg, b["name"], args)
         cmd = args.get("command") if isinstance(args, dict) else None
@@ -190,7 +190,7 @@ class _Activity:
                 and (call := commit_call(cmd)):
             self.carried.setdefault("pend", {})[b["id"]] = [*call, commit_dir(cmd)]
 
-    def _tool_result(self, m: dict, ts: object, sess: EventSession, agg: TurnAgg,
+    def _tool_result(self, m: dict[str, Any], ts: object, sess: EventSession, agg: TurnAgg,
                      link: Link) -> None:
         err = m.get("isError") is True
         agg["errors"] += err
@@ -204,7 +204,7 @@ class _Activity:
                 self._emit("commit", ts, f"{tid}|{sha}", sess.turn_id, attrs)
 
 
-def _upgrade_state(wm: dict) -> None:
+def _upgrade_state(wm: dict[str, Any]) -> None:
     """Bring state saved by an older version to the current shape, once: the header kept in the
     entry, pending commit calls with their target, and link SHAs keyed. A reset would re-read the
     file instead. Each step is safe on state already upgraded."""
@@ -220,18 +220,18 @@ def _upgrade_state(wm: dict) -> None:
     wm["state_v"] = _STATE_V
 
 
-def _note_model_change(o: dict, cur: FileState) -> None:
+def _note_model_change(o: dict[str, Any], cur: FileState) -> None:
     cur["model"] = str_or_none(o.get("modelId")) or str_or_none(o.get("model")) or cur.get("model")
     provider = str_or_none(o.get("provider"))
     if provider:
         cur["provider"] = provider
 
 
-def _record_id(o: dict, path: str) -> object:
+def _record_id(o: dict[str, Any], path: str) -> object:
     return o.get("id") or f"{path}:{o.get('timestamp')}"
 
 
-def _usage_event(o: dict, msg: dict, cur: FileState, path: str, project: str | None,
+def _usage_event(o: dict[str, Any], msg: dict[str, Any], cur: FileState, path: str, project: str | None,
                  sess: EventSession | None) -> UsageEvent | None:
     """The usage row of a record, None if it has no tokens. Raises on malformed token counts."""
     if o.get("type") == "message":
@@ -269,7 +269,7 @@ def _usage_event(o: dict, msg: dict, cur: FileState, path: str, project: str | N
     )
 
 
-def _advance_session(o: dict, hdr: dict, cur: FileState, is_prompt: bool) -> EventSession | None:
+def _advance_session(o: dict[str, Any], hdr: dict[str, Any], cur: FileState, is_prompt: bool) -> EventSession | None:
     """The record's session, a prompt opening a new turn; None for a fork's copied entry, whose
     usage id dedupes but whose session and activity rows belong to the parent."""
     if is_fork_copy(o, hdr):
@@ -280,11 +280,11 @@ def _advance_session(o: dict, hdr: dict, cur: FileState, is_prompt: bool) -> Eve
 
 
 def _chunk_rows(path: str, lines: list[bytes], cur: FileState, keys: RepoKeys,
-                skipped: Counter) -> list:
+                skipped: Counter[str]) -> list[Row]:
     """All rows of one file's new lines; updates `cur`, the private copy of its watermark entry."""
     hdr = cur.get("hdr") or header({}, path)
     act = _Activity(cur.setdefault("act", {}), hdr["id"], hdr["cwd"], keys)
-    events: list = []
+    events: list[Row] = []
     for raw in lines:
         o = parse_record(raw)
         if o is None:
@@ -331,14 +331,14 @@ def _fresh_state(st: os.stat_result) -> FileState:
     return {"off": 0, "ino": st.st_ino, "model": None}
 
 
-def collect(cfg: Config, wm: dict) -> Iterator[Batch]:
+def collect(cfg: Config, wm: dict[str, Any]) -> Iterator[Batch]:
     if not sessions_dir(cfg.home).exists():
         return
     _upgrade_state(wm)
     keys = RepoKeys(cfg.repo_key_salt)
 
     def chunk_rows(path: str, cur: FileState, _off: int, lines: list[bytes],
-                   skipped: Counter) -> list:
+                   skipped: Counter[str]) -> list[Row]:
         events = _chunk_rows(path, lines, cur, keys, skipped)
         # shortcut: the last open turn of a file is emitted only when a later scan reads its end
         # (or the next prompt); a session left on an error or a tool call keeps it open for good.

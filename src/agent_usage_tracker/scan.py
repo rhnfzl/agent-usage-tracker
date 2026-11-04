@@ -10,27 +10,64 @@ import csv
 import json
 import sys
 from datetime import datetime, timezone
-from typing import Any, Callable, Iterator, Sequence, TextIO
+from typing import Any, Callable, Iterator, Sequence, TextIO, TypedDict
 
 from .collectors import REGISTRY, Collect, drain
 from .config import Config
 from .event import (ActivityEvent, Batch, CollectorUnavailable, Row, TimeInterval, UsageEvent,
                     parse_ts, valid_ts)
-from .push import (COLUMNS, deliver_scan_rows, local_error, make_sender, scan_row, scrub_error,
-                   send_activity_rows, send_session_rows)
+from .push import (COLUMNS, ScanStatus, deliver_scan_rows, error_type_name, make_sender,
+                   redacted_error, scan_row, send_activity_rows, send_session_rows)
 from .state import collector_wm, load_state, save_state
 
 BATCH = 500
 
 
-def _blank_agent_tally() -> dict[str, Any]:
+class ModelTally(TypedDict):
+    events: int
+    total: int
+
+
+class AgentTally(TypedDict):
+    """One collector's line of the scan report."""
+    events: int
+    human: int
+    input: int
+    output: int
+    cache_read: int
+    cache_write: int
+    reasoning: int
+    total: int
+    skipped_no_ts: int
+    duplicates: int
+    by_model: dict[str, ModelTally]
+    activity: dict[str, int]
+    intervals: int
+    time: dict[str | None, float]       # category -> seconds
+    relevant_s: float
+
+
+class HistoryCounts(TypedDict):
+    """The report of a history backfill."""
+    rows: int
+    by_origin: dict[str, int]
+    turn_null: int
+    subagent_no_parent: int
+    activity: int
+    by_kind: dict[str, int]
+    via: dict[str, int]
+    link: dict[str, dict[str, int]]
+    failed: set[str]
+
+
+def _blank_agent_tally() -> AgentTally:
     return {"events": 0, "human": 0, "input": 0, "output": 0, "cache_read": 0,
             "cache_write": 0, "reasoning": 0, "total": 0, "skipped_no_ts": 0,
             "duplicates": 0, "by_model": {}, "activity": {},
-            "intervals": 0, "time": {}, "relevant_s": 0.0}    # time: category -> seconds
+            "intervals": 0, "time": {}, "relevant_s": 0.0}
 
 
-def _tally_event(agg: dict, e: Row) -> None:
+def _tally_event(agg: AgentTally, e: Row) -> None:
     if isinstance(e, TimeInterval):      # active time; no tokens, kept out of events/human
         secs = (datetime.fromisoformat(e.end_ts) - datetime.fromisoformat(e.ts)).total_seconds()
         agg["intervals"] += 1
@@ -58,7 +95,7 @@ def _tally_event(agg: dict, e: Row) -> None:
 class _CollectorPass:
     """One collector's rows on their way to the sink: tallied, buffered, sent in batches."""
 
-    def __init__(self, agg: dict[str, Any], sender: Callable[[list[Row]], None] | None) -> None:
+    def __init__(self, agg: AgentTally, sender: Callable[[list[Row]], None] | None) -> None:
         self.agg, self.sender = agg, sender      # sender None: a dry run, nothing is sent
         # The same session can sit at two paths -- Claude Code re-encodes a project directory
         # (e.g. '-Users-me-proj' and 'prefix---Users-me-proj'), so one session file is globbed
@@ -69,17 +106,17 @@ class _CollectorPass:
         self.buf: list[Row] = []
         self.advances: list[Callable[[], None]] = []
         self.newest_ts: datetime | None = None
-        self.status = "ok"
+        self.status: ScanStatus = "ok"
         self.error: str | None = None
 
-    def drain_all(self, collect: Collect, cfg: Config, wm: dict, name: str) -> None:
+    def drain_all(self, collect: Collect, cfg: Config, wm: dict[str, Any], name: str) -> None:
         for batches in drain(collect, cfg, wm, name):
             try:
                 for batch in batches:
                     self.take(batch)
             except CollectorUnavailable as exc:     # what it could read still goes out below
                 print(f"aut: {exc}", file=sys.stderr)
-                self.status, self.error = "degraded", scrub_error(exc.__cause__ or exc)
+                self.status, self.error = "degraded", error_type_name(exc.__cause__ or exc)
             self.flush()
 
     def take(self, batch: Batch) -> None:
@@ -106,7 +143,7 @@ class _CollectorPass:
             self.flush()
 
     def flush(self) -> None:
-        if self.buf and self.sender is not None:
+        if self.buf and self.sender is not None:    # a dry run fills no buf; this narrows sender
             self.sender(self.buf)           # raises on delivery failure -> advances skipped
         for advance in self.advances:       # always advance the (in-memory) watermark so the
             advance()                       # drain terminates; only scan persists it
@@ -114,11 +151,11 @@ class _CollectorPass:
         self.advances.clear()
 
 
-def run_scan(cfg: Config, agents: Sequence[str], *, dry_run: bool) -> dict[str, dict[str, Any]]:
+def run_scan(cfg: Config, agents: Sequence[str], *, dry_run: bool) -> dict[str, AgentTally]:
     state = load_state()
     sender = None if dry_run else make_sender(cfg)
-    report: dict[str, dict[str, Any]] = {}
-    scan_rows: list[dict] = []      # one heartbeat row per collector that ran (agents.collector_scan)
+    report: dict[str, AgentTally] = {}
+    scan_rows: list[dict[str, Any]] = []      # one heartbeat row per collector that ran (agents.collector_scan)
 
     for name in agents:
         collector = REGISTRY[name]
@@ -133,16 +170,16 @@ def run_scan(cfg: Config, agents: Sequence[str], *, dry_run: bool) -> dict[str, 
             if collector.after_scan and not dry_run:    # a dry run changes nothing
                 collector.after_scan(cfg)
         except BaseException as exc:
-            run.status, run.error = "error", scrub_error(exc)
+            run.status, run.error = "error", error_type_name(exc)
             failure = exc
         if not dry_run:
             try:
                 save_state(state, [name])
             except OSError as exc:      # never ahead of the heartbeat, or of the pass's own failure
                 if failure:
-                    print(f"aut: warning: watermark not saved: {local_error(exc)}", file=sys.stderr)
+                    print(f"aut: warning: watermark not saved: {redacted_error(exc)}", file=sys.stderr)
                 else:
-                    run.status, run.error = "error", scrub_error(exc)
+                    run.status, run.error = "error", error_type_name(exc)
                     failure = exc
             scan_rows.append(scan_row(cfg, name, started_at, status=run.status, error=run.error,
                                       events=agg["events"] + agg["intervals"],
@@ -158,7 +195,7 @@ def run_scan(cfg: Config, agents: Sequence[str], *, dry_run: bool) -> dict[str, 
     return report
 
 
-def _print_tokens(name: str, agg: dict[str, Any]) -> None:
+def _print_tokens(name: str, agg: AgentTally) -> None:
     print(f"{name:<12} {agg['events']:>6} turns  {agg['total']:>12,} tokens "
           f"(in {agg['input']:,} / out {agg['output']:,} / "
           f"cacheR {agg['cache_read']:,} / cacheW {agg['cache_write']:,}"
@@ -167,7 +204,7 @@ def _print_tokens(name: str, agg: dict[str, Any]) -> None:
         print(f"    {model:<28} {mv['events']:>5} turns  {mv['total']:>12,} tokens")
 
 
-def _print_time(name: str, agg: dict[str, Any]) -> None:
+def _print_time(name: str, agg: AgentTally) -> None:
     total_s = sum(agg["time"].values())
     print(f"{name:<12} {agg['intervals']:>6} intervals  {total_s / 60:,.1f} min active "
           f"({agg['relevant_s'] / 60:,.1f} min work-relevant)")
@@ -175,7 +212,7 @@ def _print_time(name: str, agg: dict[str, Any]) -> None:
         print(f"    {cat:<28} {secs / 60:>9,.1f} min")
 
 
-def _print_agent(name: str, agg: dict[str, Any]) -> None:
+def _print_agent(name: str, agg: AgentTally) -> None:
     if agg["events"] or agg["total"]:
         _print_tokens(name, agg)
     if agg["human"]:
@@ -191,13 +228,13 @@ def _print_agent(name: str, agg: dict[str, Any]) -> None:
               "under more than one project path)")
 
 
-def print_scan(cfg: Config, report: dict, dry_run: bool) -> None:
+def print_scan(cfg: Config, report: dict[str, AgentTally], *, dry_run: bool) -> None:
     mode = "DRY-RUN (nothing sent)" if dry_run else "scan"
     print(f"\naut {mode}  machine={cfg.machine}\n" + "=" * 60)
     grand = 0
     for name, agg in report.items():
-        if not any(agg[k] for k in ("events", "human", "activity", "skipped_no_ts", "duplicates",
-                                "intervals")):
+        if not (agg["events"] or agg["human"] or agg["activity"] or agg["skipped_no_ts"]
+                or agg["duplicates"] or agg["intervals"]):
             print(f"{name:<12} -  no new usage")
             continue
         grand += agg["total"]
@@ -214,7 +251,7 @@ def reset_watermarks(agents: Sequence[str]) -> None:
     save_state(state, agents)
 
 
-def _one_shot_batches(name: str, cfg: Config, wm: dict, failed: set[str],
+def _one_shot_batches(name: str, cfg: Config, wm: dict[str, Any], failed: set[str],
                       keeps: set[str]) -> Iterator[Batch]:
     """All of a collector's batches for a one-shot command, which calls each batch's advance
     itself: an unavailable source ends that pass, and its name goes into `failed` when the collector
@@ -266,7 +303,7 @@ def print_export(written: int, skipped: int, out_path: str | None) -> None:
     print(f"exported {written} events{skip_note}{dest}", file=sys.stderr)
 
 
-def _tally_activity(counts: dict, e: ActivityEvent) -> None:
+def _tally_activity(counts: HistoryCounts, e: ActivityEvent) -> None:
     counts["activity"] += 1
     counts["by_kind"][e.kind] = counts["by_kind"].get(e.kind, 0) + 1
     if e.kind == "steer":
@@ -280,7 +317,7 @@ def _tally_activity(counts: dict, e: ActivityEvent) -> None:
                 r[k] = r.get(k, 0) + 1
 
 
-def _tally_session(counts: dict, row: dict) -> None:
+def _tally_session(counts: HistoryCounts, row: dict[str, Any]) -> None:
     counts["rows"] += 1
     origin = row["run_origin"]
     counts["by_origin"][origin] = counts["by_origin"].get(origin, 0) + 1
@@ -293,19 +330,19 @@ class _History:
 
     def __init__(self, dsn: str, dry_run: bool, *, sessions: bool, activity: bool) -> None:
         self.dsn, self.dry_run, self.sessions, self.activity = dsn, dry_run, sessions, activity
-        self.counts: dict[str, Any] = {"rows": 0, "by_origin": {}, "turn_null": 0,
-                                       "subagent_no_parent": 0, "activity": 0, "by_kind": {},
-                                       "via": {}, "link": {}, "failed": set()}
-        self.buf: list[dict] = []
-        self.abuf: list[ActivityEvent] = []
+        self.counts: HistoryCounts = {"rows": 0, "by_origin": {}, "turn_null": 0,
+                                      "subagent_no_parent": 0, "activity": 0, "by_kind": {},
+                                      "via": {}, "link": {}, "failed": set()}
+        self.session_buf: list[UsageEvent] = []
+        self.activity_buf: list[ActivityEvent] = []
 
     def flush(self) -> None:
-        if self.buf and not self.dry_run:
-            send_session_rows(self.dsn, self.buf)   # raises -> the command fails, nothing to undo
-        if self.abuf and not self.dry_run:
-            send_activity_rows(self.dsn, self.abuf)
-        self.buf.clear()
-        self.abuf.clear()
+        if self.session_buf and not self.dry_run:
+            send_session_rows(self.dsn, self.session_buf)   # raises -> the command fails, nothing to undo
+        if self.activity_buf and not self.dry_run:
+            send_activity_rows(self.dsn, self.activity_buf)
+        self.session_buf.clear()
+        self.activity_buf.clear()
 
     def take(self, e: Row, seen: set[str], name: str) -> None:
         if isinstance(e, ActivityEvent):
@@ -318,8 +355,8 @@ class _History:
         if valid_ts(e.ts) and e.event_id not in seen:
             seen.add(e.event_id)
             _tally_activity(self.counts, e)
-            self.abuf.append(e)
-            if len(self.abuf) >= BATCH:
+            self.activity_buf.append(e)
+            if len(self.activity_buf) >= BATCH:
                 self.flush()
 
     def _take_session(self, e: UsageEvent, seen: set[str], name: str) -> None:
@@ -329,15 +366,15 @@ class _History:
             return
         seen.add(e.event_id)
         _tally_session(self.counts, row)
-        self.buf.append(row)
-        if len(self.buf) >= BATCH:
+        self.session_buf.append(e)
+        if len(self.session_buf) >= BATCH:
             self.flush()
             if self.counts["rows"] % (BATCH * 20) == 0:
                 print(f"aut: {name}: {self.counts['rows']:,} session rows so far", file=sys.stderr)
 
 
 def run_history_backfill(cfg: Config, agents: Sequence[str], *, dry_run: bool,
-                         sessions: bool = True, activity: bool = False) -> dict[str, Any]:
+                         sessions: bool = True, activity: bool = False) -> HistoryCounts:
     """Send agents.event_session rows (sessions) and/or agents.activity_event rows (activity) for
     ALL history, never usage rows: re-reading files from byte 0 re-emits (event_id, ts) pairs that
     can differ from the stored ones (see the ts note in collectors/claude_code.py), and those would
@@ -360,7 +397,7 @@ def run_history_backfill(cfg: Config, agents: Sequence[str], *, dry_run: bool,
     return history.counts
 
 
-def print_history_backfill(c: dict, *, dry_run: bool, sessions: bool, activity: bool) -> None:
+def print_history_backfill(c: HistoryCounts, *, dry_run: bool, sessions: bool, activity: bool) -> None:
     mode = "DRY-RUN (nothing sent)" if dry_run else "sent"
     if sessions:
         print(f"sessions-only backfill {mode}: {c['rows']} rows, by run_origin "

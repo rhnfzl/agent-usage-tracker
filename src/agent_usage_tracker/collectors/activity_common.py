@@ -15,7 +15,7 @@ from collections import Counter
 from datetime import datetime
 from typing import Any, Callable, NotRequired, TypedDict, TypeVar
 
-from ..event import EventSession, UsageEvent, make_event_id
+from ..event import EventSession, RunOrigin, UsageEvent, make_event_id
 from ..repo_keys import RepoKeys, repo_identity
 from ._util import MS_PER_S
 from .commits import COMMIT_LINE, commit_repo
@@ -67,7 +67,7 @@ def ms_between(start: object, end: object) -> int | None:
         return None
 
 
-def first_record(path: str) -> dict | None:
+def first_record(path: str) -> dict[str, Any] | None:
     """The file's first JSON line, for a header a resumed scan no longer reads."""
     try:
         with open(path, "rb") as fh:
@@ -110,7 +110,7 @@ class Link:
     branch_key is False where the source names a default branch: it has no key, and a lower rank
     may not stand in for it."""
 
-    def __init__(self, keys: RepoKeys, s: dict) -> None:
+    def __init__(self, keys: RepoKeys, s: dict[str, Any]) -> None:
         self.keys, self.s = keys, s
 
     def source(self, repo_key: str | None, branch: object = None) -> list[str | bool | None]:
@@ -165,7 +165,7 @@ class Link:
         if host and isinstance(repo, str):
             self._add("prs", pr_key(self.keys, host, repo, number), MAX_PRS)
 
-    def attrs(self, origin: str | None) -> dict[str, Any]:
+    def attrs(self, origin: RunOrigin) -> dict[str, Any]:
         at = [self.s["at"][k] for k in sorted(self.s.get("at", {}))]
         # the repo of the first source that has one; its branch from that source, or from a lower
         # one in the SAME repo (a branch edge must never join two repos)
@@ -177,7 +177,7 @@ class Link:
                 # subagents and scripted runs attach to an episode, never start one
                 "role": "child" if origin in ("subagent", "automated") else "seed"}
 
-    def merge(self, other: dict) -> None:
+    def merge(self, other: dict[str, Any]) -> None:
         """Add a session-level source (ranks it lacks, its tickets) to this turn."""
         for k, v in (other.get("at") or {}).items():
             self.s.setdefault("at", {}).setdefault(k, v)
@@ -189,7 +189,7 @@ class Link:
 
 
 def record_commits(link: Link, cwd: object, target: object, text: str, shas: list[str], *,
-                   amend: bool, fallback: str | None = None) -> list[tuple[str, dict]]:
+                   amend: bool, fallback: str | None = None) -> list[tuple[str, dict[str, Any]]]:
     """Tell the turn's link about a commit call's printed `shas`; (sha, attrs) of each commit row."""
     if not shas:
         return []
@@ -198,27 +198,27 @@ def record_commits(link: Link, cwd: object, target: object, text: str, shas: lis
     return [(sha, {"sha": sha, "repo_key": key, "amend": amend}) for sha in shas]
 
 
-def pad_pending(act: dict | None) -> None:
+def pad_pending(act: dict[str, Any] | None) -> None:
     """State upgrade: a pending commit call saved before its target was kept gains target None."""
     for call in ((act or {}).get("pend") or {}).values():
         call[2:] = call[2:] or [None]
 
 
-def drop_raw_shas(act: dict | None) -> None:
+def drop_raw_shas(act: dict[str, Any] | None) -> None:
     """State upgrade: a link saved before sha_refs were keyed held raw hex; only the keys stay."""
     link = (act or {}).get("link") or {}
     if link.get("shas"):
         link["shas"] = [v for v in link["shas"] if len(v) == 64]
 
 
-def pop_pending(pend: dict, tid: str) -> tuple[bool, bool, object]:
+def pop_pending(pend: dict[str, Any], tid: str) -> tuple[bool, bool, object]:
     """Take one pending commit call. It rides in the watermark as the JSON list
     [is_amend, printed_before, target]; this is the one place that knows the order."""
     amend, before, target = pend.pop(tid)
     return bool(amend), bool(before), target
 
 
-def best_effort(errors: Counter, fn: Callable[..., _T], *args: object) -> _T | None:
+def best_effort(errors: Counter[str], fn: Callable[..., _T], *args: object) -> _T | None:
     """Run one activity step. One that raises is counted by exception type and skipped (None), so
     activity can never block the usage and session rows of the same chunk."""
     try:
@@ -228,7 +228,7 @@ def best_effort(errors: Counter, fn: Callable[..., _T], *args: object) -> _T | N
         return None
 
 
-def human_event(agent: str, id_parts: tuple, ts: str | None, session: EventSession | None = None,
+def human_event(agent: str, id_parts: tuple[Any, ...], ts: str | None, session: EventSession | None = None,
                 project: str | None = None) -> UsageEvent:
     """The zero-token usage row of a prompt a person typed."""
     return UsageEvent(event_id=make_event_id(agent, "human", *id_parts), ts=ts, agent=agent,
@@ -244,7 +244,7 @@ class TurnAgg(TypedDict):
     last: str | None       # the previous call's tool and input hash
     run: int               # length of the current run of identical calls
     max: int               # longest such run
-    mcp_ids: NotRequired[list]   # codex: MCP call ids, to match the item Desktop logs again
+    mcp_ids: NotRequired[list[Any]]   # codex: MCP call ids, to match the item Desktop logs again
 
 
 def blank_tool_tally() -> TurnAgg:

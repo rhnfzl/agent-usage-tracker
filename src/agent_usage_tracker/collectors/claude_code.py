@@ -19,10 +19,10 @@ import re
 import time
 from collections import Counter
 from pathlib import Path
-from typing import Iterator, TypedDict
+from typing import Any, Iterator, NamedTuple, TypedDict
 
 from ..config import Config
-from ..event import ActivityEvent, Batch, EventSession, RunOrigin, UsageEvent, make_event_id
+from ..event import Row, ActivityEvent, Batch, EventSession, RunOrigin, UsageEvent, make_event_id
 from ..repo_keys import RepoKeys
 from ..state import parse_record
 from .activity_common import IDLE_S, best_effort, drop_raw_shas, human_event, pad_pending, text_of
@@ -95,7 +95,7 @@ _PROGRAM_ENTRYPOINTS = {"sdk-py", "sdk-cli"}
 _NON_HUMAN_PROMPT_SOURCES = {"system", "sdk"}
 
 
-def _origin_not_human(o: dict) -> bool:
+def _origin_not_human(o: dict[str, Any]) -> bool:
     origin = o.get("turnOrigin")
     if isinstance(origin, str) and origin != "human":
         return True
@@ -126,7 +126,7 @@ _USAGE_CMD = "<command-name>/usage</command-name>"
 _LOOP_RE = re.compile(r"<command-(?:message>(?:[\w-]+:)?loop</command-message|name>/loop</command-name)>")
 
 
-def is_old_loop(o: dict, text: str) -> bool:
+def is_old_loop(o: dict[str, Any], text: str) -> bool:
     """A /loop record from before Claude Code wrote turnOrigin. Then, every scheduled firing
     looked exactly like the /loop you typed; newer files mark all repeats `scheduled`."""
     return "turnOrigin" not in o and bool(_LOOP_RE.search(text))
@@ -139,7 +139,7 @@ def _is_injected(text: str) -> bool:
             or (bool(text.strip()) and not CONTEXT_BLOCK_RE.sub("", text).strip()))
 
 
-def human_text(o: dict) -> str | None:
+def human_text(o: dict[str, Any]) -> str | None:
     """The text of a record a person typed, else None. A real human prompt is string content
     (typed text or a slash command) or a non-empty block list with no tool_result. Skipped: the tool_result
     user-lines Claude Code injects after every tool call (they dominate the raw "user" count),
@@ -157,18 +157,24 @@ def human_text(o: dict) -> str | None:
     return None if _is_injected(text) else text
 
 
-def _file_identity(base: Path, path: str) -> tuple[bool, str, str | None]:
-    """(is_subagent, fallback session_id, fallback parent) from the path alone. A subagent lives at
+class FileIdentity(NamedTuple):
+    subagent: bool
+    session_id: str               # the fallback when a record does not say
+    parent: str | None            # the same
+
+
+def _file_identity(base: Path, path: str) -> FileIdentity:
+    """What the path alone says. A subagent lives at
     <parent>/subagents/[workflows/<wf>/]agent-<id>.jsonl; a main session at <sessionId>.jsonl."""
     parts = Path(path).relative_to(base).parts
     stem = Path(path).stem
     if "subagents" in parts[1:-1]:       # parts[0] is the project dir, whatever its name
         i = parts.index("subagents", 1)
-        return True, stem.removeprefix("agent-"), parts[i - 1]
-    return False, stem, None
+        return FileIdentity(True, stem.removeprefix("agent-"), parts[i - 1])
+    return FileIdentity(False, stem, None)
 
 
-def _session_of(o: dict, ident: tuple[bool, str, str | None], turn: str | None) -> EventSession:
+def _session_of(o: dict[str, Any], ident: FileIdentity, turn: str | None) -> EventSession:
     sub, sid, parent = ident
     if sub:     # records carry sessionId = the PARENT session and agentId = their own
         return EventSession(str_or_none(o.get("agentId")) or sid,
@@ -180,7 +186,7 @@ def _session_of(o: dict, ident: tuple[bool, str, str | None], turn: str | None) 
     return EventSession(str_or_none(o.get("sessionId")) or sid, None, origin, turn)
 
 
-def _complete(path: str, off: int) -> bool:
+def _is_fully_read(path: str, off: int) -> bool:
     """Read to its end and untouched for IDLE_S: no more records will follow."""
     try:
         st = os.stat(path)
@@ -189,7 +195,7 @@ def _complete(path: str, off: int) -> bool:
     return off >= st.st_size and time.time() - st.st_mtime >= IDLE_S
 
 
-def _upgrade_state(wm: dict) -> None:
+def _upgrade_state(wm: dict[str, Any]) -> None:
     """Bring state saved by an older version to the current shape, once: pending commit calls with
     their target, and link SHAs keyed. Each step is safe on state already upgraded."""
     if wm.get("state_v") == _STATE_V:
@@ -200,7 +206,7 @@ def _upgrade_state(wm: dict) -> None:
     wm["state_v"] = _STATE_V
 
 
-def _record_uid(o: dict, path: str) -> str:
+def _record_uid(o: dict[str, Any], path: str) -> str:
     return o.get("uuid") or f"{path}:{o.get('timestamp')}"
 
 
@@ -225,7 +231,7 @@ def steer_texts(home: Path, sessions: set[str], want: set[str]) -> dict[str, str
     return out
 
 
-def _usage_event(o: dict, path: str, ident: tuple[bool, str, str | None],
+def _usage_event(o: dict[str, Any], path: str, ident: FileIdentity,
                  turn: str | None) -> tuple[str, UsageEvent] | None:
     """(dedup key, usage row) of an assistant record, None if it has no tokens. Raises on malformed
     token counts."""
@@ -262,15 +268,15 @@ def _usage_event(o: dict, path: str, ident: tuple[bool, str, str | None],
     )
 
 
-def _next_turn(o: dict, is_subagent: bool, turn: str | None) -> str | None:
+def _next_turn(o: dict[str, Any], is_subagent: bool, turn: str | None) -> str | None:
     """turn_id after a user record: the latest promptId (tool_results carry it too); a subagent
     keeps its first one, the parent turn that spawned it."""
     pid = str_or_none(o.get("promptId"))
     return pid if pid and not (is_subagent and turn) else turn
 
 
-def _keep_fuller(best: dict[str, UsageEvent], o: dict, path: str,
-                 ident: tuple[bool, str, str | None], turn: str | None, skipped: Counter) -> None:
+def _keep_fuller(best: dict[str, UsageEvent], o: dict[str, Any], path: str,
+                 ident: FileIdentity, turn: str | None, skipped: Counter[str]) -> None:
     """Fold an assistant record into best: the fuller record wins, an equal one keeps the first.
 
     Claude Code writes ONE JSONL line per content block of an assistant message (text + each
@@ -300,7 +306,8 @@ def _keep_fuller(best: dict[str, UsageEvent], o: dict, path: str,
         best[found[0]] = found[1]
 
 
-def _only_ran_usage(fresh: bool, best: dict, steers: list) -> bool:
+def _only_ran_usage(fresh: bool, best: dict[str, UsageEvent],
+                    steers: list[tuple[ActivityEvent | None, bool]]) -> bool:
     """A session that only ran /usage (no model call, every prompt a /usage) was nobody working
     (AgentsView, MIT). Judged only on a read from byte 0, so a /usage typed mid-session and caught
     alone by a live scan is kept, as a full re-read keeps it. shortcut: a file whose first chunk
@@ -308,7 +315,7 @@ def _only_ran_usage(fresh: bool, best: dict, steers: list) -> bool:
     return fresh and not best and bool(steers) and all(is_usage for _s, is_usage in steers)
 
 
-def _human_row(o: dict, text: str, path: str, sess: EventSession,
+def _human_row(o: dict[str, Any], text: str, path: str, sess: EventSession,
                act: Activity) -> tuple[UsageEvent, tuple[ActivityEvent | None, bool]]:
     """The human row of a typed prompt, and its steer row with whether the prompt ran /usage."""
     uid = _record_uid(o, path)
@@ -317,7 +324,7 @@ def _human_row(o: dict, text: str, path: str, sess: EventSession,
 
 
 def _chunk_rows(path: str, base: Path, lines: list[bytes], from_start: bool, cur: FileState,
-                keys: RepoKeys, skipped: Counter) -> list:
+                keys: RepoKeys, skipped: Counter[str]) -> list[Row]:
     """All rows of one file's new lines, read from byte 0 or not; updates `cur`, the private copy
     of its watermark entry."""
     best: dict[str, UsageEvent] = {}
@@ -330,8 +337,8 @@ def _chunk_rows(path: str, base: Path, lines: list[bytes], from_start: bool, cur
     # earlier scan is not lost.
     # shortcut: files first read before this existed start at NULL until their next user record.
     turn = str_or_none(cur.get("turn"))
-    act = Activity(NAME, path, ident[0], cur.get("act"), keys)
-    steers: list = []
+    act = Activity(NAME, path, ident.subagent, cur.get("act"), keys)
+    steers: list[tuple[ActivityEvent | None, bool]] = []
     for raw in lines:
         o = parse_record(raw)
         if o is None:
@@ -339,7 +346,7 @@ def _chunk_rows(path: str, base: Path, lines: list[bytes], from_start: bool, cur
             continue
         typ = o.get("type")
         if typ == "user":
-            turn = _next_turn(o, ident[0], turn)
+            turn = _next_turn(o, ident.subagent, turn)
         sess = _session_of(o, ident, turn)
         best_effort(act.errors, act.record, o, sess)
         if typ == "user":
@@ -355,7 +362,7 @@ def _chunk_rows(path: str, base: Path, lines: list[bytes], from_start: bool, cur
             steers.append(steer)
         elif typ == "assistant":
             _keep_fuller(best, o, path, ident, turn, skipped)
-    if _complete(path, cur["off"]):
+    if _is_fully_read(path, cur["off"]):
         act.finish()
     if _only_ran_usage(from_start, best, steers):
         human, steers = [], []
@@ -369,7 +376,7 @@ def _chunk_rows(path: str, base: Path, lines: list[bytes], from_start: bool, cur
         cur["act"] = state
     else:
         cur.pop("act", None)
-    return list(best.values()) + human + [s for s, _u in steers if s] + act.events
+    return [*best.values(), *human, *(s for s, _u in steers if s), *act.events]
 
 
 def _fresh_state(st: os.stat_result) -> FileState:
@@ -381,7 +388,7 @@ def _has_open_link_turn(entry: FileState) -> bool:
     return bool((entry.get("act") or {}).get("lo"))
 
 
-def collect(cfg: Config, wm: dict) -> Iterator[Batch]:
+def collect(cfg: Config, wm: dict[str, Any]) -> Iterator[Batch]:
     base = projects_dir(cfg.home)
     if not base.exists():
         return
@@ -389,7 +396,7 @@ def collect(cfg: Config, wm: dict) -> Iterator[Batch]:
     keys = RepoKeys(cfg.repo_key_salt)   # cwd -> repo_key cached once per collect() pass
 
     def chunk_rows(path: str, cur: FileState, off: int, lines: list[bytes],
-                   skipped: Counter) -> list:
+                   skipped: Counter[str]) -> list[Row]:
         return _chunk_rows(path, base, lines, not off, cur, keys, skipped)
 
     yield from file_batches(NAME, glob.glob(str(base / "**" / "*.jsonl"), recursive=True),

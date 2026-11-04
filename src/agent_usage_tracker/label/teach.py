@@ -16,12 +16,11 @@ import subprocess  # nosec B404 # one fixed argv in ask_claude, no shell
 import tempfile
 from collections import Counter
 from dataclasses import dataclass
-from datetime import date
-from typing import Callable
+from datetime import datetime, timezone
 
 from ..config import LABEL_DAYS, AutError, Config
 from .backends import make_backend
-from .core import Backend, Choice, Request, render
+from .core import Choice, Request, render_prompt
 from .evalset import append_jsonl, eval_path, read_jsonl, stratified, unit_day, window_units
 from .tasks import TASKS, Source
 
@@ -42,7 +41,7 @@ MAX_FAILS = 3                # consecutive claude failures (logged out, offline)
 
 def sonnet_prompt(req: Request) -> str:
     ids = [c["id"] for c in req.candidates]
-    body = render(req, ids).rsplit("\n\n", 1)[0]          # drop the one-letter instruction
+    body = render_prompt(req, ids).rsplit("\n\n", 1)[0]          # drop the one-letter instruction
     return (f"{body}\n\nReply with only a JSON object that maps each option name "
             f"({', '.join(ids)}) to the probability that it is the answer; they sum to 1.")
 
@@ -86,14 +85,13 @@ class _SonnetRun:
     fails: int = 0
 
 
-def _sonnet_dist(r: Request, ask: Callable[[str], tuple[str, float]], run: _SonnetRun,
-                 c: Counter) -> dict[str, float] | None:
+def _sonnet_dist(r: Request, run: _SonnetRun, c: Counter[str]) -> dict[str, float] | None:
     """Sonnet's distribution for a unit; None (counted why) when there is none."""
     if run.spent >= run.budget_usd or run.fails >= MAX_FAILS:
         c["sonnet_skipped"] += 1
         return None
     try:
-        text, cost = ask(sonnet_prompt(r))
+        text, cost = ask_claude(sonnet_prompt(r))
     except (RuntimeError, ValueError, OSError, subprocess.TimeoutExpired):
         run.fails += 1
         c["sonnet_failed"] += 1
@@ -105,17 +103,14 @@ def _sonnet_dist(r: Request, ask: Callable[[str], tuple[str, float]], run: _Sonn
     return dist
 
 
-def run_teach(cfg: Config, task: str, n: int, budget_usd: float = 5.0, days: int = LABEL_DAYS, *,
-              src: Source | None = None, local: Backend | None = None,
-              ask: Callable[[str], tuple[str, float]] | None = None,
-              today: date | None = None) -> Counter:
-    """Silver labels for up to n units not yet labelled by every teacher that applies to them.
-    local: the local backend (default the config's label_model, uncalibrated); ask(prompt) ->
-    (text, usd): the Sonnet call (tests pass fakes)."""
+def run_teach(cfg: Config, task: str, n: int, *, budget_usd: float = 5.0, days: int = LABEL_DAYS,
+              src: Source | None = None, now: datetime | None = None) -> Counter[str]:
+    """Silver labels for up to n units not yet labelled by every teacher that applies to them. The
+    local teacher is the config's label_model, uncalibrated."""
     t = TASKS[task]
+    today = (now or datetime.now(timezone.utc)).astimezone().date()
     reqs = window_units(cfg, task, days, src, today)
-    local = local or make_backend(task, Choice(), cfg.label_model)
-    ask = ask or ask_claude
+    local = make_backend(task, Choice(), cfg.label_model)
     out = eval_path(task, "silver")
     have = {(r.get("unit_id"), r.get("teacher")) for r in read_jsonl(out)
             if r.get("task_ver") == t.ver}
@@ -126,11 +121,11 @@ def run_teach(cfg: Config, task: str, n: int, budget_usd: float = 5.0, days: int
 
     order = stratified(list(reqs.values()), lambda r: (r.unit, unit_day(r)), seed=task)
     todo = [r for r in order if wants(r)][:n]
-    c: Counter = Counter(units=len(todo))
-    sonnet, today_s = _SonnetRun(budget_usd), (today or date.today()).isoformat()
+    c: Counter[str] = Counter(units=len(todo))
+    sonnet, today_s = _SonnetRun(budget_usd), today.isoformat()
     for r in todo:
         for teacher in wants(r):
-            dist = _sonnet_dist(r, ask, sonnet, c) if teacher == SONNET else local.distribution(r)
+            dist = _sonnet_dist(r, sonnet, c) if teacher == SONNET else local.distribution(r)
             if dist is None:
                 continue
             append_jsonl(out, {"unit_id": r.unit_id, "teacher": teacher, "task_ver": t.ver,
@@ -140,7 +135,7 @@ def run_teach(cfg: Config, task: str, n: int, budget_usd: float = 5.0, days: int
     return c
 
 
-def print_teach(task: str, c: Counter, budget_usd: float) -> None:
+def print_teach(task: str, c: Counter[str], budget_usd: float) -> None:
     print(f"label teach {task}: {c['units']} units, local {c['local']}, sonnet {c['sonnet']} "
           f"(unusable {c['sonnet_unusable']}, failed {c['sonnet_failed']}, skipped "
           f"{c['sonnet_skipped']}), spent ${c['spent_usd_milli'] / _MILLI_PER_USD:.2f} of "

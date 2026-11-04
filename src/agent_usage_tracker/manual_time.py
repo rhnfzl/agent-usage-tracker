@@ -12,7 +12,7 @@ from .push import insert_pg
 _MAX_MANUAL = timedelta(hours=16)
 
 
-def _local(value: str) -> datetime:
+def _parse_local_datetime(value: str) -> datetime:
     """A datetime typed by the user; no zone means this machine's local time."""
     try:
         dt = datetime.fromisoformat(value)
@@ -37,10 +37,10 @@ def build_manual_interval(cfg: Config, span: ManualSpan, *, not_relevant: bool =
     if span.minutes is not None:
         if span.start or span.end:
             raise AutError("time add: use --start/--end or --minutes, not both")
-        end_dt = _local(span.at) if span.at else now
+        end_dt = _parse_local_datetime(span.at) if span.at else now
         start_dt = end_dt - timedelta(minutes=span.minutes)
     elif span.start and span.end and not span.at:
-        start_dt, end_dt = _local(span.start), _local(span.end)
+        start_dt, end_dt = _parse_local_datetime(span.start), _parse_local_datetime(span.end)
     else:
         raise AutError("time add: give --start and --end, or --minutes [--at]")
     if end_dt <= start_dt:

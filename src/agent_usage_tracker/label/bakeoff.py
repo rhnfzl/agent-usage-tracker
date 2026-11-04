@@ -70,7 +70,7 @@ def ece(tops: list[tuple[float, bool]], bins: int = 10) -> float | None:
     """Expected calibration error of (top probability, was right), equal-width bins."""
     if not tops:
         return None
-    by: dict[int, list] = {}
+    by: dict[int, list[Any]] = {}
     for p, hit in tops:
         by.setdefault(min(int(p * bins), bins - 1), []).append((p, hit))
     return sum(abs(sum(p for p, _ in b) / len(b) - sum(h for _, h in b) / len(b)) * len(b)
@@ -174,7 +174,7 @@ def default_backends(cfg: Config, task: str) -> list[Backend]:
 
 
 def run_eval(cfg: Config, task: str, days: int = LABEL_DAYS, *, src: Source | None = None,
-             backends: list[Backend] | None = None, now: datetime | None = None) -> list[dict]:
+             backends: list[Backend] | None = None, now: datetime | None = None) -> list[dict[str, Any]]:
     now = now or datetime.now(timezone.utc)
     today = now.astimezone().date()
     items, gone = gold_items(cfg, task, days, src, today)
@@ -197,7 +197,7 @@ def run_eval(cfg: Config, task: str, days: int = LABEL_DAYS, *, src: Source | No
     return recs
 
 
-def passes(rec: dict, coverage: float, precision: float) -> bool:
+def passes(rec: dict[str, Any], coverage: float, precision: float) -> bool:
     """The bar (CONTRACT.md, the bake-off): a held-out report, coverage at tau at least label_coverage, every
     label that passed held-out items at its tau right at least `precision` of the time, and no
     label's share on known items off by more than SHARE_ERROR_PP."""
@@ -211,7 +211,7 @@ def passes(rec: dict, coverage: float, precision: float) -> bool:
 
 def choose(cfg: Config, task: str) -> dict[str, Any]:
     """Write the smallest backend whose newest eval passes into label.json; others untouched."""
-    newest: dict[str, dict] = {}
+    newest: dict[str, dict[str, Any]] = {}
     for r in read_jsonl(eval_path(task, "eval")):
         if r.get("task_ver") == TASKS[task].ver:
             newest[r["model_id"]] = r                   # the file is in time order
@@ -258,7 +258,7 @@ def _fit(data: list[tuple[list[int], list[float], float]], k: int, epochs: int =
     return w
 
 
-def _training_data(gold: dict[str, str], silver: dict[str, dict], reqs: dict[str, Request],
+def _training_data(gold: dict[str, str], silver: dict[str, dict[str, Any]], reqs: dict[str, Request],
                    test: set[str], labels: list[str]) -> list[tuple[list[int], list[float], float]]:
     """(features, target distribution, weight) of each gold and silver unit the encoder may see."""
     data = []
@@ -283,11 +283,12 @@ def _macro_f1(pairs: list[tuple[str, str]], labels: list[str]) -> float | None:
 
 
 def train_encoder(cfg: Config, task: str, days: int = LABEL_DAYS, *, src: Source | None = None,
-                  today: date | None = None) -> dict[str, Any]:
+                  now: datetime | None = None) -> dict[str, Any]:
     """Fit the encoder on half the calibration-day gold (in_encoder_train_split, GOLD_WEIGHT) and
     silver (teachers averaged), never on a held-out gold unit nor on the gold eval calibrates it with;
     report accuracy and macro-F1 on the held-out gold only."""
     labels = [c for c, _d in TASKS[task].candidates]
+    today = (now or datetime.now(timezone.utc)).astimezone().date()
     reqs = window_units(cfg, task, days, src, today)
     gold, silver = gold_latest(task), silver_by_unit(task)
     test = {u for u in gold if u in reqs and held_out(reqs[u])}
@@ -307,7 +308,7 @@ def train_encoder(cfg: Config, task: str, days: int = LABEL_DAYS, *, src: Source
             "macro_f1": _macro_f1(pairs, labels)}
 
 
-def print_eval(task: str, records: list[dict]) -> None:
+def print_eval(task: str, records: list[dict[str, Any]]) -> None:
     for r in records:
         print(f"label eval {task} {r['model_id']}: macro-F1 {r['macro_f1']}, kappa "
               f"{r['kappa']}, ECE {r['ece_raw']} -> {r['ece_cal']}, coverage "
@@ -315,10 +316,10 @@ def print_eval(task: str, records: list[dict]) -> None:
               f"{r['s_per_decision']} s per decision")
 
 
-def print_choose(task: str, c: dict) -> None:
+def print_choose(task: str, c: dict[str, Any]) -> None:
     print(f"label choose {task}: {c['backend']} {c['model_id']} (T "
           f"{c['temperature']}, tau {json.dumps(c['tau'])})")
 
 
-def print_train_encoder(task: str, r: dict) -> None:
+def print_train_encoder(task: str, r: dict[str, Any]) -> None:
     print(f"label train-encoder {task}: {json.dumps(r)}")

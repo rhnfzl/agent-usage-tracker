@@ -229,8 +229,8 @@ def test_gh_merged_pr_counts_as_merged():
         old = os.environ["PATH"]
         os.environ["PATH"] = f"{bindir}{os.pathsep}{old}"
         try:
-            outs, stats = oc.evaluate(rows, clones, NOW, cache={}, gh=True)
-            off, _ = oc.evaluate(rows, clones, NOW, cache={}, gh=False)
+            outs, stats = oc.evaluate(rows, clones, NOW, cache={}, use_gh=True)
+            off, _ = oc.evaluate(rows, clones, NOW, cache={}, use_gh=False)
         finally:
             os.environ["PATH"] = old
         assert _states(outs)[s["F"][:9]][:2] == ("merged", None), outs
@@ -333,7 +333,7 @@ def test_gh_failure_leaves_the_commit_undecided():
         cache: dict = {}
         try:
             outs, stats = oc.evaluate([_row(s["F"], _key(url), 25)], clones, NOW, cache=cache,
-                                      gh=True)
+                                      use_gh=True)
         finally:
             os.environ["PATH"] = old
         assert (outs[0]["state"], outs[0]["sticky"]) == ("undecided", True), outs
@@ -579,12 +579,12 @@ def test_a_clone_that_cannot_answer_may_know_more():
         _g(stale, "branch", "-q", "topic", s["A"])
         clones = oc.find_clones([str(Path(d) / "projects")], RepoKeys(SALT))
         rows = [_row(s["A"], _key(str(Path(d) / "origin.git")), 30)]
-        real = oc.lookup
-        oc.lookup = lambda c, shas: None if c.path == str(work) else real(c, shas)
+        real = oc.resolve_shas
+        oc.resolve_shas = lambda c, shas: None if c.path == str(work) else real(c, shas)
         try:
             outs, stats = oc.evaluate(rows, clones, NOW, cache={})
         finally:
-            oc.lookup = real
+            oc.resolve_shas = real
         assert (outs[0]["state"], outs[0]["sticky"]) == ("undecided", True), outs
         assert stats["repo_unreadable"] == 1, stats
     print("ok a_clone_that_cannot_answer_may_know_more")
@@ -595,7 +595,7 @@ def test_a_cached_gh_answer_counts_without_gh():
         _work, s = _world(Path(d))
         clones = oc.find_clones([str(Path(d) / "projects")], RepoKeys(SALT))
         outs, stats = oc.evaluate([_row(s["F"], None, 25)], clones, NOW,
-                                  cache={f"gh:{s['F']}": True}, gh=False)
+                                  cache={f"gh:{s['F']}": True}, use_gh=False)
         assert outs[0]["state"] == "merged" and stats["gh_lookups"] == 0, (outs, stats)
     print("ok a_cached_gh_answer_counts_without_gh")
 

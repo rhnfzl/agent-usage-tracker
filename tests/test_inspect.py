@@ -89,7 +89,7 @@ def test_build_collects_evidence():
                                   (("steer_intent", "review"), 1),
                                   (("steer_intent", "unknown"), 1)], ep["steer_labels"]
     assert [c[1] for c in ep["corrections"]] == ["confirm", "merge"]
-    assert [s.get("agent") for s in ep["sessions"]] == ["claude_code", "codex", None]
+    assert [s.get("agent") for s in ep["member_activity"]] == ["claude_code", "codex", None]
     assert [x["unit_id"] for x in view["labels"]] == ["blk"]
     print("ok build_collects_evidence")
 
@@ -159,23 +159,24 @@ def test_page_escapes_and_serves_read_only_with_correction_link():
     print("ok page_escapes_and_serves_read_only_with_correction_link")
 
 
-def test_run_inspect_passes_mode_and_stops_on_empty():
+def test_run_inspect_passes_mode_and_stops_on_empty(monkeypatch):
     from agent_usage_tracker.config import Config
-    seen = {}
+    seen = []
 
-    def fetch(dsn, **kw):
-        seen.update(kw)
+    def fetch(dsn, kind, value):
+        seen.append((kind, value))
         return _raw()
+    monkeypatch.setattr(inspector, "fetch", fetch)
+    monkeypatch.setattr(review, "serve", lambda *a, **k: {"reviewed": 0, "right": 0})
     with tempfile.TemporaryDirectory() as d:
         cfg = Config(machine="test", agents=(), webhook_url=None, webhook_secret=None,
                      pg_dsn="postgresql://ignored", home=Path(d))
-        out = inspector.run_inspect(cfg, day="2001-01-05", fetch_fn=fetch,
-                                    serve_fn=lambda *a, **k: {"reviewed": 0, "right": 0})
-        assert out["reviewed"] == 0 and seen == {"episode": None, "day": "2001-01-05",
-                                                 "label": None}
+        out = inspector.run_inspect(cfg, "day", "2001-01-05")
+        assert out["reviewed"] == 0 and seen == [("day", "2001-01-05")]
         empty = {k: [] for k in _raw()}
+        monkeypatch.setattr(inspector, "fetch", lambda dsn, kind, value: empty)
         try:
-            inspector.run_inspect(cfg, episode="0f0f", fetch_fn=lambda dsn, **kw: empty)
+            inspector.run_inspect(cfg, "episode", "0f0f")
         except AutError as exc:
             assert "nothing found" in str(exc)
         else:
@@ -184,14 +185,10 @@ def test_run_inspect_passes_mode_and_stops_on_empty():
 
 
 def test_exactly_one_selector():
-    for kw in ({}, {"episode": "0f0f", "day": "2001-01-05"}):
+    for args in ((), ("episode",), ("episode", "0f0f", "2001-01-05")):
         for call in (inspector.fetch, inspector.run_inspect):
-            try:
-                call("not reached", **kw)
-            except ValueError as exc:
-                assert "exactly one" in str(exc)
-            else:
-                raise AssertionError(f"accepted {kw}")
+            with pytest.raises(TypeError):
+                call("not reached", *args)
     print("ok exactly_one_selector")
 
 
@@ -216,16 +213,16 @@ def test_fetch_checks_episode_and_day_uses_activity_rows():
     try:
         for bad in (" ", "", "0f_f", "0f%", "nope", "0f0"):
             try:
-                inspector.fetch("dsn", episode=bad)
+                inspector.fetch("dsn", "episode", bad)
             except AutError as exc:
                 assert "episode id or prefix" in str(exc)
             else:
                 raise AssertionError(f"accepted --episode {bad!r}")
         assert sqls == []
-        inspector.fetch("dsn", episode=" 0F0F ")
+        inspector.fetch("dsn", "episode", " 0F0F ")
         assert sqls[0][1] == ("0f0f%",)
         sqls.clear()
-        inspector.fetch("dsn", day="2001-01-05")
+        inspector.fetch("dsn", "day", "2001-01-05")
         assert sqls[0][1] == inspector._day_bounds("2001-01-05")
     finally:
         if old is None:
@@ -274,9 +271,9 @@ def test_episode_prefix_lets_no_like_wildcard_through():
 
 
 def test_fetch_wants_exactly_one_selector_before_it_connects():
-    for kw in ({}, {"episode": "abcd", "day": "2001-01-05"}, {"day": "2001-01-05", "label": "x"}):
-        with pytest.raises(ValueError, match="exactly one"):
-            inspector.fetch("postgresql://never-used", **kw)
+    for args in ((), ("episode",), ("episode", "abcd", "2001-01-05")):
+        with pytest.raises(TypeError):
+            inspector.fetch("postgresql://never-used", *args)
 
 
 def test_add_anchors_files_lists_and_scalars_under_their_type():
@@ -341,10 +338,10 @@ def test_labels_table_says_when_a_label_is_below_tau():
 
 def test_member_table_caps_the_rows_and_says_so():
     s = {"role": "seed", "session_id": "s" * 20, "repo_keys": [K1, None]}
-    page = inspector._member_table({"sessions": [s] * 101}, {})
+    page = inspector._member_table({"member_activity": [s] * 101}, {})
     assert page.count("<tr>") == 101 and "First 100 of 101." in page and "(no local title)" in page
     info = {s["session_id"]: {"titles": ["t1", "t2", "t3", "t4"], "branches": ["b"]}}
-    page = inspector._member_table({"sessions": [{**s, "first": T0, "last": T0}]}, info)
+    page = inspector._member_table({"member_activity": [{**s, "first": T0, "last": T0}]}, info)
     assert "t2; t3; t4" in page and "t1" not in page and K1[:12] in page and K1[:13] not in page
 
 

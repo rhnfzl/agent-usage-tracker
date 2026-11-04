@@ -82,7 +82,7 @@ def _locked(path: Path) -> Iterator[None]:
             yield
 
 
-def save_state(state: dict, names: Iterable[str]) -> None:
+def save_state(state: dict[str, Any], names: Iterable[str]) -> None:
     """Write the named collectors' watermarks (a name gone from `state` is dropped) over what is on
     disk now. A scan and a long `aut label run` each hold a copy from when they started; writing
     that copy back whole would roll the other's watermarks back. Two runs of one collector still
@@ -144,7 +144,7 @@ def load_json_dict(path: Path) -> dict[str, Any]:
     return obj if isinstance(obj, dict) else {}
 
 
-def parse_record(raw: bytes | str) -> dict | None:
+def parse_record(raw: bytes | str) -> dict[str, Any] | None:
     """One complete JSONL line as a dict, else None. read_new_lines holds back partial lines, so
     there a None is a real anomaly: the caller counts it as malformed and skips it. A reader that
     only shows local text just skips it, as does one of a file a crash can cut mid-write."""
@@ -155,7 +155,7 @@ def parse_record(raw: bytes | str) -> dict | None:
     return o if isinstance(o, dict) else None
 
 
-def collector_wm(state: dict, name: str) -> dict[str, Any]:
+def collector_wm(state: dict[str, Any], name: str) -> dict[str, Any]:
     """Return (creating if needed) the private watermark dict for one collector. Resets a
     non-dict value (from external corruption) to an empty dict so a scan can't crash on it."""
     collectors = state.setdefault("collectors", {})

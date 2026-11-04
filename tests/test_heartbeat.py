@@ -165,15 +165,15 @@ def test_dry_run_sends_nothing() -> None:
     print("ok dry_run_sends_nothing")
 
 
-def test_scrub_error() -> None:
+def test_error_type_name() -> None:
     # The stored error is the exception TYPE only. Free text can hold a work repo path or part of
     # a secret, and no redaction pattern catches every form, so none of it leaves the machine.
     for msg in ("could not connect: postgresql://aut:hunter2@db.example/agents",
                 "host=db user=aut password='my secret' dbname=agents",
                 "No such file: /home/someone/work/client-repo/session.jsonl", "x" * 1000):
-        assert push.scrub_error(RuntimeError(msg)) == "RuntimeError", msg
-    assert push.scrub_error(KeyError("k")) == "KeyError"
-    print("ok scrub_error")
+        assert push.error_type_name(RuntimeError(msg)) == "RuntimeError", msg
+    assert push.error_type_name(KeyError("k")) == "KeyError"
+    print("ok error_type_name")
 
 
 def test_interrupt_is_not_delivered() -> None:

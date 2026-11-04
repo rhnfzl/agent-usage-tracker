@@ -104,7 +104,7 @@ class ActivityEvent:
     kind: ActivityKind
     session_id: str | None
     turn_id: str | None
-    attrs: dict
+    attrs: dict[str, Any]
     machine: str | None = None       # stamped by the runner, like UsageEvent.machine
 
 
@@ -120,7 +120,7 @@ class TimeInterval:
     title: str | None
     category: str | None
     work_relevant: bool
-    attrs: dict
+    attrs: dict[str, Any]
     machine: str | None = None       # stamped by the runner (aw) or `aut time add` (manual)
 
 

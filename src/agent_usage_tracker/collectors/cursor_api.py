@@ -81,7 +81,7 @@ def _auth(cfg: Config) -> tuple[str, int] | None:
         con.close()
 
 
-def _post(cookie: str, name: str, body: dict) -> Any:
+def _post(cookie: str, name: str, body: dict[str, Any]) -> Any:
     """POST a dashboard endpoint. Origin/Referer clear Cursor's CSRF ('Invalid origin') guard.
     A redirect is not followed: the session cookie must reach cursor.com and nowhere else.
     Raises one of HTTP_ERRORS on transport/HTTP failure; the caller decides how to handle it."""
@@ -106,7 +106,7 @@ def _same_user(owner: object, uid: object) -> bool:
     return o != "" and u != "" and o.lower() != "none" and o == u
 
 
-def _map_event(e: dict, uid: object) -> UsageEvent | None:
+def _map_event(e: dict[str, Any], uid: object) -> UsageEvent | None:
     """One Cursor usage event -> UsageEvent, or None if it is not this user's or has no tokens."""
     if not _same_user(e.get("owningUser"), uid):
         return None                       # SAFETY: never emit another team member's event
@@ -141,17 +141,19 @@ def _map_event(e: dict, uid: object) -> UsageEvent | None:
     )
 
 
-def describe(cfg: Config, wm: dict) -> str:
+def describe(cfg: Config, wm: dict[str, Any]) -> str:
     if "since_ms" in wm:
         return f"since_ms={wm['since_ms']}"
     return "enabled, not yet scanned" if cfg.cursor_api else "disabled (cursor_api=false)"
 
 
-def _page_events(batch: list, uid: object, since: int) -> tuple[list[UsageEvent], int, int]:
+def _page_events(batch: list[Any], uid: object, since: int) -> tuple[list[UsageEvent], int, int]:
     """(this user's events, how many rows were AT/AFTER the watermark, the newest of the events)."""
     events: list[UsageEvent] = []
     fresh_rows, newest = 0, since
     for raw in batch:
+        if not isinstance(raw, dict):     # a stray row must not fail the page
+            continue
         ms = safe_int(raw.get("timestamp"))
         # SKIP (not break) rows older than the watermark: robust to a page that isn't perfectly
         # newest-first, so a stray old row can't hide newer rows behind it.
@@ -190,7 +192,7 @@ def _fetch_events(cookie: str, team_id: int, uid: object, since: int,
     return events, newest
 
 
-def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[UsageEvent], Callable[[], None]]]:
+def collect(cfg: Config, wm: dict[str, Any]) -> Iterator[tuple[list[UsageEvent], Callable[[], None]]]:
     if not cfg.cursor_api:
         return
     auth = _auth(cfg)
@@ -214,7 +216,7 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[UsageEvent], Callable[
         raise CollectorUnavailable(f"cursor_api: usage fetch failed ({exc}); skipping this run") \
             from exc
 
-    def advance_watermark(w: dict = wm, n: int = newest) -> None:
+    def advance_watermark(w: dict[str, Any] = wm, n: int = newest) -> None:
         if n:
             w["since_ms"] = n
 

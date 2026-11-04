@@ -227,7 +227,7 @@ def test_run_gold_review_picks_the_first_labelled_task_and_reports_gold(tmp_path
         seen.update(task=task, reqs=reqs, **kw)
         return Counter(answered=1, skipped=2)
     monkeypatch.setattr(gold, "serve", serve)
-    monkeypatch.setattr(gold, "window_units", lambda cfg, task, days, src: _reqs("u"))
+    monkeypatch.setattr(gold, "window_units", lambda cfg, task, days, src, today: _reqs("u"))
     cfg = _cfg(tmp_path, label_tasks=("daily_note", TASK))
     with _env(tmp_path):
         evalset.append_jsonl(evalset.eval_path(TASK, "gold"),

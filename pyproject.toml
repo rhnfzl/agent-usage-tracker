@@ -44,6 +44,7 @@ pythonpath = ["src", "tests"]
 python_version = "3.11"
 files = ["src"]
 disallow_untyped_defs = true
+disallow_any_generics = true
 
 # Optional extras: the base install, and CI's lint job, have none of them.
 [[tool.mypy.overrides]]

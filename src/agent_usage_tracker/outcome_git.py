@@ -18,7 +18,7 @@ import time
 from dataclasses import dataclass, field
 from glob import escape as glob_escape
 from glob import glob
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 from .git_safe import git_argv, git_env
 from .repo_keys import RepoKeys, repo_identity
@@ -48,7 +48,7 @@ def run_git(path: str, *args: str, inp: str | None = None, timeout: float = 300)
 class Clone:
     path: str                 # a worktree of the repo (held in memory only)
     key: str | None           # repo_key of its origin
-    gh: str | None            # owner/repo when origin is on github.com (for gh)
+    github_slug: str | None   # owner/repo when origin is on github.com (for gh)
     default: str | None       # origin/HEAD's target ref, or an origin main/master/develop
     fetched_at: float = 0.0   # when origin was last fetched (FETCH_HEAD, or this run's fetch)
     readable: bool = True     # False: git failed reading its refs, so `default` says nothing
@@ -108,11 +108,11 @@ def _origin_url(path: str) -> str | None:
 
 def _clone_at(path: str, common: str, keys: RepoKeys) -> Clone:
     url = _origin_url(path)
-    key, gh = _origin_ids((url or "").strip(), keys)
+    key, slug = _origin_ids((url or "").strip(), keys)
     heads = glob(os.path.join(glob_escape(common), "FETCH_HEAD")) + glob(
         os.path.join(glob_escape(common), "worktrees", "*", "FETCH_HEAD"))
     default, readable = _default_ref(path)
-    return Clone(path, key, gh, default, max((os.path.getmtime(h) for h in heads), default=0.0),
+    return Clone(path, key, slug, default, max((os.path.getmtime(h) for h in heads), default=0.0),
                  readable and url is not None)
 
 
@@ -176,7 +176,7 @@ def fetch_clones(clones: list[Clone]) -> tuple[int, int]:
     return ok, failed
 
 
-def lookup(clone: Clone, shas: list[str]) -> dict[str, Hit] | None:
+def resolve_shas(clone: Clone, shas: list[str]) -> dict[str, ResolvedCommit] | None:
     """sha (as stored, possibly abbreviated) -> its full sha and committer time, for those it
     holds; None when git failed."""
     out = run_git(clone.path, "cat-file", "--batch-check",
@@ -195,13 +195,13 @@ def lookup(clone: Clone, shas: list[str]) -> dict[str, Hit] | None:
     if log is None:
         return None
     ct = dict(line.split() for line in log.splitlines() if line.strip())
-    return {s: Hit(f, int(ct[f])) for s, f in full.items() if f in ct}
+    return {s: ResolvedCommit(f, int(ct[f])) for s, f in full.items() if f in ct}
 
 
 def _patch_ids(path: str, args: list[str], inp: str | None = None) -> dict[str, str] | None:
     """full sha -> stable patch id for the commits `git log -p <args>` prints; None when git failed
     or took over PATCH_ID_TIMEOUT_S, and then neither process stays behind."""
-    procs: list[subprocess.Popen] = []
+    procs: list[subprocess.Popen[Any]] = []
     try:
         with tempfile.TemporaryFile() as revs:  # a file, so writing the revs can never block on git
             revs.write((inp or "").encode())
@@ -214,7 +214,7 @@ def _patch_ids(path: str, args: list[str], inp: str | None = None) -> dict[str, 
             git_argv(path, "patch-id", "--stable"), stdin=log.stdout,
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, env=git_env())
         procs.append(pid)
-        if log.stdout:
+        if log.stdout:     # always set with stdout=PIPE; the check narrows its type
             log.stdout.close()
         out, _ = pid.communicate(timeout=PATCH_ID_TIMEOUT_S)
         log.wait(timeout=60)
@@ -231,7 +231,7 @@ def _patch_ids(path: str, args: list[str], inp: str | None = None) -> dict[str, 
 
 
 @dataclass(slots=True)
-class Repo:
+class CloneRead:
     """What one clone says about its anchors, read once per run. Not ok: a git read failed, so
     nothing here may decide a commit."""
     ok: bool = False
@@ -291,20 +291,20 @@ def _reverted(log: str) -> dict[str, int]:
     return reverted
 
 
-def read_repo(clone: Clone, since: int, off_default: list[str]) -> Repo:
+def read_clone(clone: Clone, since: int, off_default: list[str]) -> CloneRead:
     d, path = clone.default, clone.path
     log = run_git(path, "log", "--format=%H %ct %P", d) if d else ""
     branches = run_git(path, "rev-list", "--branches", "--remotes", *([f"^{d}"] if d else []))
     rv = run_git(path, "log", "--branches", "--remotes", f"--since=@{since}",
               "--grep=This reverts commit", "--format=%ct%n%B%x00")
     if not clone.readable or log is None or branches is None or rv is None:
-        return Repo()
+        return CloneRead()
     tip_t, on_default = _landings(log)
     off = [f for f in off_default if f not in on_default]
     twin = _twins(path, d, since, off) if d and off else {}
     if twin is None:
-        return Repo()
-    return Repo(True, tip_t, on_default, set(branches.split()), twin, _reverted(rv))
+        return CloneRead()
+    return CloneRead(True, tip_t, on_default, set(branches.split()), twin, _reverted(rv))
 
 
 class GitFailed(Exception):
@@ -362,13 +362,13 @@ def survival(clone: Clone, target: str, merge_t: float) -> float | None:
     return round(min(1.0, alive / added), 4)
 
 
-def gh_merged(repo: str, sha: str) -> bool | None:
-    """True when a merged PR of repo contains sha; None when gh is missing or fails."""
+def gh_merged(github_slug: str, sha: str) -> bool | None:
+    """True when a merged PR of github_slug contains sha; None when gh is missing or fails."""
     if not shutil.which("gh"):
         return None
     try:
-        r = subprocess.run(  # nosec B603, B607 # no shell; repo and sha are values of their flags
-            ["gh", "pr", "list", "--repo", repo, "--state", "merged", "--search",
+        r = subprocess.run(  # nosec B603, B607 # no shell; slug and sha are values of their flags
+            ["gh", "pr", "list", "--repo", github_slug, "--state", "merged", "--search",
              sha, "--json", "number", "--limit", "1"], capture_output=True,
             text=True, timeout=FETCH_TIMEOUT_S)
         return bool(json.loads(r.stdout)) if r.returncode == 0 else None
@@ -376,6 +376,6 @@ def gh_merged(repo: str, sha: str) -> bool | None:
         return None
 
 
-class Hit(NamedTuple):
+class ResolvedCommit(NamedTuple):
     full: str
     committed: int

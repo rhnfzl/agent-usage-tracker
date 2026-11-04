@@ -63,7 +63,7 @@ def connect_ro(path: object) -> sqlite3.Connection | None:
         return None
 
 
-def _model(bubble: dict) -> str | None:
+def _model(bubble: dict[str, Any]) -> str | None:
     for k in ("model", "modelType", "modelName"):
         v = bubble.get(k)
         if isinstance(v, str) and v:
@@ -71,7 +71,7 @@ def _model(bubble: dict) -> str | None:
     return None
 
 
-def _ts(bubble: dict, meta: dict) -> str | None:
+def _ts(bubble: dict[str, Any], meta: dict[str, Any]) -> str | None:
     """Bubble createdAt is an ISO string; composerData createdAt is epoch-ms. Handle both."""
     bts = bubble.get("createdAt")
     if isinstance(bts, str) and bts:
@@ -79,11 +79,11 @@ def _ts(bubble: dict, meta: dict) -> str | None:
     return epoch_ms_to_iso(bts or meta.get("ts"))
 
 
-def _composers(cur: sqlite3.Cursor, skipped: Counter) -> tuple[dict[str, dict],
+def _composers(cur: sqlite3.Cursor, skipped: Counter[str]) -> tuple[dict[str, dict[str, Any]],
                                                               sqlite3.DatabaseError | None]:
     """composerId -> {ts, model}: recovers a timestamp for bubbles that lack one. Also the read
     failure, if any: the bubbles still go out, and some lose their ts or model."""
-    comp: dict[str, dict] = {}
+    comp: dict[str, dict[str, Any]] = {}
     try:
         for key, val in cur.execute(
             "SELECT key, value FROM cursorDiskKV WHERE key LIKE 'composerData:%'"
@@ -106,8 +106,8 @@ def _composers(cur: sqlite3.Cursor, skipped: Counter) -> tuple[dict[str, dict],
     return comp, None
 
 
-def _bubble_event(key: str, val: Any, comp: dict[str, dict], human_only: bool,
-                  skipped: Counter) -> UsageEvent | None:
+def _bubble_event(key: str, val: Any, comp: dict[str, dict[str, Any]], human_only: bool,
+                  skipped: Counter[str]) -> UsageEvent | None:
     """The row of one bubble; None when it has none."""
     try:
         o = json.loads(val)
@@ -146,7 +146,7 @@ def _bubble_event(key: str, val: Any, comp: dict[str, dict], human_only: bool,
     )
 
 
-def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[UsageEvent], Callable[[], None]]]:
+def collect(cfg: Config, wm: dict[str, Any]) -> Iterator[tuple[list[UsageEvent], Callable[[], None]]]:
     db = cursor_db(cfg)
     if not db.exists():
         return
@@ -156,7 +156,7 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[UsageEvent], Callable[
                                    "(locked/corrupt); skipping cursor this run")
     try:
         cur = con.cursor()
-        skipped: Counter = Counter()
+        skipped: Counter[str] = Counter()
         comp, read_failure = _composers(cur, skipped)
         try:
             rows = cur.execute(

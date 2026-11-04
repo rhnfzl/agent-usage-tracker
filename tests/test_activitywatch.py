@@ -84,17 +84,17 @@ class FakeAW:
             for needle in (WIN, AFK, "filter_keyvals", "not-afk", "filter_period_intersect"):
                 assert needle in q, needle
             assert "host-b" not in q
-            start, end = (aw._parse(x) for x in body["timeperiods"][0].split("/"))
-            hits = [e for e in self.events if aw._parse(e["timestamp"]) < end
-                    and aw._parse(e["timestamp"]) + timedelta(seconds=e["duration"]) > start]
+            start, end = (aw._parse_aw_ts(x) for x in body["timeperiods"][0].split("/"))
+            hits = [e for e in self.events if aw._parse_aw_ts(e["timestamp"]) < end
+                    and aw._parse_aw_ts(e["timestamp"]) + timedelta(seconds=e["duration"]) > start]
             return [hits]
         if method == "GET" and path.startswith(f"/api/0/buckets/{WIN}/events?"):
             # like aw-server-rust: newest first, and an event spanning `end` is clipped to it
             qs = urllib.parse.parse_qs(path.split("?", 1)[1])
-            end = aw._parse(qs["end"][0])
+            end = aw._parse_aw_ts(qs["end"][0])
             hits = []
-            for e in sorted(self.old, key=lambda e: aw._parse(e["timestamp"]), reverse=True):
-                s = aw._parse(e["timestamp"])
+            for e in sorted(self.old, key=lambda e: aw._parse_aw_ts(e["timestamp"]), reverse=True):
+                s = aw._parse_aw_ts(e["timestamp"])
                 if s < end:
                     secs = min(e["duration"], (end - s).total_seconds())
                     hits.append({**e, "duration": secs})

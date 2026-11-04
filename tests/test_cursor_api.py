@@ -21,6 +21,11 @@ from agent_usage_tracker.event import CollectorUnavailable  # noqa: E402
 from test_collectors import _cfg  # noqa: E402
 
 
+def test_a_stray_row_does_not_fail_the_page() -> None:
+    from agent_usage_tracker.collectors import cursor_api
+    assert cursor_api._page_events(["stray", None], "u", 0) == ([], 0, 0)
+
+
 def test_cursor_api() -> None:
     from agent_usage_tracker.collectors import cursor_api
     UID = 114903562

@@ -27,10 +27,11 @@ from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Generator, Iterable, Iterator
+from typing import Any, Generator, Iterable, Iterator, NotRequired, TypedDict
 
 from ..config import Config
-from ..event import ActivityKind, Batch, ActivityEvent, CollectorUnavailable, EventSession, make_event_id
+from ..event import (ActivityKind, Batch, ActivityEvent, CollectorUnavailable, EventSession, Row,
+                     RunOrigin, make_event_id)
 from ..repo_keys import RepoKeys
 from .activity_common import (IDLE_S, Link, TurnAgg, add_call, best_effort, blank_tool_tally, human_event,
                               ms_between, record_commits, text_of, turn_attrs)
@@ -54,14 +55,14 @@ def chat_stores(home: Path) -> list[str]:
     return sorted(glob.glob(str(home / ".cursor" / "chats" / "*" / "*" / "store.db")))
 
 
-def _cursor_options(m: dict) -> dict:
+def _cursor_options(m: dict[str, Any]) -> dict[str, Any]:
     """The cursor block of a message's providerOptions."""
     po = m.get("providerOptions")
     c = po.get("cursor") if isinstance(po, dict) else None
     return c if isinstance(c, dict) else {}
 
 
-def request_id(m: dict) -> str | None:
+def request_id(m: dict[str, Any]) -> str | None:
     """requestId of a real prompt; None for any other message."""
     c = _cursor_options(m)
     r = c.get("requestId")
@@ -141,9 +142,9 @@ def root_lists(con: sqlite3.Connection) -> list[tuple[str, ...]]:
     return [a for a, b in zip(srt, srt[1:] + [()]) if b[:len(a)] != a]
 
 
-def messages(con: sqlite3.Connection, ids: set[str]) -> dict[str, dict]:
+def messages(con: sqlite3.Connection, ids: set[str]) -> dict[str, dict[str, Any]]:
     """The listed messages, plus every prompt (a prompt can be in no surviving root)."""
-    out: dict[str, dict] = {}
+    out: dict[str, dict[str, Any]] = {}
 
     def take(rows: Iterable[tuple[str, Any]]) -> None:
         for k, v in rows:
@@ -164,18 +165,24 @@ def messages(con: sqlite3.Connection, ids: set[str]) -> dict[str, dict]:
     return out
 
 
+class _TurnOrigin(TypedDict):
+    """The origin fields a chat's turn rows carry."""
+    run_origin: RunOrigin
+    parent_session_id: NotRequired[str | None]
+
+
 @dataclass
 class _Turn:
     """One requestId's turn. A prompt no surviving root lists has no tool messages to read and
     emits no turn or link row (`listed` False)."""
-    msg: dict
+    msg: dict[str, Any]
     closed: bool = False
     listed: bool = True
     agg: TurnAgg = field(default_factory=blank_tool_tally)
-    acts: list = field(default_factory=list)         # (kind, seed, attrs) rows, emitted at close
-    cids: set = field(default_factory=set)           # tool calls counted, by toolCallId
-    more: dict = field(default_factory=dict)         # follow-up prompt text -> (blob id, message)
-    link: dict = field(default_factory=dict)
+    acts: list[tuple[ActivityKind, str, dict[str, Any]]] = field(default_factory=list)         # (kind, seed, attrs) rows, emitted at close
+    cids: set[object] = field(default_factory=set)           # tool calls counted, by toolCallId
+    more: dict[str, Any] = field(default_factory=dict)         # follow-up prompt text -> (blob id, message)
+    link: dict[str, Any] = field(default_factory=dict)
 
 
 class _Activity:
@@ -183,10 +190,10 @@ class _Activity:
 
     def __init__(self, keys: RepoKeys) -> None:
         self.keys = keys
-        self.calls: dict = {}     # toolCallId -> args, across the chat's lists
-        self.errors: Counter = Counter()      # messages whose extraction raised (skipped)
+        self.calls: dict[object, Any] = {}     # toolCallId -> args, across the chat's lists
+        self.errors: Counter[str] = Counter()      # messages whose extraction raised (skipped)
 
-    def record(self, message: dict, turn: _Turn) -> None:
+    def record(self, message: dict[str, Any], turn: _Turn) -> None:
         """One assistant or tool message: tool aggregates, commits, rejections, link."""
         link = Link(self.keys, turn.link)
         content = [b for b in message["content"] if isinstance(b, dict)] \
@@ -196,7 +203,7 @@ class _Activity:
         elif message.get("role") == "tool":
             self._tool_message(message, content, turn, link)
 
-    def _assistant(self, content: list[dict], turn: _Turn, link: Link) -> None:
+    def _assistant(self, content: list[dict[str, Any]], turn: _Turn, link: Link) -> None:
         link.note_text(text_of(content))
         for b in content:
             if b.get("type") == "tool-call" and isinstance(b.get("toolName"), str):
@@ -207,7 +214,7 @@ class _Activity:
                 turn.cids.add(cid)
                 add_call(turn.agg, _by_tool_key(b["toolName"]), b.get("args"))
 
-    def _tool_message(self, message: dict, content: list[dict], turn: _Turn, link: Link) -> None:
+    def _tool_message(self, message: dict[str, Any], content: list[dict[str, Any]], turn: _Turn, link: Link) -> None:
         hl = _cursor_options(message).get("highLevelToolCallResult")
         err = isinstance(hl, dict) and hl.get("isError") is True
         turn.agg["errors"] += err
@@ -223,7 +230,7 @@ class _Activity:
             elif b.get("toolName") == "Shell":
                 self._shell_result(b, res, cid, err, turn, link)
 
-    def _shell_result(self, b: dict, res: str, cid: object, err: bool, turn: _Turn,
+    def _shell_result(self, b: dict[str, Any], res: str, cid: object, err: bool, turn: _Turn,
                       link: Link) -> None:
         turn.agg["hooks"] += res.startswith("Rejected: Hook blocked")
         args = self.calls.get(cid)
@@ -239,7 +246,7 @@ class _Activity:
             turn.acts.append(("commit", f"{cid}|{sha}", attrs))
 
 
-def _read_list(seq: tuple[str, ...], msgs: dict[str, dict], done: set[str], act: _Activity,
+def _read_list(seq: tuple[str, ...], msgs: dict[str, dict[str, Any]], done: set[str], act: _Activity,
                turns: dict[str, _Turn], seen: set[str]) -> None:
     """One root list: its prompts open and close turns, its other messages belong to the open one."""
     rid = None
@@ -266,7 +273,7 @@ def _read_list(seq: tuple[str, ...], msgs: dict[str, dict], done: set[str], act:
             best_effort(act.errors, act.record, m, turns[rid])
 
 
-def _read_turns(lists: list[tuple[str, ...]], msgs: dict[str, dict], done: set[str],
+def _read_turns(lists: list[tuple[str, ...]], msgs: dict[str, dict[str, Any]], done: set[str],
                 act: _Activity) -> dict[str, _Turn]:
     """Every requestId's turn, its activity read unless the turn was already sent."""
     turns: dict[str, _Turn] = {}
@@ -280,13 +287,13 @@ def _read_turns(lists: list[tuple[str, ...]], msgs: dict[str, dict], done: set[s
     return turns
 
 
-def _turn_rows(rid: str, turn: _Turn, sid: str, human: bool, origin: dict, created: str | None,
-               keys: RepoKeys) -> list:
+def _turn_rows(rid: str, turn: _Turn, sid: str, human: bool, origin: _TurnOrigin, created: str | None,
+               keys: RepoKeys) -> list[Row]:
     """The rows of one closed turn."""
-    rows: list = []
+    rows: list[Row] = []
     ts = prompt_ts(text_of(turn.msg.get("content")), created)
 
-    def emit(kind: ActivityKind, seed: str, attrs: dict, at: str | None = ts) -> None:
+    def emit(kind: ActivityKind, seed: str, attrs: dict[str, Any], at: str | None = ts) -> None:
         rows.append(ActivityEvent(event_id=make_event_id(NAME, kind, f"{sid}|{seed}"), ts=at,
                                   agent=NAME, kind=kind, session_id=sid, turn_id=rid, attrs=attrs))
     # the first prompt keeps the (sid, rid) ids; a follow-up adds its blob id to them
@@ -313,8 +320,8 @@ def _turn_rows(rid: str, turn: _Turn, sid: str, human: bool, origin: dict, creat
     return rows
 
 
-def _closed_turn_rows(path: str, con: sqlite3.Connection, meta: dict, cur: dict, idle: bool,
-          keys: RepoKeys) -> tuple[list, Counter]:
+def _closed_turn_rows(path: str, con: sqlite3.Connection, meta: dict[str, Any], cur: dict[str, Any], idle: bool,
+          keys: RepoKeys) -> tuple[list[Row], Counter[str]]:
     """Rows of every turn that closed since the last scan; updates `cur` (a copy) in place."""
     sid = str_or_none(meta.get("agentId")) or os.path.basename(os.path.dirname(path))
     # A subagent chat's prompts are its parent agent talking, not a person. Its parent is in
@@ -323,7 +330,7 @@ def _closed_turn_rows(path: str, con: sqlite3.Connection, meta: dict, cur: dict,
     human = not info
     parent = info.get("parentAgentId") if isinstance(info, dict) else None
     # No session row can carry a subagent chat's origin (it has no usage row), so its turn does.
-    origin = {"run_origin": "interactive"} if human else {
+    origin: _TurnOrigin = {"run_origin": "interactive"} if human else {
         "run_origin": "subagent",
         "parent_session_id": parent if isinstance(parent, str) and _UUID.fullmatch(parent) else None}
     created = epoch_ms_to_iso(meta.get("createdAt"))
@@ -332,7 +339,7 @@ def _closed_turn_rows(path: str, con: sqlite3.Connection, meta: dict, cur: dict,
     done = set(cur.get("done", ()))
     act = _Activity(keys)
     turns = _read_turns(lists, msgs, done, act)
-    events: list = []
+    events: list[Row] = []
     for rid, turn in turns.items():
         # The store has no turn-end record, so a turn ends at the next prompt or once the chat sits
         # idle: a running one, or a prompt newer than the root that will list it, is not closed early.
@@ -347,7 +354,7 @@ def _closed_turn_rows(path: str, con: sqlite3.Connection, meta: dict, cur: dict,
     return events, act.errors
 
 
-def chat_meta(con: sqlite3.Connection) -> dict | None:
+def chat_meta(con: sqlite3.Connection) -> dict[str, Any] | None:
     row = con.execute("SELECT value FROM meta WHERE key = '0'").fetchone()
     try:
         m = json.loads(bytes.fromhex(row[0]))
@@ -388,13 +395,13 @@ def _finished_run_rows(path: str, have: set[str]) -> list[ActivityEvent] | None:
     return out
 
 
-def describe(cfg: Config, wm: dict) -> str:
+def describe(cfg: Config, wm: dict[str, Any]) -> str:
     if "chats" in wm:
         return f"{len(wm['chats'])} chats, {len(wm.get('sdk', {}))} SDK stores tracked"
     return describe_files(cfg, wm)
 
 
-def _read_chat(path: str, prev: dict, keys: RepoKeys) -> tuple[list, dict, Counter] | None:
+def _read_chat(path: str, prev: dict[str, Any], keys: RepoKeys) -> tuple[list[Any], dict[str, Any], Counter[str]] | None:
     """(rows, the chat's new watermark entry, messages skipped); None when it has nothing new.
     Raises sqlite3.DatabaseError when the store is locked or corrupt."""
     con = connect_ro(path)
@@ -414,7 +421,7 @@ def _read_chat(path: str, prev: dict, keys: RepoKeys) -> tuple[list, dict, Count
         con.close()
 
 
-def _sdk_batches(home: Path, sdk: dict) -> Generator[Batch, None, int]:
+def _sdk_batches(home: Path, sdk: dict[str, Any]) -> Generator[Batch, None, int]:
     """The SDK stores' batches; returns how many stores could not be read."""
     unreadable = 0
     for path in sorted(glob.glob(str(home / ".cursor" / "projects" / "*" / "sdk-agent-store"
@@ -427,7 +434,7 @@ def _sdk_batches(home: Path, sdk: dict) -> Generator[Batch, None, int]:
         if not runs:
             continue
 
-        def advance_sdk_watermark(p: str = path, seen: list = sorted(
+        def advance_sdk_watermark(p: str = path, seen: list[str] = sorted(
                 have | {str(e.turn_id) for e in runs})) -> None:
             sdk[p] = {"runs": seen}
 
@@ -435,11 +442,11 @@ def _sdk_batches(home: Path, sdk: dict) -> Generator[Batch, None, int]:
     return unreadable
 
 
-def collect(cfg: Config, wm: dict) -> Iterator[Batch]:
-    chats: dict = wm.setdefault("chats", {})
-    sdk: dict = wm.setdefault("sdk", {})
+def collect(cfg: Config, wm: dict[str, Any]) -> Iterator[Batch]:
+    chats: dict[str, Any] = wm.setdefault("chats", {})
+    sdk: dict[str, Any] = wm.setdefault("sdk", {})
     keys = RepoKeys(cfg.repo_key_salt)
-    skipped: Counter = Counter()
+    skipped: Counter[str] = Counter()
     unreadable = 0
     for path in chat_stores(cfg.home):
         prev = chats.get(path) or {}
@@ -455,7 +462,7 @@ def collect(cfg: Config, wm: dict) -> Iterator[Batch]:
         if not events and cur == prev:
             continue
 
-        def advance_watermark(p: str = path, c: dict = cur) -> None:
+        def advance_watermark(p: str = path, c: dict[str, Any] = cur) -> None:
             chats[p] = c
 
         yield events, advance_watermark

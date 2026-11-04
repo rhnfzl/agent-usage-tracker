@@ -12,10 +12,10 @@ github.com/kenn-io/agentsview, MIT licence, (c) its authors).
 from __future__ import annotations
 
 from collections import Counter
-from typing import TypedDict
+from typing import Any, TypedDict
 from urllib.parse import urlparse
 
-from ..event import ActivityKind, ActivityEvent, EventSession, make_event_id
+from ..event import ActivityKind, ActivityEvent, EventSession, RunOrigin, make_event_id
 from ..repo_keys import RepoKeys
 from .activity_common import (IDLE_S, Link, TurnAgg, add_call, best_effort, blank_tool_tally, ms_between,
                               pop_pending, record_commits, text_of, text_sha256, tool_key,
@@ -32,11 +32,11 @@ class ActivityState(TypedDict, total=False):
     """What rides in the file's watermark entry; a key with nothing to carry is left out."""
     intr: bool             # the last user-side record was an interrupt
     agg: TurnAgg
-    pend: dict[str, list]  # commit tool_use_id -> pop_pending's list
+    pend: dict[str, list[Any]]  # commit tool_use_id -> pop_pending's list
     seen: list[str]        # the open turn's newest tool block ids
-    link: dict
-    wt: list               # [repo_key, branch_key] of the worktree the session is in
-    lo: dict               # the open link turn: last record's uid, ts, session and origin
+    link: dict[str, Any]
+    wt: list[Any]               # [repo_key, branch_key] of the worktree the session is in
+    lo: dict[str, Any]               # the open link turn: last record's uid, ts, session and origin
 
 
 class Activity:
@@ -48,13 +48,13 @@ class Activity:
         s: ActivityState = carried if isinstance(carried, dict) else {}
         self.agent, self.path, self.subagent, self.keys = agent, path, subagent, keys
         self.events: list[ActivityEvent] = []
-        self.errors: Counter = Counter()                       # records whose extraction raised (skipped)
+        self.errors: Counter[str] = Counter()                       # records whose extraction raised (skipped)
         self.intr = bool(s.get("intr"))      # the last user-side record was an interrupt
         self.after_intr = False
         # Turn aggregates and unanswered commit calls are carried across scans in the watermark,
         # so a turn split by a scan boundary still gets one complete row.
         self.agg: TurnAgg = s.get("agg") or blank_tool_tally()
-        self.pend: dict = s.get("pend") or {}
+        self.pend: dict[str, Any] = s.get("pend") or {}
         # Tool block ids already counted. Within a chunk the set spans turns (Claude Code re-logs
         # history after a turn ends). Across scans only the open turn's newest _SEEN_MAX ids are
         # carried, which is where a re-log split by a scan boundary lands; this keeps the state small.
@@ -67,9 +67,9 @@ class Activity:
         # queued split drifts from a full re-read.
         self.queued: set[str] = set()
         self.link = Link(keys, s.get("link") or {})
-        self.wt: list | None = s.get("wt")
-        self.lo: dict | None = s.get("lo")
-        self._at3: tuple | None = None     # the (cwd, gitBranch) last placed in this turn
+        self.wt: list[Any] | None = s.get("wt")
+        self.lo: dict[str, Any] | None = s.get("lo")
+        self._at3: tuple[Any, ...] | None = None     # the (cwd, gitBranch) last placed in this turn
 
     def state(self) -> ActivityState:
         s: ActivityState = {}
@@ -90,13 +90,13 @@ class Activity:
             s["lo"] = self.lo
         return s
 
-    def _emit(self, kind: ActivityKind, o: dict, seed: object, sess: EventSession, attrs: dict) -> None:
+    def _emit(self, kind: ActivityKind, o: dict[str, Any], seed: object, sess: EventSession, attrs: dict[str, Any]) -> None:
         self.events.append(ActivityEvent(
             event_id=make_event_id(self.agent, kind, seed), ts=str_or_none(o.get("timestamp")),
             agent=self.agent, kind=kind, session_id=sess.session_id, turn_id=sess.turn_id,
             attrs=attrs))
 
-    def _uid(self, o: dict) -> str:
+    def _uid(self, o: dict[str, Any]) -> str:
         return o.get("uuid") or f"{self.path}:{o.get('timestamp')}"
 
     def finish(self) -> None:
@@ -110,7 +110,7 @@ class Activity:
             self._close_link(lo["uid"], lo["ts"], lo["sid"], lo["turn"], lo["origin"])
 
     def _close_link(self, seed: str, ts: str | None, sid: str, turn: str | None,
-                    origin: str | None) -> None:
+                    origin: RunOrigin) -> None:
         if self.wt:
             self.link.s.setdefault("at", {}).setdefault("1", self.wt)
         self.events.append(ActivityEvent(
@@ -119,7 +119,7 @@ class Activity:
         self.link.reset()
         self.lo, self._at3 = None, None
 
-    def record(self, o: dict, sess: EventSession) -> None:
+    def record(self, o: dict[str, Any], sess: EventSession) -> None:
         typ = o.get("type")
         self._close_link_after_gap(o)
         if typ in ("queue-operation", "attachment"):
@@ -142,7 +142,7 @@ class Activity:
             else:
                 self._user(o, content, blocks, sess)
 
-    def _close_link_after_gap(self, o: dict) -> None:
+    def _close_link_after_gap(self, o: dict[str, Any]) -> None:
         # A record IDLE_S or more after the open link turn's last one: that turn closed there,
         # as a live scan that saw the file idle in between closed it, so any split of scans and
         # one full read cut the same place. shortcut: assumes a record reaches the file within
@@ -152,7 +152,7 @@ class Activity:
         if gap is not None and gap >= IDLE_S * MS_PER_S:
             self.finish()
 
-    def _note_link_turn(self, o: dict, sess: EventSession) -> None:
+    def _note_link_turn(self, o: dict[str, Any], sess: EventSession) -> None:
         self.lo = {"uid": self._uid(o), "ts": str_or_none(o.get("timestamp")), "sid": sess.session_id,
                    "turn": sess.turn_id, "origin": sess.run_origin}
         at3 = (o.get("cwd"), o.get("gitBranch"))
@@ -160,7 +160,7 @@ class Activity:
             self._at3 = at3
             self.link.place(3, self.keys.of_cwd(at3[0]), at3[1])
 
-    def _note_queued(self, o: dict) -> None:
+    def _note_queued(self, o: dict[str, Any]) -> None:
         if o.get("type") == "queue-operation":
             if o.get("operation") == "enqueue" and isinstance(o.get("content"), str):
                 self.queued.add(text_sha256(o["content"]))
@@ -169,7 +169,7 @@ class Activity:
         if isinstance(a, dict) and a.get("type") == "queued_command":
             self.queued.add(text_sha256(text_of(a.get("prompt"))))
 
-    def _worktree(self, o: dict) -> None:
+    def _worktree(self, o: dict[str, Any]) -> None:
         ws = o.get("worktreeSession")
         if isinstance(ws, dict):
             rk = self.keys.of_cwd(ws.get("originalCwd")) \
@@ -178,7 +178,7 @@ class Activity:
         else:                        # the session left its worktree
             self.wt = None
 
-    def _system(self, o: dict, sess: EventSession) -> None:
+    def _system(self, o: dict[str, Any], sess: EventSession) -> None:
         if o.get("subtype") == "turn_duration":
             self._turn(o, sess)
         elif o.get("subtype") == "compact_boundary":
@@ -187,7 +187,7 @@ class Activity:
             self._emit("compaction", o, self._uid(o), sess,
                        {"trigger": trig} if isinstance(trig, str) else {})
 
-    def _assistant(self, o: dict, blocks: list[dict], sess: EventSession) -> None:
+    def _assistant(self, o: dict[str, Any], blocks: list[dict[str, Any]], sess: EventSession) -> None:
         for b in blocks:
             if b.get("type") == "tool_use":
                 self._tool_use(o, b, sess)
@@ -197,7 +197,7 @@ class Activity:
                 # the link lists
                 self.link.note_text(b.get("text"))
 
-    def _user(self, o: dict, content: object, blocks: list[dict], sess: EventSession) -> None:
+    def _user(self, o: dict[str, Any], content: object, blocks: list[dict[str, Any]], sess: EventSession) -> None:
         self.link.note_text(text_of(content))
         for b in blocks:
             if b.get("type") == "tool_result":
@@ -211,12 +211,12 @@ class Activity:
             self._emit("interrupt", o, self._uid(o), sess,
                        {"during_tool": "for tool use" in text_of(content)})
 
-    def steer(self, o: dict, uid: str, text: str, sess: EventSession) -> ActivityEvent | None:
+    def steer(self, o: dict[str, Any], uid: str, text: str, sess: EventSession) -> ActivityEvent | None:
         """The steer row for a prompt the collector counted as human (None if it raised). Call after
         record(o)."""
         return best_effort(self.errors, self._steer, o, uid, text, sess)
 
-    def _steer(self, o: dict, uid: str, text: str, sess: EventSession) -> ActivityEvent:
+    def _steer(self, o: dict[str, Any], uid: str, text: str, sess: EventSession) -> ActivityEvent:
         s, ps = text.lstrip(), o.get("promptSource")
         if s.startswith("<bash-input>"):
             via = "bash_input"
@@ -237,7 +237,7 @@ class Activity:
             attrs={"via": via, "words": len(text.split()), "chars": len(text),
                    "after_interrupt": self.after_intr})
 
-    def _tool_use(self, o: dict, b: dict, sess: EventSession) -> None:
+    def _tool_use(self, o: dict[str, Any], b: dict[str, Any], sess: EventSession) -> None:
         tid, name = b.get("id"), b.get("name")
         if not isinstance(tid, str) or not isinstance(name, str) or "u" + tid in self.seen:
             return                       # a re-logged block counts once
@@ -251,7 +251,7 @@ class Activity:
         if name == "Bash" and isinstance(cmd, str) and (call := commit_call(cmd)):
             self.pend[tid] = [*call, commit_dir(cmd)]
 
-    def _tool_result(self, o: dict, b: dict, sess: EventSession) -> None:
+    def _tool_result(self, o: dict[str, Any], b: dict[str, Any], sess: EventSession) -> None:
         tid = b.get("tool_use_id")
         if not isinstance(tid, str) or "r" + tid in self.seen:
             return
@@ -270,7 +270,7 @@ class Activity:
             amend, before, target = pop_pending(self.pend, tid)
             self._commits(o, tid, text, sess, target, amend=amend, before=before, err=err)
 
-    def _commits(self, o: dict, tid: str, text: str, sess: EventSession, target: object, *,
+    def _commits(self, o: dict[str, Any], tid: str, text: str, sess: EventSession, target: object, *,
                  amend: bool, before: bool, err: bool) -> None:
         tr = o.get("toolUseResult")
         g = tr.get("gitOperation") if isinstance(tr, dict) else None
@@ -281,7 +281,7 @@ class Activity:
                                          fallback=self.wt[0] if self.wt else None):
             self._emit("commit", o, f"{tid}|{sha}", sess, attrs)
 
-    def _pr(self, o: dict, sess: EventSession) -> None:
+    def _pr(self, o: dict[str, Any], sess: EventSession) -> None:
         num, url, repo = o.get("prNumber"), o.get("prUrl"), o.get("prRepository")
         if not isinstance(num, int) or isinstance(num, bool):
             return
@@ -299,7 +299,7 @@ class Activity:
         seed = o.get("uuid") or f"{sess.session_id}|{num}|{o.get('timestamp')}"
         self._emit("pr", o, seed, sess, {"number": num, "host": kind, "repo_key": key})
 
-    def _turn(self, o: dict, sess: EventSession) -> None:
+    def _turn(self, o: dict[str, Any], sess: EventSession) -> None:
         self._emit("turn", o, self._uid(o), sess, {
             "duration_ms": o.get("durationMs") if isinstance(o.get("durationMs"), int) else None,
             "message_count": o.get("messageCount") if isinstance(o.get("messageCount"), int)

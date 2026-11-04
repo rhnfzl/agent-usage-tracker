@@ -14,10 +14,11 @@ import html
 import re
 from collections import Counter
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable
+from typing import Any, Callable, Literal
 
 from . import episode_store, local_page, review
-from .collectors.session_digest import local_info
+from .episode_store import Episode
+from .collectors.session_digest import SessionView, local_info
 from .config import AutError, Config
 from .sink import connect
 
@@ -34,6 +35,7 @@ RULES = {   # keep in step with "Episodes (sink-built)" in CONTRACT.md, which st
     "undecided": "a commit still waits for an outcome (`aut outcomes`)",
     "no_code": "no commits: research or review work",
 }
+Selector = Literal["episode", "day", "label"]
 _SHA = re.compile(r"[0-9a-f]{7,40}")
 _EP_PREFIX = re.compile(r"[0-9a-f-]{4,36}")
 _EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
@@ -63,21 +65,15 @@ def _episode_prefix(episode: str) -> str:
     return ep
 
 
-def _check_one_selector(episode: str | None, day: str | None, label: str | None) -> None:
-    if sum(x is not None for x in (episode, day, label)) != 1:
-        raise ValueError("inspect: exactly one of episode, day and label")
-
-
-def fetch(dsn: str, episode: str | None = None, day: str | None = None,
-          label: str | None = None) -> dict[str, Any]:
+def fetch(dsn: str, kind: Selector, value: str) -> dict[str, Any]:
     """Raw rows for one view. Read-only; every SELECT is ids, keys, enums and numbers."""
-    _check_one_selector(episode, day, label)
     start = end = _EPOCH
-    params: tuple
-    if episode is not None:
-        where, params = "e.episode_id::text LIKE %s", (_episode_prefix(episode) + "%",)
-    elif day is not None:
-        start, end = _day_bounds(day)
+    label = None
+    params: tuple[Any, ...]
+    if kind == "episode":
+        where, params = "e.episode_id::text LIKE %s", (_episode_prefix(value) + "%",)
+    elif kind == "day":
+        start, end = _day_bounds(value)
         # a member row that day, as agents.episode_activity_day counts it (not span overlap)
         where = ("EXISTS (SELECT 1 FROM agents.episode_member em JOIN agents.activity_event a "
                  "ON a.session_id = em.session_id WHERE em.episode_id = e.episode_id AND a.kind "
@@ -85,14 +81,13 @@ def fetch(dsn: str, episode: str | None = None, day: str | None = None,
                  "AND a.ts BETWEEN e.first_ts AND e.last_ts)")
         params = (start, end)
     else:   # the label's own episode (episode, episode_day) or its steer's session's episodes
+        label = value
         where = ("e.episode_id::text = %s OR e.episode_id IN (SELECT m.episode_id FROM "
                  "agents.episode_member m JOIN agents.activity_event a ON a.session_id = "
                  "m.session_id WHERE a.kind = 'steer' AND a.event_id = %s)")
-        if label is None:       # _check_one_selector rules this out
-            raise ValueError("inspect: exactly one of episode, day and label")
         params = (label.split(":")[0], label)
     with connect(dsn) as conn:
-        def q(sql: str, p: tuple) -> list[tuple]:
+        def q(sql: str, p: tuple[Any, ...]) -> list[tuple[Any, ...]]:
             return conn.execute(sql, p).fetchall()
         eps = episode_store.load_episodes(conn, where, params)
         sids = sorted({m["session_id"] for ep in eps for m in ep["members"]})
@@ -122,14 +117,14 @@ def fetch(dsn: str, episode: str | None = None, day: str | None = None,
             "outcomes": outcomes, "manual": manual, "corrections": corr, "labels": labels}
 
 
-def latest_labels(rows: list) -> list[dict]:
+def latest_labels(rows: list[Any]) -> list[dict[str, Any]]:
     """The current labels (core.current_labels), oldest first."""
     from .label.core import current_labels     # imported where used, as in cli.py
 
     return sorted(current_labels(rows), key=lambda d: (d["ts"], d["task"] or ""))
 
 
-def _add_anchors(anchors: dict[str, dict[str, set]], sid: str, a: dict) -> None:
+def _add_anchors(anchors: dict[str, dict[str, set[str]]], sid: str, a: dict[str, Any]) -> None:
     """Add one link row's keys, by anchor type."""
     for name, fields in ANCHORS:
         for f in fields:
@@ -138,11 +133,11 @@ def _add_anchors(anchors: dict[str, dict[str, set]], sid: str, a: dict) -> None:
                 anchors[name].setdefault(str(x), set()).add(sid)
 
 
-def _link_keys(ep_members: dict[str, dict], seeds: set[str],
-               acts: list) -> tuple[dict[str, dict[str, set]], dict[str, set]]:
+def _link_keys(ep_members: dict[str, dict[str, Any]], seeds: set[str],
+               acts: list[Any]) -> tuple[dict[str, dict[str, set[str]]], dict[str, set[str]]]:
     """(anchor type -> key -> seed sessions holding it, 7-hex commit -> sessions) of one episode."""
-    anchors: dict[str, dict[str, set]] = {name: {} for name, _f in ANCHORS}
-    commits: dict[str, set] = {}
+    anchors: dict[str, dict[str, set[str]]] = {name: {} for name, _f in ANCHORS}
+    commits: dict[str, set[str]] = {}
     for sid, kind, a in acts:
         a = a or {}
         keys = {k for k in ep_members.get(sid, {}).get("repo_keys", []) if k}
@@ -157,7 +152,7 @@ def _link_keys(ep_members: dict[str, dict], seeds: set[str],
     return anchors, commits
 
 
-def _rule_of(ep: dict, manual: list, seeds: set[str]) -> str:
+def _rule_of(ep: Episode, manual: list[Any], seeds: set[str]) -> str:
     """Which rule of agents.episode_link() fired."""
     if ep["outcome_source"] != "manual":
         return RULES.get(ep["outcome"], ep["outcome"])
@@ -166,11 +161,11 @@ def _rule_of(ep: dict, manual: list, seeds: set[str]) -> str:
                               if man else "")
 
 
-def _episode_labels(ep: dict, members: dict[str, dict], labels: list[dict], steer_sid: dict,
-                    used: set[int]) -> tuple[list[dict], Counter]:
+def _episode_labels(ep: Episode, members: dict[str, dict[str, Any]], labels: list[dict[str, Any]], steer_sid: dict[str, Any],
+                    used: set[int]) -> tuple[list[dict[str, Any]], Counter[tuple[str, str]]]:
     """(the episode's own labels, its steers' labels per (task, label)); marks the labels it took."""
-    own: list[dict] = []
-    steer_mix: Counter = Counter()
+    own: list[dict[str, Any]] = []
+    steer_mix: Counter[tuple[str, str]] = Counter()
     for i, lab in enumerate(labels):
         uid, unit = lab["unit_id"] or "", lab["unit"]
         if (unit == "episode" and uid == ep["id"]) or \
@@ -184,7 +179,7 @@ def _episode_labels(ep: dict, members: dict[str, dict], labels: list[dict], stee
     return own, steer_mix
 
 
-def build(raw: dict) -> dict[str, Any]:
+def build(raw: dict[str, Any]) -> dict[str, Any]:
     """Assemble each episode's evidence from fetch()'s rows. Pure: tests feed it rows."""
     sess = {s: {"agent": ag, "steers": n, "first": f, "last": la}
             for s, ag, n, f, la in raw["sessions"]}
@@ -202,7 +197,7 @@ def build(raw: dict) -> dict[str, Any]:
                     "labels": own, "steer_labels": sorted(steer_mix.items()),
                     "commits": [(k, *states.get(k, ("no outcome yet", None)), sorted(v))
                                 for k, v in sorted(commits.items())],
-                    "sessions": [{**m, **sess.get(m["session_id"], {})} for m in ep["members"]],
+                    "member_activity": [{**m, **sess.get(m["session_id"], {})} for m in ep["members"]],
                     "corrections": [c for c in raw["corrections"]
                                     if c[2] in mem or (c[3] and c[3] in mem)]})
     rest = [lab for i, lab in enumerate(labels) if i not in used]
@@ -213,14 +208,14 @@ def _short(x: object) -> str:
     return str(x)[:12]
 
 
-def _table(head: list[str], rows: list[list]) -> str:
+def _table(head: list[str], rows: list[list[Any]]) -> str:
     e = html.escape
     return ("<table><tr>" + "".join(f"<th>{e(h)}</th>" for h in head) + "</tr>" +
             "".join("<tr>" + "".join(f"<td>{e(str(c))}</td>" for c in r) + "</tr>"
                     for r in rows) + "</table>")
 
 
-def _labels_table(labs: list[dict]) -> str:
+def _labels_table(labs: list[dict[str, Any]]) -> str:
     return _table(["task", "unit", "unit id", "label", "p", "model", "version"],
                   [[x["task"], x["unit"], x["unit_id"],
                     "unknown (below tau: " + str(x["label"]) + ")" if x["below_tau"] else x["label"],
@@ -228,9 +223,9 @@ def _labels_table(labs: list[dict]) -> str:
                    for x in labs])
 
 
-def _member_table(ep: dict, info: dict) -> str:
+def _member_table(ep: dict[str, Any], info: dict[str, SessionView]) -> str:
     rows = []
-    for s in ep["sessions"][:4 * _SHOW]:     # seeds first (load_episodes' order)
+    for s in ep["member_activity"][:4 * _SHOW]:     # seeds first (load_episodes' order)
         d = info.get(s["session_id"], {})
         span = f"{s['first']:%m-%d %H:%M} to {s['last']:%m-%d %H:%M}" if s.get("first") else ""
         rows.append([s["role"], s.get("agent", ""), _short(s["session_id"]),
@@ -240,12 +235,12 @@ def _member_table(ep: dict, info: dict) -> str:
                      ", ".join(d.get("branches", [])[:5])])
     table = _table(["role", "agent", "session", "steers", "active", "repo keys", "local titles",
                     "local branches"], rows)
-    if len(ep["sessions"]) > 4 * _SHOW:
-        table += f"<p class=meta>First {4 * _SHOW} of {len(ep['sessions'])}.</p>"
+    if len(ep["member_activity"]) > 4 * _SHOW:
+        table += f"<p class=meta>First {4 * _SHOW} of {len(ep['member_activity'])}.</p>"
     return table
 
 
-def _anchor_items(anchors: dict[str, dict[str, set]]) -> str:
+def _anchor_items(anchors: dict[str, dict[str, set[str]]]) -> str:
     e, parts = html.escape, []
     for name, vals in anchors.items():
         shared = {v: ss for v, ss in vals.items() if len(ss) > 1}
@@ -256,7 +251,7 @@ def _anchor_items(anchors: dict[str, dict[str, set]]) -> str:
     return "".join(parts)
 
 
-def _labels_part(ep: dict) -> str:
+def _labels_part(ep: dict[str, Any]) -> str:
     parts = ["<h3>Labels</h3>"]
     if ep["labels"]:
         parts.append(_labels_table(ep["labels"]))
@@ -268,7 +263,7 @@ def _labels_part(ep: dict) -> str:
     return "".join(parts)
 
 
-def _episode_section(ep: dict, info: dict) -> str:
+def _episode_section(ep: dict[str, Any], info: dict[str, SessionView]) -> str:
     e, parts = html.escape, []
     parts.append(f"<section><h2>Episode <code>{e(ep['id'])}</code></h2><p class=meta>"
                  f"{ep['first_ts']:%Y-%m-%d %H:%M} to {ep['last_ts']:%Y-%m-%d %H:%M}; "
@@ -299,7 +294,7 @@ def _episode_section(ep: dict, info: dict) -> str:
     return "".join(parts)
 
 
-def _label_history(view: dict, label: str) -> str:
+def _label_history(view: dict[str, Any], label: str) -> str:
     hist = sorted((r for r in view["history"] if (r[2] or {}).get("unit_id") == label),
                   key=lambda r: r[1])
     return (f"<section><h2>Every label row of <code>{html.escape(label)}</code></h2>"
@@ -310,7 +305,7 @@ def _label_history(view: dict, label: str) -> str:
             + "</section>")
 
 
-def render(view: dict, info: dict, token: str, title: str, label: str | None = None) -> str:
+def render(view: dict[str, Any], info: dict[str, SessionView], token: str, title: str, label: str | None = None) -> str:
     e = html.escape
     parts = [local_page.head("Evidence inspector", "64rem", _CSS) + f"""<h1>{e(title)}</h1>
 <p>Private page on this machine only; its only write is the correction form it links to. Titles
@@ -328,31 +323,28 @@ and branch names come from this machine's logs and are never sent.</p>"""]
     return "".join(parts)
 
 
-def pages(view: dict, info: dict, title: str, label: str | None = None) -> Callable[[str], dict]:
+def pages(view: dict[str, Any], info: dict[str, SessionView], title: str,
+          label: str | None = None) -> Callable[[str], dict[str, str]]:
     """The evidence at /<token> and the correction form for its episodes at /<token>/correct."""
     return lambda token: {"": render(view, info, token, title, label),
                           "/correct": review.render(view["episodes"], info, token, title.lower())}
 
 
-def run_inspect(cfg: Config, episode: str | None = None, day: str | None = None,
-                label: str | None = None, fetch_fn: Callable[..., dict] = fetch,
-                serve_fn: Callable[..., dict] = review.serve) -> dict[str, int]:
-    _check_one_selector(episode, day, label)
+def run_inspect(cfg: Config, kind: Selector, value: str) -> dict[str, int]:
     dsn = cfg.require_pg("inspect")
-    if episode is not None:
-        episode = _episode_prefix(episode)
-    title = f"Episode {episode}" if episode is not None else \
-        f"Day {day}" if day is not None else f"Label {label}"
-    view = build(fetch_fn(dsn, episode=episode, day=day, label=label))
+    if kind == "episode":
+        value = _episode_prefix(value)
+    title = f"{kind.capitalize()} {value}"
+    view = build(fetch(dsn, kind, value))
     if not view["episodes"] and not view["labels"]:
         raise AutError(f"inspect: nothing found for {title.lower()}")
     info = local_info(cfg.home, {s["session_id"] for ep in view["episodes"]
-                                        for s in ep["sessions"][:4 * _SHOW]
-                                        if s["role"] == "seed"})   # children have no title
-    return serve_fn(view["episodes"], lambda rows: episode_store.insert_corrections(dsn, rows),
-                    pages(view, info, title, label))
+                                 for s in ep["member_activity"][:4 * _SHOW]
+                                 if s["role"] == "seed"})   # children have no title
+    return review.serve(view["episodes"], lambda rows: episode_store.insert_corrections(dsn, rows),
+                        pages(view, info, title, value if kind == "label" else None))
 
 
-def print_inspect(summary: dict) -> None:
+def print_inspect(summary: dict[str, Any]) -> None:
     if summary["reviewed"]:
         print(f"inspect: {summary['reviewed']} corrections saved")

@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 import sys
 from dataclasses import dataclass
-from typing import Callable, Iterator
+from typing import Any, Callable, Iterator
 
 from ..config import Config
 from ..event import Batch
@@ -25,14 +25,14 @@ from ._util import describe_files, describe_full_scan
 # an absurd ceiling, never hit in practice).
 MAX_DRAIN_PASSES = 100_000
 
-Collect = Callable[[Config, dict], Iterator[Batch]]
+Collect = Callable[[Config, dict[str, Any]], Iterator[Batch]]
 _USAGE_ONLY = frozenset({"usage"})      # no session or activity rows, see CONTRACT.md
 
 
 @dataclass(frozen=True)
 class Collector:
     collect: Collect
-    describe: Callable[[Config, dict], str] = describe_files    # one line for `aut status`
+    describe: Callable[[Config, dict[str, Any]], str] = describe_files    # one line for `aut status`
     after_scan: Callable[[Config], object] | None = None        # never run by a dry run
     # What it can emit: a one-shot command is partial only if a collector it keeps rows from failed.
     rows: frozenset[str] = frozenset({"usage", "session", "activity"})
@@ -51,14 +51,14 @@ REGISTRY: dict[str, Collector] = {
 }
 
 
-def _stamped(collect: Collect, cfg: Config, wm: dict) -> Iterator[Batch]:
+def _stamped(collect: Collect, cfg: Config, wm: dict[str, Any]) -> Iterator[Batch]:
     for events, advance_watermark in collect(cfg, wm):
         for e in events:
             e.machine = cfg.machine
         yield events, advance_watermark
 
 
-def drain(collect: Collect, cfg: Config, wm: dict, name: str) -> Iterator[Iterator[Batch]]:
+def drain(collect: Collect, cfg: Config, wm: dict[str, Any], name: str) -> Iterator[Iterator[Batch]]:
     """One iterator of batches per pass of collect() over wm, each row stamped with this machine,
     until a pass leaves wm unchanged. Full-scan collectors (cursor, cursor_sdk) never mutate wm, so
     they settle after one pass. The consumer applies a pass's advances before asking for the next;

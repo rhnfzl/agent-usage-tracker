@@ -195,7 +195,7 @@ def test_load_choice_treats_a_bad_field_as_a_bad_entry(tmp_path, monkeypatch, ca
 
 
 def test_render_shows_the_facts_the_options_in_order_and_the_letters():
-    assert core.render(_two_options(), ["a", "b"]) == (
+    assert core.render_prompt(_two_options(), ["a", "b"]) == (
         'Which?\n\nFacts:\n- text: go\n- n: 3\n- names: ["é"]\n\n'
         "Options:\nA. a: desc a\nB. b: desc b\n\nAnswer with one letter (A, B) and nothing else.")
 

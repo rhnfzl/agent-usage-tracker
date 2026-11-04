@@ -20,7 +20,7 @@ from typing import Any, Callable, Iterable, Iterator, Protocol, runtime_checkabl
 from ..config import config_path
 from ..event import ActivityEvent, make_event_id
 
-PROMPT_VER = 1               # bump when render() changes; task_ver covers candidates/definitions
+PROMPT_VER = 1               # bump when render_prompt() changes; task_ver covers candidates/definitions
 LETTERS = "ABCDEFGHIJ"
 TAU_FLOOR = 0.5
 
@@ -55,10 +55,10 @@ class Request:
     unit: str                  # steer | episode_day | aw_block | episode | aw_title
     unit_id: str
     ts: str                    # the unit's own time (ISO-8601): the label row's ts
-    facts: dict                # what the decision reads; text in it is redacted, never stored
+    facts: dict[str, Any]                # what the decision reads; text in it is redacted, never stored
     question: str
     decision: str              # choice | boolean
-    candidates: list[dict]     # [{"id", "desc"}]: the task's closed list
+    candidates: list[dict[str, Any]]     # [{"id", "desc"}]: the task's closed list
     none_fits: str | None      # the explicit out-of-list candidate ("other"), or None
     rev: str | None = None     # the unit's version, when a changed unit is re-asked (episode)
 
@@ -148,7 +148,7 @@ def load_choice(task: str) -> Choice:
     return Choice(**{k: c[k] for k in Choice.__slots__ if k in c})
 
 
-def render(req: Request, order: list[str]) -> str:
+def render_prompt(req: Request, order: list[str]) -> str:
     """The prompt for one candidate order: candidates as letters, the facts, a one-letter answer."""
     desc = {c["id"]: c["desc"] for c in req.candidates}
     lines = [req.question, "", "Facts:"]
@@ -180,7 +180,7 @@ def letter_distribution(letter_logits: Callable[[str, list[str]], list[float]],
     out = dict.fromkeys(ids, 0.0)
     orders = (ids, ids[::-1])
     for order in orders:
-        for c, p in zip(order, softmax(letter_logits(render(req, order),
+        for c, p in zip(order, softmax(letter_logits(render_prompt(req, order),
                                                      list(LETTERS[:len(order)])))):
             out[c] += p / len(orders)
     return out
@@ -192,7 +192,7 @@ def temper(dist: dict[str, float], t: float) -> dict[str, float]:
     return dict(zip(keys, softmax([math.log(max(dist[k], 1e-12)) / t for k in keys])))
 
 
-def fit_temperature(dists: list[dict], golds: list[str], lo: float = 0.05,
+def fit_temperature(dists: list[dict[str, Any]], golds: list[str], lo: float = 0.05,
                     hi: float = 20.0) -> float:
     """The T that minimises the gold labels' negative log likelihood (golden section on log T;
     the NLL of temperature scaling is unimodal in it). 1.0 without data."""
@@ -263,11 +263,11 @@ def label_event(req: Request, res: Response, labelled_at: str | None = None) -> 
                "labelled_at": labelled_at})
 
 
-def current_labels(rows: Iterable[tuple]) -> list[dict]:
+def current_labels(rows: Iterable[tuple[Any, ...]]) -> list[dict[str, Any]]:
     """The one current label per (task, unit, unit_id) of (event_id, ts, attrs) rows, picked as
     agents.label_latest picks it: newest task_ver, then newest labelled_at (a row without one
     loses), then event_id. A row with no below_tau counts as below: readers treat it as unknown."""
-    best: dict[tuple, tuple] = {}
+    best: dict[tuple[Any, ...], tuple[Any, ...]] = {}
     for eid, ts, a in rows:
         a = a or {}
         key = (a.get("task"), a.get("unit"), a.get("unit_id"))

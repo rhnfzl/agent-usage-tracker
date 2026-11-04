@@ -18,10 +18,10 @@ import glob
 import os
 from collections import Counter
 from pathlib import Path
-from typing import Any, Iterator, TypedDict
+from typing import Any, Iterator, NamedTuple, TypedDict
 
 from ..config import Config
-from ..event import ActivityKind, Batch, ActivityEvent, EventSession, RunOrigin, UsageEvent, make_event_id
+from ..event import Row, ActivityKind, Batch, ActivityEvent, EventSession, RunOrigin, UsageEvent, make_event_id
 from ..repo_keys import RepoKeys, repo_identity
 from ..state import parse_record
 from .activity_common import (Link, TurnAgg, add_call, best_effort, blank_tool_tally, drop_raw_shas,
@@ -88,7 +88,7 @@ def _fresh_state(st: os.stat_result) -> FileState:
 _PROGRAM_SOURCES = {"exec", "mcp"}
 
 
-def run_origin(p: dict) -> RunOrigin:
+def run_origin(p: dict[str, Any]) -> RunOrigin:
     """run_origin from the thread's FIRST session_meta. Structural signals only: originator,
     source and thread_source are recorded by codex itself.
 
@@ -117,7 +117,7 @@ def is_scheduled_automation(message: object) -> bool:
     return head.startswith("Automation:") and "Automation ID:" in head
 
 
-def _set_meta(cur: FileState, p: dict, keys: RepoKeys) -> None:
+def _set_meta(cur: FileState, p: dict[str, Any], keys: RepoKeys) -> None:
     """Identity, origin and cwd from the FIRST session_meta only: a forked file repeats its
     parent's meta on a later line. Its git block gives the link fields every turn carries: the
     repo from the cwd, else the remote URL (hashed, never kept), and the branch, as keys."""
@@ -127,7 +127,7 @@ def _set_meta(cur: FileState, p: dict, keys: RepoKeys) -> None:
     cur["meta"]["link"] = _meta_link(p, keys)
 
 
-def _meta_link(p: dict, keys: RepoKeys) -> dict:
+def _meta_link(p: dict[str, Any], keys: RepoKeys) -> dict[str, Any]:
     g = dict_or_empty(p.get("git"))
     rk = keys.of_cwd(p.get("cwd"))
     if not rk and isinstance(g.get("repository_url"), str):
@@ -157,7 +157,7 @@ def script_of(cmd: object) -> str | None:
     return None
 
 
-def prompt_of(rtype: object, payload: dict, has_um: bool) -> tuple[str, int] | None:
+def prompt_of(rtype: object, payload: dict[str, Any], has_um: bool) -> tuple[str, int] | None:
     """(text, images) when the record is a prompt: a user_message, or a UserMessage item in a
     file that has no user_message (older files carry both for one prompt)."""
     if rtype != "event_msg":
@@ -185,17 +185,17 @@ class _Activity:
 
     def __init__(self, cur: FileState, path: str, keys: RepoKeys) -> None:
         self.cur, self.path, self.keys = cur, path, keys
-        self.carried: dict = cur.setdefault("act", {})
+        self.carried: dict[str, Any] = cur.setdefault("act", {})
         self.events: list[ActivityEvent] = []
-        self.errors: Counter = Counter()      # records whose extraction raised (skipped)
+        self.errors: Counter[str] = Counter()      # records whose extraction raised (skipped)
 
-    def _emit(self, kind: ActivityKind, ts: object, seed: str, attrs: dict) -> None:
+    def _emit(self, kind: ActivityKind, ts: object, seed: str, attrs: dict[str, Any]) -> None:
         sess = self.sess
         self.events.append(ActivityEvent(
             event_id=make_event_id(NAME, kind, f"{sess.session_id}|{seed}"), ts=str_or_none(ts),
             agent=NAME, kind=kind, session_id=sess.session_id, turn_id=sess.turn_id, attrs=attrs))
 
-    def record(self, o: dict) -> None:
+    def record(self, o: dict[str, Any]) -> None:
         """Non-prompt activity of one record: tool aggregates, interrupt, turn, commit, compaction,
         link."""
         record_type, payload = o.get("type"), dict_or_empty(o.get("payload"))
@@ -209,7 +209,7 @@ class _Activity:
         elif record_type == "event_msg":
             self._event_msg(payload, ts)
 
-    def _event_msg(self, payload: dict, ts: object) -> None:
+    def _event_msg(self, payload: dict[str, Any], ts: object) -> None:
         kind, item = payload.get("type"), payload.get("item")
         turn_seed = str(payload.get("turn_id") or ts)
         if kind in ("task_complete", "turn_aborted"):
@@ -238,7 +238,7 @@ class _Activity:
         self.carried["agg"] = blank_tool_tally()
         self.carried.pop("start", None)
 
-    def _tool_call(self, payload: dict) -> None:
+    def _tool_call(self, payload: dict[str, Any]) -> None:
         name = payload.get("name")
         if payload.get("type") in ("function_call", "custom_tool_call") and isinstance(name, str):
             # an MCP namespace is a server label (free text); other namespaces are codex's own.
@@ -250,7 +250,7 @@ class _Activity:
                 self.agg.setdefault("mcp_ids", []).append(payload.get("call_id"))
             add_call(self.agg, "mcp" if mcp else name, payload.get("arguments", payload.get("input")))
 
-    def _item(self, item: dict, ts: object) -> None:
+    def _item(self, item: dict[str, Any], ts: object) -> None:
         typ = item.get("type")
         if typ == "CommandExecution":
             code = item.get("exit_code")
@@ -276,7 +276,7 @@ class _Activity:
             self._emit("compaction", ts, str(item.get("id") or ts), {})
 
 
-def _upgrade_state(wm: dict, keys: RepoKeys) -> None:
+def _upgrade_state(wm: dict[str, Any], keys: RepoKeys) -> None:
     """Bring state saved by an older version to the current shape, once. An entry from before
     um_ord existed is dropped, so the file is re-read from 0 and user_message ordinals (and thus
     their event_ids) stay consistent if it is later reset and re-read; that is safe because
@@ -302,8 +302,16 @@ def _upgrade_state(wm: dict, keys: RepoKeys) -> None:
     wm["state_v"] = _STATE_V
 
 
-def parsed_records(lines: list[bytes], off: int, cur: FileState, skipped: Counter) -> list[tuple]:
-    """(record, type, payload, copied) of each new line that has a payload. A forked child's file
+class ParsedRecord(NamedTuple):
+    record: dict[str, Any]
+    type: object
+    payload: dict[str, Any]
+    copied: bool
+
+
+def parsed_records(lines: list[bytes], off: int, cur: FileState,
+                   skipped: Counter[str]) -> list[ParsedRecord]:
+    """Each new line that has a payload. A forked child's file
     opens with a copy of its parent's history: lines before the first meta's
     subagent_history_start_ordinal (0-based). `skip` is how many copied lines are still unread.
     Only a fork: a spawned child can carry an ordinal too, with no copy."""
@@ -320,13 +328,13 @@ def parsed_records(lines: list[bytes], off: int, cur: FileState, skipped: Counte
             if not off and not i and o.get("type") == "session_meta" and p.get("forked_from_id"):
                 skip = max(safe_int(p.get("subagent_history_start_ordinal")) - 1, 0)
                 copied = True
-            recs.append((o, o.get("type"), p, copied))
+            recs.append(ParsedRecord(o, o.get("type"), p, copied))
     if skip:
         cur["skip"] = skip
     return recs
 
 
-def _note_session_meta(payload: dict, cur: FileState, keys: RepoKeys) -> None:
+def _note_session_meta(payload: dict[str, Any], cur: FileState, keys: RepoKeys) -> None:
     # the usage event_id seed keeps its old rule (payload.session_id, any meta line),
     # so stored usage rows never change id; session rows use the thread id instead
     cur["session_id"] = payload.get("session_id") or payload.get("id") or cur["session_id"]
@@ -335,7 +343,7 @@ def _note_session_meta(payload: dict, cur: FileState, keys: RepoKeys) -> None:
         _set_meta(cur, payload, keys)
 
 
-def _note_context(rtype: object, payload: dict, copied: bool, cur: FileState, keys: RepoKeys) -> None:
+def _note_context(rtype: object, payload: dict[str, Any], copied: bool, cur: FileState, keys: RepoKeys) -> None:
     """Streaming state from a record: session identity, model, cwd, the current turn."""
     if rtype == "session_meta":
         _note_session_meta(payload, cur, keys)
@@ -347,7 +355,7 @@ def _note_context(rtype: object, payload: dict, copied: bool, cur: FileState, ke
         cur["turn"] = str_or_none(payload.get("turn_id")) or cur.get("turn")
 
 
-def _token_event(o: dict, payload: dict, cur: FileState, path: str) -> UsageEvent | None:
+def _token_event(o: dict[str, Any], payload: dict[str, Any], cur: FileState, path: str) -> UsageEvent | None:
     """The usage row of a token_count record, None if it has no tokens. Raises on malformed counts."""
     info = payload.get("info")
     last = info.get("last_token_usage") if isinstance(info, dict) else None
@@ -384,7 +392,7 @@ def _token_event(o: dict, payload: dict, cur: FileState, path: str) -> UsageEven
     )
 
 
-def _prompt_rows(o: dict, prompt: tuple[str, int], cur: FileState, path: str, act: _Activity) -> list:
+def _prompt_rows(o: dict[str, Any], prompt: tuple[str, int], cur: FileState, path: str, act: _Activity) -> list[Row]:
     """The human and steer rows of a prompt someone typed. Threads a program drives (subagents,
     `codex exec`, MCP calls, another agent's integration, scheduled automations) are not human
     turns, and get none."""
@@ -412,7 +420,7 @@ def _prompt_rows(o: dict, prompt: tuple[str, int], cur: FileState, path: str, ac
     ]
 
 
-def _chunk_rows(path: str, recs: list[tuple], cur: FileState, keys: RepoKeys, skipped: Counter) -> list:
+def _chunk_rows(path: str, recs: list[ParsedRecord], cur: FileState, keys: RepoKeys, skipped: Counter[str]) -> list[Row]:
     """All rows of one file's new records; updates `cur`, the private copy of its watermark entry."""
     # shortcut: judged per chunk (plus earlier chunks of the file), so an older-format turn
     # split exactly between its UserMessage item and its user_message counts twice; older
@@ -420,7 +428,7 @@ def _chunk_rows(path: str, recs: list[tuple], cur: FileState, keys: RepoKeys, sk
     if any(t == "event_msg" and p.get("type") == "user_message" for _o, t, p, _c in recs):
         cur["has_um"] = True
     act = _Activity(cur, path, keys)
-    events: list = []
+    events: list[Row] = []
     for o, t, p, copied in recs:
         _note_context(t, p, copied, cur, keys)
         if t == "event_msg" and p.get("type") == "token_count":
@@ -454,14 +462,14 @@ def _trim_state(cur: FileState) -> None:
         cur.pop("act", None)
 
 
-def collect(cfg: Config, wm: dict) -> Iterator[Batch]:
+def collect(cfg: Config, wm: dict[str, Any]) -> Iterator[Batch]:
     if not sessions_dir(cfg.home).exists():
         return
     keys = RepoKeys(cfg.repo_key_salt)
     _upgrade_state(wm, keys)
 
     def chunk_rows(path: str, cur: FileState, off: int, lines: list[bytes],
-                   skipped: Counter) -> list:
+                   skipped: Counter[str]) -> list[Row]:
         events = _chunk_rows(path, parsed_records(lines, off, cur, skipped), cur, keys, skipped)
         _trim_state(cur)
         return events
