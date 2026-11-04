@@ -41,11 +41,12 @@ import json
 import os
 import sys
 from datetime import date, datetime, timedelta, timezone
+from typing import Iterator
 
 from . import pricing
 from .collectors import REGISTRY, activitywatch
 from .config import Config, load_config, config_path
-from .event import ActivityEvent, Row, TimeInterval, UsageEvent, make_event_id, valid_ts
+from .event import ActivityEvent, Batch, CollectorUnavailable, Row, TimeInterval, UsageEvent, make_event_id, valid_ts
 from .label.names import DAYS, DECISION_TASKS, TASK_NAMES
 from .push import (COLUMNS, deliver_scan_rows, insert_pg, make_sender, scan_row, scrub_error,
                    send_activity_rows, send_session_rows)
@@ -114,43 +115,47 @@ def run_scan(cfg: Config, agents: list[str], dry_run: bool) -> dict:
         # counted both and overstated the scan. Per-agent, discarded when the agent finishes.
         seen: set[str] = set()
         buf_events: list[Row] = []
-        buf_commits: list = []
+        pending_advances: list = []
         started_at = datetime.now(timezone.utc)
         status, error, newest_ts, interrupted = "ok", None, None, False
 
         def flush() -> None:
             if buf_events and sender is not None:   # sender is None in dry-run -> nothing sent
-                sender(buf_events)          # raises on delivery failure -> commits skipped
-            for commit in buf_commits:      # always advance the (in-memory) watermark so the
-                commit()                    # drain loop below terminates; only scan persists it
+                sender(buf_events)          # raises on delivery failure -> advances skipped
+            for advance in pending_advances:    # always advance the (in-memory) watermark so the
+                advance()                       # drain loop below terminates; only scan persists it
             buf_events.clear()
-            buf_commits.clear()
+            pending_advances.clear()
 
         try:
             for _ in range(_MAX_DRAIN_PASSES):
                 before = _wm_fp(wm)
-                for events, commit in collect(cfg, wm):
-                    for e in events:
-                        e.machine = cfg.machine
-                        if not valid_ts(e.ts):
-                            agg["skipped_no_ts"] += 1
-                            continue
-                        ts = datetime.fromisoformat(e.ts.replace("Z", "+00:00"))    # valid_ts: parses
-                        ts = ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
-                        newest_ts = ts if newest_ts is None or ts > newest_ts else newest_ts
-                        if e.event_id in seen:
-                            agg["duplicates"] += 1      # counted once, above
-                        else:
-                            seen.add(e.event_id)
-                            _add(agg, e)
-                        # Still queued for the sink either way: deduping the PUSH would mean a
-                        # copy whose batch failed could not be re-sent from the other path, and
-                        # ON CONFLICT already makes the repeat free.
-                        if not dry_run:
-                            buf_events.append(e)
-                    buf_commits.append(commit)
-                    if len(buf_events) >= BATCH:
-                        flush()
+                try:
+                    for events, advance_watermark in collect(cfg, wm):
+                        for e in events:
+                            e.machine = cfg.machine
+                            if not valid_ts(e.ts):
+                                agg["skipped_no_ts"] += 1
+                                continue
+                            ts = datetime.fromisoformat(e.ts.replace("Z", "+00:00"))    # valid_ts: parses
+                            ts = ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
+                            newest_ts = ts if newest_ts is None or ts > newest_ts else newest_ts
+                            if e.event_id in seen:
+                                agg["duplicates"] += 1      # counted once, above
+                            else:
+                                seen.add(e.event_id)
+                                _add(agg, e)
+                            # Still queued for the sink either way: deduping the PUSH would mean a
+                            # copy whose batch failed could not be re-sent from the other path, and
+                            # ON CONFLICT already makes the repeat free.
+                            if not dry_run:
+                                buf_events.append(e)
+                        pending_advances.append(advance_watermark)
+                        if len(buf_events) >= BATCH:
+                            flush()
+                except CollectorUnavailable as exc:     # what it could read still goes out below
+                    print(f"aut: {exc}", file=sys.stderr)
+                    status, error = "degraded", scrub_error(exc.__cause__ or exc)
                 flush()
                 if _wm_fp(wm) == before:    # a whole pass advanced nothing -> fully drained
                     break
@@ -213,6 +218,14 @@ def _print_report(cfg: Config, report: dict, dry_run: bool) -> None:
     print(f"{'TOTAL':<12} {grand:>32,} tokens")
 
 
+def _available_batches(name: str, cfg: Config, wm: dict) -> Iterator[Batch]:
+    """A collector's batches for a one-shot command: an unavailable source just ends them."""
+    try:
+        yield from REGISTRY[name](cfg, wm)
+    except CollectorUnavailable as exc:
+        print(f"aut: {exc}", file=sys.stderr)
+
+
 def run_export(cfg: Config, agents: list[str], out) -> tuple[int, int]:
     """Write all normalized events (from scratch, ignoring the watermark) as CSV to `out`.
     Column order matches push.COLUMNS / the sink table, so it loads via COPY. Useful for
@@ -229,7 +242,7 @@ def run_export(cfg: Config, agents: list[str], out) -> tuple[int, int]:
         seen: set[str] = set()
         for _ in range(_MAX_DRAIN_PASSES):    # drain past the per-file line cap (one-shot command)
             before = _wm_fp(wm)
-            for events, commit in REGISTRY[name](cfg, wm):
+            for events, advance_watermark in _available_batches(name, cfg, wm):
                 for e in events:
                     if not isinstance(e, UsageEvent):   # the CSV is agents.usage_event only
                         continue
@@ -243,7 +256,7 @@ def run_export(cfg: Config, agents: list[str], out) -> tuple[int, int]:
                     d = e.to_dict()
                     writer.writerow(["" if d[c] is None else d[c] for c in COLUMNS])
                     n += 1
-                commit()                      # advance wm so the next pass continues past the cap
+                advance_watermark()           # so the next pass continues past the cap
             if _wm_fp(wm) == before:
                 break
     return n, skipped
@@ -276,7 +289,7 @@ def run_session_backfill(cfg: Config, agents: list[str], dry_run: bool, sessions
         seen: set[str] = set()                      # same session under two paths: one row
         for _ in range(_MAX_DRAIN_PASSES):
             before = _wm_fp(wm)
-            for events, commit in REGISTRY[name](cfg, wm):
+            for events, advance_watermark in _available_batches(name, cfg, wm):
                 for e in events:
                     e.machine = cfg.machine
                     if isinstance(e, TimeInterval):     # neither a session nor an activity row
@@ -318,7 +331,7 @@ def run_session_backfill(cfg: Config, agents: list[str], dry_run: bool, sessions
                         if counts["rows"] % (BATCH * 20) == 0:
                             print(f"aut: {name}: {counts['rows']:,} session rows so far",
                                   file=sys.stderr)
-                commit()                            # advances only the throwaway wm
+                advance_watermark()                 # advances only the throwaway wm
             if _wm_fp(wm) == before:
                 break
         flush()

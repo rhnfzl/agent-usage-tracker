@@ -10,15 +10,21 @@ Locks the normalization rules that are easy to get wrong:
 
 from __future__ import annotations
 
+import contextlib
+import http.server
+import io
 import json
 import sqlite3
 import sys
 import tempfile
+import threading
+import urllib.error
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from agent_usage_tracker.config import Config  # noqa: E402
+from agent_usage_tracker.event import CollectorUnavailable  # noqa: E402
 from agent_usage_tracker.collectors import claude_code, codex, cursor, cursor_sdk, pi  # noqa: E402
 
 
@@ -717,30 +723,102 @@ def test_cursor_api() -> None:
     print("ok cursor_api")
 
 
+def test_cursor_cookie_not_sent_through_a_redirect() -> None:
+    from agent_usage_tracker.collectors import cursor_api
+    seen: list[tuple[str, str | None]] = []
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def _answer(self) -> None:
+            seen.append((self.path, self.headers.get("Cookie")))
+            self.send_response(302 if self.path.endswith("get-me") else 200)
+            self.send_header("Location", f"http://127.0.0.1:{self.server.server_port}/elsewhere")
+            self.send_header("Content-Length", "2")
+            self.end_headers()
+            self.wfile.write(b"{}")
+
+        do_GET = do_POST = _answer
+
+        def log_message(self, *args) -> None:
+            pass
+
+    srv = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    saved = cursor_api._BASE
+    cursor_api._BASE = f"http://127.0.0.1:{srv.server_port}"
+    try:
+        try:
+            cursor_api._post("secret-cookie", "get-me", {})
+            raise AssertionError("a 3xx must not be followed")
+        except urllib.error.HTTPError as exc:
+            assert exc.code == 302
+    finally:
+        cursor_api._BASE = saved
+        srv.shutdown()
+        srv.server_close()
+    assert [p for p, _c in seen] == ["/get-me"], seen      # the cookie never reached /elsewhere
+    print("ok cursor_cookie_not_sent_through_a_redirect")
+
+
+def test_cursor_api_token_gone_is_unavailable_not_silent() -> None:
+    from agent_usage_tracker.collectors import cursor_api
+    with tempfile.TemporaryDirectory() as d:
+        db = Path(d) / "state.vscdb"
+        cfg = _cfg(Path(d))
+        cfg.cursor_api, cfg.cursor_db_path = True, str(db)
+        assert list(cursor_api.collect(cfg, {})) == []         # Cursor not installed: nothing to say
+        con = sqlite3.connect(db)
+        con.execute("CREATE TABLE ItemTable (key TEXT, value TEXT)")
+        con.commit()
+        con.close()
+        try:
+            list(cursor_api.collect(cfg, {}))
+            raise AssertionError("a Cursor with no usable token must not look like a quiet week")
+        except CollectorUnavailable as exc:
+            assert "token" in str(exc)
+    print("ok cursor_api_token_gone_is_unavailable_not_silent")
+
+
+def test_cursor_counts_malformed_bubbles() -> None:
+    from agent_usage_tracker.collectors import cursor
+    with tempfile.TemporaryDirectory() as d:
+        db = Path(d) / "state.vscdb"
+        con = sqlite3.connect(db)
+        con.execute("CREATE TABLE cursorDiskKV (key TEXT, value TEXT)")
+        con.execute("INSERT INTO cursorDiskKV VALUES ('bubbleId:c:1', 'not json')")
+        con.commit()
+        con.close()
+        cfg = _cfg(Path(d))
+        cfg.cursor_db_path = str(db)
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            assert _drain(cursor.collect, cfg) == []
+        assert "1 malformed record(s) skipped" in err.getvalue(), err.getvalue()
+    print("ok cursor_counts_malformed_bubbles")
+
+
 def test_hardening_edges() -> None:
-    # basename: cross-platform + non-str guard (Windows path reduced on POSIX, containers -> None)
-    from agent_usage_tracker.collectors._util import basename
-    assert basename("/home/u/repo") == "repo"
-    assert basename("C:\\Users\\a\\private\\proj") == "proj"     # windows path on posix
-    assert basename("repo/") == "repo" and basename("plain-name") == "plain-name"
-    assert basename(None) is None and basename(["x"]) is None and basename({"a": 1}) is None
+    # project_name: cross-platform + non-str guard (Windows path reduced on POSIX, containers -> None)
+    from agent_usage_tracker.collectors._util import project_name
+    assert project_name("/home/u/repo") == "repo"
+    assert project_name("C:\\Users\\a\\private\\proj") == "proj"     # windows path on posix
+    assert project_name("repo/") == "repo" and project_name("plain-name") == "plain-name"
+    assert project_name(None) is None and project_name(["x"]) is None and project_name({"a": 1}) is None
 
     # A git worktree is the SAME repo: collapse it onto the main checkout, or one repo worked on
     # across N branches reports as N projects and no per-project total is real.
-    assert basename("/w/repo/.claude/worktrees/feat-x") == "repo"     # Claude Code's own layout
-    assert basename("/w/repo/.worktrees/feat-x") == "repo"            # hand-rolled
-    assert basename("/w/repo/.claude-worktrees/feat-x") == "repo"     # any .*worktrees container
-    assert basename("C:\\w\\repo\\.worktrees\\feat-x") == "repo"      # same on a windows path
+    assert project_name("/w/repo/.claude/worktrees/feat-x") == "repo"     # Claude Code's own layout
+    assert project_name("/w/repo/.worktrees/feat-x") == "repo"            # hand-rolled
+    assert project_name("/w/repo/.claude-worktrees/feat-x") == "repo"     # any .*worktrees container
+    assert project_name("C:\\w\\repo\\.worktrees\\feat-x") == "repo"      # same on a windows path
     # A monorepo package inside a worktree stays attributed to the PACKAGE, not the branch.
-    assert basename("/w/mono/.worktrees/R8-1/pkg") == "pkg"
-    assert basename("/w/mono/.claude/worktrees/R8-1/pkg") == "pkg"
+    assert project_name("/w/mono/.worktrees/R8-1/pkg") == "pkg"
+    assert project_name("/w/mono/.claude/worktrees/R8-1/pkg") == "pkg"
     # Must not fire on ordinary paths, incl. dot-dirs that are not worktree containers.
-    assert basename("/home/u/.claude/projects") == "projects"
-    assert basename("/home/u/.config/repo") == "repo"
-    assert basename("/home/u/worktrees/repo") == "repo"     # no dot -> not a container
+    assert project_name("/home/u/.claude/projects") == "projects"
+    assert project_name("/home/u/.config/repo") == "repo"
+    assert project_name("/home/u/worktrees/repo") == "repo"     # no dot -> not a container
     # Degenerate: the container itself, with no branch under it, is left exactly as it was.
-    assert basename("/w/repo/.worktrees") == ".worktrees"
-    assert basename("/.worktrees/feat-x") == "feat-x"       # nothing left to attribute to
+    assert project_name("/w/repo/.worktrees") == ".worktrees"
+    assert project_name("/.worktrees/feat-x") == "feat-x"       # nothing left to attribute to
 
     # _as_bool: a quoted "false" in TOML must not silently enable a collector
     from agent_usage_tracker.config import _as_bool
@@ -909,6 +987,9 @@ def main() -> int:
     test_valid_ts()
     test_sender_config()
     test_cf_access_headers()
+    test_cursor_cookie_not_sent_through_a_redirect()
+    test_cursor_api_token_gone_is_unavailable_not_silent()
+    test_cursor_counts_malformed_bubbles()
     print("\nALL PASS")
     return 0
 

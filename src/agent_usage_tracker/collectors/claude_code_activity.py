@@ -1,7 +1,9 @@
 """Claude Code activity rows (agents.activity_event): how a person steers, what a turn did.
 
 Called record by record from the claude_code collector. attrs carry counts, flags, short enums,
-ids and hashes only, never prompt text, tool output, paths, titles or commit messages.
+ids and hashes only, never prompt text, tool output, paths, titles or commit messages. It has its
+own module only because of its size: this per-record machine is the same shape as the _Activity
+classes in codex.py, pi.py and cursor_cli.py, which live next to their collectors.
 
 The turn aggregates and the retry and runaway rules live in activity_common (from AgentsView,
 github.com/kenn-io/agentsview, MIT licence, (c) its authors).
@@ -14,11 +16,10 @@ from urllib.parse import urlparse
 
 from ..event import ActivityEvent, EventSession, make_event_id
 from ..repo_keys import RepoKeys
-from .activity_common import (IDLE_S, Link, add_call, blank_agg, commit_call, commit_dir,
-                              commit_repo, commit_shas, ms_between, turn_attrs)
-from .activity_common import h as _h
-from .activity_common import text_of as _text
-from .activity_common import tool_key as _tool
+from .activity_common import (IDLE_S, Link, TurnAgg, add_call, blank_agg, commit_rows, ms_between,
+                              text_of, text_sha256, tool_key, turn_attrs)
+from .commits import commit_call, commit_dir, commit_shas
+from ._util import str_or_none
 
 _INTERRUPT = "[Request interrupted"
 _REJECTED = "The user doesn't want to proceed"
@@ -30,7 +31,7 @@ class Activity:
 
     def __init__(self, agent: str, path: str, subagent: bool, carried: dict | None,
                  keys: RepoKeys) -> None:
-        # A copy: only the collector's commit() may publish new state into the watermark, or a
+        # A copy: only the collector's advance_watermark() may publish new state into the watermark, or a
         # failed delivery would save this chunk's counts next to the old offset.
         s = copy.deepcopy(carried) if isinstance(carried, dict) else {}
         self.agent, self.path, self.subagent, self.keys = agent, path, subagent, keys
@@ -40,7 +41,7 @@ class Activity:
         self.after_intr = False
         # Turn aggregates and unanswered commit calls are carried across scans in the watermark,
         # so a turn split by a scan boundary still gets one complete row.
-        self.agg = s.get("agg") or blank_agg()
+        self.agg: TurnAgg = s.get("agg") or blank_agg()
         self.pend: dict = s.get("pend") or {}  # commit tool_use_id -> [is_amend, printed_before]
         # Tool block ids already counted. Within a chunk the set spans turns (Claude Code re-logs
         # history after a turn ends). Across scans only the open turn's newest _SEEN_MAX ids are
@@ -76,7 +77,7 @@ class Activity:
 
     def _emit(self, kind: str, o: dict, seed: object, sess: EventSession, attrs: dict) -> None:
         self.events.append(ActivityEvent(
-            event_id=make_event_id(self.agent, kind, seed), ts=o.get("timestamp"),
+            event_id=make_event_id(self.agent, kind, seed), ts=str_or_none(o.get("timestamp")),
             agent=self.agent, kind=kind, session_id=sess.session_id, turn_id=sess.turn_id,
             attrs=attrs))
 
@@ -101,8 +102,8 @@ class Activity:
         except Exception:
             self.errors += 1
 
-    def _close_link(self, seed: object, ts: object, sid: object, turn: object,
-                    origin: object) -> None:
+    def _close_link(self, seed: str, ts: str | None, sid: str, turn: str | None,
+                    origin: str | None) -> None:
         if self.wt:
             self.link.s.setdefault("at", {}).setdefault("1", self.wt)
         self.events.append(ActivityEvent(
@@ -122,7 +123,7 @@ class Activity:
         if gap is not None and gap >= IDLE_S * 1000:
             self.finish()
         if typ in ("assistant", "user"):
-            self.lo = {"uid": self._uid(o), "ts": o.get("timestamp"), "sid": sess.session_id,
+            self.lo = {"uid": self._uid(o), "ts": str_or_none(o.get("timestamp")), "sid": sess.session_id,
                        "turn": sess.turn_id, "origin": sess.run_origin}
             at3 = (o.get("cwd"), o.get("gitBranch"))
             if at3 != self._at3:
@@ -130,11 +131,11 @@ class Activity:
                 self.link.place(3, self.keys.of_cwd(at3[0]), at3[1])
         if typ == "queue-operation":
             if o.get("operation") == "enqueue" and isinstance(o.get("content"), str):
-                self.queued.add(_h(o["content"]))
+                self.queued.add(text_sha256(o["content"]))
         elif typ == "attachment":
             a = o.get("attachment")
             if isinstance(a, dict) and a.get("type") == "queued_command":
-                self.queued.add(_h(_text(a.get("prompt"))))
+                self.queued.add(text_sha256(text_of(a.get("prompt"))))
         elif typ == "pr-link":
             self._pr(o, sess)
         elif typ == "worktree-state":
@@ -168,18 +169,18 @@ class Activity:
                         # if that skews the link lists
                         self.link.text(b.get("text"))
                 return
-            self.link.text(_text(content))
+            self.link.text(text_of(content))
             for b in blocks:
                 if b.get("type") == "tool_result":
                     self._tool_result(o, b, sess)
             if o.get("isMeta"):
                 return
-            is_intr = _text(content).lstrip().startswith(_INTERRUPT)
+            is_intr = text_of(content).lstrip().startswith(_INTERRUPT)
             self.after_intr, self.intr = self.intr, is_intr
             # A subagent's copy of the interrupt is the same keypress the parent already logged.
             if is_intr and not (self.subagent or o.get("isSidechain")):
                 self._emit("interrupt", o, self._uid(o), sess,
-                           {"during_tool": "for tool use" in _text(content)})
+                           {"during_tool": "for tool use" in text_of(content)})
 
     def steer(self, o: dict, uid: str, text: str, sess: EventSession) -> ActivityEvent | None:
         """The steer row for a prompt the collector counted as human (None if it raised). Call after
@@ -201,12 +202,12 @@ class Activity:
         elif ps == "suggestion_accepted":
             via = "suggestion_accepted"
         # promptSource says so on newer files; older ones only show the earlier enqueue.
-        elif ps == "queued" or (ps is None and _h(text) in self.queued):
+        elif ps == "queued" or (ps is None and text_sha256(text) in self.queued):
             via = "queued"
         else:
             via = "typed"
         return ActivityEvent(
-            event_id=make_event_id(self.agent, "steer", uid), ts=o.get("timestamp"),
+            event_id=make_event_id(self.agent, "steer", uid), ts=str_or_none(o.get("timestamp")),
             agent=self.agent, kind="steer", session_id=sess.session_id, turn_id=sess.turn_id,
             attrs={"via": via, "words": len(text.split()), "chars": len(text),
                    "after_interrupt": self.after_intr})
@@ -220,7 +221,7 @@ class Activity:
         inp = b.get("input") if isinstance(b.get("input"), dict) else {}
         add_call(self.agg, name, inp)
         if name == "Skill" and isinstance(inp.get("skill"), str):
-            self._emit("invoke", o, tid, sess, {"skill": _tool(inp["skill"])})
+            self._emit("invoke", o, tid, sess, {"skill": tool_key(inp["skill"])})
         cmd = inp.get("command")
         call = commit_call(cmd) if name == "Bash" and isinstance(cmd, str) else None
         if call:
@@ -233,7 +234,7 @@ class Activity:
         self.seen["r" + tid] = None
         self.open_ids.append("r" + tid)
         err = b.get("is_error") is True
-        text = _text(b.get("content")).lstrip()
+        text = text_of(b.get("content")).lstrip()
         self.link.text(text)
         if err:
             self.agg["errors"] += 1
@@ -242,9 +243,8 @@ class Activity:
             elif text.startswith("PreToolUse:") and "hook error" in text[:200]:
                 self.agg["hooks"] += 1          # a hook denied it, not the user
         if tid in self.pend:
-            amend, before, *target = self.pend.pop(tid)    # older state has no target
-            self._commits(o, tid, bool(amend), bool(before), text, err, sess,
-                          target[0] if target else None)
+            amend, before, target = self.pend.pop(tid)
+            self._commits(o, tid, bool(amend), bool(before), text, err, sess, target)
 
     def _commits(self, o: dict, tid: str, amend: bool, before: bool, text: str, err: bool,
                  sess: EventSession, target: object = None) -> None:
@@ -253,13 +253,9 @@ class Activity:
         c = g.get("commit") if isinstance(g, dict) else None
         sha = c.get("sha") if isinstance(c, dict) and isinstance(c.get("sha"), str) else None
         found = commit_shas(text, err, before, sha)
-        if not found:
-            return
-        key = commit_repo(self.keys, o.get("cwd"), target, self.wt[0] if self.wt else None)
-        self.link.commit(key, text, found)
-        for sha in found:
-            self._emit("commit", o, f"{tid}|{sha}", sess,
-                       {"sha": sha, "repo_key": key, "amend": amend})
+        for sha, attrs in commit_rows(self.link, o.get("cwd"), target, text, found, amend,
+                                      self.wt[0] if self.wt else None):
+            self._emit("commit", o, f"{tid}|{sha}", sess, attrs)
 
     def _pr(self, o: dict, sess: EventSession) -> None:
         num, url, repo = o.get("prNumber"), o.get("prUrl"), o.get("prRepository")

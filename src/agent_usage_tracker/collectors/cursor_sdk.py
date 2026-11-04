@@ -27,13 +27,9 @@ from typing import Callable, Iterator
 
 from ..config import Config
 from ..event import UsageEvent, make_event_id
-from ._util import basename, safe_int
+from ._util import noop_advance, project_name, safe_int
 
 NAME = "cursor_sdk"
-
-
-def _noop() -> None:
-    return None
 
 
 def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[UsageEvent], Callable[[], None]]]:
@@ -51,7 +47,7 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[UsageEvent], Callable[
         if not isinstance(m, dict) or not isinstance(m.get("runs"), list):
             continue
         ticket = m.get("ticket") or path
-        project = basename(m.get("project"))   # basename-only (never a full path) per CONTRACT.md
+        project = project_name(m.get("project"))   # basename-only (never a full path) per CONTRACT.md
         for pos, r in enumerate(m["runs"]):
             if not isinstance(r, dict):
                 continue
@@ -85,4 +81,4 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[UsageEvent], Callable[
                 total_tokens=total,
                 project=project,
             ))
-    yield events, _noop
+    yield events, noop_advance

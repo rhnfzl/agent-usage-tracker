@@ -15,11 +15,12 @@ Nothing leaves the machine before these guards run, in this order:
 Category and work relevance come from an app mapping (config over code defaults, then the app's
 declared macOS category); a browser row is 'web-work' when its title or URL matches a work
 pattern, else 'web'. A scan never fails because ActivityWatch is closed: no server or no buckets
-means no rows.
+means no rows and a 'degraded' heartbeat.
 """
 
 from __future__ import annotations
 
+import functools
 import json
 import os
 import plistlib
@@ -34,9 +35,10 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Iterator
 
 from ..config import Config
-from ..event import TimeInterval, make_event_id
+from ..event import CollectorUnavailable, TimeInterval, make_event_id
 from ..net import HTTP_ERRORS
 from ..redact import clean_text
+from ..sink import LOCAL_HOSTS
 
 NAME = "activitywatch"
 _LAG = timedelta(minutes=5)          # aw-watcher-window extends its last event; leave it settle
@@ -99,11 +101,23 @@ _MAC_CATEGORIES = {
 }
 
 
+@functools.lru_cache(maxsize=None)     # once per URL per run: a scan makes many calls
+def _warn_if_plaintext(url: str) -> None:
+    """Window titles travel this link, and purge deletes over it. Warn, never refuse: an aw-server
+    on a private network works today."""
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme == "http" and (parsed.hostname or "").lower() not in LOCAL_HOSTS:
+        print(f"aut: warning: activitywatch_url reaches {parsed.hostname} over plain http, so window "
+              "titles travel unencrypted. Use https:// unless the link is private (for example "
+              "Tailscale).", file=sys.stderr)
+
+
 def _http(cfg: Config, method: str, path: str, body: Any = None) -> Any:
     """The one HTTP call to aw-server (tests stub this). Raises on transport or HTTP failure."""
     url = cfg.activitywatch_url.rstrip("/") + path
     if not url.startswith(("http://", "https://")):
         raise ValueError("activitywatch_url must be http(s)")
+    _warn_if_plaintext(cfg.activitywatch_url)
     req = urllib.request.Request(url, method=method,
                                  data=None if body is None else json.dumps(body).encode(),
                                  headers={"Content-Type": "application/json"})
@@ -114,11 +128,6 @@ def _http(cfg: Config, method: str, path: str, body: Any = None) -> Any:
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
-
-
-def readable_until(until: datetime) -> datetime:
-    """How far collect() must get on its own toward `until`: earlier means it skipped."""
-    return min(until, _now() - _LAG) - 2 * _MIN_RANGE
 
 
 def _parse(ts: str) -> datetime:
@@ -199,7 +208,7 @@ class _MacCategories:
         return cat if isinstance(cat, str) and cat else None
 
 
-def _mac_category(declared: str) -> str:
+def _category_from_declared(declared: str) -> str:
     kind = declared.removeprefix("public.app-category.")
     return "media" if kind.endswith("games") else _MAC_CATEGORIES.get(kind, "other")
 
@@ -234,7 +243,7 @@ def classify(cfg: Config, app: str, title: str, url: str = "",
     if cat is None:
         cat, rule = _lookup(_DEFAULT_APPS, name), "default_app"
     if cat is None and (declared := (mac or _MacCategories())(app.strip())):
-        cat, rule = _mac_category(declared), "macos_category"
+        cat, rule = _category_from_declared(declared), "macos_category"
     if cat is None:
         cat, rule = "other", "unknown"
     if cat == "browser":
@@ -246,7 +255,8 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[TimeInterval], Callabl
     try:
         found = _buckets(cfg)
         if found is None:
-            return
+            raise CollectorUnavailable("activitywatch: aw-server has no window and AFK buckets for "
+                                       "this host; skipping")
         win, afk, first = found
         start = _parse(wm["end"]) if wm.get("end") else first
         end = min(_now() - _LAG, start + _CHUNK)
@@ -257,9 +267,8 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[TimeInterval], Callabl
                     {"query": query, "timeperiods": [f"{start.isoformat()}/{end.isoformat()}"]})
         raw = res[0] if isinstance(res, list) and res and isinstance(res[0], list) else []
     except (*HTTP_ERRORS, ValueError, TypeError, AttributeError, KeyError) as exc:
-        print(f"aut: activitywatch: aw-server not usable ({type(exc).__name__}); skipping",
-              file=sys.stderr)
-        return
+        raise CollectorUnavailable(f"activitywatch: aw-server not usable ({type(exc).__name__}); "
+                                   "skipping") from exc
 
     rows: list[TimeInterval] = []
     days = cfg.activitywatch_title_days
@@ -300,10 +309,10 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[TimeInterval], Callabl
               f"deny-list, {idle_s / 60:.1f} min idle (login window / screen saver)",
               file=sys.stderr)
 
-    def commit(w: dict = wm, end_iso: str = end.isoformat()) -> None:
+    def advance_watermark(w: dict = wm, end_iso: str = end.isoformat()) -> None:
         w["end"] = end_iso
 
-    yield rows, commit
+    yield rows, advance_watermark
 
 
 def purge(cfg: Config) -> int:

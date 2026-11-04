@@ -260,6 +260,7 @@ def test_codex_carries_across_scans() -> None:
         fstate = next(iter(wm["files"].values()))
         assert fstate["turn"] == "T1" and fstate["act"]["agg"]["calls"] == 1, fstate
         fstate.pop("meta")
+        del wm["state_v"]           # state from before identity was kept has no version either
         _append(f, [_item(T(3), "T1", type="CommandExecution", id="x", cwd="/gone", exit_code=2,
                           command=["sh", "-c", "false"], aggregated_output=""),
                     _tok(T(4)), _ev(T(5), type="task_complete", turn_id="T1")])
@@ -504,6 +505,7 @@ def test_pi_carries_across_scans() -> None:
         wm: dict = {}
         assert not _acts(_collect(pi, home, wm), "turn")
         next(iter(wm["files"].values())).pop("hdr")
+        del wm["state_v"]           # state from before the header was kept has no version either
         _append(f, [_pr("r1", T(3), "k1", "ok 0a1b2c3"), _pa("a2", T(4), "stop", tokens=1)])
         second = _collect(pi, home, wm)
         [t] = _acts(second, "turn")
@@ -564,6 +566,108 @@ def test_backfill_codex_pi() -> None:
     print("ok backfill_codex_pi")
 
 
+def _pi_file(home: Path) -> Path:
+    return home / f".pi/agent/sessions/--x--/2026-07-18T10-00-00-000Z_{SID}.jsonl"
+
+
+def test_pi_watermark_with_an_old_dev_is_not_read_again() -> None:
+    """A reboot renumbers st_dev. State saved before Pi moved to inode-only identity holds the old
+    number: it must resume where it was, with no history re-read or re-counted."""
+    with tempfile.TemporaryDirectory() as d:
+        home = Path(d)
+        f = _pi_file(home)
+        _write_jsonl(f, [_hdr(SID, "/x/repo"), _pu("u1", T(1), "go"),
+                         _pa("a1", T(2), "stop", tokens=7)])
+        wm: dict = {}
+        assert len(_usage(_collect(pi, home, wm))) == 1
+        entry = wm["files"][str(f)]
+        off, ino = entry["off"], entry["ino"]
+        entry["dev"] += 4                # what a restart does to every tracked path
+        del wm["state_v"]                # and this state predates the version
+        assert _collect(pi, home, wm) == [], "nothing new: nothing read again"
+        assert (entry["off"], entry["ino"]) == (off, ino)
+        _append(f, [_pu("u2", T(3), "more"), _pa("a2", T(4), "stop", tokens=9)])
+        later = _collect(pi, home, wm)
+        assert [u.event_id for u in _usage(later)] == [make_event_id("pi", "a2")], later  # new only
+        assert [h.session.turn_id for h in _usage(later, "human")] == ["u2"]
+    print("ok pi_watermark_with_an_old_dev_is_not_read_again")
+
+
+def test_tailers_share_the_truncation_and_replacement_reset() -> None:
+    for mod, f, recs in (
+            (pi, "pi", [_hdr(SID, "/x/repo"), _pu("u1", T(1), "go"), _pa("a1", T(2), "stop", tokens=7)]),
+            (codex, "codex", [_meta("C1"), _tok(T(1))])):
+        with tempfile.TemporaryDirectory() as d:
+            home = Path(d)
+            path = _pi_file(home) if f == "pi" else home / ".codex/sessions/2026/07/18/rollout-t.jsonl"
+            _write_jsonl(path, recs)
+            wm: dict = {}
+            assert len(_usage(_collect(mod, home, wm))) == 1
+            wm["files"][str(path)]["off"] += 1000       # the file is now shorter than the offset
+            assert len(_usage(_collect(mod, home, wm))) == 1, f
+            wm["files"][str(path)]["ino"] += 1          # a different file now sits at this path
+            assert len(_usage(_collect(mod, home, wm))) == 1, f
+            assert _collect(mod, home, wm) == [], f     # and it resumes normally after
+    print("ok tailers_share_the_truncation_and_replacement_reset")
+
+
+def test_state_upgrades_run_once_at_load() -> None:
+    with tempfile.TemporaryDirectory() as d:
+        home = Path(d)
+        # Codex state from before um_ord: dropped, so the file is re-read from 0
+        cf = home / ".codex/sessions/2026/07/18/rollout-u.jsonl"
+        _write_jsonl(cf, [_meta("C1"), _tok(T(1))])
+        wm: dict = {}
+        _collect(codex, home, wm)
+        del wm["files"][str(cf)]["um_ord"], wm["state_v"]
+        assert len(_usage(_collect(codex, home, wm))) == 1
+        assert wm["files"][str(cf)]["um_ord"] == 0 and wm["state_v"] == codex._STATE_V
+
+        # Pi: a commit call pending in state from before its target was kept still resolves
+        repo = _git_repo(home, "https://Example.com/Owner/Repo.git")
+        f = _pi_file(home)
+        _write_jsonl(f, [_hdr(SID, str(repo)), _pu("u1", T(1), "go"),
+                         _pa("a1", T(2), "toolUse", ("k1", "bash", {"command": "git commit -m x"}),
+                             tokens=1)])
+        wm = {}
+        _collect(pi, home, wm)
+        pend = wm["files"][str(f)]["act"]["pend"]
+        pend["k1"] = pend["k1"][:2]
+        del wm["state_v"]
+        err = io.StringIO()
+        _append(f, [_pr("r1", T(3), "k1", "ok 0a1b2c3"), _pa("a2", T(4), "stop", tokens=1)])
+        with contextlib.redirect_stderr(err):
+            second = _collect(pi, home, wm)
+        [c] = _acts(second, "commit")
+        assert c.attrs["sha"] == "0a1b2c3" and c.attrs["repo_key"]
+        assert "skipped" not in err.getvalue(), err.getvalue()
+    print("ok state_upgrades_run_once_at_load")
+
+
+def test_malformed_usage_records_are_counted() -> None:
+    with tempfile.TemporaryDirectory() as d:
+        home = Path(d)
+        pf = _pi_file(home)
+        bad_pi = _pa("a2", T(3), "stop", tokens=1)
+        bad_pi["message"]["usage"]["input"] = "many"
+        _write_jsonl(pf, [_hdr(SID, "/x/repo"), _pa("a1", T(2), "stop", tokens=7), bad_pi])
+        with pf.open("a") as fh:
+            fh.write("{not json\n[1, 2]\n")
+        cf = home / ".codex/sessions/2026/07/18/rollout-m.jsonl"
+        bad_tok = _tok(T(2))
+        bad_tok["payload"]["info"]["last_token_usage"]["input_tokens"] = "many"
+        _write_jsonl(cf, [_meta("C1"), _tok(T(1)), bad_tok])
+        with cf.open("a") as fh:
+            fh.write("{not json\n")
+        for mod, want in ((pi, 3), (codex, 2)):
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                evs = _collect(mod, home)
+            assert len(_usage(evs)) == 1, mod.NAME          # the good row is untouched
+            assert f"{want} malformed record(s) skipped" in err.getvalue(), err.getvalue()
+    print("ok malformed_usage_records_are_counted")
+
+
 def main() -> int:
     test_codex_sessions()
     test_codex_activity()
@@ -575,6 +679,10 @@ def main() -> int:
     test_pi_carries_across_scans()
     test_attrs_carry_no_text()
     test_backfill_codex_pi()
+    test_pi_watermark_with_an_old_dev_is_not_read_again()
+    test_tailers_share_the_truncation_and_replacement_reset()
+    test_state_upgrades_run_once_at_load()
+    test_malformed_usage_records_are_counted()
     print("\nALL PASS")
     return 0
 

@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import os
+import sys
+from collections import Counter
 from datetime import datetime, timezone
 
 # Cap lines read per file per scan so a huge first-scan/backfill file can't spike memory.
@@ -16,14 +19,41 @@ def str_or_none(value: object) -> str | None:
 
 
 def safe_int(value, default: int = 0) -> int:
-    """Non-negative int() that never raises. Guards a corrupt state offset (1e400 -> inf ->
-    OverflowError) AND a negative offset (which would make fh.seek() raise and wedge the scan);
-    every caller feeds a byte offset, which is always >= 0."""
+    """Non-negative int() that never raises, for untrusted counts, offsets and timestamps from
+    logs and state. A negative or unparseable value becomes `default`: a corrupt state offset
+    (1e400 -> inf -> OverflowError, or a negative one, which would make fh.seek() raise) must not
+    wedge the scan."""
     try:
         parsed = int(value)
     except (TypeError, ValueError, OverflowError):
         return default
     return parsed if parsed >= 0 else default
+
+
+def noop_advance() -> None:
+    """The watermark callback of a full-scan collector: it has no watermark to advance."""
+
+
+def parse_record(raw: bytes) -> dict | None:
+    """One complete JSONL line as a dict, else None. read_new_lines holds back partial lines, so a
+    None is a real anomaly: the caller counts it as malformed and skips it."""
+    try:
+        o = json.loads(raw)
+    except ValueError:              # JSONDecodeError and UnicodeDecodeError are ValueErrors
+        return None
+    return o if isinstance(o, dict) else None
+
+
+def warn_skipped(name: str, skipped: Counter, unaffected: str = "usage") -> None:
+    """Report a collector's skips. Skipping is best effort on purpose: a failed activity extraction
+    never blocks the usage and session rows of the same chunk, and one bad record never wedges a
+    scan at its offset. But a malformed usage record's tokens are gone, so neither stays silent."""
+    if skipped["activity"]:
+        print(f"aut: {name}: {skipped['activity']} activity record(s) skipped (extraction failed); "
+              f"{unaffected} and session rows are unaffected.", file=sys.stderr)
+    if skipped["malformed"]:
+        print(f"aut: {name}: {skipped['malformed']} malformed record(s) skipped; any usage they "
+              "held is not counted.", file=sys.stderr)
 
 
 def read_new_lines(path: str, offset: int) -> tuple[list[bytes], int]:
@@ -59,10 +89,10 @@ def read_new_lines(path: str, offset: int) -> tuple[list[bytes], int]:
     return lines, consumed
 
 
-def scan_file(path: str, fstate: dict) -> tuple[list[bytes], dict]:
-    """Inode-aware tail. `fstate` carries {'dev','ino','off'} (empty on first sight). Resets the
-    offset to 0 when the file behind the path changes (rotated/replaced) so the beginning of a
-    replacement file is never skipped. Returns (complete_lines, new_fstate).
+def same_file(fstate: dict, st: os.stat_result) -> bool:
+    """May a tail resume from this watermark entry? False on first sight (empty entry), when the
+    file behind the path changed (rotated/replaced), and when it was truncated in place, so the
+    beginning of a replacement is never skipped.
 
     Identity is st_ino ALONE, deliberately not (st_dev, st_ino). st_dev is assigned at mount,
     not intrinsic to the volume: macOS/APFS hands out a different number after every reboot. Any
@@ -74,14 +104,18 @@ def scan_file(path: str, fstate: dict) -> tuple[list[bytes], dict]:
     another filesystem could collide with a same-numbered inode there and be resumed mid-file.
     That needs a tracked path to change volumes AND collide, and it undercounts rather than
     double-counts. A guaranteed re-push every reboot is the worse trade. st_dev is still recorded
-    for diagnostics. Truncation-in-place is caught separately by read_new_lines (size < offset)."""
+    for diagnostics."""
+    return fstate.get("ino") == st.st_ino and st.st_size >= safe_int(fstate.get("off"))
+
+
+def scan_file(path: str, fstate: dict) -> tuple[list[bytes], dict]:
+    """Inode-aware tail. `fstate` carries {'dev','ino','off'} (empty on first sight); the offset
+    restarts at 0 unless same_file allows resuming. Returns (complete_lines, new_fstate)."""
     try:
         st = os.stat(path)
     except OSError:
         return [], fstate
-    off = safe_int(fstate.get("off"))
-    if fstate.get("ino") != st.st_ino:            # different file at this path (rotated/replaced)
-        off = 0
+    off = safe_int(fstate.get("off")) if same_file(fstate, st) else 0
     lines, new_off = read_new_lines(path, off)
     new_fstate = dict(fstate)
     new_fstate["dev"] = st.st_dev
@@ -125,7 +159,7 @@ def _strip_worktree(parts: list[str]) -> list[str] | None:
     return None
 
 
-def basename(path) -> str | None:
+def project_name(path) -> str | None:
     """Last path segment only (never a full path -> safe for a public-later repo), after
     collapsing a git worktree back onto its main checkout (see _strip_worktree). Handles BOTH
     '/' and '\\' so a Windows path is reduced on POSIX too; rejects non-strings (returns None)

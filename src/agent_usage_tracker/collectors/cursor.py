@@ -10,8 +10,8 @@ checks from real data:
 Because the DB is small and Cursor can write a bubble's tokenCount AFTER first insert,
 we full-scan every run (no watermark) and rely on event_id + ON CONFLICT to dedup at the
 sink. This is a LOWER BOUND: sessions with no local snapshot are invisible. For complete,
-model-attributed, timestamped data, use the Cursor dashboard API with the
-`cursorAuth/accessToken` cookie from ItemTable (documented follow-up, not in v1).
+model-attributed, timestamped data, use the `cursor_api` collector, with `cursor_human_only` here
+to keep the prompts without double-counting the tokens.
 
 Known limitation: the first NONZERO tokenCount seen for a bubble wins. If Cursor later
 rewrites that bubble to a different nonzero count, the sink's ON CONFLICT DO NOTHING keeps
@@ -24,12 +24,13 @@ import json
 import os
 import sqlite3
 import sys
+from collections import Counter
 from pathlib import Path
 from typing import Callable, Iterator
 
 from ..config import Config
-from ..event import UsageEvent, make_event_id
-from ._util import epoch_ms_to_iso
+from ..event import CollectorUnavailable, UsageEvent, make_event_id
+from ._util import epoch_ms_to_iso, noop_advance, warn_skipped
 
 NAME = "cursor"
 # Cursor stores state.vscdb in the OS-specific app-data dir. Subpath is the same everywhere.
@@ -37,7 +38,7 @@ _CURSOR_SUBPATH = "Cursor/User/globalStorage/state.vscdb"
 _BATCH = 500
 
 
-def cursor_db(cfg: Config) -> Path | None:
+def cursor_db(cfg: Config) -> Path:
     """Locate Cursor's state.vscdb across macOS / Windows / Linux, or an explicit override."""
     if cfg.cursor_db_path:
         return Path(cfg.cursor_db_path).expanduser()
@@ -68,10 +69,6 @@ def _model(bubble: dict) -> str | None:
     return None
 
 
-def _noop() -> None:
-    return None
-
-
 def _ts(bubble: dict, meta: dict) -> str | None:
     """Bubble createdAt is an ISO string; composerData createdAt is epoch-ms. Handle both."""
     bts = bubble.get("createdAt")
@@ -82,13 +79,12 @@ def _ts(bubble: dict, meta: dict) -> str | None:
 
 def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[UsageEvent], Callable[[], None]]]:
     db = cursor_db(cfg)
-    if db is None or not db.exists():
+    if not db.exists():
         return
     con = connect_ro(db)
     if con is None:
-        print("aut: cursor state.vscdb exists but could not be opened (locked/corrupt); "
-              "skipping cursor this run", file=sys.stderr)
-        return
+        raise CollectorUnavailable("cursor state.vscdb exists but could not be opened "
+                                   "(locked/corrupt); skipping cursor this run")
     try:
         cur = con.cursor()
 
@@ -118,15 +114,18 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[UsageEvent], Callable[
                 "SELECT key, value FROM cursorDiskKV WHERE key LIKE 'bubbleId:%'"
             )
         except sqlite3.DatabaseError as exc:
-            print(f"aut: cursor bubbleId query failed ({exc}); skipping cursor", file=sys.stderr)
-            return
+            raise CollectorUnavailable(f"cursor bubbleId query failed ({exc}); skipping cursor") \
+                from exc
 
         events: list[UsageEvent] = []
+        skipped: Counter = Counter()
+        read_failure: sqlite3.DatabaseError | None = None
         try:
             for key, val in rows:
                 try:
                     o = json.loads(val)
                     if not isinstance(o, dict):
+                        skipped["malformed"] += 1
                         continue
                     tc = o.get("tokenCount")
                     if not isinstance(tc, dict):
@@ -134,6 +133,7 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[UsageEvent], Callable[
                     inp = int(tc.get("inputTokens") or 0)
                     out = int(tc.get("outputTokens") or 0)
                 except (json.JSONDecodeError, TypeError, ValueError, AttributeError, OverflowError):
+                    skipped["malformed"] += 1
                     continue
                 composer_id = key.split(":")[1]
                 bubble_id = o.get("bubbleId") or key.rsplit(":", 1)[-1]
@@ -167,10 +167,14 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[UsageEvent], Callable[
                 else:
                     continue
                 if len(events) >= _BATCH:
-                    yield events, _noop
+                    yield events, noop_advance
                     events = []
         except sqlite3.DatabaseError as exc:   # corrupt DB can raise mid-iteration
-            print(f"aut: cursor row read failed ({exc}); emitting partial data", file=sys.stderr)
-        yield events, _noop
+            read_failure = exc
+        yield events, noop_advance
+        warn_skipped(NAME, skipped)
+        if read_failure:
+            raise CollectorUnavailable(f"cursor row read failed ({read_failure}); emitted partial "
+                                       "data") from read_failure
     finally:
         con.close()

@@ -3,6 +3,8 @@ from event_id + ON CONFLICT at the sink, so the watermark can be slightly over-i
 without ever double-counting.
 
 Layout (JSON): {"collectors": {"<name>": {<collector-private state>}}}
+A collector that changes its file entries keeps a `state_v` in its state and upgrades older state
+once, in its own _upgrade_state, when it starts.
 The watermark is only committed AFTER a successful push, so a failed push means the next
 run re-reads and re-sends (idempotent at the sink).
 """

@@ -30,10 +30,10 @@ import urllib.request
 from typing import Any, Callable, Iterator
 
 from ..config import Config
-from ..event import UsageEvent, make_event_id
-from ..net import HTTP_ERRORS
+from ..event import CollectorUnavailable, UsageEvent, make_event_id
+from ..net import HTTP_ERRORS, NoRedirect
 from ._util import epoch_ms_to_iso, safe_int
-from .cursor import cursor_db
+from .cursor import connect_ro, cursor_db
 
 NAME = "cursor_api"      # registry / config key + event_id namespace (internal)
 _AGENT = "cursor"        # emitted agent label: this IS the accurate Cursor source, so it reads as
@@ -47,12 +47,10 @@ _MAX_PAGES = 200                 # hard stop (200*100 = 20k events/scan) so a bu
 def _auth(cfg: Config) -> tuple[str, int] | None:
     """(session-cookie, teamId) from the local Cursor state DB, or None if unavailable."""
     db = cursor_db(cfg)
-    if db is None or not db.exists():
+    if not db.exists():
         return None
-    try:
-        con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
-        con.execute("PRAGMA query_only = ON")
-    except sqlite3.DatabaseError:
+    con = connect_ro(db)
+    if con is None:
         return None
     try:
         def item(k: str):
@@ -85,13 +83,14 @@ def _auth(cfg: Config) -> tuple[str, int] | None:
 
 def _post(cookie: str, name: str, body: dict) -> Any:
     """POST a dashboard endpoint. Origin/Referer clear Cursor's CSRF ('Invalid origin') guard.
+    A redirect is not followed: the session cookie must reach cursor.com and nowhere else.
     Raises one of HTTP_ERRORS on transport/HTTP failure; the caller decides how to handle it."""
     req = urllib.request.Request(
         f"{_BASE}/{name}", method="POST", data=json.dumps(body).encode(),
         headers={"Cookie": cookie, "Content-Type": "application/json",
                  "User-Agent": "Mozilla/5.0", "Origin": "https://cursor.com",
                  "Referer": "https://cursor.com/dashboard"})
-    with urllib.request.urlopen(req, timeout=30) as resp:
+    with urllib.request.build_opener(NoRedirect).open(req, timeout=30) as resp:
         return json.loads(resp.read())
 
 
@@ -147,14 +146,16 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[UsageEvent], Callable[
         return
     auth = _auth(cfg)
     if auth is None:
-        return                       # Cursor not installed / no token -> silently skip
+        if cursor_db(cfg).exists():
+            raise CollectorUnavailable("cursor_api: no usable token in Cursor's state DB (signed "
+                                       "out?); skipping this run")
+        return                       # Cursor not installed -> nothing to read
     cookie, team_id = auth
     try:
         me = _post(cookie, "get-me", {})
         uid = me.get("userId") if isinstance(me, dict) else None
         if not uid:                       # None, empty, or non-dict response -> can't self-scope, skip
-            print("aut: cursor_api: could not resolve a userId; skipping", file=sys.stderr)
-            return
+            raise CollectorUnavailable("cursor_api: could not resolve a userId; skipping")
         # incremental: only fetch events newer than the last one we committed (epoch ms)
         since = safe_int(wm.get("since_ms"))
         # first run (no watermark): bounded lookback window instead of all history
@@ -190,14 +191,14 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[UsageEvent], Callable[
                   "be unread -- shorten cursor_api_lookback_days or run again.", file=sys.stderr)
     except (*HTTP_ERRORS, json.JSONDecodeError, UnicodeDecodeError, AttributeError,
             TypeError) as exc:
-        print(f"aut: cursor_api: usage fetch failed ({exc}); skipping this run", file=sys.stderr)
-        return
+        raise CollectorUnavailable(f"cursor_api: usage fetch failed ({exc}); skipping this run") \
+            from exc
 
-    def commit(w: dict = wm, n: int = newest) -> None:
+    def advance_watermark(w: dict = wm, n: int = newest) -> None:
         if n:
             w["since_ms"] = n
 
-    yield events, commit
+    yield events, advance_watermark
 
 
 def _now_ms() -> int:

@@ -152,10 +152,10 @@ it ran, after the usage for that collector has been delivered:
 |---|---|
 | `machine`, `collector` | who ran, which collector |
 | `started_at`, `finished_at` | wall clock around that collector's drain loop (UTC) |
-| `status` | `ok`, or `error` if the collector raised (the scan still fails exactly as before) |
+| `status` | `ok`; `degraded` if the collector ran but could not read a source that is there (an expired Cursor token, a stopped aw-server, a locked or corrupt store: what it could read is still delivered, the reason is on local stderr, and the scan goes on to the next collector); or `error` if the collector raised (the scan still fails exactly as before). A source that is simply absent (the tool is not installed) stays `ok` |
 | `events`, `human` | new agent / human turns this scan, the same counts the scan report prints |
 | `newest_ts` | latest valid event timestamp seen this scan, null if none |
-| `error` | the exception type only (for example `OperationalError`). The message never leaves the machine: it can name a project path or part of a credential, so it stays on local stderr |
+| `error` | the exception type only (for example `OperationalError`, or `HTTPError` on a `degraded` row; `CollectorUnavailable` when no exception caused it). The message never leaves the machine: it can name a project path or part of a credential, so it stays on local stderr |
 | `aut_version` | the client version |
 
 All rows of a scan go out in one `INSERT ... ON CONFLICT (machine, collector, finished_at) DO
@@ -345,7 +345,7 @@ give no activity rows and no `turn_id` (the copy ends in a `turn_aborted` that i
 interrupt). A spawned child without `forked_from_id` can carry an ordinal too (measured: equal to its line count, with no copy): it is
 read in full. The commit rules (command segments, SHA parsing, `repo_key`) and the turn
 aggregates (`by_tool` with the MCP collapse, `max_identical_run`, `retry_flag`, `runaway_flag`)
-are the shared code in `collectors/activity_common.py` and `repo_keys.py`.
+are the shared code in `collectors/commits.py`, `collectors/activity_common.py` and `repo_keys.py`.
 
 | kind | Codex | Pi |
 |---|---|---|

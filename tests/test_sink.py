@@ -20,7 +20,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from agent_usage_tracker import pricing, push, sink  # noqa: E402
 from agent_usage_tracker.collectors import cursor_api  # noqa: E402
 from agent_usage_tracker.config import Config  # noqa: E402
-from agent_usage_tracker.event import ActivityEvent, EventSession, UsageEvent  # noqa: E402
+from agent_usage_tracker.event import (ActivityEvent, CollectorUnavailable, EventSession,  # noqa: E402
+                                       UsageEvent)
 from test_activity import _fake_psycopg  # noqa: E402
 
 WEBHOOK = "https://hooks.example/h"
@@ -201,11 +202,13 @@ def test_truncated_body_is_a_handled_fetch_failure() -> None:
     saved_auth, saved_post = cursor_api._auth, cursor_api._post
     cursor_api._auth, cursor_api._post = (lambda cfg: ("cookie", 0)), truncated
     try:
-        with contextlib.redirect_stderr(io.StringIO()) as err:
-            assert list(cursor_api.collect(_cfg(cursor_api=True), {})) == []
+        try:
+            list(cursor_api.collect(_cfg(cursor_api=True), {}))
+            raise AssertionError("a failed fetch must report the source unavailable")
+        except CollectorUnavailable as exc:
+            assert "skipping this run" in str(exc), exc
     finally:
         cursor_api._auth, cursor_api._post = saved_auth, saved_post
-    assert "skipping this run" in err.getvalue(), err.getvalue()
     print("ok truncated_body_is_a_handled_fetch_failure")
 
 

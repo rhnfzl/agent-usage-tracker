@@ -27,7 +27,7 @@ from urllib.parse import urlparse
 from . import __version__
 from .config import Config
 from .event import ActivityEvent, Row, TimeInterval, UsageEvent
-from .net import HTTP_ERRORS
+from .net import HTTP_ERRORS, NoRedirect
 from .redact import redact
 from .sink import LOCAL_HOSTS, connect, write_many
 
@@ -64,11 +64,6 @@ TIME_TABLE = "agents.time_interval"
 _ERROR_MAX = 300
 
 
-class _NoRedirect(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        return None  # do not follow; urllib raises HTTPError for the 3xx instead of silently GETting
-
-
 def _post_webhook(url: str, secret: str, batch: list[UsageEvent],
                   extra_headers: dict[str, str] | None = None) -> None:
     body = json.dumps({"events": [e.to_dict() for e in batch]}).encode("utf-8")
@@ -77,7 +72,7 @@ def _post_webhook(url: str, secret: str, batch: list[UsageEvent],
         headers.update(extra_headers)
     req = urllib.request.Request(url, data=body, method="POST", headers=headers)
     try:
-        with urllib.request.build_opener(_NoRedirect).open(req, timeout=30) as resp:
+        with urllib.request.build_opener(NoRedirect).open(req, timeout=30) as resp:
             status = resp.status
     except urllib.error.HTTPError as exc:            # 3xx (no-follow) / 4xx / 5xx
         raise RuntimeError(f"webhook HTTP {exc.code}") from exc

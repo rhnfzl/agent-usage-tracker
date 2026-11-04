@@ -36,7 +36,8 @@ from test_activity import _git_repo, _key, _plain_value  # noqa: E402
 from agent_usage_tracker import cli  # noqa: E402
 from agent_usage_tracker.collectors import REGISTRY, cursor_cli  # noqa: E402
 from agent_usage_tracker.config import ALL_AGENTS, Config  # noqa: E402
-from agent_usage_tracker.event import ActivityEvent, UsageEvent, make_event_id  # noqa: E402
+from agent_usage_tracker.event import (ActivityEvent, CollectorUnavailable, UsageEvent,  # noqa: E402
+                                       make_event_id)
 
 SALT = "test-salt"
 NAME = "cursor_cli"
@@ -418,20 +419,41 @@ def test_attrs_carry_no_text() -> None:
 
 def test_activity_errors_never_block_human_rows() -> None:
     def check(home, repo):
-        real = cursor_cli._activity
+        real = cursor_cli._Activity._record
 
         def boom(*a, **k):
             raise RuntimeError("boom")
-        cursor_cli._activity = boom
+        cursor_cli._Activity._record = boom
         try:
             with contextlib.redirect_stderr(io.StringIO()) as err:
                 evs = _collect(home)
         finally:
-            cursor_cli._activity = real
+            cursor_cli._Activity._record = real
         assert len([e for e in evs if isinstance(e, UsageEvent)]) == 4
         assert "activity record(s) skipped" in err.getvalue()
     _run(check)
     print("ok activity_errors_never_block_human_rows")
+
+
+def test_unreadable_store_is_reported_after_the_rest() -> None:
+    def check(home, repo):
+        bad = home / ".cursor/chats/hhh/ffffffff-0000-4000-8000-00000000000f/store.db"
+        bad.parent.mkdir(parents=True)
+        bad.write_bytes(b"this is not a database" * 100)
+        wm: dict = {}
+        out = []
+        try:
+            for events, advance_watermark in cursor_cli.collect(_cfg(home), wm):
+                out.extend(events)
+                advance_watermark()
+            raise AssertionError("a corrupt store must not look like a quiet week")
+        except CollectorUnavailable as exc:
+            assert "1 store(s)" in str(exc), exc
+        assert [e for e in out if isinstance(e, UsageEvent)], \
+            "the readable chats still came first"
+        assert str(bad) not in wm["chats"], "and the bad one is retried next scan"
+    _run(check)
+    print("ok unreadable_store_is_reported_after_the_rest")
 
 
 def test_backfill_cursor_cli() -> None:
@@ -471,6 +493,7 @@ def main() -> int:
     test_attrs_carry_no_text()
     test_activity_errors_never_block_human_rows()
     test_backfill_cursor_cli()
+    test_unreadable_store_is_reported_after_the_rest()
     print("\nALL PASS")
     return 0
 

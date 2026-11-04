@@ -39,8 +39,8 @@ from .collectors import codex as _cx
 from .collectors import cursor as _cursor
 from .collectors import cursor_cli as _cu
 from .collectors import pi as _pi
-from .collectors.activity_common import (COMMIT_LINE, commit_call, first_record, ms_between,
-                                          text_of)
+from .collectors.activity_common import first_record, ms_between, text_of
+from .collectors.commits import COMMIT_LINE, commit_call
 from .collectors._util import epoch_ms_to_iso, safe_int
 from .config import Config
 from .redact import clean_text

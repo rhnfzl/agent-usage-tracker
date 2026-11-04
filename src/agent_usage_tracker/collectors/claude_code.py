@@ -14,33 +14,34 @@ intended cross-check for that.
 from __future__ import annotations
 
 import glob
-import json
 import os
 import re
-import sys
 import time
+from collections import Counter
 from pathlib import Path
 from typing import Iterator
 
 from ..config import Config
 from ..event import Batch, EventSession, UsageEvent, make_event_id
 from ..repo_keys import RepoKeys
-from .activity_common import IDLE_S, text_of
-from ._util import basename, safe_int, scan_file, str_or_none
+from .activity_common import IDLE_S, pad_pending, text_of
+from ._util import parse_record, project_name, safe_int, scan_file, str_or_none, warn_skipped
 from .claude_code_activity import Activity
 
 NAME = "claude_code"
+# The watermark's format. Older state is upgraded once by _upgrade_state; delete a step from there
+# once no machine can still hold state that old.
+_STATE_V = 1
 
 
 def _is_human_text(content: object) -> bool:
     """True for a genuine typed prompt: a plain string (typed text or a slash command) or a
-    block list that is ALL text. False for the tool_result block-lists Claude Code writes as
-    role=user after each tool call, so those injections don't count as you prompting."""
+    non-empty block list with no tool_result (text, possibly with pasted images). False for the
+    tool_result block-lists Claude Code writes as role=user after each tool call, so those
+    injections don't count as you prompting."""
     if isinstance(content, str):
         return True
     if isinstance(content, list):
-        # A real prompt may mix text with pasted images; exclude only the tool_result
-        # block-lists Claude Code writes as role=user after each tool call.
         return bool(content) and all(
             isinstance(b, dict) and b.get("type") != "tool_result" for b in content)
     return False
@@ -103,7 +104,7 @@ def _is_injected(text: str) -> bool:
 
 def human_text(o: dict) -> str | None:
     """The text of a record a person typed, else None. A real human prompt is string content
-    (typed text or a slash command) or an all-text block list. Skipped: the tool_result
+    (typed text or a slash command) or a non-empty block list with no tool_result. Skipped: the tool_result
     user-lines Claude Code injects after every tool call (they dominate the raw "user" count),
     synthetic meta/compact/sidechain lines, and an SDK program driving the session (unknown or
     absent entrypoints stay counted: only what is positively a program is dropped)."""
@@ -126,7 +127,7 @@ def _file_identity(base: Path, path: str) -> tuple[bool, str, str | None]:
     stem = Path(path).stem
     if "subagents" in parts[1:-1]:       # parts[0] is the project dir, whatever its name
         i = parts.index("subagents", 1)
-        return True, stem.removeprefix("agent-"), parts[i - 1] if i else None
+        return True, stem.removeprefix("agent-"), parts[i - 1]
     return False, stem, None
 
 
@@ -151,13 +152,161 @@ def _complete(path: str, off: int) -> bool:
     return off >= st.st_size and time.time() - st.st_mtime >= IDLE_S
 
 
+def _upgrade_state(wm: dict) -> None:
+    """Bring state saved by an older version to the current shape, once: pending commit calls with
+    their target."""
+    if wm.get("state_v") == _STATE_V:
+        return
+    for entry in wm.setdefault("files", {}).values():
+        pad_pending(entry.get("act"))
+    wm["state_v"] = _STATE_V
+
+
+def _record_uid(o: dict, path: str) -> object:
+    return o.get("uuid") or f"{path}:{o.get('timestamp')}"
+
+
+def _usage_event(o: dict, path: str, ident: tuple[bool, str, str | None],
+                 turn: str | None) -> tuple[str, UsageEvent] | None:
+    """(dedup key, usage row) of an assistant record, None if it has no tokens. Raises on malformed
+    token counts."""
+    msg = o.get("message")
+    if not isinstance(msg, dict):
+        return None
+    u = msg.get("usage")
+    if not isinstance(u, dict):
+        return None
+    inp = int(u.get("input_tokens") or 0)
+    out = int(u.get("output_tokens") or 0)
+    cr = int(u.get("cache_read_input_tokens") or 0)
+    cw = int(u.get("cache_creation_input_tokens") or 0)
+    total = inp + out + cr + cw
+    if total == 0:
+        return None
+    msg_id = msg.get("id")
+    # message.id groups a message's blocks; requestId disambiguates a retried message.
+    # Fall back to uuid / path:ts only for old transcripts that lack message.id.
+    key = f"{msg_id}|{o.get('requestId')}" if msg_id else _record_uid(o, path)
+    return key, UsageEvent(
+        event_id=make_event_id(NAME, key),
+        ts=o.get("timestamp"),
+        agent=NAME,
+        model=msg.get("model"),
+        provider="anthropic",
+        input_tokens=inp,
+        output_tokens=out,
+        cache_read_tokens=cr,
+        cache_write_tokens=cw,
+        total_tokens=total,
+        project=project_name(o.get("cwd")),
+        session=_session_of(o, ident, turn),
+    )
+
+
+def _chunk_rows(path: str, base: Path, lines: list[bytes], fstate: dict, new_fstate: dict,
+                keys: RepoKeys, skipped: Counter) -> list:
+    """All rows of one file's new lines; puts what rides in the watermark into new_fstate."""
+    # Claude Code writes ONE JSONL line per content block of an assistant message (text +
+    # each tool_use), and every one of those lines repeats the SAME cumulative message.usage.
+    # Keying by uuid (unique per line) would count a 6-block message 6x. So dedup by
+    # (message.id, requestId) within the scan, keeping the max-total record (also correct if
+    # the repeats are cumulative-growing rather than identical), and derive event_id from that
+    # key so the sink dedups the same message across scans too.
+    #
+    # ts is whichever line last raised the max within THIS chunk, and that is not stable
+    # across scans: Claude Code re-logs a message more than once, observed both a thousand-plus
+    # lines later in the same file and with a message's own lines minutes apart. A scan seeing
+    # only part of that spread emits the same event_id with a different ts, and the sink's key
+    # is (event_id, ts) -- a TimescaleDB hypertable must carry its partitioning column in the
+    # unique index -- so both rows persist and the partial one would double-count.
+    #
+    # Not fixable here: which lines a scan sees is exactly what varies, so no per-chunk rule is
+    # invariant, and closing it would need a per-message ts cache in the watermark for every
+    # tracked file. The sink's agents.usage_event_dedup view settles it instead, keeping the
+    # largest total per event_id (counts are cumulative, so the largest is the complete one).
+    best: dict[str, UsageEvent] = {}
+    human: list[UsageEvent] = []
+    # shortcut: counted per scan chunk, so an old file read in two chunks keeps two /loops;
+    # harmless while old files are complete on disk and scanned once.
+    old_loops = 0
+    ident = _file_identity(base, path)
+    # turn_id: promptId of the latest user record (tool_results carry it too); a subagent keeps
+    # its first one, the parent turn that spawned it.
+    # Carried across chunks in the file's watermark entry, so a turn that began in an earlier
+    # scan is not lost. Dropped when the path now holds a different file (rotated/replaced).
+    # shortcut: files first read before this existed start at NULL until their next user record.
+    same_inode = fstate.get("ino") == new_fstate.get("ino")
+    turn: str | None = str_or_none(fstate.get("turn")) if same_inode else None
+    # activity state rides in the same watermark entry and is dropped with it on a new file
+    act = Activity(NAME, path, ident[0], fstate.get("act") if same_inode else None, keys)
+    fresh = not same_inode or safe_int(fstate.get("off")) == 0     # read from byte 0
+    steers: list = []
+    for raw in lines:
+        o = parse_record(raw)
+        if o is None:
+            skipped["malformed"] += 1
+            continue
+        typ = o.get("type")
+        if typ == "user":
+            pid = str_or_none(o.get("promptId"))
+            if pid and not (ident[0] and turn):
+                turn = pid
+        act.record(o, _session_of(o, ident, turn))
+        if typ == "user":
+            text = human_text(o)
+            if text is None:
+                continue
+            if is_old_loop(o, text):
+                old_loops += 1
+                if old_loops > 1:        # you typed the first; the rest are firings
+                    continue
+            uid = _record_uid(o, path)
+            sess = _session_of(o, ident, turn)
+            human.append(UsageEvent(
+                event_id=make_event_id(NAME, "human", uid),
+                ts=o.get("timestamp"), agent=NAME, model=None, provider=None,
+                kind="human", project=project_name(o.get("cwd")), session=sess,
+            ))
+            steers.append((act.steer(o, uid, text, sess), _USAGE_CMD in text))
+        elif typ == "assistant":
+            try:
+                found = _usage_event(o, path, ident, turn)
+            except (ValueError, TypeError, OverflowError):  # OverflowError: int(inf) from 1e400
+                skipped["malformed"] += 1
+                continue
+            # the fuller record wins; an equal one keeps the first
+            if found and (found[0] not in best
+                          or best[found[0]].total_tokens < found[1].total_tokens):
+                best[found[0]] = found[1]
+    if _complete(path, safe_int(new_fstate.get("off"))):
+        act.finish()
+    # A session that only ran /usage (no model call, every prompt a /usage) was nobody working
+    # (AgentsView, MIT). Judged only on a read from byte 0, so a /usage typed mid-session and
+    # caught alone by a live scan is kept, as a full re-read keeps it. shortcut: a file whose
+    # first chunk held only the /usage keeps it dropped if real work follows; rare.
+    if fresh and not best and steers and all(is_usage for _s, is_usage in steers):
+        human, steers = [], []
+    skipped["activity"] += act.errors
+    _keep_or_drop(new_fstate, "turn", turn)
+    _keep_or_drop(new_fstate, "act", act.state())
+    return list(best.values()) + human + [s for s, _u in steers if s] + act.events
+
+
+def _keep_or_drop(fstate: dict, key: str, value: object) -> None:
+    if value:
+        fstate[key] = value
+    else:
+        fstate.pop(key, None)
+
+
 def collect(cfg: Config, wm: dict) -> Iterator[Batch]:
     base = cfg.home / ".claude" / "projects"
     if not base.exists():
         return
-    files: dict = wm.setdefault("files", {})
+    _upgrade_state(wm)
+    files: dict = wm["files"]
     keys = RepoKeys(cfg.repo_key_salt)   # cwd -> repo_key cached once per collect() pass
-    act_errors = 0
+    skipped: Counter = Counter()
 
     for path in glob.glob(str(base / "**" / "*.jsonl"), recursive=True):
         fstate = files.get(path, {})
@@ -165,136 +314,10 @@ def collect(cfg: Config, wm: dict) -> Iterator[Batch]:
         # a file with an open link turn is looked at again once it went idle, to close it
         if not lines and new_fstate == fstate and not (fstate.get("act") or {}).get("lo"):
             continue
+        events = _chunk_rows(path, base, lines, fstate, new_fstate, keys, skipped)
 
-        # Claude Code writes ONE JSONL line per content block of an assistant message (text +
-        # each tool_use), and every one of those lines repeats the SAME cumulative message.usage.
-        # Keying by uuid (unique per line) would count a 6-block message 6x. So dedup by
-        # (message.id, requestId) within the scan, keeping the max-total record (also correct if
-        # the repeats are cumulative-growing rather than identical), and derive event_id from that
-        # key so the sink dedups the same message across scans too.
-        #
-        # ts is whichever line last raised the max within THIS chunk, and that is not stable
-        # across scans: Claude Code re-logs a message more than once, observed both a thousand-plus
-        # lines later in the same file and with a message's own lines minutes apart. A scan seeing
-        # only part of that spread emits the same event_id with a different ts, and the sink's key
-        # is (event_id, ts) -- a TimescaleDB hypertable must carry its partitioning column in the
-        # unique index -- so both rows persist and the partial one would double-count.
-        #
-        # Not fixable here: which lines a scan sees is exactly what varies, so no per-chunk rule is
-        # invariant, and closing it would need a per-message ts cache in the watermark for every
-        # tracked file. The sink's agents.usage_event_dedup view settles it instead, keeping the
-        # largest total per event_id (counts are cumulative, so the largest is the complete one).
-        best: dict[str, UsageEvent] = {}
-        human: list[UsageEvent] = []
-        # shortcut: counted per scan chunk, so an old file read in two chunks keeps two /loops;
-        # harmless while old files are complete on disk and scanned once.
-        old_loops = 0
-        ident = _file_identity(base, path)
-        # turn_id: promptId of the latest user record (tool_results carry it too); a subagent keeps
-        # its first one, the parent turn that spawned it.
-        # Carried across chunks in the file's watermark entry, so a turn that began in an earlier
-        # scan is not lost. Dropped when the path now holds a different file (rotated/replaced).
-        # shortcut: files first read before this existed start at NULL until their next user record.
-        same_file = fstate.get("ino") == new_fstate.get("ino")
-        turn: str | None = str_or_none(fstate.get("turn")) if same_file else None
-        # activity state rides in the same watermark entry and is dropped with it on a new file
-        act = Activity(NAME, path, ident[0], fstate.get("act") if same_file else None, keys)
-        fresh = not same_file or safe_int(fstate.get("off")) == 0     # read from byte 0
-        steers: list = []
-        for raw in lines:
-            try:
-                o = json.loads(raw)
-            except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
-                continue
-            if not isinstance(o, dict):
-                continue
-            typ = o.get("type")
-            if typ == "user":
-                pid = str_or_none(o.get("promptId"))
-                if pid and not (ident[0] and turn):
-                    turn = pid
-            act.record(o, _session_of(o, ident, turn))
-            if typ == "user":
-                text = human_text(o)
-                if text is not None:
-                    if is_old_loop(o, text):
-                        old_loops += 1
-                        if old_loops > 1:        # you typed the first; the rest are firings
-                            continue
-                    uid = o.get("uuid") or f"{path}:{o.get('timestamp')}"
-                    sess = _session_of(o, ident, turn)
-                    human.append(UsageEvent(
-                        event_id=make_event_id(NAME, "human", uid),
-                        ts=o.get("timestamp"), agent=NAME, model=None, provider=None,
-                        kind="human", project=basename(o.get("cwd")), session=sess,
-                    ))
-                    steers.append((act.steer(o, uid, text, sess), _USAGE_CMD in text))
-                continue
-            if typ != "assistant":
-                continue
-            try:
-                msg = o.get("message")
-                if not isinstance(msg, dict):
-                    continue
-                u = msg.get("usage")
-                if not isinstance(u, dict):
-                    continue
-                inp = int(u.get("input_tokens") or 0)
-                out = int(u.get("output_tokens") or 0)
-                cr = int(u.get("cache_read_input_tokens") or 0)
-                cw = int(u.get("cache_creation_input_tokens") or 0)
-            except (ValueError, TypeError, AttributeError,
-                    OverflowError):  # OverflowError: int(float('inf')) from 1e400
-                continue
-            total = inp + out + cr + cw
-            if total == 0:
-                continue
-            msg_id = msg.get("id")
-            # message.id groups a message's blocks; requestId disambiguates a retried message.
-            # Fall back to uuid / path:ts only for old transcripts that lack message.id.
-            key = f"{msg_id}|{o.get('requestId')}" if msg_id else \
-                (o.get("uuid") or f"{path}:{o.get('timestamp')}")
-            prev = best.get(key)
-            if prev is not None and prev.total_tokens >= total:
-                continue                         # already have the fuller (or equal) record
-            best[key] = UsageEvent(
-                event_id=make_event_id(NAME, key),
-                ts=o.get("timestamp"),
-                agent=NAME,
-                model=msg.get("model"),
-                provider="anthropic",
-                input_tokens=inp,
-                output_tokens=out,
-                cache_read_tokens=cr,
-                cache_write_tokens=cw,
-                total_tokens=total,
-                project=basename(o.get("cwd")),
-                session=_session_of(o, ident, turn),
-            )
-        if _complete(path, safe_int(new_fstate.get("off"))):
-            act.finish()
-        # A session that only ran /usage (no model call, every prompt a /usage) was nobody working
-        # (AgentsView, MIT). Judged only on a read from byte 0, so a /usage typed mid-session and
-        # caught alone by a live scan is kept, as a full re-read keeps it. shortcut: a file whose
-        # first chunk held only the /usage keeps it dropped if real work follows; rare.
-        if fresh and not best and steers and all(is_usage for _s, is_usage in steers):
-            human, steers = [], []
-        events = list(best.values()) + human + [s for s, _u in steers if s] + act.events
-        act_errors += act.errors
-        if turn:
-            new_fstate["turn"] = turn
-        else:
-            new_fstate.pop("turn", None)
-        carried = act.state()
-        if carried:
-            new_fstate["act"] = carried
-        else:
-            new_fstate.pop("act", None)
-
-        def commit(p: str = path, s: dict = new_fstate) -> None:
+        def advance_watermark(p: str = path, s: dict = new_fstate) -> None:
             files[p] = s
 
-        yield events, commit
-    if act_errors:
-        print(f"aut: {NAME}: {act_errors} activity record(s) skipped (extraction failed); usage "
-              "and session rows are unaffected.", file=sys.stderr)
+        yield events, advance_watermark
+    warn_skipped(NAME, skipped)

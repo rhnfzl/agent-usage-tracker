@@ -1,5 +1,6 @@
-"""Activity helpers shared by the collectors: commit detection and SHA parsing, the
-per-turn tool aggregates and the per-turn link fields. attrs built from these carry counts, flags, short enums and hashes only.
+"""What the activity extractors share: the per-turn tool aggregates, the per-turn link fields and
+small record helpers. Commit detection lives in commits.py. attrs built from these carry counts,
+flags, short enums and hashes only.
 
 The turn aggregates' retry and runaway rules are ported from AgentsView
 (github.com/kenn-io/agentsview, MIT licence, (c) its authors).
@@ -9,34 +10,14 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import re
 from datetime import datetime
+from typing import NotRequired, TypedDict
 
 from ..repo_keys import RepoKeys, repo_identity
+from .commits import COMMIT_LINE, commit_repo
 
-_SEGMENTS = re.compile(r"&&|\|\||[;|\n]")
-_HEREDOC = re.compile(r"""<<-?\s*(['"]?)(\w+)\1([^\n]*)\n.*?\n\s*\2[ \t]*(?=\n|$)""", re.S)
-_ARG = r"""(?:[^\s"']|"[^"]*"|'[^']*')+"""
-# optional wrappers (VAR=x, env, command, timeout N, rtk [proxy]), then `git`, then only global
-# options (-C <dir>, -c <k=v>, --flag[=v]), then the commit subcommand itself
-GIT_COMMIT = re.compile(
-    rf"^\s*[({{]?\s*(?:(?:\w+={_ARG}|(?:\S*/)?env|command|timeout\s+\S+|rtk(?:\s+proxy)?)\s+)*"
-    rf"(?:\S*/)?git(?:\s+(?:-[Cc]\s+{_ARG}|--[\w-]+(?:={_ARG})?|-\w+))*\s+commit(?:\s|$)")
-# segments that print nothing, so a commit after only these still owns the output's first line
-_SILENT = re.compile(rf"^\s*(?:(?:cd|pushd|set|export|true|mkdir|rm)\b|cat\s+>|\w+={_ARG}\s*$"
-                     rf"|(?:\S*/)?git(?:\s+-C\s+{_ARG})?\s+add\b)")
-_COMMIT_OUT = re.compile(r"^\[[^\]\s]+(?: \(root-commit\))? (?P<sha>[0-9a-f]{7,40})\]", re.M)
-# The condensed form a command proxy prints instead of git's own "[branch sha]" line: "ok <sha>"
-# or "<sha> <subject>" on the FIRST line. Most commits on a machine with such a proxy look like this.
-_CONDENSED = re.compile(r"(?:ok )?(?P<sha>[0-9a-f]{7,40})(?:\s|$)")
 _HEX_SHA = re.compile(r"[0-9a-f]{7,40}")
-_OK_LINE = re.compile(r"^ok (?P<sha>[0-9a-f]{7,40})\s*$", re.M)
-# git's commit line with its branch and subject, for the link row (both are text: hashed or dropped)
-COMMIT_LINE = re.compile(
-    r"^\[(?P<br>[^\]\s]+)(?: \(root-commit\))? [0-9a-f]{7,40}\] ?(?P<subj>[^\n]*)", re.M)
-_CD = re.compile(rf"^\s*[({{]?\s*(?:cd|pushd)\s+({_ARG})\s*$")
-_DASH_C = re.compile(rf"\s-C\s+({_ARG})")
 # link fields: a commit-like SHA (7 to 40 hex, not inside a longer word, a uuid or a 64-hex hash),
 # a strict ticket id, a GitHub or Bitbucket PR URL
 _SHA_REF = re.compile(r"(?<![\w-])[0-9a-f]{7,40}(?![\w-])")
@@ -67,7 +48,8 @@ def tool_key(name: str) -> str:
     return "mcp" if name.startswith("mcp__") else name
 
 
-def h(text: str) -> str:
+def text_sha256(text: str) -> str:
+    """Hex SHA-256 of the stripped text."""
     return hashlib.sha256(text.strip().encode("utf-8")).hexdigest()
 
 
@@ -89,49 +71,6 @@ def first_record(path: str) -> dict | None:
     except (OSError, ValueError):
         return None
     return o if isinstance(o, dict) else None
-
-
-def commit_call(cmd: str) -> tuple[bool, bool] | None:
-    """(is_amend, printed_before) when a command segment runs `git commit` (not --dry-run);
-    printed_before: a segment ahead of the commit may have printed, so the output's first line is
-    not necessarily the commit's."""
-    # a heredoc body is data (a file, a commit message), not commands: drop it before splitting
-    segs = [x for x in _SEGMENTS.split(_HEREDOC.sub(r"\3", cmd)) if x.strip()]
-    hits = [i for i, x in enumerate(segs) if GIT_COMMIT.match(x) and "--dry-run" not in x.split()]
-    if not hits:
-        return None
-    return (any("--amend" in segs[i].split() for i in hits),
-            not all(_SILENT.match(x) for x in segs[:hits[0]]))
-
-
-def commit_dir(cmd: str) -> str | None:
-    """Where the first commit call runs when the command moves there itself (`cd X && git commit`,
-    `git -C X commit`), relative to the record's cwd unless absolute; None when it does not move
-    or the move is not knowable (a variable, a command substitution)."""
-    d = None
-    for x in [x for x in _SEGMENTS.split(_HEREDOC.sub(r"\3", cmd)) if x.strip()]:
-        m, g = _CD.match(x), GIT_COMMIT.match(x)
-        if not (m or (g and "--dry-run" not in x.split())):
-            continue
-        # a cd moves the shell for the segments after it; a -C only the commit itself
-        for arg in [m[1]] if m else [c[1] for c in _DASH_C.finditer(g[0])]:
-            if "$" in arg or "`" in arg:
-                return None
-            d = os.path.join(d or "", os.path.expanduser(arg.strip("\"'")))
-        if g:
-            return d
-    return None
-
-
-def commit_repo(keys: RepoKeys, cwd: object, target: object, fallback: str | None) -> str | None:
-    """A commit's repo_key: the directory the command moved to, else the record's cwd, else
-    `fallback` (the worktree's original checkout, for a cwd that is gone). A relative target
-    with no cwd is not resolved: it would be relative to aut's own directory."""
-    if isinstance(target, str) and (isinstance(cwd, str) or os.path.isabs(target)):
-        k = keys.of_cwd(os.path.join(cwd, target) if isinstance(cwd, str) else target)
-        if k:
-            return k
-    return keys.of_cwd(cwd) or fallback
 
 
 def branch_key(keys: RepoKeys, repo_key: str | None, branch: object) -> str | None:
@@ -247,36 +186,48 @@ class Link:
         self.s.clear()
 
 
-def commit_shas(text: str, err: bool, before: bool, structured: str | None = None) -> list[str]:
-    """SHAs a commit call printed: git's `[branch sha]` lines; failing that, for a successful
-    call only, the agent's structured sha, else the condensed proxy form where it can be the
-    commit's own (the first line, or the last `ok <sha>` when an earlier segment may have
-    printed)."""
-    found = [m["sha"] for m in _COMMIT_OUT.finditer(text)]
-    if found or err:
-        return found
-    if structured:
-        return [structured]
-    if before:
-        return [m["sha"] for m in _OK_LINE.finditer(text)][-1:]
-    m = _CONDENSED.match(text.split("\n", 1)[0])
-    return [m["sha"]] if m else []
+def commit_rows(link: Link, cwd: object, target: object, text: str, shas: list[str], amend: bool,
+                fallback: str | None = None) -> list[tuple[str, dict]]:
+    """Tell the turn's link about a commit call's printed `shas`; (sha, attrs) of each commit row."""
+    if not shas:
+        return []
+    key = commit_repo(link.keys, cwd, target, fallback)
+    link.commit(key, text, shas)
+    return [(sha, {"sha": sha, "repo_key": key, "amend": amend}) for sha in shas]
 
 
-def blank_agg() -> dict:
+def pad_pending(act: dict | None) -> None:
+    """State upgrade: a pending commit call saved before its target was kept gains target None."""
+    for call in ((act or {}).get("pend") or {}).values():
+        call[2:] = call[2:] or [None]
+
+
+class TurnAgg(TypedDict):
+    """One turn's tool aggregates. A plain dict because it rides in the watermark as JSON."""
+    calls: int
+    errors: int
+    hooks: int
+    by: dict[str, int]
+    last: str | None       # the previous call's tool and input hash
+    run: int               # length of the current run of identical calls
+    max: int               # longest such run
+    mcp_ids: NotRequired[list]   # codex: MCP call ids, to match the item Desktop logs again
+
+
+def blank_agg() -> TurnAgg:
     return {"calls": 0, "errors": 0, "hooks": 0, "by": {}, "last": None, "run": 0, "max": 0}
 
 
-def add_call(agg: dict, name: str, args: object) -> None:
+def add_call(agg: TurnAgg, name: str, args: object) -> None:
     """Count one tool call; a run of the same tool with the same input feeds max_identical_run."""
     agg["calls"] += 1
     agg["by"][tool_key(name)] = agg["by"].get(tool_key(name), 0) + 1
-    key = name + ":" + h(json.dumps(args, sort_keys=True, default=str))[:16]
+    key = name + ":" + text_sha256(json.dumps(args, sort_keys=True, default=str))[:16]
     agg["run"] = agg["run"] + 1 if key == agg["last"] else 1
     agg["last"], agg["max"] = key, max(agg["max"], agg["run"])
 
 
-def turn_attrs(agg: dict) -> dict:
+def turn_attrs(agg: TurnAgg) -> dict:
     top = max(agg["by"].values(), default=0)
     return {
         "tool_calls": agg["calls"], "tool_errors": agg["errors"], "by_tool": dict(agg["by"]),

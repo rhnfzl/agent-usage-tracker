@@ -36,7 +36,7 @@ from agent_usage_tracker.collectors import REGISTRY  # noqa: E402
 from agent_usage_tracker.collectors import activitywatch as aw  # noqa: E402
 from agent_usage_tracker.config import ALL_AGENTS, AW_CATEGORIES, DEFAULT_AGENTS, Config, load_config  # noqa: E402
 from agent_usage_tracker.redact import PATTERNS, clean_text  # noqa: E402
-from agent_usage_tracker.event import TimeInterval, UsageEvent  # noqa: E402
+from agent_usage_tracker.event import CollectorUnavailable, TimeInterval, UsageEvent  # noqa: E402
 from test_activity import _fake_psycopg  # noqa: E402
 
 HOST = "host-a"
@@ -139,6 +139,18 @@ def _rows(cfg, wm, fake, now):
     return out, err.getvalue()
 
 
+def test_plaintext_url_to_another_host_warns_but_works() -> None:
+    aw._warn_if_plaintext.cache_clear()
+    with contextlib.redirect_stderr(io.StringIO()) as err:
+        for url in ("http://localhost:5600", "http://127.0.0.1:5600", "https://aw.example"):
+            aw._warn_if_plaintext(url)
+        assert err.getvalue() == ""
+        aw._warn_if_plaintext("http://aw.example:5600")
+        aw._warn_if_plaintext("http://aw.example:5600")
+    assert err.getvalue().count("aw.example") == 1, err.getvalue()    # once per run, not refused
+    print("ok plaintext_url_to_another_host_warns_but_works")
+
+
 def test_default_agents_exclude_activitywatch() -> None:
     assert "activitywatch" in ALL_AGENTS and "activitywatch" in REGISTRY
     assert "activitywatch" not in DEFAULT_AGENTS
@@ -233,8 +245,11 @@ def test_aw_down_or_no_buckets() -> None:
 
     for fake in (FakeAW(up=False), FakeAW(with_buckets=False), Cut()):
         wm: dict = {}
-        out, _ = _rows(_cfg(), wm, fake, now)
-        assert out == [] and wm == {}
+        try:
+            _rows(_cfg(), wm, fake, now)
+            raise AssertionError("a source that cannot be read must say so")
+        except CollectorUnavailable:
+            assert wm == {}
         with _patched(fake, now), contextlib.redirect_stderr(io.StringIO()):
             assert aw.purge(_cfg()) == 0
     print("ok aw_down_or_no_buckets")
@@ -658,6 +673,7 @@ def main() -> int:
     test_titles_kept_for_good_by_default()
     test_time_add_validation()
     test_delivery_one_transaction_and_webhook_note()
+    test_plaintext_url_to_another_host_warns_but_works()
     print("\nALL PASS")
     return 0
 

@@ -19,7 +19,7 @@ from typing import Callable
 from ..collectors import activitywatch as aw
 from ..collectors.activity_common import text_of
 from ..config import Config
-from ..event import make_event_id
+from ..event import CollectorUnavailable, make_event_id
 from ..redact import redact
 from ..repo_keys import RepoKeys
 from ..sink import connect
@@ -166,20 +166,20 @@ class Source:
     def windows(self, since: datetime, until: datetime) -> list[dict]:
         """This machine's ActivityWatch window rows in [since, until), through the collector's own
         guards (idle, deny-list, redaction, title settings), one day per query. None where
-        activitywatch is not enabled; SourceUnavailable when it is but aw-server stops short."""
+        activitywatch is not enabled; SourceUnavailable when it is but aw-server cannot be read."""
         if aw.NAME not in self.cfg.agents:
             return []
         out, wm = [], {"end": since.astimezone(timezone.utc).isoformat()}
         while datetime.fromisoformat(wm["end"]) < until:
             before = wm["end"]
-            for rows, commit in aw.collect(self.cfg, wm):
-                out += rows
-                commit()
+            try:
+                for rows, advance_watermark in aw.collect(self.cfg, wm):
+                    out += rows
+                    advance_watermark()
+            except CollectorUnavailable as exc:
+                raise SourceUnavailable(str(exc)) from exc
             if wm["end"] == before:
                 break
-        # collect stops on its own short of now - lag; anything earlier means it skipped
-        if datetime.fromisoformat(wm["end"]) < aw.readable_until(until):
-            raise SourceUnavailable("activitywatch: aw-server not readable for the label window")
         res = []
         for t in out:
             s, e = datetime.fromisoformat(t.ts), min(datetime.fromisoformat(t.end_ts), until)

@@ -15,25 +15,28 @@ from __future__ import annotations
 
 import copy
 import glob
-import json
 import os
 import re
-import sys
+from collections import Counter
 from pathlib import Path
 from typing import Iterator
 
 from ..config import Config
 from ..event import Batch, ActivityEvent, EventSession, UsageEvent, make_event_id
 from ..repo_keys import RepoKeys
-from .activity_common import (Link, add_call, blank_agg, commit_call, commit_dir,
-                              commit_repo, commit_shas, first_record, ms_between, text_of,
-                              tool_key, turn_attrs)
-from ._util import basename, read_new_lines, safe_int, str_or_none
+from .activity_common import (Link, add_call, blank_agg, commit_rows, first_record, ms_between,
+                              pad_pending, text_of, tool_key, turn_attrs)
+from .commits import commit_call, commit_dir, commit_shas
+from ._util import (parse_record, project_name, read_new_lines, safe_int, same_file, str_or_none,
+                    warn_skipped)
 
 NAME = "pi"
 _UUID = re.compile(r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$")
 SKILL = re.compile(r'\s*<skill name="([\w.:-]+)"')
 _ENDS = ("stop", "aborted", "length")   # an `error` followed by another assistant is a retry
+# The watermark's format. Older state is upgraded once by _upgrade_state; delete a step from there
+# once no machine can still hold state that old.
+_STATE_V = 1
 
 
 def _cost_total(cost) -> float | None:
@@ -70,30 +73,38 @@ def header(o: dict, path: str) -> dict:
 
 
 class _Activity:
-    """Per-file activity state machine; `a` is the carried state (already a private copy)."""
+    """Per-file activity state machine; `carried` is the watermark's state (a private copy)."""
 
-    def __init__(self, a: dict, sid: str, cwd: str | None, keys: RepoKeys) -> None:
-        self.a, self.sid, self.cwd, self.keys = a, sid, cwd, keys
+    def __init__(self, carried: dict, sid: str, cwd: str | None, keys: RepoKeys) -> None:
+        self.carried, self.sid, self.cwd, self.keys = carried, sid, cwd, keys
         self.events: list[ActivityEvent] = []
+        self.errors = 0                       # records whose extraction raised (skipped)
 
     def _emit(self, kind: str, ts: object, seed: str, turn: str | None, attrs: dict) -> None:
         self.events.append(ActivityEvent(
-            event_id=make_event_id(NAME, kind, f"{self.sid}|{seed}"), ts=ts, agent=NAME,
+            event_id=make_event_id(NAME, kind, f"{self.sid}|{seed}"), ts=str_or_none(ts), agent=NAME,
             kind=kind, session_id=self.sid, turn_id=turn, attrs=attrs))
 
     def _close(self, end: object) -> None:
-        t = self.a.pop("open")
-        self._emit("turn", end, t["id"], t["id"], {
-            "duration_ms": ms_between(t["ts"], end), "message_count": t["n"],
-            **turn_attrs(self.a.get("agg") or blank_agg())})
-        link = Link(self.keys, self.a.pop("link", {}))
+        turn = self.carried.pop("open")
+        self._emit("turn", end, turn["id"], turn["id"], {
+            "duration_ms": ms_between(turn["ts"], end), "message_count": turn["n"],
+            **turn_attrs(self.carried.get("agg") or blank_agg())})
+        link = Link(self.keys, self.carried.pop("link", {}))
         link.place(3, self.keys.of_cwd(self.cwd))
-        self._emit("link", end, t["id"], t["id"], link.attrs("interactive"))
-        self.a.pop("agg", None)
-        self.a.pop("pend", None)       # a commit call unanswered at turn end never will be
+        self._emit("link", end, turn["id"], turn["id"], link.attrs("interactive"))
+        self.carried.pop("agg", None)
+        self.carried.pop("pend", None)       # a commit call unanswered at turn end never will be
 
     def record(self, o: dict, sess: EventSession) -> None:
-        a, ts, eid = self.a, o.get("timestamp"), o.get("id")
+        """Best effort: a record whose extraction raises is counted and skipped."""
+        try:
+            self._record(o, sess)
+        except Exception:
+            self.errors += 1
+
+    def _record(self, o: dict, sess: EventSession) -> None:
+        a, ts, eid = self.carried, o.get("timestamp"), o.get("id")
         if o.get("type") == "compaction":
             tb = o.get("tokensBefore")
             self._emit("compaction", ts, str(eid), sess.turn_id,
@@ -151,143 +162,168 @@ class _Activity:
                 tid = m.get("toolCallId")
                 pend = a.get("pend") or {}
                 if isinstance(tid, str) and tid in pend:
-                    amend, before, *target = pend.pop(tid)     # older state has no target
-                    found = commit_shas(text_of(content), err, bool(before))
-                    key = commit_repo(self.keys, self.cwd, target[0] if target else None,
-                                      None) if found else None
-                    if found:
-                        link.commit(key, text_of(content), found)
-                    for sha in found:
-                        self._emit("commit", ts, f"{tid}|{sha}", sess.turn_id,
-                                   {"sha": sha, "repo_key": key, "amend": bool(amend)})
+                    amend, before, target = pend.pop(tid)
+                    text = text_of(content)
+                    found = commit_shas(text, err, bool(before))
+                    for sha, attrs in commit_rows(link, self.cwd, target, text, found, bool(amend)):
+                        self._emit("commit", ts, f"{tid}|{sha}", sess.turn_id, attrs)
         a["prev"] = role
+
+
+def _upgrade_state(wm: dict) -> None:
+    """Bring state saved by an older version to the current shape, once: the header kept in the
+    entry, and pending commit calls with their target. A reset would re-read the file instead."""
+    if wm.get("state_v") == _STATE_V:
+        return
+    for path, entry in wm.setdefault("files", {}).items():
+        if safe_int(entry.get("off")) and "hdr" not in entry:
+            first = first_record(path)
+            if first and first.get("type") == "session":
+                entry["hdr"] = header(first, path)
+        pad_pending(entry.get("act"))
+    wm["state_v"] = _STATE_V
+
+
+def _note_model_change(o: dict, cur: dict) -> None:
+    m = o.get("modelId") or o.get("model")
+    if m:
+        cur["model"] = m
+    if o.get("provider"):
+        cur["provider"] = o["provider"]
+
+
+def _record_id(o: dict, path: str) -> object:
+    return o.get("id") or f"{path}:{o.get('timestamp')}"
+
+
+def _usage_event(o: dict, msg: dict, cur: dict, path: str, project: str | None,
+                 sess: EventSession | None) -> UsageEvent | None:
+    """The usage row of a record, None if it has no tokens. Raises on malformed token counts."""
+    if o.get("type") == "message":
+        u, model, provider = msg.get("usage"), msg.get("model"), msg.get("provider")
+    elif o.get("type") == "compaction":      # the summary call's own usage; no model on the record
+        u, model, provider = o.get("usage"), None, None
+    else:
+        return None
+    if not isinstance(u, dict):
+        return None
+    inp = int(u.get("input") or 0)
+    out = int(u.get("output") or 0)
+    cr = int(u.get("cacheRead") or 0)
+    cw = int(u.get("cacheWrite") or 0)
+    total = int(u.get("totalTokens") or (inp + out + cr + cw))
+    # a SUBSET of output: informational, never added to totals or cost
+    rea = int(u["reasoning"]) if u.get("reasoning") is not None else None
+    if total == 0:
+        return None
+    return UsageEvent(
+        event_id=make_event_id(NAME, _record_id(o, path)),
+        ts=o.get("timestamp"),
+        agent=NAME,
+        model=model or cur["model"],
+        provider=provider or cur.get("provider"),
+        input_tokens=inp,
+        output_tokens=out,
+        cache_read_tokens=cr,
+        cache_write_tokens=cw,
+        reasoning_tokens=rea,
+        total_tokens=total,
+        est_cost_usd=_cost_total(u.get("cost")),
+        project=project,
+        session=sess,
+    )
+
+
+def _chunk_rows(path: str, lines: list[bytes], cur: dict, keys: RepoKeys,
+                skipped: Counter) -> list:
+    """All rows of one file's new lines; updates `cur`, the private copy of its watermark entry."""
+    hdr = cur.get("hdr") or header({}, path)
+    act = _Activity(cur.setdefault("act", {}), hdr["id"], hdr["cwd"], keys)
+    events: list = []
+    for raw in lines:
+        o = parse_record(raw)
+        if o is None:
+            skipped["malformed"] += 1
+            continue
+        t = o.get("type")
+        if t == "session":
+            if "hdr" not in cur:
+                cur["hdr"] = hdr = header(o, path)
+                act.sid, act.cwd = hdr["id"], hdr["cwd"]
+            continue
+        if t == "model_change":
+            _note_model_change(o, cur)
+            continue
+        msg = o.get("message") if isinstance(o.get("message"), dict) else {}
+        # A fork copies the parent's entries (same ids and timestamps, all before its own
+        # header): their usage ids dedupe, but session and activity rows belong to the parent.
+        gap = ms_between(o.get("timestamp"), hdr["ts"]) if hdr["fork"] else None
+        copied = gap is not None and gap > 0
+        is_prompt = t == "message" and msg.get("role") == "user"
+        if is_prompt and not copied:
+            cur["turn"] = str_or_none(o.get("id")) or cur.get("turn")
+        sess = None if copied else EventSession(hdr["id"], hdr["parent"], "unknown", cur.get("turn"))
+        if not copied:
+            act.record(o, sess)
+        project = project_name(hdr["cwd"])
+        if is_prompt:
+            # A human prompt: plain text, no usage block. Emit as a human turn.
+            events.append(UsageEvent(
+                event_id=make_event_id(NAME, "human", _record_id(o, path)),
+                ts=o.get("timestamp"), agent=NAME, model=None, provider=None,
+                kind="human", project=project, session=sess,
+            ))
+            continue
+        try:
+            event = _usage_event(o, msg, cur, path, project, sess)
+        except (ValueError, TypeError, OverflowError):
+            skipped["malformed"] += 1
+            continue
+        if event:
+            events.append(event)
+    skipped["activity"] += act.errors
+    return events + act.events
+
+
+def _trim_state(cur: dict) -> None:
+    if not cur["act"].get("link"):
+        cur["act"].pop("link", None)
+    if not cur["act"]:
+        del cur["act"]
 
 
 def collect(cfg: Config, wm: dict) -> Iterator[Batch]:
     base = cfg.home / ".pi" / "agent" / "sessions"
     if not base.exists():
         return
-    files: dict = wm.setdefault("files", {})
+    _upgrade_state(wm)
+    files: dict = wm["files"]
     keys = RepoKeys(cfg.repo_key_salt)
-    act_errors = 0
+    skipped: Counter = Counter()
 
     for path in glob.glob(str(base / "**" / "*.jsonl"), recursive=True):
         try:
             st = os.stat(path)
         except OSError:
             continue
-        prev = files.get(path)
-        if (not prev or (prev.get("dev"), prev.get("ino")) != (st.st_dev, st.st_ino)
-                or st.st_size < safe_int(prev.get("off"))):   # identity is (dev, ino); see _util
+        prev = files.get(path) or {}
+        if not same_file(prev, st):
             prev = {"off": 0, "dev": st.st_dev, "ino": st.st_ino, "model": None}
         off = safe_int(prev.get("off"))
         if st.st_size <= off:
             continue
 
         lines, new_off = read_new_lines(path, off)
-        # A deep copy: only commit() may publish this chunk's state into the watermark.
+        # A deep copy: only advance_watermark() may publish this chunk's state into the watermark.
         cur = copy.deepcopy(prev)
-        if off and "hdr" not in cur:      # resumed from a state saved before the header was kept
-            first = first_record(path)
-            if first and first.get("type") == "session":
-                cur["hdr"] = header(first, path)
-        hdr = cur.get("hdr") or header({}, path)
-        act = _Activity(cur.setdefault("act", {}), hdr["id"], hdr["cwd"], keys)
-        events: list = []
-        for raw in lines:
-            try:
-                o = json.loads(raw)
-            except (json.JSONDecodeError, UnicodeDecodeError):
-                continue
-            if not isinstance(o, dict):
-                continue
-            t = o.get("type")
-            msg = o.get("message")
-            if not isinstance(msg, dict):
-                msg = {}
-            if t == "session":
-                if "hdr" not in cur:
-                    cur["hdr"] = hdr = header(o, path)
-                    act.sid, act.cwd = hdr["id"], hdr["cwd"]
-                continue
-            if t == "model_change":
-                m = o.get("modelId") or o.get("model")
-                if m:
-                    cur["model"] = m
-                if o.get("provider"):
-                    cur["provider"] = o["provider"]
-                continue
-            # A fork copies the parent's entries (same ids and timestamps, all before its own
-            # header): their usage ids dedupe, but session and activity rows belong to the parent.
-            gap = ms_between(o.get("timestamp"), hdr["ts"]) if hdr["fork"] else None
-            copied = gap is not None and gap > 0
-            if not copied and t == "message" and msg.get("role") == "user":
-                cur["turn"] = str_or_none(o.get("id")) or cur.get("turn")
-            sess = None if copied else EventSession(hdr["id"], hdr["parent"], "unknown",
-                                                    cur.get("turn"))
-            if not copied:
-                try:                     # best effort: never blocks usage and session rows
-                    act.record(o, sess)
-                except Exception:
-                    act_errors += 1
-            project = basename(hdr["cwd"])
-            if t == "message" and msg.get("role") == "user":
-                # A human prompt: plain text, no usage block. Emit as a human turn.
-                events.append(UsageEvent(
-                    event_id=make_event_id(NAME, "human", o.get("id") or f"{path}:{o.get('timestamp')}"),
-                    ts=o.get("timestamp"), agent=NAME, model=None, provider=None,
-                    kind="human", project=project, session=sess,
-                ))
-                continue
-            if t == "message":
-                u, model, provider = msg.get("usage"), msg.get("model"), msg.get("provider")
-            elif t == "compaction":      # the summary call's own usage; no model on the record
-                u, model, provider = o.get("usage"), None, None
-            else:
-                continue
-            if not isinstance(u, dict):
-                continue
-            try:
-                inp = int(u.get("input") or 0)
-                out = int(u.get("output") or 0)
-                cr = int(u.get("cacheRead") or 0)
-                cw = int(u.get("cacheWrite") or 0)
-                total = int(u.get("totalTokens") or (inp + out + cr + cw))
-                # a SUBSET of output: informational, never added to totals or cost
-                rea = int(u["reasoning"]) if u.get("reasoning") is not None else None
-            except (ValueError, TypeError, OverflowError):
-                continue
-            if total == 0:
-                continue
-            events.append(UsageEvent(
-                event_id=make_event_id(NAME, o.get("id") or f"{path}:{o.get('timestamp')}"),
-                ts=o.get("timestamp"),
-                agent=NAME,
-                model=model or cur["model"],
-                provider=provider or cur.get("provider"),
-                input_tokens=inp,
-                output_tokens=out,
-                cache_read_tokens=cr,
-                cache_write_tokens=cw,
-                reasoning_tokens=rea,
-                total_tokens=total,
-                est_cost_usd=_cost_total(u.get("cost")),
-                project=project,
-                session=sess,
-            ))
-        events.extend(act.events)
+        events = _chunk_rows(path, lines, cur, keys, skipped)
         cur["off"] = new_off
         # shortcut: the last open turn of a file is emitted only when a later scan reads its end
         # (or the next prompt); a session left on an error or a tool call keeps it open for good.
-        if not cur["act"].get("link"):
-            cur["act"].pop("link", None)
-        if not cur["act"]:
-            del cur["act"]
+        _trim_state(cur)
 
-        def commit(p: str = path, c: dict = cur) -> None:
+        def advance_watermark(p: str = path, c: dict = cur) -> None:
             files[p] = c
 
-        yield events, commit
-    if act_errors:
-        print(f"aut: {NAME}: {act_errors} activity record(s) skipped (extraction failed); usage "
-              "and session rows are unaffected.", file=sys.stderr)
+        yield events, advance_watermark
+    warn_skipped(NAME, skipped)

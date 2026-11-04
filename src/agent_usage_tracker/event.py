@@ -120,3 +120,10 @@ class TimeInterval:
 # can say which.
 Row = UsageEvent | ActivityEvent | TimeInterval
 Batch = tuple[Sequence[Row], Callable[[], None]]
+
+
+class CollectorUnavailable(Exception):
+    """A collector could not read a source that is there (an expired token, a stopped server, a
+    locked store). Raised after the batches it could read, with a one-line message for local stderr;
+    the scan records status 'degraded' and carries on. Chain the cause: its type is what the
+    heartbeat row stores."""

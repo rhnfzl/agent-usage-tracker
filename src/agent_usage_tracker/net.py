@@ -4,5 +4,15 @@ garbled status line (IncompleteRead, BadStatusLine) is an HTTPException, which i
 from __future__ import annotations
 
 import http.client
+import urllib.request
 
 HTTP_ERRORS = (OSError, http.client.HTTPException)
+
+
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    """For `build_opener`: a 3xx raises HTTPError instead of being followed. Following would turn a
+    POST into a GET that looks like success, and it would carry a Cookie header to wherever the
+    redirect points."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None

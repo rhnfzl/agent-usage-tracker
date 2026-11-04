@@ -32,7 +32,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from agent_usage_tracker import cli, push  # noqa: E402
 from agent_usage_tracker.collectors import claude_code  # noqa: E402
 from agent_usage_tracker.collectors import claude_code_activity as act  # noqa: E402
-from agent_usage_tracker.collectors.activity_common import GIT_COMMIT  # noqa: E402
+from agent_usage_tracker.collectors.commits import GIT_COMMIT  # noqa: E402
 from agent_usage_tracker.config import Config  # noqa: E402
 from agent_usage_tracker.event import ActivityEvent, UsageEvent, make_event_id  # noqa: E402
 from agent_usage_tracker.repo_keys import RepoKeys, repo_identity  # noqa: E402

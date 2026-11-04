@@ -2,7 +2,8 @@
 
 Run: `python tests/test_heartbeat.py`  (or `pytest`).
 Locks the rules that matter for a heartbeat that rides alongside usage delivery:
-  - every collector that ran gets one row, 'ok' or 'error', and an error still re-raises;
+  - every collector that ran gets one row, 'ok', 'degraded' or 'error', and an error still
+    re-raises, while a degraded collector delivers what it read and the scan goes on;
   - all rows go out in ONE delivery call, and a failing delivery never changes the scan;
   - dry-run sends nothing;
   - error text is short and never carries a DSN or URL with credentials.
@@ -23,7 +24,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from agent_usage_tracker import __version__, cli, push  # noqa: E402
 from agent_usage_tracker.config import Config  # noqa: E402
-from agent_usage_tracker.event import UsageEvent  # noqa: E402
+from agent_usage_tracker.event import CollectorUnavailable, UsageEvent  # noqa: E402
 
 
 def _cfg(pg_dsn: str | None = None, webhook_url: str | None = None) -> Config:
@@ -103,6 +104,35 @@ def test_scan_rows_ok_and_error() -> None:
         assert r["started_at"].tzinfo is not None and r["started_at"] <= r["finished_at"]
         assert set(r) == set(push.SCAN_COLUMNS), r
     print("ok scan_rows_ok_and_error")
+
+
+def test_degraded_collector_keeps_its_rows_and_the_scan_goes_on() -> None:
+    advanced: list[bool] = []
+
+    def partly(cfg, wm):
+        yield [_ev("a", "2026-07-18T09:00:00+00:00")], lambda: advanced.append(True)
+        try:
+            raise OSError("token expired")
+        except OSError as exc:
+            raise CollectorUnavailable("partly: could not read the rest") from exc
+
+    def unreadable(cfg, wm):
+        raise CollectorUnavailable("unreadable: no source")
+        yield
+
+    calls: list[list[dict]] = []
+    reg = {"partly": partly, "unreadable": unreadable, "good": _ok_collector}
+    with _patched(reg, lambda cfg, rows: calls.append(list(rows))) as (sent, _state), \
+            contextlib.redirect_stderr(io.StringIO()) as err:
+        cli.run_scan(_cfg(pg_dsn="postgresql://x"), list(reg), dry_run=False)
+    rows = {r["collector"]: r for r in calls[0]}
+    assert (rows["partly"]["status"], rows["partly"]["error"]) == ("degraded", "OSError"), rows
+    assert rows["partly"]["events"] == 1 and sent[0] == ["a"] and advanced  # read rows went out
+    assert (rows["unreadable"]["status"], rows["unreadable"]["error"]) \
+        == ("degraded", "CollectorUnavailable")
+    assert rows["good"]["status"] == "ok"
+    assert "could not read the rest" in err.getvalue() and "token expired" not in str(rows)
+    print("ok degraded_collector_keeps_its_rows_and_the_scan_goes_on")
 
 
 def test_delivery_failure_is_swallowed() -> None:
@@ -220,6 +250,7 @@ def main() -> int:
     test_scrub_error()
     test_interrupt_is_not_delivered()
     test_send_scan_rows_transport()
+    test_degraded_collector_keeps_its_rows_and_the_scan_goes_on()
     print("\nALL PASS")
     return 0
 

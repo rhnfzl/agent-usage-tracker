@@ -31,6 +31,7 @@ from test_activity import (SALT, _base, _collect, _git_repo, _key, _plain_value,
                            _result, _tools, _turn_end, _use, _user, _write_jsonl)
 
 from agent_usage_tracker.collectors import activity_common as ac  # noqa: E402
+from agent_usage_tracker.collectors import commits  # noqa: E402
 from agent_usage_tracker.repo_keys import RepoKeys  # noqa: E402
 from agent_usage_tracker.collectors import codex, pi  # noqa: E402
 from agent_usage_tracker.config import Config  # noqa: E402
@@ -110,9 +111,9 @@ def test_junk_commit_sha_gets_no_key() -> None:
     link = ac.Link(_keys(), {})
     for junk in ("1", "2", "90", "abc123", "abc1234g", "a" * 41, ""):
         assert ac.sha_key(_keys(), junk) is None, junk
-        link.commit(None, "", ac.commit_shas("", False, False, junk))
+        link.commit(None, "", commits.commit_shas("", False, False, junk))
     assert link.s.get("cks", []) == [], link.s
-    link.commit(None, "", ac.commit_shas("", False, False, "ABC1234"))
+    link.commit(None, "", commits.commit_shas("", False, False, "ABC1234"))
     assert link.s["cks"] == [_sk("abc1234")], link.s
     print("ok junk_commit_sha_gets_no_key")
 
@@ -149,7 +150,7 @@ def test_commit_dir() -> None:
         ("ls", None),
     ]
     for cmd, want in cases:                                      # Windows joins with "\\"
-        got = ac.commit_dir(cmd)
+        got = commits.commit_dir(cmd)
         assert (got and os.path.normpath(got)) == (want and os.path.normpath(want)), (cmd, got)
     print("ok commit_dir")
 
@@ -188,17 +189,17 @@ def test_commit_repo_order() -> None:
     with tempfile.TemporaryDirectory() as d:
         one, two = _repos(Path(d))
         keys = _keys()
-        assert ac.commit_repo(keys, str(one), str(two), None) == K2
-        assert ac.commit_repo(keys, str(two), None, K1) == K2         # cwd resolves: cwd wins
-        assert ac.commit_repo(keys, "/gone/wt", None, K1) == K1       # else the worktree
-        assert ac.commit_repo(keys, "/gone/wt", "/gone/x", None) is None
+        assert commits.commit_repo(keys, str(one), str(two), None) == K2
+        assert commits.commit_repo(keys, str(two), None, K1) == K2         # cwd resolves: cwd wins
+        assert commits.commit_repo(keys, "/gone/wt", None, K1) == K1       # else the worktree
+        assert commits.commit_repo(keys, "/gone/wt", "/gone/x", None) is None
         # with no cwd a relative target means nothing (never the aut process's own directory)
         here = os.getcwd()
         try:
             os.chdir(d)
             rel = os.path.relpath(one, d)
-            assert ac.commit_repo(_keys(), None, rel, None) is None
-            assert ac.commit_repo(_keys(), None, str(one), None) == K1
+            assert commits.commit_repo(_keys(), None, rel, None) is None
+            assert commits.commit_repo(_keys(), None, str(one), None) == K1
         finally:
             os.chdir(here)
     print("ok commit_repo_order")
@@ -513,6 +514,7 @@ def test_codex_link_from_older_watermark() -> None:
         for _events, commit in codex.collect(_cfg(home), wm):
             commit()
         assert wm["files"][str(f)]["meta"].pop("link") is not None
+        del wm["state_v"]           # state from before the link was kept has no version either
         with f.open("a") as fh:
             fh.write(json.dumps({"timestamp": "2026-07-18T10:00:02Z", "type": "event_msg",
                                  "payload": {"type": "task_complete", "turn_id": "u1"}}) + "\n")
