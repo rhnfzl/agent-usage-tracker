@@ -23,6 +23,7 @@ import binascii
 import json
 import sqlite3
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -199,6 +200,4 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[UsageEvent], Callable[
 
 
 def _now_ms() -> int:
-    # isolated so the (rare) no-clock test envs and the collector share one source of "now"
-    import time
     return int(time.time() * 1000)

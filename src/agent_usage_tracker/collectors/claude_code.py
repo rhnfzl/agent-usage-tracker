@@ -26,7 +26,7 @@ from ..config import Config
 from ..event import EventSession, UsageEvent, make_event_id
 from ..repo_keys import RepoKeys
 from .activity_common import IDLE_S, text_of
-from ._util import basename, safe_int, scan_file
+from ._util import basename, safe_int, scan_file, str_or_none
 from .claude_code_activity import Activity
 
 NAME = "claude_code"
@@ -119,10 +119,6 @@ def human_text(o: dict) -> str | None:
     return None if _is_injected(text) else text
 
 
-def _str(v: object) -> str | None:
-    return v if isinstance(v, str) and v else None
-
-
 def _file_identity(base: Path, path: str) -> tuple[bool, str, str | None]:
     """(is_subagent, fallback session_id, fallback parent) from the path alone. A subagent lives at
     <parent>/subagents/[workflows/<wf>/]agent-<id>.jsonl; a main session at <sessionId>.jsonl."""
@@ -137,12 +133,13 @@ def _file_identity(base: Path, path: str) -> tuple[bool, str, str | None]:
 def _session_of(o: dict, ident: tuple[bool, str, str | None], turn: str | None) -> EventSession:
     sub, sid, parent = ident
     if sub:     # records carry sessionId = the PARENT session and agentId = their own
-        return EventSession(_str(o.get("agentId")) or sid, _str(o.get("sessionId")) or parent,
+        return EventSession(str_or_none(o.get("agentId")) or sid,
+                            str_or_none(o.get("sessionId")) or parent,
                             "subagent", turn)
     ep = o.get("entrypoint")
     origin = ("automated" if ep in _PROGRAM_ENTRYPOINTS
               else "interactive" if ep == "cli" else "unknown")
-    return EventSession(_str(o.get("sessionId")) or sid, None, origin, turn)
+    return EventSession(str_or_none(o.get("sessionId")) or sid, None, origin, turn)
 
 
 def _complete(path: str, off: int) -> bool:
@@ -199,7 +196,7 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[UsageEvent], Callable[
         # scan is not lost. Dropped when the path now holds a different file (rotated/replaced).
         # shortcut: files first read before this existed start at NULL until their next user record.
         same_file = fstate.get("ino") == new_fstate.get("ino")
-        turn: str | None = _str(fstate.get("turn")) if same_file else None
+        turn: str | None = str_or_none(fstate.get("turn")) if same_file else None
         # activity state rides in the same watermark entry and is dropped with it on a new file
         act = Activity(NAME, path, ident[0], fstate.get("act") if same_file else None, keys)
         fresh = not same_file or safe_int(fstate.get("off")) == 0     # read from byte 0
@@ -213,7 +210,7 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[UsageEvent], Callable[
                 continue
             typ = o.get("type")
             if typ == "user":
-                pid = _str(o.get("promptId"))
+                pid = str_or_none(o.get("promptId"))
                 if pid and not (ident[0] and turn):
                     turn = pid
             act.record(o, _session_of(o, ident, turn))

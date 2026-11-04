@@ -109,23 +109,23 @@ class FakeAW:
 
 @contextlib.contextmanager
 def _patched(fake: FakeAW, now: datetime):
-    saved = aw._http, aw._now, aw._macos_category
-    aw._http, aw._now, aw._macos_category = fake, (lambda: now), (lambda app: None)
+    saved = aw._http, aw._now, aw._MacCategories
+    aw._http, aw._now, aw._MacCategories = fake, (lambda: now), (lambda: lambda app: None)
     try:
         yield
     finally:
-        aw._http, aw._now, aw._macos_category = saved
+        aw._http, aw._now, aw._MacCategories = saved
 
 
 @contextlib.contextmanager
 def _mac(table: dict):
     """Stub the macOS bundle lookup: app name -> LSApplicationCategoryType (missing: None)."""
-    saved, asked = aw._macos_category, []
-    aw._macos_category = lambda app: (asked.append(app), table.get(app))[1]
+    saved, asked = aw._MacCategories, []
+    aw._MacCategories = lambda: lambda app: (asked.append(app), table.get(app))[1]
     try:
         yield asked
     finally:
-        aw._macos_category = saved
+        aw._MacCategories = saved
 
 
 def _wm() -> dict:
@@ -423,39 +423,37 @@ def test_macos_lookup_guards() -> None:
         real_dirs = aw._MAC_APP_DIRS
         try:
             aw.subprocess.run, aw._DARWIN, aw._MAC_APP_DIRS = run, True, (os.path.join(d, ""),)
-            aw._macos_category.cache_clear()
-            assert aw._macos_category("Some") == "public.app-category.developer-tools"
-            assert aw._macos_category("Some") == "public.app-category.developer-tools"
+            mac = aw._MacCategories()
+            assert mac("Some") == "public.app-category.developer-tools"
+            assert mac("Some") == "public.app-category.developer-tools"
             assert len(seen) == 1, "one lookup per app per scan (cached)"
             assert seen[0][0][0] == "mdfind" and seen[0][1] == 2
             assert "kMDItemDisplayName == 'Some'" in seen[0][0][1]
             assert "com.apple.application-bundle" in seen[0][0][1]
-            assert aw._macos_category("Bad'Name") is None and len(seen) == 1, "no query injection"
+            assert mac("Bad'Name") is None and len(seen) == 1, "no query injection"
             # a hit outside the app folders (network or external volume) is never opened
-            assert aw._macos_category("Far") is None and len(seen) == 2
+            assert mac("Far") is None and len(seen) == 2
             # a bundle that opens http(s) links is a browser, whatever category it declares
-            assert aw._macos_category("Web") == "browser"
+            assert mac("Web") == "browser"
             with _mac({"Web": "browser"}):
                 assert aw.classify(_cfg(), "Web", "Weekend") == ("web", False, "browser_other")
                 assert aw.classify(_cfg(), "Web", "PR 1 - GitHub") == (
                     "web-work", True, "browser_work_title")
             aw.subprocess.run = lambda a, **k: subprocess.CompletedProcess(
                 a, 0, stdout=f"{d}/Missing.app\n", stderr="")
-            assert aw._macos_category("Missing") is None
+            assert mac("Missing") is None
             # one timeout (Spotlight stalled) turns lookups off for the rest of the scan
             aw.subprocess.run = boom
-            assert aw._macos_category("Slow") is None
+            assert mac("Slow") is None
             aw.subprocess.run = run
             n = len(seen)
-            assert aw._macos_category("Some Other") is None and len(seen) == n, "no more lookups"
-            aw._mac_off = False
-            aw.subprocess.run, aw._DARWIN = run, False
-            aw._macos_category.cache_clear()
-            assert aw._macos_category("Some") is None and len(seen) == n, "macOS only"
+            assert mac("Some Other") is None and len(seen) == n, "no more lookups"
+            # the off switch and the memo die with the collect() that set them
+            assert aw._MacCategories()("Some") and len(seen) == n + 1, "next scan looks again"
+            aw._DARWIN = False
+            assert aw._MacCategories()("Some") is None and len(seen) == n + 1, "macOS only"
         finally:
             aw.subprocess.run, aw._DARWIN, aw._MAC_APP_DIRS = real_run, real_darwin, real_dirs
-            aw._mac_off = False
-            aw._macos_category.cache_clear()
     print("ok macos_lookup_guards")
 
 
@@ -466,11 +464,10 @@ def test_macos_lookup_real() -> None:
             pytest.skip("macOS only")
         except ImportError:
             return
-    aw._macos_category.cache_clear()
-    got = aw._macos_category("Preview")          # ships with every macOS
+    mac = aw._MacCategories()
+    got = mac("Preview")          # ships with every macOS
     assert got is None or got.startswith("public.app-category."), got
-    assert aw._macos_category("No Such App Name 0000") is None
-    aw._macos_category.cache_clear()
+    assert mac("No Such App Name 0000") is None
     print("ok macos_lookup_real")
 
 
@@ -604,7 +601,7 @@ def test_delivery_one_transaction_and_webhook_note() -> None:
     assert "commit" not in log
 
     posted: list = []
-    saved, push._SESSION_NOTE_SHOWN = push._post_webhook, False
+    saved = push._post_webhook
     push._post_webhook = lambda url, secret, batch, headers=None: posted.append(batch)
     try:
         hook = push.make_sender(_cfg(webhook_url="https://hook.example.test/x", webhook_secret="s"))

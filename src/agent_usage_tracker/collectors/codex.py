@@ -27,7 +27,7 @@ from ..repo_keys import RepoKeys
 from .activity_common import (Link, add_call, blank_agg, commit_call, commit_dir,
                               commit_repo, commit_shas, first_record, ms_between, repo_identity,
                               text_of, turn_attrs)
-from ._util import basename, read_new_lines, safe_int
+from ._util import basename, read_new_lines, safe_int, str_or_none
 
 NAME = "codex"
 
@@ -73,15 +73,11 @@ def is_scheduled_automation(message: object) -> bool:
     return head.startswith("Automation:") and "Automation ID:" in head
 
 
-def _str(v: object) -> str | None:
-    return v if isinstance(v, str) and v else None
-
-
 def _set_meta(cur: dict, p: dict, keys: RepoKeys) -> None:
     """Identity, origin and cwd from the FIRST session_meta only: a forked file repeats its
     parent's meta on a later line. Its git block gives the link fields every turn carries: the
     repo from the cwd, else the remote URL (hashed, never kept), and the branch, as keys."""
-    cur["meta"] = {"id": _str(p.get("id")), "parent": _str(p.get("parent_thread_id")),
+    cur["meta"] = {"id": str_or_none(p.get("id")), "parent": str_or_none(p.get("parent_thread_id")),
                    "origin": run_origin(p)}
     cur["cwd"] = p.get("cwd") or cur.get("cwd")
     cur["meta"]["link"] = _meta_link(p, keys)
@@ -295,7 +291,7 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list, Callable[[], None]]]:
                 if p.get("cwd"):
                     cur["cwd"] = p.get("cwd")
             elif t == "event_msg" and p.get("type") == "task_started" and not copied:
-                cur["turn"] = _str(p.get("turn_id")) or cur.get("turn")
+                cur["turn"] = str_or_none(p.get("turn_id")) or cur.get("turn")
             elif t == "event_msg" and p.get("type") == "token_count":
                 try:
                     info = p.get("info")

@@ -28,7 +28,7 @@ from ..repo_keys import RepoKeys
 from .activity_common import (Link, add_call, blank_agg, commit_call, commit_dir,
                               commit_repo, commit_shas, first_record, ms_between, text_of,
                               tool_key, turn_attrs)
-from ._util import basename, read_new_lines, safe_int
+from ._util import basename, read_new_lines, safe_int, str_or_none
 
 NAME = "pi"
 _UUID = re.compile(r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$")
@@ -49,10 +49,6 @@ def _cost_total(cost) -> float | None:
     return f
 
 
-def _str(v: object) -> str | None:
-    return v if isinstance(v, str) and v else None
-
-
 def uuid_in(path: str) -> str | None:
     """The session uuid in a Pi file name (`<ts>_<uuid>.jsonl`)."""
     m = _UUID.search(os.path.basename(path))
@@ -62,14 +58,14 @@ def uuid_in(path: str) -> str | None:
 def header(o: dict, path: str) -> dict:
     """What the watermark keeps of line 1. A fork's parent is the header id of the file named in
     parentSession, else the uuid in that name; the path itself is never kept."""
-    ps = _str(o.get("parentSession"))
+    ps = str_or_none(o.get("parentSession"))
     parent = None
     if ps:
         first = first_record(ps) if ps.endswith(".jsonl") and os.path.isfile(ps) else None
-        parent = (_str(first.get("id")) if first and first.get("type") == "session" else None) \
+        parent = (str_or_none(first.get("id")) if first and first.get("type") == "session" else None) \
             or uuid_in(ps)
-    return {"id": _str(o.get("id")) or uuid_in(path) or Path(path).stem,
-            "ts": o.get("timestamp"), "cwd": _str(o.get("cwd")), "parent": parent,
+    return {"id": str_or_none(o.get("id")) or uuid_in(path) or Path(path).stem,
+            "ts": o.get("timestamp"), "cwd": str_or_none(o.get("cwd")), "parent": parent,
             "fork": bool(ps)}
 
 
@@ -226,7 +222,7 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list, Callable[[], None]]]:
             gap = ms_between(o.get("timestamp"), hdr["ts"]) if hdr["fork"] else None
             copied = gap is not None and gap > 0
             if not copied and t == "message" and msg.get("role") == "user":
-                cur["turn"] = _str(o.get("id")) or cur.get("turn")
+                cur["turn"] = str_or_none(o.get("id")) or cur.get("turn")
             sess = None if copied else EventSession(hdr["id"], hdr["parent"], "unknown",
                                                     cur.get("turn"))
             if not copied:

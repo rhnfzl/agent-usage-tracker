@@ -20,7 +20,6 @@ means no rows.
 
 from __future__ import annotations
 
-import functools
 import http.client
 import json
 import os
@@ -87,11 +86,11 @@ _RELEVANT = frozenset(("editor", "terminal", "agent", "dev", "comms", "docs", "d
 
 _DARWIN = sys.platform == "darwin"
 _MAC_TIMEOUT = 2
-_mac_off = False                  # set by the first timeout: a stalled Spotlight is not retried
-# local app folders only: a bundle on a network or external volume could block the plist read
-_MAC_APP_DIRS = ("/Applications/", "/System/", os.path.expanduser("~/Applications/"))
+# local app folders only (and ~/Applications): a bundle on a network or external volume could
+# block the plist read
+_MAC_APP_DIRS = ("/Applications/", "/System/")
 # LSApplicationCategoryType (after 'public.app-category.') -> category; games-* are media too.
-# 'browser' is what _macos_category reports for a bundle that opens http(s) links.
+# 'browser' is what _MacCategories reports for a bundle that opens http(s) links.
 _MAC_CATEGORIES = {
     "developer-tools": "dev", "business": "comms", "productivity": "docs",
     "graphics-design": "design", "browser": "browser",
@@ -159,33 +158,45 @@ def _lookup(table, name: str):
     return next((v for k, v in table.items() if name.startswith(k + " ")), None)
 
 
-@functools.cache                  # once per app per scan: a scan is one process
-def _macos_category(app: str) -> str | None:
-    """'browser' when the app bundle opens http(s) links (browsers declare productivity), else
-    its declared LSApplicationCategoryType, or None: off macOS, no local bundle, no key, or any
-    error or timeout. The app name only goes to the local Spotlight index."""
-    global _mac_off
-    if _mac_off or not _DARWIN or not app or any(c in app for c in "'\\*"):  # no quoting
-        return None
-    query = ("kMDItemContentType == 'com.apple.application-bundle' && "
-             f"kMDItemDisplayName == '{app}'")
-    try:
-        out = subprocess.run(["mdfind", query], capture_output=True, text=True, check=True,
-                             timeout=_MAC_TIMEOUT).stdout.splitlines()
-        hit = next((p for p in out if p.startswith(_MAC_APP_DIRS)), None)
-        if hit is None:
+class _MacCategories:
+    """One collect()'s macOS lookups: once per app, and the first timeout (a stalled Spotlight)
+    ends them. Each returns 'browser' when the app bundle opens http(s) links (browsers declare
+    productivity), else its declared LSApplicationCategoryType, or None: off macOS, no local
+    bundle, no key, or any error or timeout. The app name only goes to the local Spotlight index."""
+
+    def __init__(self) -> None:
+        self.seen: dict[str, str | None] = {}
+        self.off = False
+
+    def __call__(self, app: str) -> str | None:
+        if app not in self.seen:
+            self.seen[app] = None if self.off else self._lookup(app)
+        return self.seen[app]
+
+    def _lookup(self, app: str) -> str | None:
+        if not _DARWIN or not app or any(c in app for c in "'\\*"):  # no quoting
             return None
-        with open(f"{hit}/Contents/Info.plist", "rb") as f:
-            info = plistlib.load(f)
-        schemes = {str(x).lower() for t in info.get("CFBundleURLTypes") or ()
-                   for x in t.get("CFBundleURLSchemes") or ()}
-        cat = "browser" if schemes & {"http", "https"} else info.get("LSApplicationCategoryType")
-    except subprocess.TimeoutExpired:
-        _mac_off = True
-        return None
-    except Exception:                 # a lookup must never fail a scan
-        return None
-    return cat if isinstance(cat, str) and cat else None
+        query = ("kMDItemContentType == 'com.apple.application-bundle' && "
+                 f"kMDItemDisplayName == '{app}'")
+        dirs = (*_MAC_APP_DIRS, os.path.expanduser("~/Applications/"))
+        try:
+            out = subprocess.run(["mdfind", query], capture_output=True, text=True, check=True,
+                                 timeout=_MAC_TIMEOUT).stdout.splitlines()
+            hit = next((p for p in out if p.startswith(dirs)), None)
+            if hit is None:
+                return None
+            with open(f"{hit}/Contents/Info.plist", "rb") as f:
+                info = plistlib.load(f)
+            schemes = {str(x).lower() for t in info.get("CFBundleURLTypes") or ()
+                       for x in t.get("CFBundleURLSchemes") or ()}
+            cat = "browser" if schemes & {"http", "https"} \
+                else info.get("LSApplicationCategoryType")
+        except subprocess.TimeoutExpired:
+            self.off = True
+            return None
+        except Exception:                 # a lookup must never fail a scan
+            return None
+        return cat if isinstance(cat, str) and cat else None
 
 
 def _mac_category(declared: str) -> str:
@@ -215,13 +226,14 @@ def browser_category(cfg: Config, title: str, url: str = "") -> tuple[str, str]:
     return "web", "browser_other"
 
 
-def classify(cfg: Config, app: str, title: str, url: str = "") -> tuple[str, bool, str]:
+def classify(cfg: Config, app: str, title: str, url: str = "",
+             mac: Callable[[str], str | None] | None = None) -> tuple[str, bool, str]:
     """(category, work_relevant, rule) for one window row."""
     name = _norm(app)
     cat, rule = _lookup(cfg.activitywatch_categories, name), "config_app"
     if cat is None:
         cat, rule = _lookup(_DEFAULT_APPS, name), "default_app"
-    if cat is None and (declared := _macos_category(app.strip())):
+    if cat is None and (declared := (mac or _MacCategories())(app.strip())):
         cat, rule = _mac_category(declared), "macos_category"
     if cat is None:
         cat, rule = "other", "unknown"
@@ -254,6 +266,7 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[TimeInterval], Callabl
     days = cfg.activitywatch_title_days
     title_from = _now() - timedelta(days=days) if days else None
     denied_n, denied_s, idle_s = 0, 0.0, 0.0
+    mac = _MacCategories()
     for ev in raw:
         try:
             s = _parse(ev["timestamp"])
@@ -273,7 +286,7 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[TimeInterval], Callabl
         if denied(cfg, app, title, data):
             denied_n, denied_s = denied_n + 1, denied_s + secs
             continue
-        category, relevant, rule = classify(cfg, app, title, str(data.get("url") or ""))
+        category, relevant, rule = classify(cfg, app, title, str(data.get("url") or ""), mac)
         keep = cfg.activitywatch_titles and (title_from is None or s >= title_from)
         sent = (clean_text(title) or None) if keep else None
         s_iso, e_iso = s.astimezone(timezone.utc).isoformat(), e.astimezone(timezone.utc).isoformat()

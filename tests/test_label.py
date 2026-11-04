@@ -463,7 +463,7 @@ def test_windows_go_through_the_collector(tmp_path, monkeypatch):
         return [[x for x in evs if s <= aw._parse(x["timestamp"]) < e]]
     monkeypatch.setattr(aw, "_http", http)
     monkeypatch.setattr(aw, "_now", lambda: NOW)
-    monkeypatch.setattr(aw, "_macos_category", lambda app: None)
+    monkeypatch.setattr(aw, "_MacCategories", lambda: lambda app: None)
     cfg = _cfg(tmp_path, agents=("activitywatch",))
     w = tasks.Source(cfg).windows(t0 - timedelta(hours=1), t0 + timedelta(minutes=2))
     assert [x["title"] for x in w] == ["page 0 password=[redacted]", "page 1 password=[redacted]"]

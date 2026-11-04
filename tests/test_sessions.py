@@ -237,9 +237,8 @@ def test_webhook_skips_sessions_once() -> None:
         _fixture(home)
         batch = _events(home)
         posted: list = []
-        saved = (push._post_webhook, push._SESSION_NOTE_SHOWN)
+        saved = push._post_webhook
         push._post_webhook = lambda url, secret, b, h=None: posted.append(b)
-        push._SESSION_NOTE_SHOWN = False
         err = io.StringIO()
         try:
             send = push.make_sender(_cfg(home, webhook_url="https://hooks.example/h"))
@@ -247,7 +246,7 @@ def test_webhook_skips_sessions_once() -> None:
                 send(batch)
                 send(batch)
         finally:
-            push._post_webhook, push._SESSION_NOTE_SHOWN = saved
+            push._post_webhook = saved
         assert len(posted) == 2
         assert err.getvalue().count("\n") == 1 and "session" in err.getvalue(), err.getvalue()
     print("ok webhook_skips_sessions_once")

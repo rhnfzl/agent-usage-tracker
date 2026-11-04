@@ -53,16 +53,12 @@ ACTIVITY_TABLE = "agents.activity_event"
 TIME_COLUMNS = ("event_id", "ts", "end_ts", "machine", "source", "app", "title", "category",
                 "work_relevant", "attrs")
 TIME_TABLE = "agents.time_interval"
-_SESSION_NOTE_SHOWN = False
 _ERROR_MAX = 300
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         return None  # do not follow; urllib raises HTTPError for the 3xx instead of silently GETting
-
-
-_OPENER = urllib.request.build_opener(_NoRedirect)
 
 
 def _post_webhook(url: str, secret: str, batch: list[UsageEvent],
@@ -73,7 +69,7 @@ def _post_webhook(url: str, secret: str, batch: list[UsageEvent],
         headers.update(extra_headers)
     req = urllib.request.Request(url, data=body, method="POST", headers=headers)
     try:
-        with _OPENER.open(req, timeout=30) as resp:
+        with urllib.request.build_opener(_NoRedirect).open(req, timeout=30) as resp:
             status = getattr(resp, "status", None) or resp.getcode()
     except urllib.error.HTTPError as exc:            # 3xx (no-follow) / 4xx / 5xx
         raise RuntimeError(f"webhook HTTP {exc.code}") from exc
@@ -160,22 +156,6 @@ def send_session_rows(dsn: str, rows: list[dict]) -> None:
         conn.commit()
 
 
-def _note_sessions_skipped(batch: list, pg: bool = False) -> None:
-    global _SESSION_NOTE_SHOWN
-    if _SESSION_NOTE_SHOWN or not any(not isinstance(e, UsageEvent) or e.session for e in batch):
-        return
-    _SESSION_NOTE_SHOWN = True
-    # shortcut: the webhook carries usage only; upgrade when a machine runs webhook-only (until
-    # then `aut backfill --sessions-only` / `--activity-only` over pg_dsn fills the gap; time rows
-    # have no backfill, so a webhook-only machine loses them).
-    if pg:
-        print("aut: note: session rows not sent over the webhook (`aut backfill --sessions-only` "
-              "fills them over pg_dsn)", file=sys.stderr)
-        return
-    print("aut: note: session/activity/time rows not sent over the webhook (needs "
-          "transport.pg_dsn)", file=sys.stderr)
-
-
 def make_sender(cfg: Config) -> Callable[[list[UsageEvent]], None]:
     """Return a send(batch) that tries the webhook, then the PG fallback. Raises (before any
     send) if nothing is configured or a configured webhook is missing its secret."""
@@ -202,6 +182,23 @@ def make_sender(cfg: Config) -> Callable[[list[UsageEvent]], None]:
                 f"(or http:// to localhost for testing) is allowed, not '{scheme or 'no'}-scheme'."
             )
 
+    note_shown = False
+
+    def note_sessions_skipped(batch: list, pg: bool = False) -> None:
+        nonlocal note_shown
+        if note_shown or not any(not isinstance(e, UsageEvent) or e.session for e in batch):
+            return
+        note_shown = True
+        # shortcut: the webhook carries usage only; upgrade when a machine runs webhook-only (until
+        # then `aut backfill --sessions-only` / `--activity-only` over pg_dsn fills the gap; time
+        # rows have no backfill, so a webhook-only machine loses them).
+        if pg:
+            print("aut: note: session rows not sent over the webhook (`aut backfill "
+                  "--sessions-only` fills them over pg_dsn)", file=sys.stderr)
+            return
+        print("aut: note: session/activity/time rows not sent over the webhook (needs "
+              "transport.pg_dsn)", file=sys.stderr)
+
     def send(batch: list[UsageEvent]) -> None:
         if not batch:
             return
@@ -217,7 +214,7 @@ def make_sender(cfg: Config) -> Callable[[list[UsageEvent]], None]:
             else:
                 if cfg.has_pg and (acts or times):     # the webhook carries usage only
                     insert_pg(cfg.pg_dsn, acts + times)
-                _note_sessions_skipped(usage if cfg.has_pg else batch, cfg.has_pg)
+                note_sessions_skipped(usage if cfg.has_pg else batch, cfg.has_pg)
                 return
         if cfg.has_pg:
             insert_pg(cfg.pg_dsn, batch)

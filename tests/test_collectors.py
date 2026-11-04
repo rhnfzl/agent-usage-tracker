@@ -878,12 +878,12 @@ def test_cf_access_headers() -> None:
             captured.update(req.headers)
             return _Resp()
 
-    orig = push._OPENER
-    push._OPENER = _Opener()
+    orig = push.urllib.request.build_opener
+    push.urllib.request.build_opener = lambda *handlers: _Opener()
     try:
         push._post_webhook("https://x/h", "sec", [], extra_headers=both.cf_access_headers)
     finally:
-        push._OPENER = orig
+        push.urllib.request.build_opener = orig
     keys = {k.lower() for k in captured}
     assert {"cf-access-client-id", "cf-access-client-secret", "x-aut-secret"} <= keys, captured
     print("ok cf_access_headers")

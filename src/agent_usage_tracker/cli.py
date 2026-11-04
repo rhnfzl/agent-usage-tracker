@@ -36,7 +36,9 @@ sums straight from your real logs.
 from __future__ import annotations
 
 import argparse
+import csv
 import json
+import os
 import sys
 from datetime import date, datetime, timedelta, timezone
 
@@ -45,7 +47,7 @@ from .collectors import REGISTRY, activitywatch
 from .config import Config, load_config, config_path
 from .event import ActivityEvent, TimeInterval, UsageEvent, make_event_id, valid_ts
 from .label.names import DAYS, DECISION_TASKS, TASK_NAMES
-from .push import (insert_pg, make_sender, scrub_error, send_activity_rows, send_scan_rows,
+from .push import (COLUMNS, insert_pg, make_sender, scrub_error, send_activity_rows, send_scan_rows,
                    send_session_rows)
 from .state import collector_wm, load_state, save_state
 
@@ -231,10 +233,6 @@ def run_export(cfg: Config, agents: list[str], out) -> tuple[int, int]:
     Column order matches push.COLUMNS / the sink table, so it loads via COPY. Useful for
     an offline bulk backfill or a bridged load where the live transport is not wired yet.
     Returns (written, skipped) where skipped counts records with a missing/invalid ts."""
-    import csv
-
-    from .push import COLUMNS
-
     writer = csv.writer(out)
     writer.writerow(COLUMNS)
     n = skipped = 0
@@ -568,8 +566,6 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.cmd == "outcome":
-        import os
-
         from . import outcomes
         if not cfg.has_pg:
             raise SystemExit("outcome needs transport.pg_dsn")

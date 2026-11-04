@@ -10,6 +10,11 @@ from datetime import datetime, timezone
 _MAX_LINES = 50000
 
 
+def str_or_none(value: object) -> str | None:
+    """A non-empty string as is; anything else is None."""
+    return value if isinstance(value, str) and value else None
+
+
 def safe_int(value, default: int = 0) -> int:
     """Non-negative int() that never raises. Guards a corrupt state offset (1e400 -> inf ->
     OverflowError) AND a negative offset (which would make fh.seek() raise and wedge the scan);
