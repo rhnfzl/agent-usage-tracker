@@ -11,15 +11,15 @@ github.com/kenn-io/agentsview, MIT licence, (c) its authors).
 
 from __future__ import annotations
 
-import copy
 from collections import Counter
-from typing import Any
+from typing import TypedDict
 from urllib.parse import urlparse
 
 from ..event import ActivityKind, ActivityEvent, EventSession, make_event_id
 from ..repo_keys import RepoKeys
-from .activity_common import (IDLE_S, Link, TurnAgg, add_call, blank_tool_tally, commit_rows, ms_between,
-                              text_of, text_sha256, tool_key, turn_attrs)
+from .activity_common import (IDLE_S, Link, TurnAgg, add_call, best_effort, blank_tool_tally, ms_between,
+                              pop_pending, record_commits, text_of, text_sha256, tool_key,
+                              turn_attrs)
 from .commits import commit_call, commit_dir, commit_shas
 from ._util import MS_PER_S, dict_or_empty, str_or_none
 
@@ -28,14 +28,24 @@ _REJECTED = "The user doesn't want to proceed"
 _SEEN_MAX = 20     # open-turn tool ids carried across scans (re-logs land within ~40 lines)
 
 
-class Activity:
-    """Per-file, per-chunk extractor. state() is what must ride in the file's watermark entry."""
+class ActivityState(TypedDict, total=False):
+    """What rides in the file's watermark entry; a key with nothing to carry is left out."""
+    intr: bool             # the last user-side record was an interrupt
+    agg: TurnAgg
+    pend: dict[str, list]  # commit tool_use_id -> pop_pending's list
+    seen: list[str]        # the open turn's newest tool block ids
+    link: dict
+    wt: list               # [repo_key, branch_key] of the worktree the session is in
+    lo: dict               # the open link turn: last record's uid, ts, session and origin
 
-    def __init__(self, agent: str, path: str, subagent: bool, carried: dict | None,
+
+class Activity:
+    """Per-file, per-chunk extractor over `carried`, state from the private copy of the file's
+    watermark entry. state() is what must ride in that entry."""
+
+    def __init__(self, agent: str, path: str, subagent: bool, carried: ActivityState | None,
                  keys: RepoKeys) -> None:
-        # A copy: only the collector's advance_watermark() may publish new state into the watermark, or a
-        # failed delivery would save this chunk's counts next to the old offset.
-        s = copy.deepcopy(carried) if isinstance(carried, dict) else {}
+        s: ActivityState = carried if isinstance(carried, dict) else {}
         self.agent, self.path, self.subagent, self.keys = agent, path, subagent, keys
         self.events: list[ActivityEvent] = []
         self.errors: Counter = Counter()                       # records whose extraction raised (skipped)
@@ -44,7 +54,7 @@ class Activity:
         # Turn aggregates and unanswered commit calls are carried across scans in the watermark,
         # so a turn split by a scan boundary still gets one complete row.
         self.agg: TurnAgg = s.get("agg") or blank_tool_tally()
-        self.pend: dict = s.get("pend") or {}  # commit tool_use_id -> [is_amend, printed_before, target]
+        self.pend: dict = s.get("pend") or {}
         # Tool block ids already counted. Within a chunk the set spans turns (Claude Code re-logs
         # history after a turn ends). Across scans only the open turn's newest _SEEN_MAX ids are
         # carried, which is where a re-log split by a scan boundary lands; this keeps the state small.
@@ -57,12 +67,12 @@ class Activity:
         # queued split drifts from a full re-read.
         self.queued: set[str] = set()
         self.link = Link(keys, s.get("link") or {})
-        self.wt = s.get("wt")      # [repo_key, branch_key] of the worktree the session is in
-        self.lo = s.get("lo")      # the open link turn: last record's uid, ts, session and origin
+        self.wt: list | None = s.get("wt")
+        self.lo: dict | None = s.get("lo")
         self._at3: tuple | None = None     # the (cwd, gitBranch) last placed in this turn
 
-    def state(self) -> dict[str, Any]:
-        s: dict[str, Any] = {}
+    def state(self) -> ActivityState:
+        s: ActivityState = {}
         if self.intr:
             s["intr"] = True
         # A subagent file never gets a turn_duration, so its aggregates would never be used.
@@ -72,9 +82,12 @@ class Activity:
             s["pend"] = self.pend
         if self.open_ids and not self.subagent:
             s["seen"] = self.open_ids[-_SEEN_MAX:]
-        for k, v in (("link", self.link.s), ("wt", self.wt), ("lo", self.lo)):
-            if v:
-                s[k] = v
+        if self.link.s:
+            s["link"] = self.link.s
+        if self.wt:
+            s["wt"] = self.wt
+        if self.lo:
+            s["lo"] = self.lo
         return s
 
     def _emit(self, kind: ActivityKind, o: dict, seed: object, sess: EventSession, attrs: dict) -> None:
@@ -86,23 +99,15 @@ class Activity:
     def _uid(self, o: dict) -> str:
         return o.get("uuid") or f"{self.path}:{o.get('timestamp')}"
 
-    def record(self, o: dict, sess: EventSession) -> None:
-        """Best effort: a record whose extraction raises is counted and skipped, so activity can
-        never block the usage and session rows of the same chunk."""
-        try:
-            self._record(o, sess)
-        except Exception as exc:
-            self.errors[f"activity:{type(exc).__name__}"] += 1
-
     def finish(self) -> None:
         """The file is complete (read to its end and idle for IDLE_S): close its open link turn.
         A subagent or scripted file never gets a turn_duration to close it."""
-        try:
-            if self.lo:
-                lo = self.lo
-                self._close_link(lo["uid"], lo["ts"], lo["sid"], lo["turn"], lo["origin"])
-        except Exception as exc:
-            self.errors[f"activity:{type(exc).__name__}"] += 1
+        best_effort(self.errors, self._close_open_link)
+
+    def _close_open_link(self) -> None:
+        if self.lo:
+            lo = self.lo
+            self._close_link(lo["uid"], lo["ts"], lo["sid"], lo["turn"], lo["origin"])
 
     def _close_link(self, seed: str, ts: str | None, sid: str, turn: str | None,
                     origin: str | None) -> None:
@@ -114,7 +119,7 @@ class Activity:
         self.link.reset()
         self.lo, self._at3 = None, None
 
-    def _record(self, o: dict, sess: EventSession) -> None:
+    def record(self, o: dict, sess: EventSession) -> None:
         typ = o.get("type")
         self._close_link_after_gap(o)
         if typ in ("queue-operation", "attachment"):
@@ -124,7 +129,7 @@ class Activity:
         elif typ == "worktree-state":
             self._worktree(o)
         elif typ in ("ai-title", "custom-title"):
-            self.link.tickets(o.get("aiTitle") or o.get("customTitle"))
+            self.link.note_tickets(o.get("aiTitle") or o.get("customTitle"))
         elif typ == "system":
             self._system(o, sess)
         elif typ in ("assistant", "user"):
@@ -190,10 +195,10 @@ class Activity:
                 # shortcut: a re-logged text block is read again (its SHAs and PRs are the
                 # session's own, so only the next turn's lists grow); dedup by uuid if that skews
                 # the link lists
-                self.link.text(b.get("text"))
+                self.link.note_text(b.get("text"))
 
     def _user(self, o: dict, content: object, blocks: list[dict], sess: EventSession) -> None:
-        self.link.text(text_of(content))
+        self.link.note_text(text_of(content))
         for b in blocks:
             if b.get("type") == "tool_result":
                 self._tool_result(o, b, sess)
@@ -209,11 +214,7 @@ class Activity:
     def steer(self, o: dict, uid: str, text: str, sess: EventSession) -> ActivityEvent | None:
         """The steer row for a prompt the collector counted as human (None if it raised). Call after
         record(o)."""
-        try:
-            return self._steer(o, uid, text, sess)
-        except Exception as exc:
-            self.errors[f"activity:{type(exc).__name__}"] += 1
-            return None
+        return best_effort(self.errors, self._steer, o, uid, text, sess)
 
     def _steer(self, o: dict, uid: str, text: str, sess: EventSession) -> ActivityEvent:
         s, ps = text.lstrip(), o.get("promptSource")
@@ -258,7 +259,7 @@ class Activity:
         self.open_ids.append("r" + tid)
         err = b.get("is_error") is True
         text = text_of(b.get("content")).lstrip()
-        self.link.text(text)
+        self.link.note_text(text)
         if err:
             self.agg["errors"] += 1
             if text.startswith(_REJECTED):
@@ -266,18 +267,18 @@ class Activity:
             elif text.startswith("PreToolUse:") and "hook error" in text[:200]:
                 self.agg["hooks"] += 1          # a hook denied it, not the user
         if tid in self.pend:
-            amend, before, target = self.pend.pop(tid)
-            self._commits(o, tid, bool(amend), bool(before), text, err, sess, target)
+            amend, before, target = pop_pending(self.pend, tid)
+            self._commits(o, tid, text, sess, target, amend=amend, before=before, err=err)
 
-    def _commits(self, o: dict, tid: str, amend: bool, before: bool, text: str, err: bool,
-                 sess: EventSession, target: object = None) -> None:
+    def _commits(self, o: dict, tid: str, text: str, sess: EventSession, target: object, *,
+                 amend: bool, before: bool, err: bool) -> None:
         tr = o.get("toolUseResult")
         g = tr.get("gitOperation") if isinstance(tr, dict) else None
         c = g.get("commit") if isinstance(g, dict) else None
         sha = c.get("sha") if isinstance(c, dict) and isinstance(c.get("sha"), str) else None
         found = commit_shas(text, err, before, sha)
-        for sha, attrs in commit_rows(self.link, o.get("cwd"), target, text, found, amend,
-                                      self.wt[0] if self.wt else None):
+        for sha, attrs in record_commits(self.link, o.get("cwd"), target, text, found, amend=amend,
+                                         fallback=self.wt[0] if self.wt else None):
             self._emit("commit", o, f"{tid}|{sha}", sess, attrs)
 
     def _pr(self, o: dict, sess: EventSession) -> None:
@@ -291,7 +292,7 @@ class Activity:
         kind = "github" if "github" in host else "bitbucket" if "bitbucket" in host else "other"
         key = self.keys.of(f"{host}/{repo.strip('/')}".lower()) \
             if host and isinstance(repo, str) else None
-        self.link.pr(host, repo, num)
+        self.link.note_pr(host, repo, num)
         # One row per pr-link record (its ts never depends on how much of the file a scan read);
         # distinct PRs are counted in SQL. Real pr-link records carry no uuid, so the fallback seed
         # is session + number + the record's own ts: a re-logged copy maps to the same row.

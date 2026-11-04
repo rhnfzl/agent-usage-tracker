@@ -72,13 +72,13 @@ def _keys() -> RepoKeys:
 def test_ticket_pattern() -> None:
     link = ac.Link(_keys(), {})
     for t in ("ABC-123", "feat/ABC-124-thing", "X1-5", "fix [QA-7]: x"):
-        link.tickets(t)
+        link.note_tickets(t)
     for t in ("abc-125", "A-1", "ABCDEFGHIJK-1", "UTF-8", "SHA-256", "ISO-8601", "ABC-12x",
               "xABC-12", "ABC-"):
-        link.tickets(t)
+        link.note_tickets(t)
     assert link.s["tix"] == [_key(t) for t in ("ABC-123", "ABC-124", "X1-5", "QA-7")], link.s
     capped = ac.Link(_keys(), {})
-    capped.tickets(" ".join(f"AB-{i}" for i in range(9)))
+    capped.note_tickets(" ".join(f"AB-{i}" for i in range(9)))
     assert len(capped.s["tix"]) == ac.MAX_TICKETS
     print("ok ticket_pattern")
 
@@ -89,20 +89,25 @@ def test_sha_refs_filter() -> None:
     drop = ["abc123", "facade", "decade0"[:6], "deadbeef", "1234567", "a" * 41 + "1",
             "0123456789abcdef" * 4, "550e8400-e29b-41d4-a716-446655440000", "ABC1234",
             "abc1234_x", "x_abc1234", "abc1234g", "zabc1234"]
-    link.text(" ".join(drop) + "\n" + " ".join(keep) + " abc1234")
+    link.note_text(" ".join(drop) + "\n" + " ".join(keep) + " abc1234")
     assert link.s["shas"] == [_sk(v) for v in keep], link.s
     many = ac.Link(_keys(), {})
-    many.text(" ".join(f"{i:07x}a" for i in range(ac.MAX_SHAS + 10)))
+    many.note_text(" ".join(f"{i:07x}a" for i in range(ac.MAX_SHAS + 10)))
     assert len(many.s["shas"]) == ac.MAX_SHAS
     # a 32- or 40-hex secret passes the SHA filter: only a keyed hash of 7 hex is kept
     secret = "9f3c1e0b7a6d5c4b3a291807f6e5d4c3"
     leak = ac.Link(_keys(), {})
-    leak.text(f'webhook_secret = "{secret}"\nhttps://{secret}@o1.ingest.example.com/1 '
+    leak.note_text(f'webhook_secret = "{secret}"\nhttps://{secret}@o1.ingest.example.com/1 '
               f"tok={secret}0a1b2c3d")
     assert leak.s["shas"] == [_sk(secret)], leak.s
     assert secret[:7] not in json.dumps(leak.s), leak.s
-    # a watermark saved before keying carried raw hex: it is dropped on load
-    assert ac.Link(_keys(), {"shas": [secret[:12], _sk(secret)]}).s["shas"] == [_sk(secret)]
+    # a watermark saved before keying carried raw hex: the state upgrade drops it
+    act = {"link": {"shas": [secret[:12], _sk(secret)]}}
+    ac.drop_raw_shas(act)
+    assert act["link"]["shas"] == [_sk(secret)]
+    ac.drop_raw_shas(act)                               # safe to run again, and on nothing
+    ac.drop_raw_shas(None)
+    assert act["link"]["shas"] == [_sk(secret)]
     print("ok sha_refs_filter")
 
 
@@ -112,9 +117,9 @@ def test_junk_commit_sha_gets_no_key() -> None:
     link = ac.Link(_keys(), {})
     for junk in ("1", "2", "90", "abc123", "abc1234g", "a" * 41, ""):
         assert ac.sha_key(_keys(), junk) is None, junk
-        link.commit(None, "", commits.commit_shas("", False, False, junk))
+        link.note_commit(None, "", commits.commit_shas("", False, False, junk))
     assert link.s.get("cks", []) == [], link.s
-    link.commit(None, "", commits.commit_shas("", False, False, "ABC1234"))
+    link.note_commit(None, "", commits.commit_shas("", False, False, "ABC1234"))
     assert link.s["cks"] == [_sk("abc1234")], link.s
     print("ok junk_commit_sha_gets_no_key")
 
@@ -122,16 +127,16 @@ def test_junk_commit_sha_gets_no_key() -> None:
 def test_pr_urls() -> None:
     keys = _keys()
     link = ac.Link(keys, {})
-    link.text("see https://bitbucket.org/Team/Thing/pull-requests/42/overview and "
+    link.note_text("see https://bitbucket.org/Team/Thing/pull-requests/42/overview and "
               "https://github.com/Owner/Widget/pull/7#issuecomment-1, again "
               "https://github.com/owner/widget/pull/7 and not https://github.com/o/r/issues/8 "
               "nor https://bitbucket.org/t/r/pull/9 nor https://example.com/o/r/pull/3")
     want = [_key("bitbucket.org/team/thing|42"), _key("github.com/owner/widget|7")]
     assert link.s["prs"] == want, link.s
-    link.pr("github.com", "owner/widget", 7)           # a pr-link record of the same PR
+    link.note_pr("github.com", "owner/widget", 7)           # a pr-link record of the same PR
     assert link.s["prs"] == want
     many = ac.Link(keys, {})
-    many.text(" ".join(f"https://github.com/o/r/pull/{i}" for i in range(15)))
+    many.note_text(" ".join(f"https://github.com/o/r/pull/{i}" for i in range(15)))
     assert len(many.s["prs"]) == ac.MAX_PRS
     print("ok pr_urls")
 
@@ -173,7 +178,7 @@ def test_branch_never_crosses_repos() -> None:
     def attrs(rk, out):
         link = ac.Link(keys, {})
         link.place(3, K1, "feat/x")                    # the record: repo one on feat/x
-        link.commit(rk, out, ["abc1234"])
+        link.note_commit(rk, out, ["abc1234"])
         return link.attrs("interactive")["repo_key"], link.attrs("interactive")["branch_key"]
     assert attrs(K2, "ok abc1234") == (K2, None)                  # no branch line: not one's
     assert attrs(K2, "[feat/y abc1234] x") == (K2, _bk(K2, "feat/y"))

@@ -39,7 +39,7 @@ from ..config import Config
 from ..event import CollectorUnavailable, TimeInterval, make_event_id
 from ..net import HTTP_ERRORS, LOCAL_HOSTS
 from ..redact import clean_text
-from ._util import dict_or_empty, warn_skipped
+from ._util import MALFORMED_RECORD, dict_or_empty, warn_skipped
 
 NAME = "activitywatch"
 _LAG = timedelta(minutes=5)          # aw-watcher-window extends its last event; leave it settle
@@ -317,7 +317,7 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[TimeInterval], Callabl
         try:
             s, e = _event_span(ev)
             data = dict_or_empty(ev.get("data"))
-        except (KeyError, TypeError, ValueError, AttributeError, OverflowError):
+        except MALFORMED_RECORD:
             skipped["malformed"] += 1
             continue
         s, e = max(s, start), min(e, end)

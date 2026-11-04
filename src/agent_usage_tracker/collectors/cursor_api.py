@@ -19,7 +19,6 @@ No prompt/response content is read - only token counts, model, and timestamp.
 from __future__ import annotations
 
 import base64
-import binascii
 import json
 import sqlite3
 import sys
@@ -72,12 +71,11 @@ def _auth(cfg: Config) -> tuple[str, int] | None:
         try:
             team = json.loads(team_raw) if team_raw else {}
             team_id = int(team.get("teamId") or 0) if isinstance(team, dict) else 0
-        except (json.JSONDecodeError, TypeError, ValueError):
+        except (TypeError, ValueError):
             team_id = 0
         cookie = f"WorkosCursorSessionToken={urllib.parse.quote(sub)}%3A%3A{token}"
         return cookie, team_id
-    except (sqlite3.DatabaseError, ValueError, KeyError, IndexError, TypeError,
-            AttributeError, binascii.Error, json.JSONDecodeError):
+    except (sqlite3.DatabaseError, ValueError, KeyError, IndexError, TypeError, AttributeError):
         return None                      # malformed/partial token -> treat as no auth, never crash
     finally:
         con.close()
@@ -101,7 +99,7 @@ def _same_user(owner: object, uid: object) -> bool:
     boundary: a missing/empty owningUser must never match an empty/'None' uid, and a container
     (list/dict) must never match another equal container via str() coercion."""
     if not isinstance(owner, (str, int)) or not isinstance(uid, (str, int)):
-        return False                      # scalar-only (also excludes list/dict/None)
+        return False
     if isinstance(owner, bool) or isinstance(uid, bool):   # bool is an int subclass
         return False
     o, u = str(owner).strip(), str(uid).strip()
@@ -110,7 +108,7 @@ def _same_user(owner: object, uid: object) -> bool:
 
 def _map_event(e: dict, uid: object) -> UsageEvent | None:
     """One Cursor usage event -> UsageEvent, or None if it is not this user's or has no tokens."""
-    if not isinstance(e, dict) or not _same_user(e.get("owningUser"), uid):
+    if not _same_user(e.get("owningUser"), uid):
         return None                       # SAFETY: never emit another team member's event
     tu = e.get("tokenUsage")
     if not isinstance(tu, dict):
@@ -183,7 +181,7 @@ def _fetch_events(cookie: str, team_id: int, uid: object, since: int,
         events += got
         newest = max(newest, page_newest)
         if fresh_rows == 0 or len(batch) < _PAGE:
-            break                       # a whole page was older than the watermark, or last page
+            break
     else:
         # loop ran the full cap without a natural stop: a very large window remains unread.
         # Never happens for 6h deltas; only a huge first backfill. Flag it (don't silently orphan).
@@ -193,21 +191,20 @@ def _fetch_events(cookie: str, team_id: int, uid: object, since: int,
 
 
 def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[UsageEvent], Callable[[], None]]]:
-    if not cfg.cursor_api:            # opt-in: no network unless explicitly enabled
+    if not cfg.cursor_api:
         return
     auth = _auth(cfg)
     if auth is None:
         if cursor_db(cfg).exists():
             raise CollectorUnavailable("cursor_api: no usable token in Cursor's state DB (signed "
                                        "out?); skipping this run")
-        return                       # Cursor not installed -> nothing to read
+        return
     cookie, team_id = auth
     try:
         me = _post(cookie, "get-me", {})
         uid = me.get("userId") if isinstance(me, dict) else None
         if not uid:                       # None, empty, or non-dict response -> can't self-scope, skip
             raise CollectorUnavailable("cursor_api: could not resolve a userId; skipping")
-        # incremental: only fetch events newer than the last one we committed (epoch ms)
         since = safe_int(wm.get("since_ms"))
         # first run (no watermark): bounded lookback window instead of all history
         start = since if since else _now_ms() - cfg.cursor_api_lookback_days * _DAY_MS

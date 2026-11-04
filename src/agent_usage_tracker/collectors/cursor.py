@@ -30,7 +30,9 @@ from typing import Any, Callable, Iterator
 
 from ..config import Config
 from ..event import CollectorUnavailable, UsageEvent, make_event_id
-from ._util import count_field, dict_or_empty, epoch_ms_to_iso, noop_advance, warn_skipped
+from .activity_common import human_event
+from ._util import (MALFORMED_RECORD, count_field, dict_or_empty, epoch_ms_to_iso, noop_advance,
+                    warn_skipped)
 
 NAME = "cursor"
 # Cursor stores state.vscdb in the OS-specific app-data dir. Subpath is the same everywhere.
@@ -115,7 +117,7 @@ def _bubble_event(key: str, val: Any, comp: dict[str, dict], human_only: bool,
         tc = dict_or_empty(o.get("tokenCount"))
         inp = count_field(tc, "inputTokens")
         out = count_field(tc, "outputTokens")
-    except (ValueError, TypeError, AttributeError, OverflowError):
+    except MALFORMED_RECORD:
         skipped["malformed"] += 1
         return None
     composer_id = key.split(":")[1]
@@ -125,10 +127,7 @@ def _bubble_event(key: str, val: Any, comp: dict[str, dict], human_only: bool,
         # A user bubble = a human prompt. No token count of its own, and no bubble timestamp
         # either, so ts falls back to the composer's createdAt (COARSE: every prompt in a
         # conversation shares one time). event_id is per-bubble.
-        return UsageEvent(
-            event_id=make_event_id(NAME, "human", composer_id, bubble_id),
-            ts=_ts(o, meta), agent=NAME, model=None, provider=None, kind="human",
-        )
+        return human_event(NAME, (composer_id, bubble_id), _ts(o, meta))
     # Human-turns-only mode: the token rows are exactly what would double-count against
     # cursor_api, and they are the inferior copy anyway (no cache attribution, no CLI usage). Drop
     # them and keep the prompts, which cursor_api's feed does not carry at all.

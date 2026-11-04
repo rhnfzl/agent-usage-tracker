@@ -149,9 +149,9 @@ def test_codex_session_fields():
 
 def test_review_findings_edge_cases():
     d = session_digest.Digest("x")
-    d.shell("gh pr create --fill && docker run -t myimage", "", False)
-    d.shell("git commit -q --no-edit && python -m pytest", "", False)
-    d.shell("git commit -m 'a; b' && echo -m nope", "", False)
+    d.note_shell("gh pr create --fill && docker run -t myimage", "", False)
+    d.note_shell("git commit -q --no-edit && python -m pytest", "", False)
+    d.note_shell("git commit -m 'a; b' && echo -m nope", "", False)
     d.titles.append("fix token=" + SECRET)
     d.branches.append("b-" + SECRET)
     v = d.view()
@@ -228,8 +228,8 @@ def test_codex_digest_keeps_a_record_with_an_invalid_byte():
 
 def test_digest_lists_hold_only_text():
     d = session_digest.Digest("x")
-    d.shell("git commit --no-edit", "", False)
-    d.shell("gh pr create --fill", "", False)
+    d.note_shell("git commit --no-edit", "", False)
+    d.note_shell("gh pr create --fill", "", False)
     assert d.commits == [] and d.prs == [], (d.commits, d.prs)
     print("ok digest_lists_hold_only_text")
 

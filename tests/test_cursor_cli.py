@@ -412,23 +412,23 @@ def test_attrs_carry_no_text() -> None:
             for leak in (*LEAKS, str(repo)):
                 assert leak not in blob, (e.kind, leak)
         for bad in ("mcp_acmecorp-internal_lookup", "wc -l x", "a/b"):
-            assert cursor_cli._tool(bad) in ("mcp", "other"), bad
+            assert cursor_cli._by_tool_key(bad) in ("mcp", "other"), bad
     _run(check)
     print("ok attrs_carry_no_text (cursor_cli)")
 
 
 def test_activity_errors_never_block_human_rows() -> None:
     def check(home, repo):
-        real = cursor_cli._Activity._record
+        real = cursor_cli._Activity.record
 
         def boom(*a, **k):
             raise RuntimeError("boom")
-        cursor_cli._Activity._record = boom
+        cursor_cli._Activity.record = boom
         try:
             with contextlib.redirect_stderr(io.StringIO()) as err:
                 evs = _collect(home)
         finally:
-            cursor_cli._Activity._record = real
+            cursor_cli._Activity.record = real
         assert len([e for e in evs if isinstance(e, UsageEvent)]) == 4
         assert "activity record(s) skipped" in err.getvalue()
     _run(check)

@@ -145,7 +145,9 @@ def send_activity_rows(dsn: str, acts: list[ActivityEvent]) -> None:
 
 
 def send_session_rows(dsn: str, rows: list[dict]) -> None:
-    """Session rows only (the sessions-only backfill). Idempotent on event_id; raises on failure."""
+    """Session rows only (the sessions-only backfill), as UsageEvent.session_row() dicts: that
+    backfill holds them already, unlike send_activity_rows' events. Idempotent on event_id; raises
+    on failure."""
     write_many(dsn, _SESSION_SQL, [tuple(r[c] for c in SESSION_COLUMNS) for r in rows])
 
 

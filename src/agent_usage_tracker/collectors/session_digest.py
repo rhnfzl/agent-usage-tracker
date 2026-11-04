@@ -97,7 +97,7 @@ class Digest:
         self.titles: list[str] = []
         self.branches: list[str] = []
 
-    def at(self, ts: object, cwd: object = None) -> None:
+    def note_time(self, ts: object, cwd: object = None) -> None:
         d = _when(ts)
         if d:
             self.first = min(self.first or d, d)
@@ -105,7 +105,7 @@ class Digest:
         if isinstance(cwd, str) and cwd and not self.cwd:
             self.cwd = cwd
 
-    def shell(self, cmd: object, out: object, err: bool) -> None:
+    def note_shell(self, cmd: object, out: object, err: bool) -> None:
         """A shell call that succeeded: the commits it made (git's `[branch sha] subject` line,
         else the -m message) and the PR it opened (gh pr create --title)."""
         if not isinstance(cmd, str) or err:
@@ -121,7 +121,7 @@ class Digest:
         if title:
             self.prs.append(title)
 
-    def edit(self, name: object, args: object) -> None:
+    def note_edit(self, name: object, args: object) -> None:
         if name in _EDIT_TOOLS and isinstance(args, dict):
             p = args.get("file_path") or args.get("path") or args.get("notebook_path")
             if isinstance(p, str) and p:
@@ -155,11 +155,11 @@ def _claude_blocks(content: object, d: Digest, pend: dict, seen: set) -> None:
             continue
         if b.get("type") == "tool_use" and b.get("id") not in seen:
             seen.add(b.get("id"))       # Claude Code re-logs a message's blocks
-            d.edit(b.get("name"), b.get("input"))
+            d.note_edit(b.get("name"), b.get("input"))
             if b.get("name") == "Bash" and isinstance(b.get("input"), dict):
                 pend[b.get("id")] = b["input"].get("command")
         elif b.get("type") == "tool_result" and b.get("tool_use_id") in pend:
-            d.shell(pend.pop(b["tool_use_id"]), text_of(b.get("content")),
+            d.note_shell(pend.pop(b["tool_use_id"]), text_of(b.get("content")),
                     b.get("is_error") is True)
 
 
@@ -174,7 +174,7 @@ def _digest_claude_log(f: str, d: Digest) -> None:
             o = parse_record(line)      # a malformed line holds nothing to show
             if o is None:
                 continue
-            d.at(o.get("timestamp"), o.get("cwd"))
+            d.note_time(o.get("timestamp"), o.get("cwd"))
             text = claude_code.human_text(o)
             if text is not None:
                 loops += claude_code.is_old_loop(o, text)
@@ -188,7 +188,7 @@ def _digest_claude_log(f: str, d: Digest) -> None:
 def _codex_item(it: dict, d: Digest) -> None:
     if it.get("type") == "CommandExecution":
         code = it.get("exit_code")
-        d.shell(codex.script_of(it.get("command")), it.get("aggregated_output"),
+        d.note_shell(codex.script_of(it.get("command")), it.get("aggregated_output"),
                 isinstance(code, int) and code != 0)
     elif it.get("type") == "FileChange" and isinstance(it.get("changes"), dict):
         d.files.update(k for k in it["changes"] if isinstance(k, str))
@@ -218,7 +218,7 @@ def _digest_codex_log(f: str, title: str, d: Digest) -> None:
     for i, (o, t, p, copied) in enumerate(recs):
         if copied and i:
             continue
-        d.at(o.get("timestamp"), p.get("cwd") if t in ("session_meta", "turn_context") else None)
+        d.note_time(o.get("timestamp"), p.get("cwd") if t in ("session_meta", "turn_context") else None)
         _codex_record(t, p, has_um, human, d)
 
 
@@ -231,16 +231,16 @@ def _pi_message(m: dict, d: Digest, pend: dict) -> None:
     elif role == "assistant" and isinstance(content, list):
         for b in content:
             if isinstance(b, dict) and b.get("type") == "toolCall":
-                d.edit(b.get("name"), b.get("arguments"))
+                d.note_edit(b.get("name"), b.get("arguments"))
                 args = b.get("arguments")
                 if b.get("name") == "bash" and isinstance(args, dict):
                     pend[b.get("id")] = args.get("command")
     elif role == "toolResult" and m.get("toolCallId") in pend:
-        d.shell(pend.pop(m["toolCallId"]), text_of(content), m.get("isError") is True)
+        d.note_shell(pend.pop(m["toolCallId"]), text_of(content), m.get("isError") is True)
 
 
 def _digest_pi_log(f: str, hdr: dict, d: Digest) -> None:
-    d.at(hdr["ts"], hdr["cwd"])
+    d.note_time(hdr["ts"], hdr["cwd"])
     pend: dict = {}
     with open(f, encoding="utf-8", errors="replace") as fh:
         for line in fh:
@@ -248,7 +248,7 @@ def _digest_pi_log(f: str, hdr: dict, d: Digest) -> None:
             if o is None or not isinstance(o.get("message"), dict) \
                     or o.get("type") != "message" or pi.is_fork_copy(o, hdr):
                 continue
-            d.at(o.get("timestamp"))
+            d.note_time(o.get("timestamp"))
             _pi_message(o["message"], d, pend)
 
 
@@ -260,14 +260,14 @@ def _cursor_prompts(msgs: dict[str, dict], created: str | None, d: Digest, calls
             text = text_of(m.get("content"))
             q = cursor_cli.USER_QUERY.search(text)
             ts = cursor_cli.prompt_ts(text, created)
-            d.at(ts)
+            d.note_time(ts)
             prompts[r] = (_when(ts) or datetime.min.replace(tzinfo=timezone.utc),
                           q[1] if q else _BLOCK.sub(" ", text))
         content = m.get("content")
         for b in content if isinstance(content, list) else ():
             if isinstance(b, dict) and b.get("type") == "tool-call":
                 calls[b.get("toolCallId")] = b.get("args")
-                d.edit(b.get("toolName"), b.get("args"))
+                d.note_edit(b.get("toolName"), b.get("args"))
     d.prompts = [t for _ts, t in sorted(prompts.values(), key=lambda x: x[0])]
 
 
@@ -280,8 +280,8 @@ def _cursor_shell_results(msgs: dict[str, dict], d: Digest, calls: dict) -> None
                     and b.get("toolName") == "Shell":
                 res = b.get("result") if isinstance(b.get("result"), str) else ""
                 ex = cursor_cli.EXIT_LINE.match(res)
-                d.at(None, args.get("working_directory"))
-                d.shell(args.get("command"), res[ex.end():] if ex else res,
+                d.note_time(None, args.get("working_directory"))
+                d.note_shell(args.get("command"), res[ex.end():] if ex else res,
                         not ex or ex[1] != "0")
 
 
@@ -295,7 +295,7 @@ def _digest_cursor_chat(f: str, d: Digest) -> None:
     finally:
         con.close()
     created = epoch_ms_to_iso(meta.get("createdAt"))
-    d.at(created)
+    d.note_time(created)
     calls: dict = {}
     _cursor_prompts(msgs, created, d, calls)
     _cursor_shell_results(msgs, d, calls)

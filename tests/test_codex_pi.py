@@ -22,7 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_activity import _git_repo, _plain_value  # noqa: E402
 
 from agent_usage_tracker import scan  # noqa: E402
-from agent_usage_tracker.collectors import codex, pi  # noqa: E402
+from agent_usage_tracker.collectors import claude_code, codex, pi  # noqa: E402
 from codex_pi_helpers import (AGAIN, SID, T, TYPED, _acts, _append, _cfg, _collect, _hdr,  # noqa: E402
                               _meta, _pa, _pi_file, _pr, _pu, _run, _tok, _usage, _write_jsonl)
 
@@ -125,6 +125,36 @@ def test_state_upgrades_run_once_at_load() -> None:
         assert c.attrs["sha"] == "0a1b2c3" and c.attrs["repo_key"]
         assert "skipped" not in err.getvalue(), err.getvalue()
     print("ok state_upgrades_run_once_at_load")
+
+
+def test_a_version_1_watermark_upgrades_without_reading_anything_again() -> None:
+    """The state on disk when _STATE_V went to 2: entries with a `dev`, link SHAs maybe raw."""
+    key = "a" * 64
+    with tempfile.TemporaryDirectory() as d:
+        home = Path(d)
+        logs = (
+            (claude_code, home / ".claude/projects/-x/S1.jsonl",
+             [{"type": "user", "uuid": "h1", "timestamp": T(1), "sessionId": "S1",
+               "message": {"role": "user", "content": "go"}}]),
+            (codex, home / ".codex/sessions/2026/07/18/rollout-a.jsonl",
+             [_meta("C1"), _tok(T(1))]),
+            (pi, _pi_file(home), [_hdr(SID, "/x/repo"), _pu("u1", T(1), "go"),
+                                  _pa("a1", T(2), "stop", tokens=7)]),
+        )
+        for mod, f, recs in logs:
+            _write_jsonl(f, recs)
+            wm: dict = {}
+            assert _collect(mod, home, wm), mod.NAME
+            entry = wm["files"][str(f)]
+            off, ino = entry["off"], entry["ino"]
+            entry["dev"] = 4
+            entry.setdefault("act", {}).setdefault("link", {})["shas"] = ["abc1234def", key]
+            wm["state_v"] = 1
+            assert _collect(mod, home, wm) == [], mod.NAME
+            entry = wm["files"][str(f)]
+            assert (entry["off"], entry["ino"]) == (off, ino), mod.NAME
+            assert entry["act"]["link"]["shas"] == [key], mod.NAME
+            assert wm["state_v"] == mod._STATE_V == 2, mod.NAME
 
 
 def test_malformed_usage_records_are_counted() -> None:

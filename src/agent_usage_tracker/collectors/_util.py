@@ -7,14 +7,16 @@ import os
 import sys
 from collections import Counter
 from datetime import datetime, timezone
-from typing import Any, Callable, Iterable, Iterator
+from typing import Any, Callable, Iterable, Iterator, Sequence
 
-from ..event import CollectorUnavailable
+from ..event import Batch, CollectorUnavailable, Row
 
 # Cap lines read per file per scan so a huge first-scan/backfill file can't spike memory.
 # The offset is committed at the cap, so the next scan simply continues from there.
 _MAX_LINES = 50000
 MS_PER_S = 1000
+# What a malformed log record can raise while it is read. OverflowError: int(inf) from a 1e400.
+MALFORMED_RECORD = (KeyError, TypeError, ValueError, AttributeError, OverflowError)
 
 
 def describe_files(cfg: object, wm: dict) -> str:
@@ -90,18 +92,13 @@ def read_new_lines(path: str, offset: int) -> tuple[list[bytes], int]:
     """Stream complete newline-terminated records added after `offset` (capped at _MAX_LINES).
 
     Iterates one line at a time (no whole-file read) and stops at a trailing partial line
-    (no newline yet), leaving it for the next scan. Resets to 0 when the file shrank below
-    the stored offset (truncation). Returns (complete_lines, new_offset). A file that vanished has
-    nothing new; any other OSError (no permission, a failing disk) is the caller's to report.
+    (no newline yet), leaving it for the next scan. Returns (complete_lines, new_offset). A file
+    that vanished has nothing new; any other OSError (no permission, a failing disk) is the
+    caller's to report.
     """
     lines: list[bytes] = []
-    try:                         # TOCTOU: the file can vanish/rotate between getsize and open
-        size = os.path.getsize(path)
-        if size < offset:        # truncated -> reread from the start
-            offset = 0
-        if size <= offset:
-            return [], offset
-        consumed = offset
+    consumed = offset
+    try:
         with open(path, "rb") as fh:
             fh.seek(offset)
             for raw in fh:
@@ -131,46 +128,29 @@ def same_file(fstate: dict, st: os.stat_result) -> bool:
     What dropping it costs: an inode is only unique within a device, so a path that migrates to
     another filesystem could collide with a same-numbered inode there and be resumed mid-file.
     That needs a tracked path to change volumes AND collide, and it undercounts rather than
-    double-counts. A guaranteed re-push every reboot is the worse trade. st_dev is still recorded
-    for diagnostics."""
+    double-counts. A guaranteed re-push every reboot is the worse trade. Entries saved by older
+    versions still hold a `dev` key; nothing reads it."""
     return fstate.get("ino") == st.st_ino and st.st_size >= safe_int(fstate.get("off"))
 
 
-def scan_file(path: str, fstate: dict, skipped: Counter) -> tuple[list[bytes], dict]:
-    """Inode-aware tail. `fstate` carries {'dev','ino','off'} (empty on first sight); the offset
-    restarts at 0 unless same_file allows resuming. Returns (complete_lines, new_fstate). A file
-    that cannot be read keeps its fstate and is counted in skipped["unreadable"]."""
-    try:
-        st = os.stat(path)
-        off = safe_int(fstate.get("off")) if same_file(fstate, st) else 0
-        lines, new_off = read_new_lines(path, off)
-    except FileNotFoundError:
-        return [], fstate
-    except OSError:
-        skipped["unreadable"] += 1
-        return [], fstate
-    new_fstate = dict(fstate)
-    new_fstate["dev"] = st.st_dev
-    new_fstate["ino"] = st.st_ino
-    new_fstate["off"] = new_off
-    return lines, new_fstate
-
-
-def changed_files(paths: Iterable[str], files: dict, fresh: Callable[[os.stat_result], dict],
-                  skipped: Counter) -> Iterator[tuple[str, dict, int, list[bytes], int]]:
-    """Each file of `paths` with bytes past its watermark entry in `files`: (path, private copy of
-    the entry, offset read from, complete new lines, new offset). `fresh(st)` is the entry of a
-    file seen for the first time or replaced. The copy is deep so that only the caller's watermark
-    callback can publish a chunk's state. A file that cannot be read is counted in
-    skipped["unreadable"]."""
+def changed_files(paths: Iterable[str], files: dict, fresh: Callable[[os.stat_result], Any],
+                  skipped: Counter, revisit: Callable[[Any], bool] | None = None,
+                  ) -> Iterator[tuple[str, Any, int, list[bytes], int]]:
+    """Each file of `paths` with something to do: (path, private copy of its entry in `files`,
+    offset read from, complete new lines, new offset). That is a file with bytes past its entry,
+    one whose entry must restart (replaced or truncated: an offset left standing would skip bytes
+    if it regrew past it), and one whose entry `revisit` wants looked at with no new bytes.
+    `fresh(st)` is the entry of a file seen for the first time or replaced. The copy is deep so
+    that only the caller's watermark callback can publish a chunk's state. A file that cannot be
+    read is counted in skipped["unreadable"]."""
     for path in paths:
         try:
             st = os.stat(path)
-            prev = files.get(path) or {}
-            if not same_file(prev, st):
-                prev = fresh(st)
+            entry = files.get(path) or {}
+            restart = bool(entry) and not same_file(entry, st)
+            prev = fresh(st) if restart or not entry else entry
             off = safe_int(prev.get("off"))
-            if st.st_size <= off:
+            if st.st_size <= off and not restart and not (revisit and revisit(prev)):
                 continue
             lines, new_off = read_new_lines(path, off)
         except FileNotFoundError:   # gone since the glob: nothing to read, and no offset to lose
@@ -179,6 +159,26 @@ def changed_files(paths: Iterable[str], files: dict, fresh: Callable[[os.stat_re
             skipped["unreadable"] += 1
             continue
         yield path, copy.deepcopy(prev), off, lines, new_off
+
+
+def file_batches(name: str, paths: Iterable[str], files: dict,
+                 fresh: Callable[[os.stat_result], Any],
+                 chunk_rows: Callable[[str, Any, int, list[bytes], Counter], Sequence[Row]],
+                 revisit: Callable[[Any], bool] | None = None) -> Iterator[Batch]:
+    """A tailing collector's batches over changed_files. `chunk_rows(path, cur, off, lines, skipped)`
+    makes one file's rows and updates `cur`, the private copy of its entry, whose "off" already
+    holds the new offset; the entry is published only when the batch's callback runs."""
+    skipped: Counter = Counter()
+    for path, cur, off, lines, new_off in changed_files(paths, files, fresh, skipped, revisit):
+        cur["off"] = new_off
+        events = chunk_rows(path, cur, off, lines, skipped)
+
+        def advance_watermark(p: str = path, c: dict = cur) -> None:
+            files[p] = c
+
+        yield events, advance_watermark
+    warn_skipped(name, skipped)
+    raise_if_unreadable(name, skipped)
 
 
 def _strip_worktree(parts: list[str]) -> list[str] | None:

@@ -11,13 +11,16 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from collections import Counter
 from datetime import datetime
-from typing import Any, NotRequired, TypedDict
+from typing import Any, Callable, NotRequired, TypedDict, TypeVar
 
+from ..event import EventSession, UsageEvent, make_event_id
 from ..repo_keys import RepoKeys, repo_identity
 from ._util import MS_PER_S
 from .commits import COMMIT_LINE, commit_repo
 
+_T = TypeVar("_T")
 _HEX_SHA = re.compile(r"[0-9a-f]{7,40}")
 # link fields: a commit-like SHA (7 to 40 hex, not inside a longer word, a uuid or a 64-hex hash),
 # a strict ticket id, a GitHub or Bitbucket PR URL
@@ -109,12 +112,10 @@ class Link:
 
     def __init__(self, keys: RepoKeys, s: dict) -> None:
         self.keys, self.s = keys, s
-        if s.get("shas"):     # a watermark from before sha_refs were keyed held raw hex: drop it
-            s["shas"] = [v for v in s["shas"] if len(v) == 64]
 
     def source(self, repo_key: str | None, branch: object = None) -> list[str | bool | None]:
         """[repo_key, branch_key] of one source (its branch's tickets go to this turn)."""
-        self.tickets(branch)
+        self.note_tickets(branch)
         named = repo_key and isinstance(branch, str) and branch in _DEFAULT_BRANCHES
         return [repo_key, False if named else branch_key(self.keys, repo_key, branch)]
 
@@ -127,14 +128,14 @@ class Link:
             got.append(value)
         return len(got) < cap
 
-    def tickets(self, text: object) -> None:
+    def note_tickets(self, text: object) -> None:
         if isinstance(text, str) and "-" in text:
             for m in _TICKET.finditer(text):
                 if m[0].split("-")[0] not in _NOT_TICKET \
                         and not self._add("tix", self.keys.of(m[0]), MAX_TICKETS):
                     break
 
-    def commit(self, repo_key: str | None, text: str, shas: list[str]) -> None:
+    def note_commit(self, repo_key: str | None, text: str, shas: list[str]) -> None:
         """A commit call's output: its repo, the commits it printed (`commit_shas`), and the
         branch and subject of git's commit line."""
         for sha in shas:
@@ -142,9 +143,9 @@ class Link:
         m = COMMIT_LINE.search(text)
         self.place(0, repo_key, m["br"] if m else None)
         for m in COMMIT_LINE.finditer(text):
-            self.tickets(m["subj"])
+            self.note_tickets(m["subj"])
 
-    def text(self, text: object) -> None:
+    def note_text(self, text: object) -> None:
         """Tool output or message text: SHAs it quotes and the PRs it links."""
         if not isinstance(text, str):
             return
@@ -160,7 +161,7 @@ class Link:
                 if not self._add("prs", pr_key(self.keys, host, f"{o}/{r}", int(m[7])), MAX_PRS):
                     break
 
-    def pr(self, host: str, repo: object, number: object) -> None:
+    def note_pr(self, host: str, repo: object, number: object) -> None:
         if host and isinstance(repo, str):
             self._add("prs", pr_key(self.keys, host, repo, number), MAX_PRS)
 
@@ -187,13 +188,13 @@ class Link:
         self.s.clear()
 
 
-def commit_rows(link: Link, cwd: object, target: object, text: str, shas: list[str], amend: bool,
-                fallback: str | None = None) -> list[tuple[str, dict]]:
+def record_commits(link: Link, cwd: object, target: object, text: str, shas: list[str], *,
+                   amend: bool, fallback: str | None = None) -> list[tuple[str, dict]]:
     """Tell the turn's link about a commit call's printed `shas`; (sha, attrs) of each commit row."""
     if not shas:
         return []
     key = commit_repo(link.keys, cwd, target, fallback)
-    link.commit(key, text, shas)
+    link.note_commit(key, text, shas)
     return [(sha, {"sha": sha, "repo_key": key, "amend": amend}) for sha in shas]
 
 
@@ -201,6 +202,37 @@ def pad_pending(act: dict | None) -> None:
     """State upgrade: a pending commit call saved before its target was kept gains target None."""
     for call in ((act or {}).get("pend") or {}).values():
         call[2:] = call[2:] or [None]
+
+
+def drop_raw_shas(act: dict | None) -> None:
+    """State upgrade: a link saved before sha_refs were keyed held raw hex; only the keys stay."""
+    link = (act or {}).get("link") or {}
+    if link.get("shas"):
+        link["shas"] = [v for v in link["shas"] if len(v) == 64]
+
+
+def pop_pending(pend: dict, tid: str) -> tuple[bool, bool, object]:
+    """Take one pending commit call. It rides in the watermark as the JSON list
+    [is_amend, printed_before, target]; this is the one place that knows the order."""
+    amend, before, target = pend.pop(tid)
+    return bool(amend), bool(before), target
+
+
+def best_effort(errors: Counter, fn: Callable[..., _T], *args: object) -> _T | None:
+    """Run one activity step. One that raises is counted by exception type and skipped (None), so
+    activity can never block the usage and session rows of the same chunk."""
+    try:
+        return fn(*args)
+    except Exception as exc:
+        errors[f"activity:{type(exc).__name__}"] += 1
+        return None
+
+
+def human_event(agent: str, id_parts: tuple, ts: str | None, session: EventSession | None = None,
+                project: str | None = None) -> UsageEvent:
+    """The zero-token usage row of a prompt a person typed."""
+    return UsageEvent(event_id=make_event_id(agent, "human", *id_parts), ts=ts, agent=agent,
+                      model=None, provider=None, kind="human", project=project, session=session)
 
 
 class TurnAgg(TypedDict):

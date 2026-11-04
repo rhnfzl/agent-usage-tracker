@@ -18,17 +18,18 @@ import os
 import re
 from collections import Counter
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Iterator, TypedDict
 
 from ..config import Config
 from ..event import ActivityKind, Batch, ActivityEvent, EventSession, UsageEvent, make_event_id
 from ..repo_keys import RepoKeys
 from ..state import parse_record
-from .activity_common import (Link, TurnAgg, add_call, blank_tool_tally, commit_rows, first_record, ms_between,
-                              pad_pending, text_of, tool_key, turn_attrs)
+from .activity_common import (Link, TurnAgg, add_call, best_effort, blank_tool_tally, drop_raw_shas,
+                              first_record, human_event, ms_between, pad_pending, pop_pending,
+                              record_commits, text_of, tool_key, turn_attrs)
 from .commits import commit_call, commit_dir, commit_shas
-from ._util import (changed_files, count_field, dict_or_empty, project_name,
-                    raise_if_unreadable, safe_int, str_or_none, warn_skipped)
+from ._util import (MALFORMED_RECORD, count_field, dict_or_empty, file_batches, project_name,
+                    safe_int, str_or_none)
 
 NAME = "pi"
 _UUID = re.compile(r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$")
@@ -36,7 +37,18 @@ SKILL = re.compile(r'\s*<skill name="([\w.:-]+)"')
 _ENDS = ("stop", "aborted", "length")   # an `error` followed by another assistant is a retry
 # The watermark's format. Older state is upgraded once by _upgrade_state; delete a step from there
 # once no machine can still hold state that old.
-_STATE_V = 1
+_STATE_V = 2
+
+
+class FileState(TypedDict, total=False):
+    """One file's watermark entry. An entry saved by an older version also holds an unread `dev`."""
+    off: int
+    ino: int
+    model: str | None
+    provider: str
+    hdr: dict[str, Any]     # see header()
+    turn: str | None
+    act: dict[str, Any]     # _Activity's carried state
 
 
 def sessions_dir(home: Path) -> Path:
@@ -111,13 +123,6 @@ class _Activity:
         self.carried.pop("pend", None)       # a commit call unanswered at turn end never will be
 
     def record(self, o: dict, sess: EventSession) -> None:
-        """Best effort: a record whose extraction raises is counted and skipped."""
-        try:
-            self._record(o, sess)
-        except Exception as exc:
-            self.errors[f"activity:{type(exc).__name__}"] += 1
-
-    def _record(self, o: dict, sess: EventSession) -> None:
         carried, ts, eid = self.carried, o.get("timestamp"), o.get("id")
         if o.get("type") == "compaction":
             tb = o.get("tokensBefore")
@@ -131,7 +136,7 @@ class _Activity:
         open_ = carried.get("open")
         link = Link(self.keys, carried.setdefault("link", {}))
         if role != "user":           # a prompt's text belongs to the turn it opens
-            link.text(text_of(content))
+            link.note_text(text_of(content))
         if role == "user":
             self._prompt(ts, eid, content, sess, open_)
         elif role in ("assistant", "toolResult"):
@@ -160,7 +165,7 @@ class _Activity:
         if skill:
             self._emit("invoke", ts, str(eid), sess.turn_id, {"skill": tool_key(skill[1])})
         carried["open"] = {"id": eid, "ts": ts, "n": 1, "last": ts}
-        Link(self.keys, carried.setdefault("link", {})).text(text)
+        Link(self.keys, carried.setdefault("link", {})).note_text(text)
         carried["agg"] = blank_tool_tally()
 
     def _assistant(self, m: dict, ts: object, eid: object, sess: EventSession, agg: TurnAgg,
@@ -192,16 +197,17 @@ class _Activity:
         tid = m.get("toolCallId")
         pend = self.carried.get("pend") or {}
         if isinstance(tid, str) and tid in pend:
-            amend, before, target = pend.pop(tid)
+            amend, before, target = pop_pending(pend, tid)
             text = text_of(m.get("content"))
-            found = commit_shas(text, err, bool(before))
-            for sha, attrs in commit_rows(link, self.cwd, target, text, found, bool(amend)):
+            found = commit_shas(text, err, before)
+            for sha, attrs in record_commits(link, self.cwd, target, text, found, amend=amend):
                 self._emit("commit", ts, f"{tid}|{sha}", sess.turn_id, attrs)
 
 
 def _upgrade_state(wm: dict) -> None:
     """Bring state saved by an older version to the current shape, once: the header kept in the
-    entry, and pending commit calls with their target. A reset would re-read the file instead."""
+    entry, pending commit calls with their target, and link SHAs keyed. A reset would re-read the
+    file instead. Each step is safe on state already upgraded."""
     if wm.get("state_v") == _STATE_V:
         return
     for path, entry in wm.setdefault("files", {}).items():
@@ -210,10 +216,11 @@ def _upgrade_state(wm: dict) -> None:
             if first and first.get("type") == "session":
                 entry["hdr"] = header(first, path)
         pad_pending(entry.get("act"))
+        drop_raw_shas(entry.get("act"))
     wm["state_v"] = _STATE_V
 
 
-def _note_model_change(o: dict, cur: dict) -> None:
+def _note_model_change(o: dict, cur: FileState) -> None:
     cur["model"] = str_or_none(o.get("modelId")) or str_or_none(o.get("model")) or cur.get("model")
     provider = str_or_none(o.get("provider"))
     if provider:
@@ -224,7 +231,7 @@ def _record_id(o: dict, path: str) -> object:
     return o.get("id") or f"{path}:{o.get('timestamp')}"
 
 
-def _usage_event(o: dict, msg: dict, cur: dict, path: str, project: str | None,
+def _usage_event(o: dict, msg: dict, cur: FileState, path: str, project: str | None,
                  sess: EventSession | None) -> UsageEvent | None:
     """The usage row of a record, None if it has no tokens. Raises on malformed token counts."""
     if o.get("type") == "message":
@@ -262,7 +269,7 @@ def _usage_event(o: dict, msg: dict, cur: dict, path: str, project: str | None,
     )
 
 
-def _session_of(o: dict, hdr: dict, cur: dict, is_prompt: bool) -> EventSession | None:
+def _advance_session(o: dict, hdr: dict, cur: FileState, is_prompt: bool) -> EventSession | None:
     """The record's session, a prompt opening a new turn; None for a fork's copied entry, whose
     usage id dedupes but whose session and activity rows belong to the parent."""
     if is_fork_copy(o, hdr):
@@ -272,7 +279,7 @@ def _session_of(o: dict, hdr: dict, cur: dict, is_prompt: bool) -> EventSession 
     return EventSession(hdr["id"], hdr["parent"], "unknown", cur.get("turn"))
 
 
-def _chunk_rows(path: str, lines: list[bytes], cur: dict, keys: RepoKeys,
+def _chunk_rows(path: str, lines: list[bytes], cur: FileState, keys: RepoKeys,
                 skipped: Counter) -> list:
     """All rows of one file's new lines; updates `cur`, the private copy of its watermark entry."""
     hdr = cur.get("hdr") or header({}, path)
@@ -294,21 +301,17 @@ def _chunk_rows(path: str, lines: list[bytes], cur: dict, keys: RepoKeys,
             continue
         msg = dict_or_empty(o.get("message"))
         is_prompt = t == "message" and msg.get("role") == "user"
-        sess = _session_of(o, hdr, cur, is_prompt)
+        sess = _advance_session(o, hdr, cur, is_prompt)
         if sess is not None:
-            act.record(o, sess)
+            best_effort(act.errors, act.record, o, sess)
         project = project_name(hdr["cwd"])
         if is_prompt:
             # A human prompt: plain text, no usage block. Emit as a human turn.
-            events.append(UsageEvent(
-                event_id=make_event_id(NAME, "human", _record_id(o, path)),
-                ts=o.get("timestamp"), agent=NAME, model=None, provider=None,
-                kind="human", project=project, session=sess,
-            ))
+            events.append(human_event(NAME, (_record_id(o, path),), o.get("timestamp"), sess, project))
             continue
         try:
             event = _usage_event(o, msg, cur, path, project, sess)
-        except (ValueError, TypeError, OverflowError):
+        except MALFORMED_RECORD:
             skipped["malformed"] += 1
             continue
         if event:
@@ -317,34 +320,29 @@ def _chunk_rows(path: str, lines: list[bytes], cur: dict, keys: RepoKeys,
     return events + act.events
 
 
-def _trim_state(cur: dict) -> None:
+def _trim_state(cur: FileState) -> None:
     if not cur["act"].get("link"):
         cur["act"].pop("link", None)
     if not cur["act"]:
         del cur["act"]
 
 
+def _fresh_state(st: os.stat_result) -> FileState:
+    return {"off": 0, "ino": st.st_ino, "model": None}
+
+
 def collect(cfg: Config, wm: dict) -> Iterator[Batch]:
     if not sessions_dir(cfg.home).exists():
         return
     _upgrade_state(wm)
-    files: dict = wm["files"]
     keys = RepoKeys(cfg.repo_key_salt)
-    skipped: Counter = Counter()
 
-    def fresh(st: os.stat_result) -> dict:
-        return {"off": 0, "dev": st.st_dev, "ino": st.st_ino, "model": None}
-
-    for path, cur, _off, lines, new_off in changed_files(session_files(cfg.home), files, fresh, skipped):
+    def chunk_rows(path: str, cur: FileState, _off: int, lines: list[bytes],
+                   skipped: Counter) -> list:
         events = _chunk_rows(path, lines, cur, keys, skipped)
-        cur["off"] = new_off
         # shortcut: the last open turn of a file is emitted only when a later scan reads its end
         # (or the next prompt); a session left on an error or a tool call keeps it open for good.
         _trim_state(cur)
+        return events
 
-        def advance_watermark(p: str = path, c: dict = cur) -> None:
-            files[p] = c
-
-        yield events, advance_watermark
-    warn_skipped(NAME, skipped)
-    raise_if_unreadable(NAME, skipped)
+    yield from file_batches(NAME, session_files(cfg.home), wm["files"], _fresh_state, chunk_rows)

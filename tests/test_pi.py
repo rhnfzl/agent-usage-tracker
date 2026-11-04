@@ -160,7 +160,7 @@ def test_pi_watermark_with_an_old_dev_is_not_read_again() -> None:
         assert len(_usage(_collect(pi, home, wm))) == 1
         entry = wm["files"][str(f)]
         off, ino = entry["off"], entry["ino"]
-        entry["dev"] += 4                # what a restart does to every tracked path
+        entry["dev"] = 4                 # an old number, which a restart would have changed
         del wm["state_v"]                # and this state predates the version
         assert _collect(pi, home, wm) == [], "nothing new: nothing read again"
         assert (entry["off"], entry["ino"]) == (off, ino)
@@ -263,15 +263,15 @@ def test_usage_event_is_none_without_tokens_and_raises_on_a_bad_count():
         _usage_of({"type": "message"}, {"usage": {"input": "many"}})
 
 
-def test_session_of_opens_a_turn_on_a_prompt_and_skips_a_fork_copy():
+def test_advance_session_opens_a_turn_on_a_prompt_and_skips_a_fork_copy():
     hdr = {"id": "s", "parent": "p", "fork": True, "ts": T(10)}
     cur = {}
-    assert pi._session_of({"timestamp": T(5), "id": "e0"}, hdr, cur, True) is None and cur == {}
-    s = pi._session_of({"timestamp": T(11), "id": "e1"}, hdr, cur, True)
+    assert pi._advance_session({"timestamp": T(5), "id": "e0"}, hdr, cur, True) is None and cur == {}
+    s = pi._advance_session({"timestamp": T(11), "id": "e1"}, hdr, cur, True)
     assert (s.session_id, s.parent_session_id, s.turn_id) == ("s", "p", "e1")
-    assert pi._session_of({"timestamp": T(12), "id": "e2"}, hdr, cur, False).turn_id == "e1"
+    assert pi._advance_session({"timestamp": T(12), "id": "e2"}, hdr, cur, False).turn_id == "e1"
     # a prompt with no usable id stays in the turn it is in
-    assert pi._session_of({"timestamp": T(13), "id": 5}, hdr, cur, True).turn_id == "e1"
+    assert pi._advance_session({"timestamp": T(13), "id": 5}, hdr, cur, True).turn_id == "e1"
 
 
 def test_upgrade_state_adds_the_header_once_and_pads_pending_calls(tmp_path):

@@ -147,31 +147,31 @@ def test_export_drains_past_cap() -> None:
 
 
 def test_file_identity_reset() -> None:
-    # scan_file records (dev, ino) and re-reads from offset 0 when the file behind the path is
+    # changed_files keeps the inode and re-reads from offset 0 when the file behind the path is
     # replaced (rotation / inode reuse), so a replacement's opening lines are never skipped.
-    from agent_usage_tracker.collectors._util import scan_file
+    from agent_usage_tracker.collectors._util import changed_files
     with tempfile.TemporaryDirectory() as d:
         p = str(Path(d) / "f.jsonl")
         Path(p).write_bytes(b"a\nb\n")   # bytes, not text: Windows would translate \n to \r\n
-        lines, s1 = scan_file(p, {}, Counter())
+
+        def scan(entry: dict) -> list:
+            return list(changed_files([p], {p: entry} if entry else {},
+                                      lambda st: {"off": 0, "ino": st.st_ino}, Counter()))
+        [(_p, s1, _off, lines, end)] = scan({})
         assert [ln.strip() for ln in lines] == [b"a", b"b"]
-        assert "dev" in s1 and "ino" in s1 and s1["off"] == 4
-        lines, s2 = scan_file(p, s1, Counter())                 # unchanged -> nothing new
-        assert lines == [] and s2["off"] == 4
+        s1["off"] = end
+        assert set(s1) == {"ino", "off"} and s1["off"] == 4
+        assert scan(s1) == []                                   # unchanged -> nothing new
         stale = dict(s1)
         stale["ino"] = s1["ino"] + 1                 # pretend a different file now sits here
-        lines, s3 = scan_file(p, stale, Counter())
-        assert [ln.strip() for ln in lines] == [b"a", b"b"]   # reset to 0, full re-read
+        [(_p, s3, off, lines, _end)] = scan(stale)
+        assert off == 0 and [ln.strip() for ln in lines] == [b"a", b"b"]   # reset to 0, full re-read
         assert s3["ino"] == s1["ino"]                          # identity corrected to the real file
 
         # Regression: st_dev is a mount-time number, not a property of the file. macOS renumbers
         # it on reboot, which used to invalidate every watermark and re-push all history. A
         # changed dev with the same inode is the SAME file -> keep the offset, read nothing.
-        rebooted = dict(s1)
-        rebooted["dev"] = s1["dev"] + 4              # what a restart does to every tracked path
-        lines, s4 = scan_file(p, rebooted, Counter())
-        assert lines == [] and s4["off"] == 4        # no re-read
-        assert s4["dev"] == s1["dev"]                # dev still refreshed for diagnostics
+        assert scan({**s1, "dev": 4}) == []          # what an older version's entry still holds
     print("ok file_identity_reset")
 
 
@@ -333,6 +333,33 @@ def test_changed_files_starts_a_new_or_replaced_file_from_its_fresh_state(tmp_pa
         assert (off, lines, end) == (0, [b"one\n"], 4)
 
 
+def test_changed_files_restarts_a_tracked_file_truncated_to_nothing(tmp_path) -> None:
+    # Its old offset must not stand: a file regrown past it would resume mid-file.
+    from agent_usage_tracker.collectors._util import changed_files
+    f = tmp_path / "f.jsonl"
+    f.write_bytes(b"")
+    ino = f.stat().st_ino
+    fresh = lambda st: {"off": 0, "ino": st.st_ino}     # noqa: E731
+    [(_p, cur, off, lines, end)] = changed_files([str(f)], {str(f): {"off": 9, "ino": ino, "x": 1}},
+                                                 fresh, Counter())
+    assert (cur, off, lines, end) == ({"off": 0, "ino": ino}, 0, [], 0)
+    assert list(changed_files([str(f)], {str(f): cur}, fresh, Counter())) == []   # settled
+    assert list(changed_files([str(f)], {}, fresh, Counter())) == []   # first sight: nothing yet
+
+
+def test_changed_files_revisits_only_what_the_predicate_asks_for(tmp_path) -> None:
+    from agent_usage_tracker.collectors._util import changed_files
+    f = tmp_path / "f.jsonl"
+    f.write_bytes(b"one\n")
+    st = f.stat()
+    entry = {"off": 4, "ino": st.st_ino, "open": True}
+
+    def scan(revisit=None):
+        return list(changed_files([str(f)], {str(f): entry}, dict, Counter(), revisit))
+    assert scan() == [] and scan(lambda e: False) == []
+    assert scan(lambda e: e["open"]) == [(str(f), entry, 4, [], 4)]
+
+
 def _unreadable(path):
     """Pretend the OS refuses `path`: chmod 0 does nothing for root or on Windows."""
     real = open
@@ -347,18 +374,19 @@ def _unreadable(path):
 def test_an_unreadable_log_degrades_the_collector_and_a_vanished_one_stays_silent(tmp_path, monkeypatch):
     import builtins
 
-    from agent_usage_tracker.collectors._util import changed_files, raise_if_unreadable, scan_file
+    from agent_usage_tracker.collectors._util import changed_files, raise_if_unreadable
     from agent_usage_tracker.event import CollectorUnavailable
     f = tmp_path / "f.jsonl"
     f.write_bytes(b"one\n")
     gone: Counter = Counter()
-    assert scan_file(str(tmp_path / "gone.jsonl"), {}, gone) == ([], {})
     assert list(changed_files([str(tmp_path / "gone.jsonl")], {}, dict, gone)) == [] and not gone
     raise_if_unreadable("x", gone)
     monkeypatch.setattr(builtins, "open", _unreadable(f))
     skipped: Counter = Counter()
-    assert scan_file(str(f), {"off": 0}, skipped) == ([], {"off": 0})
+    tracked = {str(f): {"off": 0, "ino": f.stat().st_ino}}
+    assert list(changed_files([str(f)], tracked, lambda st: {"off": 0}, skipped)) == []
     assert list(changed_files([str(f)], {}, lambda st: {"off": 0}, skipped)) == []
+    assert tracked[str(f)] == {"off": 0, "ino": f.stat().st_ino}   # keeps its entry
     assert skipped["unreadable"] == 2
     with pytest.raises(CollectorUnavailable, match="2 file"):
         raise_if_unreadable("x", skipped)

@@ -30,20 +30,15 @@ from pathlib import Path
 from typing import Any, Generator, Iterable, Iterator
 
 from ..config import Config
-from ..event import (ActivityKind, Batch, ActivityEvent, CollectorUnavailable, EventSession, UsageEvent,
-                     make_event_id)
+from ..event import ActivityKind, Batch, ActivityEvent, CollectorUnavailable, EventSession, make_event_id
 from ..repo_keys import RepoKeys
-from .activity_common import (Link, TurnAgg, add_call, blank_tool_tally, commit_rows, ms_between, text_of,
-                              turn_attrs)
+from .activity_common import (IDLE_S, Link, TurnAgg, add_call, best_effort, blank_tool_tally, human_event,
+                              ms_between, record_commits, text_of, turn_attrs)
 from .commits import commit_call, commit_dir, commit_shas
 from ._util import describe_files, epoch_ms_to_iso, str_or_none, warn_skipped
 from .cursor import connect_ro
 
 NAME = "cursor_cli"
-# The store has no turn-end record, so a turn ends at the next prompt or once the chat sits idle.
-# shortcut: a tool call logged under a prompt more than _IDLE_S after the chat went quiet is lost
-# (turn rows are insert-only); upgrade if Cursor ever logs a turn end in the store.
-_IDLE_S = 3600
 _ENDED = {"FINISHED": "finished", "CANCELLED": "cancelled", "ERROR": "error"}
 _SQL_IN_CHUNK = 500
 _TS = re.compile(r"<timestamp>\s*\w+,\s*([A-Za-z]{3})\w*\.?\s+(\d{1,2}),\s*(\d{4}),\s*(\d{1,2}):(\d\d)"
@@ -74,7 +69,7 @@ def request_id(m: dict) -> str | None:
         else None
 
 
-def _tool(name: str) -> str:
+def _by_tool_key(name: str) -> str:
     """by_tool key. An MCP tool is `mcp_<server>_<tool>` and a server label is free text, so it
     counts as `mcp`; a name that is not a plain identifier counts as `other`."""
     if name.startswith("mcp") or name == "CallMcpTool":
@@ -192,14 +187,6 @@ class _Activity:
         self.errors: Counter = Counter()      # messages whose extraction raised (skipped)
 
     def record(self, message: dict, turn: _Turn) -> None:
-        """Best effort: a message whose extraction raises is counted and skipped, so activity
-        never blocks the human and session rows."""
-        try:
-            self._record(message, turn)
-        except Exception as exc:
-            self.errors[f"activity:{type(exc).__name__}"] += 1
-
-    def _record(self, message: dict, turn: _Turn) -> None:
         """One assistant or tool message: tool aggregates, commits, rejections, link."""
         link = Link(self.keys, turn.link)
         content = [b for b in message["content"] if isinstance(b, dict)] \
@@ -210,7 +197,7 @@ class _Activity:
             self._tool_message(message, content, turn, link)
 
     def _assistant(self, content: list[dict], turn: _Turn, link: Link) -> None:
-        link.text(text_of(content))
+        link.note_text(text_of(content))
         for b in content:
             if b.get("type") == "tool-call" and isinstance(b.get("toolName"), str):
                 cid = b.get("toolCallId")
@@ -218,7 +205,7 @@ class _Activity:
                 if isinstance(cid, str) and cid in turn.cids:
                     continue        # a rewritten blob that a later root lists again
                 turn.cids.add(cid)
-                add_call(turn.agg, _tool(b["toolName"]), b.get("args"))
+                add_call(turn.agg, _by_tool_key(b["toolName"]), b.get("args"))
 
     def _tool_message(self, message: dict, content: list[dict], turn: _Turn, link: Link) -> None:
         hl = _cursor_options(message).get("highLevelToolCallResult")
@@ -229,7 +216,7 @@ class _Activity:
                 continue
             res, cid = b.get("result"), b.get("toolCallId")
             res = res if isinstance(res, str) else ""
-            link.text(res)
+            link.note_text(res)
             if b.get("toolName") == "SwitchMode" \
                     and res.startswith("Mode switch was rejected by the user"):
                 turn.acts.append(("rejection", str(cid), {}))
@@ -248,7 +235,7 @@ class _Activity:
         ex = EXIT_LINE.match(res)       # "Exit code: N\n\nCommand output:\n..." when it ran
         output = res[ex.end():] if ex else res
         found = commit_shas(output, err or not ex or ex[1] != "0", hit[1])
-        for sha, attrs in commit_rows(link, wd, commit_dir(cmd), output, found, hit[0]):
+        for sha, attrs in record_commits(link, wd, commit_dir(cmd), output, found, amend=hit[0]):
             turn.acts.append(("commit", f"{cid}|{sha}", attrs))
 
 
@@ -276,10 +263,10 @@ def _read_list(seq: tuple[str, ...], msgs: dict[str, dict], done: set[str], act:
                 turn.more.setdefault(text, (mid, m))
         elif rid and rid not in done and mid not in seen:
             seen.add(mid)
-            act.record(m, turns[rid])
+            best_effort(act.errors, act.record, m, turns[rid])
 
 
-def _read_turns(lists: list[tuple[str, ...]], msgs: dict[str, dict], done: set[str], idle: bool,
+def _read_turns(lists: list[tuple[str, ...]], msgs: dict[str, dict], done: set[str],
                 act: _Activity) -> dict[str, _Turn]:
     """Every requestId's turn, its activity read unless the turn was already sent."""
     turns: dict[str, _Turn] = {}
@@ -289,9 +276,7 @@ def _read_turns(lists: list[tuple[str, ...]], msgs: dict[str, dict], done: set[s
     for m in msgs.values():             # a prompt no surviving root lists
         r = request_id(m)
         if r and r not in turns:
-            # its history was dropped, or it is newer than the root that will list it: wait
-            # until the chat is idle so a still-running turn is not closed early
-            turns[r] = _Turn(m, closed=idle, listed=False)
+            turns[r] = _Turn(m, listed=False)
     return turns
 
 
@@ -315,11 +300,9 @@ def _turn_rows(rid: str, turn: _Turn, sid: str, human: bool, origin: dict, creat
         images = sum(isinstance(b, dict) and b.get("type") == "image" for b in c) \
             if isinstance(c, list) else 0
         if turn.listed:
-            Link(keys, turn.link).text(ptext)
-        rows.append(UsageEvent(
-            event_id=make_event_id(NAME, "human", sid, rid, *extra), ts=pts, agent=NAME,
-            model=None, provider=None, kind="human",
-            session=EventSession(sid, None, "interactive", rid)))
+            Link(keys, turn.link).note_text(ptext)
+        rows.append(human_event(NAME, (sid, rid, *extra), pts,
+                                EventSession(sid, None, "interactive", rid)))
         emit("steer", "|".join((rid, *extra)), {"via": "typed", "words": len(words.split()),
                                                 "chars": len(words), "images": images}, pts)
     for kind, seed, attrs in turn.acts:
@@ -330,7 +313,7 @@ def _turn_rows(rid: str, turn: _Turn, sid: str, human: bool, origin: dict, creat
     return rows
 
 
-def _chat(path: str, con: sqlite3.Connection, meta: dict, cur: dict, idle: bool,
+def _closed_turn_rows(path: str, con: sqlite3.Connection, meta: dict, cur: dict, idle: bool,
           keys: RepoKeys) -> tuple[list, Counter]:
     """Rows of every turn that closed since the last scan; updates `cur` (a copy) in place."""
     sid = str_or_none(meta.get("agentId")) or os.path.basename(os.path.dirname(path))
@@ -348,9 +331,13 @@ def _chat(path: str, con: sqlite3.Connection, meta: dict, cur: dict, idle: bool,
     msgs = messages(con, {i for seq in lists for i in seq})
     done = set(cur.get("done", ()))
     act = _Activity(keys)
-    turns = _read_turns(lists, msgs, done, idle, act)
+    turns = _read_turns(lists, msgs, done, act)
     events: list = []
     for rid, turn in turns.items():
+        # The store has no turn-end record, so a turn ends at the next prompt or once the chat sits
+        # idle: a running one, or a prompt newer than the root that will list it, is not closed early.
+        # shortcut: a tool call logged under a prompt more than IDLE_S after the chat went quiet is
+        # lost (turn rows are insert-only); upgrade if Cursor ever logs a turn end in the store.
         if rid in done or not (turn.closed or idle):
             continue
         done.add(rid)
@@ -374,7 +361,7 @@ def _mtime(path: str) -> float:
                default=0.0)
 
 
-def _sdk(path: str, have: set[str]) -> list[ActivityEvent] | None:
+def _finished_run_rows(path: str, have: set[str]) -> list[ActivityEvent] | None:
     """One turn row per run that ended and was not sent yet; None if the store cannot be read.
     Queued and running runs wait: a row is insert-only, so one stored as running would never
     become finished."""
@@ -421,7 +408,7 @@ def _read_chat(path: str, prev: dict, keys: RepoKeys) -> tuple[list, dict, Count
         # A deep copy: only advance_watermark() may publish this chat's state into the watermark.
         cur = copy.deepcopy(prev)
         cur["root"] = meta.get("latestRootBlobId")
-        events, errs = _chat(path, con, meta, cur, time.time() - _mtime(path) >= _IDLE_S, keys)
+        events, errs = _closed_turn_rows(path, con, meta, cur, time.time() - _mtime(path) >= IDLE_S, keys)
         return events, cur, errs
     finally:
         con.close()
@@ -433,7 +420,7 @@ def _sdk_batches(home: Path, sdk: dict) -> Generator[Batch, None, int]:
     for path in sorted(glob.glob(str(home / ".cursor" / "projects" / "*" / "sdk-agent-store"
                                      / "*" / "index.db"))):
         have = set(sdk.get(path, {}).get("runs", ()))
-        runs = _sdk(path, have)
+        runs = _finished_run_rows(path, have)
         if runs is None:
             unreadable += 1
             continue

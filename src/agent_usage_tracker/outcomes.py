@@ -400,7 +400,8 @@ def _project_paths(cwd: str) -> list[str]:
 
 def latest_session(home: Path, cwd: str) -> str | None:
     # shortcut: Claude Code sessions only; upgrade when /outcome runs inside another agent.
-    files = [f for p in _project_paths(cwd) for f in claude_code.project_session_files(home, p)]
+    files = [Path(f) for p in _project_paths(cwd)
+             for f in claude_code.project_session_files(home, p)]
     for f in sorted(set(files), key=lambda f: f.stat().st_mtime, reverse=True):
         if claude_code.is_interactive(f):
             return f.stem

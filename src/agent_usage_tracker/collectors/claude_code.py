@@ -19,21 +19,28 @@ import re
 import time
 from collections import Counter
 from pathlib import Path
-from typing import Iterator
+from typing import Iterator, TypedDict
 
 from ..config import Config
-from ..event import Batch, EventSession, RunOrigin, UsageEvent, make_event_id
+from ..event import ActivityEvent, Batch, EventSession, RunOrigin, UsageEvent, make_event_id
 from ..repo_keys import RepoKeys
 from ..state import parse_record
-from .activity_common import IDLE_S, pad_pending, text_of
-from ._util import (count_field, project_name, raise_if_unreadable, safe_int,
-                    scan_file, str_or_none, warn_skipped)
-from .claude_code_activity import Activity
+from .activity_common import IDLE_S, best_effort, drop_raw_shas, human_event, pad_pending, text_of
+from ._util import MALFORMED_RECORD, count_field, file_batches, project_name, str_or_none
+from .claude_code_activity import Activity, ActivityState
 
 NAME = "claude_code"
 # The watermark's format. Older state is upgraded once by _upgrade_state; delete a step from there
 # once no machine can still hold state that old.
-_STATE_V = 1
+_STATE_V = 2
+
+
+class FileState(TypedDict, total=False):
+    """One file's watermark entry. An entry saved by an older version also holds an unread `dev`."""
+    off: int
+    ino: int
+    turn: str               # the turn the next record belongs to, until its next user record
+    act: ActivityState
 
 
 def projects_dir(home: Path) -> Path:
@@ -45,12 +52,13 @@ def main_session_files(home: Path) -> list[str]:
     return glob.glob(str(projects_dir(home) / "*" / "*.jsonl"))
 
 
-def project_session_files(home: Path, project: str) -> list[Path]:
+def project_session_files(home: Path, project: str) -> list[str]:
     """The main sessions of one working directory; Claude Code names the directory after its path."""
-    return list((projects_dir(home) / re.sub(r"[^A-Za-z0-9]", "-", project)).glob("*.jsonl"))
+    project_dir = projects_dir(home) / re.sub(r"[^A-Za-z0-9]", "-", project)
+    return [str(f) for f in project_dir.glob("*.jsonl")]
 
 
-def is_interactive(path: Path) -> bool:
+def is_interactive(path: str | Path) -> bool:
     """A main session started at a terminal (entrypoint cli), from its first records."""
     try:
         with open(path, encoding="utf-8", errors="replace") as fh:
@@ -183,11 +191,12 @@ def _complete(path: str, off: int) -> bool:
 
 def _upgrade_state(wm: dict) -> None:
     """Bring state saved by an older version to the current shape, once: pending commit calls with
-    their target."""
+    their target, and link SHAs keyed. Each step is safe on state already upgraded."""
     if wm.get("state_v") == _STATE_V:
         return
     for entry in wm.setdefault("files", {}).values():
         pad_pending(entry.get("act"))
+        drop_raw_shas(entry.get("act"))
     wm["state_v"] = _STATE_V
 
 
@@ -253,16 +262,6 @@ def _usage_event(o: dict, path: str, ident: tuple[bool, str, str | None],
     )
 
 
-def _carried_over(fstate: dict, new_fstate: dict) -> tuple[str | None, dict | None, bool]:
-    """(turn, activity state, read from byte 0) a chunk starts with. The watermark entry's are
-    dropped when scan_file restarted: same_file said the path now holds a different file (rotated
-    or replaced) or it was truncated, so the offset did not carry on."""
-    if fstate.get("ino") != new_fstate.get("ino") \
-            or safe_int(new_fstate.get("off")) < safe_int(fstate.get("off")):
-        return None, None, True
-    return str_or_none(fstate.get("turn")), fstate.get("act"), safe_int(fstate.get("off")) == 0
-
-
 def _next_turn(o: dict, is_subagent: bool, turn: str | None) -> str | None:
     """turn_id after a user record: the latest promptId (tool_results carry it too); a subagent
     keeps its first one, the parent turn that spawned it."""
@@ -272,10 +271,29 @@ def _next_turn(o: dict, is_subagent: bool, turn: str | None) -> str | None:
 
 def _keep_fuller(best: dict[str, UsageEvent], o: dict, path: str,
                  ident: tuple[bool, str, str | None], turn: str | None, skipped: Counter) -> None:
-    """Fold an assistant record into best: the fuller record wins, an equal one keeps the first."""
+    """Fold an assistant record into best: the fuller record wins, an equal one keeps the first.
+
+    Claude Code writes ONE JSONL line per content block of an assistant message (text + each
+    tool_use), and every one of those lines repeats the SAME cumulative message.usage. Keying by
+    uuid (unique per line) would count a 6-block message 6x. So dedup by (message.id, requestId)
+    within the scan, keeping the max-total record (also correct if the repeats are
+    cumulative-growing rather than identical), and derive event_id from that key so the sink dedups
+    the same message across scans too.
+
+    ts is whichever line last raised the max within THIS chunk, and that is not stable across
+    scans: Claude Code re-logs a message more than once, observed both a thousand-plus lines later
+    in the same file and with a message's own lines minutes apart. A scan seeing only part of that
+    spread emits the same event_id with a different ts, and the sink's key is (event_id, ts) -- a
+    TimescaleDB hypertable must carry its partitioning column in the unique index -- so both rows
+    persist and the partial one would double-count.
+
+    Not fixable here: which lines a scan sees is exactly what varies, so no per-chunk rule is
+    invariant, and closing it would need a per-message ts cache in the watermark for every tracked
+    file. The sink's agents.usage_event_dedup view settles it instead, keeping the largest total
+    per event_id (counts are cumulative, so the largest is the complete one)."""
     try:
         found = _usage_event(o, path, ident, turn)
-    except (ValueError, TypeError, OverflowError):  # OverflowError: int(inf) from 1e400
+    except MALFORMED_RECORD:
         skipped["malformed"] += 1
         return
     if found and (found[0] not in best or best[found[0]].total_tokens < found[1].total_tokens):
@@ -290,27 +308,18 @@ def _only_ran_usage(fresh: bool, best: dict, steers: list) -> bool:
     return fresh and not best and bool(steers) and all(is_usage for _s, is_usage in steers)
 
 
-def _chunk_rows(path: str, base: Path, lines: list[bytes], fstate: dict, new_fstate: dict,
+def _human_row(o: dict, text: str, path: str, sess: EventSession,
+               act: Activity) -> tuple[UsageEvent, tuple[ActivityEvent | None, bool]]:
+    """The human row of a typed prompt, and its steer row with whether the prompt ran /usage."""
+    uid = _record_uid(o, path)
+    row = human_event(NAME, (uid,), o.get("timestamp"), sess, project_name(o.get("cwd")))
+    return row, (act.steer(o, uid, text, sess), _USAGE_CMD in text)
+
+
+def _chunk_rows(path: str, base: Path, lines: list[bytes], from_start: bool, cur: FileState,
                 keys: RepoKeys, skipped: Counter) -> list:
-    """All rows of one file's new lines; puts what rides in the watermark into new_fstate."""
-    # Claude Code writes ONE JSONL line per content block of an assistant message (text +
-    # each tool_use), and every one of those lines repeats the SAME cumulative message.usage.
-    # Keying by uuid (unique per line) would count a 6-block message 6x. So dedup by
-    # (message.id, requestId) within the scan, keeping the max-total record (also correct if
-    # the repeats are cumulative-growing rather than identical), and derive event_id from that
-    # key so the sink dedups the same message across scans too.
-    #
-    # ts is whichever line last raised the max within THIS chunk, and that is not stable
-    # across scans: Claude Code re-logs a message more than once, observed both a thousand-plus
-    # lines later in the same file and with a message's own lines minutes apart. A scan seeing
-    # only part of that spread emits the same event_id with a different ts, and the sink's key
-    # is (event_id, ts) -- a TimescaleDB hypertable must carry its partitioning column in the
-    # unique index -- so both rows persist and the partial one would double-count.
-    #
-    # Not fixable here: which lines a scan sees is exactly what varies, so no per-chunk rule is
-    # invariant, and closing it would need a per-message ts cache in the watermark for every
-    # tracked file. The sink's agents.usage_event_dedup view settles it instead, keeping the
-    # largest total per event_id (counts are cumulative, so the largest is the complete one).
+    """All rows of one file's new lines, read from byte 0 or not; updates `cur`, the private copy
+    of its watermark entry."""
     best: dict[str, UsageEvent] = {}
     human: list[UsageEvent] = []
     # shortcut: counted per scan chunk, so an old file read in two chunks keeps two /loops;
@@ -320,8 +329,8 @@ def _chunk_rows(path: str, base: Path, lines: list[bytes], fstate: dict, new_fst
     # turn_id is carried across chunks in the file's watermark entry, so a turn that began in an
     # earlier scan is not lost.
     # shortcut: files first read before this existed start at NULL until their next user record.
-    turn, carried, fresh = _carried_over(fstate, new_fstate)
-    act = Activity(NAME, path, ident[0], carried, keys)
+    turn = str_or_none(cur.get("turn"))
+    act = Activity(NAME, path, ident[0], cur.get("act"), keys)
     steers: list = []
     for raw in lines:
         o = parse_record(raw)
@@ -331,7 +340,8 @@ def _chunk_rows(path: str, base: Path, lines: list[bytes], fstate: dict, new_fst
         typ = o.get("type")
         if typ == "user":
             turn = _next_turn(o, ident[0], turn)
-        act.record(o, _session_of(o, ident, turn))
+        sess = _session_of(o, ident, turn)
+        best_effort(act.errors, act.record, o, sess)
         if typ == "user":
             text = human_text(o)
             if text is None:
@@ -340,31 +350,35 @@ def _chunk_rows(path: str, base: Path, lines: list[bytes], fstate: dict, new_fst
                 old_loops += 1
                 if old_loops > 1:        # you typed the first; the rest are firings
                     continue
-            uid = _record_uid(o, path)
-            sess = _session_of(o, ident, turn)
-            human.append(UsageEvent(
-                event_id=make_event_id(NAME, "human", uid),
-                ts=o.get("timestamp"), agent=NAME, model=None, provider=None,
-                kind="human", project=project_name(o.get("cwd")), session=sess,
-            ))
-            steers.append((act.steer(o, uid, text, sess), _USAGE_CMD in text))
+            row, steer = _human_row(o, text, path, sess, act)
+            human.append(row)
+            steers.append(steer)
         elif typ == "assistant":
             _keep_fuller(best, o, path, ident, turn, skipped)
-    if _complete(path, safe_int(new_fstate.get("off"))):
+    if _complete(path, cur["off"]):
         act.finish()
-    if _only_ran_usage(fresh, best, steers):
+    if _only_ran_usage(from_start, best, steers):
         human, steers = [], []
     skipped.update(act.errors)
-    _keep_or_drop(new_fstate, "turn", turn)
-    _keep_or_drop(new_fstate, "act", act.state())
+    if turn:
+        cur["turn"] = turn
+    else:
+        cur.pop("turn", None)
+    state = act.state()
+    if state:
+        cur["act"] = state
+    else:
+        cur.pop("act", None)
     return list(best.values()) + human + [s for s, _u in steers if s] + act.events
 
 
-def _keep_or_drop(fstate: dict, key: str, value: object) -> None:
-    if value:
-        fstate[key] = value
-    else:
-        fstate.pop(key, None)
+def _fresh_state(st: os.stat_result) -> FileState:
+    return {"off": 0, "ino": st.st_ino}
+
+
+def _has_open_link_turn(entry: FileState) -> bool:
+    """Such a file is looked at again with no new bytes: once it has gone idle, its turn closes."""
+    return bool((entry.get("act") or {}).get("lo"))
 
 
 def collect(cfg: Config, wm: dict) -> Iterator[Batch]:
@@ -372,21 +386,11 @@ def collect(cfg: Config, wm: dict) -> Iterator[Batch]:
     if not base.exists():
         return
     _upgrade_state(wm)
-    files: dict = wm["files"]
     keys = RepoKeys(cfg.repo_key_salt)   # cwd -> repo_key cached once per collect() pass
-    skipped: Counter = Counter()
 
-    for path in glob.glob(str(base / "**" / "*.jsonl"), recursive=True):
-        fstate = files.get(path, {})
-        lines, new_fstate = scan_file(path, fstate, skipped)
-        # a file with an open link turn is looked at again once it went idle, to close it
-        if not lines and new_fstate == fstate and not (fstate.get("act") or {}).get("lo"):
-            continue
-        events = _chunk_rows(path, base, lines, fstate, new_fstate, keys, skipped)
+    def chunk_rows(path: str, cur: FileState, off: int, lines: list[bytes],
+                   skipped: Counter) -> list:
+        return _chunk_rows(path, base, lines, not off, cur, keys, skipped)
 
-        def advance_watermark(p: str = path, s: dict = new_fstate) -> None:
-            files[p] = s
-
-        yield events, advance_watermark
-    warn_skipped(NAME, skipped)
-    raise_if_unreadable(NAME, skipped)
+    yield from file_batches(NAME, glob.glob(str(base / "**" / "*.jsonl"), recursive=True),
+                            wm["files"], _fresh_state, chunk_rows, _has_open_link_turn)
