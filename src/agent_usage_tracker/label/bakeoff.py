@@ -224,11 +224,16 @@ def choose(cfg: Config, task: str) -> dict:
     return obj["tasks"][task]
 
 
+MIN_UPDATES = 2000
+
+
 def _fit(data: list[tuple[list[int], list[float], float]], k: int, epochs: int = 12,
          lr: float = 0.3, l2: float = 1e-4, seed: int = 0) -> dict[int, list[float]]:
     """Multinomial logistic regression by SGD on (features, target distribution, weight)."""
     w: dict[int, list[float]] = {}
     rng, data = random.Random(seed), list(data)
+    # a small gold set gets more passes: 12 passes over 20 items underfit even a separable set
+    epochs = max(epochs, -(-MIN_UPDATES // max(1, len(data))))
     for ep in range(epochs):
         rng.shuffle(data)
         step = lr / (1 + ep)
