@@ -11,7 +11,10 @@ import json
 import sqlite3
 import sys
 import tempfile
+from collections import Counter
 from pathlib import Path
+
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
@@ -136,7 +139,7 @@ def test_export_drains_past_cap() -> None:
                  "message": {"model": "m", "usage": {"input_tokens": 1, "output_tokens": 1,
                              "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}}}
                 for i in range(5)])
-            n, skipped = scan.run_export(_cfg(home), ["claude_code"], io.StringIO())
+            n, skipped, _failed = scan.run_export(_cfg(home), ["claude_code"], io.StringIO())
             assert n == 5, (n, skipped)       # all 5 drained despite cap=2
     finally:
         _util._MAX_LINES = orig
@@ -150,14 +153,14 @@ def test_file_identity_reset() -> None:
     with tempfile.TemporaryDirectory() as d:
         p = str(Path(d) / "f.jsonl")
         Path(p).write_bytes(b"a\nb\n")   # bytes, not text: Windows would translate \n to \r\n
-        lines, s1 = scan_file(p, {})
+        lines, s1 = scan_file(p, {}, Counter())
         assert [ln.strip() for ln in lines] == [b"a", b"b"]
         assert "dev" in s1 and "ino" in s1 and s1["off"] == 4
-        lines, s2 = scan_file(p, s1)                 # unchanged -> nothing new
+        lines, s2 = scan_file(p, s1, Counter())                 # unchanged -> nothing new
         assert lines == [] and s2["off"] == 4
         stale = dict(s1)
         stale["ino"] = s1["ino"] + 1                 # pretend a different file now sits here
-        lines, s3 = scan_file(p, stale)
+        lines, s3 = scan_file(p, stale, Counter())
         assert [ln.strip() for ln in lines] == [b"a", b"b"]   # reset to 0, full re-read
         assert s3["ino"] == s1["ino"]                          # identity corrected to the real file
 
@@ -166,7 +169,7 @@ def test_file_identity_reset() -> None:
         # changed dev with the same inode is the SAME file -> keep the offset, read nothing.
         rebooted = dict(s1)
         rebooted["dev"] = s1["dev"] + 4              # what a restart does to every tracked path
-        lines, s4 = scan_file(p, rebooted)
+        lines, s4 = scan_file(p, rebooted, Counter())
         assert lines == [] and s4["off"] == 4        # no re-read
         assert s4["dev"] == s1["dev"]                # dev still refreshed for diagnostics
     print("ok file_identity_reset")
@@ -309,7 +312,8 @@ def test_changed_files_yields_only_new_bytes_in_a_private_copy(tmp_path) -> None
     def fresh(st):
         fresh_calls.append(st.st_ino)
         return {"off": 0, "ino": st.st_ino, "new": True}
-    got = list(changed_files([str(a), str(b), str(tmp_path / "gone.jsonl")], files, fresh))
+    got = list(changed_files([str(a), str(b), str(tmp_path / "gone.jsonl")], files, fresh,
+                             Counter()))
     assert [(p, off, lines, end) for p, _cur, off, lines, end in got] == [(str(a), 4, [b"two\n"], 8)]
     assert fresh_calls == []                                   # `gone` was never statted to a row
     got[0][1]["state"]["n"] = 2
@@ -324,11 +328,68 @@ def test_changed_files_starts_a_new_or_replaced_file_from_its_fresh_state(tmp_pa
     stale = {str(f): {"off": 1, "ino": f.stat().st_ino + 1, "old": True}}
     for files in ({}, stale):
         [(_p, cur, off, lines, end)] = changed_files(
-            [str(f)], files, lambda st: {"off": 0, "ino": st.st_ino, "new": True})
+            [str(f)], files, lambda st: {"off": 0, "ino": st.st_ino, "new": True}, Counter())
         assert cur == {"off": 0, "ino": f.stat().st_ino, "new": True}
         assert (off, lines, end) == (0, [b"one\n"], 4)
 
 
+def _unreadable(path):
+    """Pretend the OS refuses `path`: chmod 0 does nothing for root or on Windows."""
+    real = open
+
+    def refusing(file, *a, **kw):
+        if str(file) == str(path):
+            raise PermissionError(13, "denied")
+        return real(file, *a, **kw)
+    return refusing
+
+
+def test_an_unreadable_log_degrades_the_collector_and_a_vanished_one_stays_silent(tmp_path, monkeypatch):
+    import builtins
+
+    from agent_usage_tracker.collectors._util import changed_files, raise_if_unreadable, scan_file
+    from agent_usage_tracker.event import CollectorUnavailable
+    f = tmp_path / "f.jsonl"
+    f.write_bytes(b"one\n")
+    gone: Counter = Counter()
+    assert scan_file(str(tmp_path / "gone.jsonl"), {}, gone) == ([], {})
+    assert list(changed_files([str(tmp_path / "gone.jsonl")], {}, dict, gone)) == [] and not gone
+    raise_if_unreadable("x", gone)
+    monkeypatch.setattr(builtins, "open", _unreadable(f))
+    skipped: Counter = Counter()
+    assert scan_file(str(f), {"off": 0}, skipped) == ([], {"off": 0})
+    assert list(changed_files([str(f)], {}, lambda st: {"off": 0}, skipped)) == []
+    assert skipped["unreadable"] == 2
+    with pytest.raises(CollectorUnavailable, match="2 file"):
+        raise_if_unreadable("x", skipped)
+
+
+def test_a_bad_model_value_is_skipped_and_never_wedges_the_tally(tmp_path) -> None:
+    from agent_usage_tracker.scan import _CollectorPass, _blank_agent_tally
+    log = tmp_path / ".claude" / "projects" / "-p" / "s.jsonl"
+    log.parent.mkdir(parents=True)
+    log.write_text(json.dumps({"type": "assistant", "uuid": "a", "timestamp": "2026-07-18T10:00:01Z",
+                               "cwd": "/x/p", "sessionId": "s", "message": {
+                                   "id": "m", "model": ["x"], "usage": {"input_tokens": 1}}}) + "\n")
+    cfg = Config(machine="t", agents=(), webhook_url=None, webhook_secret=None, pg_dsn=None,
+                 home=tmp_path)
+    run = _CollectorPass(_blank_agent_tally(), None)
+    run.drain_all(claude_code.collect, cfg, {}, "claude_code")
+    assert run.agg["by_model"] == {"unknown": {"events": 1, "total": 1}}
+    cur = {"model": "keep", "provider": "p"}
+    pi._note_model_change({"modelId": ["x"], "provider": {"a": 1}}, cur)
+    assert cur == {"model": "keep", "provider": "p"}
+    cur = {"model": "keep", "provider": "p", "cwd": None}
+    codex._note_context("turn_context", {"model": {"a": 1}}, False, cur, None)
+    assert cur["model"] == "keep"
+
+
+def test_warn_skipped_names_the_failure_type_of_each_activity_skip(capsys) -> None:
+    from agent_usage_tracker.collectors._util import warn_skipped
+    warn_skipped("x", Counter({"activity:KeyError": 2, "activity:TypeError": 1}))
+    err = capsys.readouterr().err
+    assert "3 activity record(s)" in err and "KeyError x2, TypeError x1" in err
+
+
 if __name__ == "__main__":
-    import pytest
     raise SystemExit(pytest.main([__file__, "-q"]))

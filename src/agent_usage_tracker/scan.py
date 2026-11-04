@@ -16,7 +16,7 @@ from .collectors import REGISTRY, Collect, drain
 from .config import Config
 from .event import (ActivityEvent, Batch, CollectorUnavailable, Row, TimeInterval, UsageEvent,
                     parse_ts, valid_ts)
-from .push import (COLUMNS, deliver_scan_rows, make_sender, scan_row, scrub_error,
+from .push import (COLUMNS, deliver_scan_rows, local_error, make_sender, scan_row, scrub_error,
                    send_activity_rows, send_session_rows)
 from .state import collector_wm, load_state, save_state
 
@@ -126,7 +126,7 @@ def run_scan(cfg: Config, agents: Sequence[str], *, dry_run: bool) -> dict[str, 
         agg = report.setdefault(name, _blank_agent_tally())
         run = _CollectorPass(agg, sender)
         started_at = datetime.now(timezone.utc)
-        interrupted = False
+        failure: BaseException | None = None
 
         try:
             run.drain_all(collector.collect, cfg, wm, name)
@@ -134,16 +134,24 @@ def run_scan(cfg: Config, agents: Sequence[str], *, dry_run: bool) -> dict[str, 
                 collector.after_scan(cfg)
         except BaseException as exc:
             run.status, run.error = "error", scrub_error(exc)
-            interrupted = isinstance(exc, KeyboardInterrupt)    # leave at once, send nothing
-            raise                           # the heartbeat goes out in finally; the scan still fails
-        finally:
-            if not dry_run:
-                save_state(state)
-                scan_rows.append(scan_row(cfg, name, started_at, status=run.status, error=run.error,
-                                          events=agg["events"] + agg["intervals"],
-                                          human=agg["human"], newest_ts=run.newest_ts))
-                if run.status == "error" and not interrupted:   # the loop ends here: one delivery
-                    deliver_scan_rows(cfg, scan_rows)
+            failure = exc
+        if not dry_run:
+            try:
+                save_state(state, [name])
+            except OSError as exc:      # never ahead of the heartbeat, or of the pass's own failure
+                if failure:
+                    print(f"aut: warning: watermark not saved: {local_error(exc)}", file=sys.stderr)
+                else:
+                    run.status, run.error = "error", scrub_error(exc)
+                    failure = exc
+            scan_rows.append(scan_row(cfg, name, started_at, status=run.status, error=run.error,
+                                      events=agg["events"] + agg["intervals"],
+                                      human=agg["human"], newest_ts=run.newest_ts))
+            # the loop ends here: one delivery. Ctrl-C leaves at once and sends nothing.
+            if failure and not isinstance(failure, KeyboardInterrupt):
+                deliver_scan_rows(cfg, scan_rows)
+        if failure:
+            raise failure                   # the scan still fails
 
     if not dry_run:
         deliver_scan_rows(cfg, scan_rows)
@@ -188,7 +196,8 @@ def print_scan(cfg: Config, report: dict, dry_run: bool) -> None:
     print(f"\naut {mode}  machine={cfg.machine}\n" + "=" * 60)
     grand = 0
     for name, agg in report.items():
-        if not any(agg[k] for k in ("events", "human", "skipped_no_ts", "duplicates", "intervals")):
+        if not any(agg[k] for k in ("events", "human", "activity", "skipped_no_ts", "duplicates",
+                                "intervals")):
             print(f"{name:<12} -  no new usage")
             continue
         grand += agg["total"]
@@ -202,33 +211,36 @@ def reset_watermarks(agents: Sequence[str]) -> None:
     state = load_state()
     for name in agents:
         state.get("collectors", {}).pop(name, None)
-    save_state(state)
+    save_state(state, agents)
 
 
-def _one_shot_batches(name: str, cfg: Config, wm: dict) -> Iterator[Batch]:
+def _one_shot_batches(name: str, cfg: Config, wm: dict, failed: set[str]) -> Iterator[Batch]:
     """All of a collector's batches for a one-shot command, which calls each batch's advance
-    itself: an unavailable source just ends that pass."""
+    itself: an unavailable source ends that pass, and its name goes into `failed`."""
     for batches in drain(REGISTRY[name].collect, cfg, wm, name):
         try:
             yield from batches
         except CollectorUnavailable as exc:
             print(f"aut: {exc}", file=sys.stderr)
+            failed.add(name)
 
 
-def run_export(cfg: Config, agents: Sequence[str], out: TextIO) -> tuple[int, int]:
+def run_export(cfg: Config, agents: Sequence[str], out: TextIO) -> tuple[int, int, set[str]]:
     """Write all normalized events (from scratch, ignoring the watermark) as CSV to `out`.
     Column order matches push.COLUMNS / the sink table, so it loads via COPY. Useful for
     an offline bulk backfill or a bridged load where the live transport is not wired yet.
-    Returns (written, skipped) where skipped counts records with a missing/invalid ts."""
+    Returns (written, skipped, failed): skipped counts records with a missing/invalid ts, failed
+    names the collectors with a source they could not read, so the CSV is partial."""
     writer = csv.writer(out)
     writer.writerow(COLUMNS)
     n = skipped = 0
+    failed: set[str] = set()
     for name in agents:
         # Must dedup here, unlike the push path: this CSV is meant to be loaded with COPY, which
         # has no ON CONFLICT to fall back on, so a session stored under two project paths would
         # land twice in the target table. See the note in run_scan.
         seen: set[str] = set()
-        for events, advance_watermark in _one_shot_batches(name, cfg, {}):
+        for events, advance_watermark in _one_shot_batches(name, cfg, {}, failed):
             for e in events:
                 if not isinstance(e, UsageEvent):   # the CSV is agents.usage_event only
                     continue
@@ -242,7 +254,7 @@ def run_export(cfg: Config, agents: Sequence[str], out: TextIO) -> tuple[int, in
                 writer.writerow(["" if d[c] is None else d[c] for c in COLUMNS])
                 n += 1
             advance_watermark()           # so the next pass continues past the cap
-    return n, skipped
+    return n, skipped, failed
 
 
 def print_export(written: int, skipped: int, out_path: str | None) -> None:
@@ -280,7 +292,7 @@ class _History:
         self.dsn, self.dry_run, self.sessions, self.activity = dsn, dry_run, sessions, activity
         self.counts: dict[str, Any] = {"rows": 0, "by_origin": {}, "turn_null": 0,
                                        "subagent_no_parent": 0, "activity": 0, "by_kind": {},
-                                       "via": {}, "link": {}}
+                                       "via": {}, "link": {}, "failed": set()}
         self.buf: list[dict] = []
         self.abuf: list[ActivityEvent] = []
 
@@ -333,7 +345,8 @@ def run_history_backfill(cfg: Config, agents: Sequence[str], *, dry_run: bool,
     history = _History(dsn, dry_run, sessions=sessions, activity=activity)
     for name in agents:
         seen: set[str] = set()                      # same session under two paths: one row
-        for events, advance_watermark in _one_shot_batches(name, cfg, {}):
+        for events, advance_watermark in _one_shot_batches(name, cfg, {},
+                                                           history.counts["failed"]):
             for e in events:
                 history.take(e, seen, name)
             advance_watermark()                 # advances only the throwaway wm

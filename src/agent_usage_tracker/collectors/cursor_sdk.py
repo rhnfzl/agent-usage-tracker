@@ -28,7 +28,7 @@ from typing import Callable, Iterator
 
 from ..config import Config
 from ..event import UsageEvent, make_event_id
-from ._util import noop_advance, project_name, safe_int, warn_skipped
+from ._util import noop_advance, project_name, raise_if_unreadable, safe_int, warn_skipped
 
 NAME = "cursor_sdk"
 
@@ -76,8 +76,13 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[UsageEvent], Callable[
         try:
             with open(path, encoding="utf-8") as fh:
                 m = json.load(fh)
-        except (OSError, json.JSONDecodeError, UnicodeDecodeError):
-            skipped["malformed"] += 1       # a later scan re-reads it: this is a full scan
+        except FileNotFoundError:           # gone since the glob
+            continue
+        except OSError:
+            skipped["unreadable"] += 1      # a later scan re-reads it: this is a full scan
+            continue
+        except ValueError:                  # JSONDecodeError and UnicodeDecodeError
+            skipped["malformed"] += 1
             continue
         if not isinstance(m, dict) or not isinstance(m.get("runs"), list):
             continue
@@ -87,3 +92,4 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[UsageEvent], Callable[
         events += [e for e in rows if e]
     yield events, noop_advance
     warn_skipped(NAME, skipped)
+    raise_if_unreadable(NAME, skipped)

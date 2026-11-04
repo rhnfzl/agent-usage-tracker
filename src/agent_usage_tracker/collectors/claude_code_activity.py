@@ -12,6 +12,7 @@ github.com/kenn-io/agentsview, MIT licence, (c) its authors).
 from __future__ import annotations
 
 import copy
+from collections import Counter
 from typing import Any
 from urllib.parse import urlparse
 
@@ -37,7 +38,7 @@ class Activity:
         s = copy.deepcopy(carried) if isinstance(carried, dict) else {}
         self.agent, self.path, self.subagent, self.keys = agent, path, subagent, keys
         self.events: list[ActivityEvent] = []
-        self.errors = 0                       # records whose extraction raised (skipped)
+        self.errors: Counter = Counter()                       # records whose extraction raised (skipped)
         self.intr = bool(s.get("intr"))      # the last user-side record was an interrupt
         self.after_intr = False
         # Turn aggregates and unanswered commit calls are carried across scans in the watermark,
@@ -90,8 +91,8 @@ class Activity:
         never block the usage and session rows of the same chunk."""
         try:
             self._record(o, sess)
-        except Exception:
-            self.errors += 1
+        except Exception as exc:
+            self.errors[f"activity:{type(exc).__name__}"] += 1
 
     def finish(self) -> None:
         """The file is complete (read to its end and idle for IDLE_S): close its open link turn.
@@ -100,8 +101,8 @@ class Activity:
             if self.lo:
                 lo = self.lo
                 self._close_link(lo["uid"], lo["ts"], lo["sid"], lo["turn"], lo["origin"])
-        except Exception:
-            self.errors += 1
+        except Exception as exc:
+            self.errors[f"activity:{type(exc).__name__}"] += 1
 
     def _close_link(self, seed: str, ts: str | None, sid: str, turn: str | None,
                     origin: str | None) -> None:
@@ -210,8 +211,8 @@ class Activity:
         record(o)."""
         try:
             return self._steer(o, uid, text, sess)
-        except Exception:
-            self.errors += 1
+        except Exception as exc:
+            self.errors[f"activity:{type(exc).__name__}"] += 1
             return None
 
     def _steer(self, o: dict, uid: str, text: str, sess: EventSession) -> ActivityEvent:

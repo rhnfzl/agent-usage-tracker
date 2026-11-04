@@ -16,6 +16,8 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Callable
 from urllib.parse import parse_qs
 
+from .push import local_error
+
 _MAX_BODY = 1 << 20
 _CSS = """:root { color-scheme: light dark; --bg: #fafafa; --fg: #1a1a1a; --mut: #666;
   --line: #ddd; --acc: #2b5fd9; }
@@ -77,7 +79,13 @@ def serve(token: str, on_get: Callable[[str], bytes | None],
                 self._reply(404, b"not found")
                 return
             form = parse_qs(self.rfile.read(_body_length(self.headers)).decode("utf-8", "replace"))
-            closing = on_post(form)
+            try:
+                closing = on_post(form)
+            except Exception as exc:    # the answers exist only in the tab: let it resubmit
+                print(f"aut: save failed: {local_error(exc)}", file=sys.stderr)
+                self._reply(500, b"<p>Nothing was saved (the reason is in the terminal). Go back "
+                                 b"and submit again; the page is still running.</p>")
+                return
             if closing is None:
                 self._reply(303, b"", root)     # post, redirect, get: reload is safe
             else:

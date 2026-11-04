@@ -31,7 +31,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from agent_usage_tracker import cli, push, scan  # noqa: E402
+from agent_usage_tracker import cli, manual_time, push, scan  # noqa: E402
 from agent_usage_tracker.collectors import REGISTRY  # noqa: E402
 from agent_usage_tracker.collectors import activitywatch as aw  # noqa: E402
 from agent_usage_tracker.config import (ALL_AGENTS, DEFAULT_AGENTS, AutError,  # noqa: E402
@@ -372,19 +372,19 @@ def test_purge_bounded_and_not_on_dry_run(monkeypatch) -> None:
 def test_time_add_validation(monkeypatch) -> None:
     cfg = _cfg(pg_dsn="postgresql://x")
     now = datetime(2026, 11, 3, 12, 0, tzinfo=timezone.utc)
-    row = cli.build_manual_interval(cfg, cli.ManualSpan(minutes=30), now=now)
+    row = manual_time.build_manual_interval(cfg, manual_time.ManualSpan(minutes=30), now=now)
     assert (row.ts, row.end_ts) == ((now - timedelta(minutes=30)).isoformat(), now.isoformat())
     assert row.source == "manual" and row.work_relevant and row.title is None
     assert row.app is None and row.attrs == {} and row.machine == "test"
-    nr = cli.build_manual_interval(cfg, cli.ManualSpan(start="2026-11-03T09:00+00:00",
+    nr = manual_time.build_manual_interval(cfg, manual_time.ManualSpan(start="2026-11-03T09:00+00:00",
                                                        end="2026-11-03T10:00+00:00"),
                                    not_relevant=True, now=now)
     assert not nr.work_relevant and nr.ts == "2026-11-03T09:00:00+00:00"
-    at = cli.build_manual_interval(cfg, cli.ManualSpan(minutes=15, at="2026-11-03T08:00+00:00"),
+    at = manual_time.build_manual_interval(cfg, manual_time.ManualSpan(minutes=15, at="2026-11-03T08:00+00:00"),
                                    now=now)
     assert at.end_ts == "2026-11-03T08:00:00+00:00"
-    local = cli.build_manual_interval(cfg, cli.ManualSpan(start="2026-11-03 09:00",
-                                                          end="2026-11-03 09:30"), now=now)
+    local = manual_time.build_manual_interval(cfg, manual_time.ManualSpan(start="2026-11-01 09:00",
+                                                                  end="2026-11-01 09:30"), now=now)
     assert datetime.fromisoformat(local.ts).utcoffset() is not None, "local time gets a zone"
     bad = [dict(start="2026-11-03T10:00+00:00", end="2026-11-03T10:00+00:00"),       # end == start
            dict(start="2026-11-03T10:00+00:00", end="2026-11-03T09:00+00:00"),       # end < start
@@ -396,9 +396,9 @@ def test_time_add_validation(monkeypatch) -> None:
            dict(minutes=10, start="2026-11-03T09:00+00:00"), dict(start="not a date", end="x")]
     for kw in bad:
         try:
-            cli.build_manual_interval(cfg, cli.ManualSpan(**kw), now=now)
+            manual_time.build_manual_interval(cfg, manual_time.ManualSpan(**kw), now=now)
             raise AssertionError(f"must refuse {kw}")
-        except SystemExit:
+        except AutError:
             pass
 
     log: list = []

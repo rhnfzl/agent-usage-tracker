@@ -117,13 +117,11 @@ def _warn_if_plaintext(url: str) -> None:
 def _http(cfg: Config, method: str, path: str, body: Any = None) -> Any:
     """The one HTTP call to aw-server (tests stub this). Raises on transport or HTTP failure."""
     url = cfg.activitywatch_url.rstrip("/") + path
-    if not url.startswith(("http://", "https://")):
-        raise ValueError("activitywatch_url must be http(s)")
     _warn_if_plaintext(cfg.activitywatch_url)
     req = urllib.request.Request(url, method=method,
                                  data=None if body is None else json.dumps(body).encode(),
                                  headers={"Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=_TIMEOUT) as resp:  # nosec B310 # http(s) only
+    with urllib.request.urlopen(req, timeout=_TIMEOUT) as resp:  # nosec B310 # load_config admits http(s) only
         raw = resp.read()
     return json.loads(raw) if raw else None
 

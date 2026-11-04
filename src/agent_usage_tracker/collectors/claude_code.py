@@ -25,8 +25,8 @@ from ..config import Config
 from ..event import Batch, EventSession, RunOrigin, UsageEvent, make_event_id
 from ..repo_keys import RepoKeys
 from .activity_common import IDLE_S, pad_pending, text_of
-from ._util import (count_field, parse_record, project_name, safe_int, scan_file, str_or_none,
-                    warn_skipped)
+from ._util import (count_field, parse_record, project_name, raise_if_unreadable, safe_int,
+                    scan_file, str_or_none, warn_skipped)
 from .claude_code_activity import Activity
 
 NAME = "claude_code"
@@ -240,7 +240,7 @@ def _usage_event(o: dict, path: str, ident: tuple[bool, str, str | None],
         event_id=make_event_id(NAME, key),
         ts=o.get("timestamp"),
         agent=NAME,
-        model=msg.get("model"),
+        model=str_or_none(msg.get("model")),
         provider="anthropic",
         input_tokens=inp,
         output_tokens=out,
@@ -353,7 +353,7 @@ def _chunk_rows(path: str, base: Path, lines: list[bytes], fstate: dict, new_fst
         act.finish()
     if _only_ran_usage(fresh, best, steers):
         human, steers = [], []
-    skipped["activity"] += act.errors
+    skipped.update(act.errors)
     _keep_or_drop(new_fstate, "turn", turn)
     _keep_or_drop(new_fstate, "act", act.state())
     return list(best.values()) + human + [s for s, _u in steers if s] + act.events
@@ -377,7 +377,7 @@ def collect(cfg: Config, wm: dict) -> Iterator[Batch]:
 
     for path in glob.glob(str(base / "**" / "*.jsonl"), recursive=True):
         fstate = files.get(path, {})
-        lines, new_fstate = scan_file(path, fstate)
+        lines, new_fstate = scan_file(path, fstate, skipped)
         # a file with an open link turn is looked at again once it went idle, to close it
         if not lines and new_fstate == fstate and not (fstate.get("act") or {}).get("lo"):
             continue
@@ -388,3 +388,4 @@ def collect(cfg: Config, wm: dict) -> Iterator[Batch]:
 
         yield events, advance_watermark
     warn_skipped(NAME, skipped)
+    raise_if_unreadable(NAME, skipped)

@@ -211,6 +211,37 @@ def test_no_local_text_reaches_the_rows():
     print("ok no_local_text_reaches_the_rows")
 
 
+def test_a_failed_save_answers_500_and_keeps_the_page_serving(capsys):
+    ready = threading.Event()
+    box: dict = {}
+    posts = iter([RuntimeError("could not connect postgresql://aut:hunter2@db/agents"), b"done"])
+
+    def on_post(form):
+        got = next(posts)
+        if isinstance(got, Exception):
+            raise got
+        return got
+
+    def on_ready(url):
+        box["url"] = url
+        ready.set()
+    t = threading.Thread(target=lambda: local_page.serve(
+        "tok", lambda tail: b"page", on_post, "{url}", open_browser=False, on_ready=on_ready))
+    t.start()
+    assert ready.wait(10)
+    try:
+        urllib.request.urlopen(urllib.request.Request(box["url"], data=b"a=1"), timeout=5)
+        raise AssertionError("a failed save must not look saved")
+    except urllib.error.HTTPError as exc:
+        assert exc.code == 500 and b"Nothing was saved" in exc.read()
+    with urllib.request.urlopen(urllib.request.Request(box["url"], data=b"a=1"), timeout=5) as r:
+        assert r.read() == b"done", "resubmitting the same tab retries the save"
+    t.join(10)
+    assert not t.is_alive()
+    err = capsys.readouterr().err
+    assert "save failed" in err and "hunter2" not in err
+
+
 if __name__ == "__main__":
     import pytest
     raise SystemExit(pytest.main([__file__, "-q"]))

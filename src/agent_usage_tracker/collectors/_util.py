@@ -10,6 +10,8 @@ from collections import Counter
 from datetime import datetime, timezone
 from typing import Any, Callable, Iterable, Iterator
 
+from ..event import CollectorUnavailable
+
 # Cap lines read per file per scan so a huge first-scan/backfill file can't spike memory.
 # The offset is committed at the cap, so the next scan simply continues from there.
 _MAX_LINES = 50000
@@ -74,13 +76,26 @@ def parse_record(raw: bytes | str) -> dict | None:
 def warn_skipped(name: str, skipped: Counter, unaffected: str = "usage") -> None:
     """Report a collector's skips. Skipping is best effort on purpose: a failed activity extraction
     never blocks the usage and session rows of the same chunk, and one bad record never wedges a
-    scan at its offset. But a malformed usage record's tokens are gone, so neither stays silent."""
-    if skipped["activity"]:
-        print(f"aut: {name}: {skipped['activity']} activity record(s) skipped (extraction failed); "
+    scan at its offset. But a malformed usage record's tokens are gone, so neither stays silent.
+    Activity failures are keyed "activity:<exception type>": the type names a systematic parser
+    break and, unlike a message, cannot carry record content."""
+    failed = {k.partition(":")[2]: n for k, n in sorted(skipped.items())
+              if k.startswith("activity:") and n}
+    if failed:
+        print(f"aut: {name}: {sum(failed.values())} activity record(s) skipped (extraction failed: "
+              f"{', '.join(f'{k} x{n}' for k, n in failed.items())}); "
               f"{unaffected} and session rows are unaffected.", file=sys.stderr)
     if skipped["malformed"]:
         print(f"aut: {name}: {skipped['malformed']} malformed record(s) skipped; any usage they "
               "held is not counted.", file=sys.stderr)
+
+
+def raise_if_unreadable(name: str, skipped: Counter) -> None:
+    """After a collector's last batch: files that are there but could not be read make the scan
+    degraded instead of looking like files with nothing new."""
+    if skipped["unreadable"]:
+        raise CollectorUnavailable(f"{name}: {skipped['unreadable']} file(s) could not be read, "
+                                   "left for the next scan")
 
 
 def read_new_lines(path: str, offset: int) -> tuple[list[bytes], int]:
@@ -88,19 +103,17 @@ def read_new_lines(path: str, offset: int) -> tuple[list[bytes], int]:
 
     Iterates one line at a time (no whole-file read) and stops at a trailing partial line
     (no newline yet), leaving it for the next scan. Resets to 0 when the file shrank below
-    the stored offset (truncation). Returns (complete_lines, new_offset).
+    the stored offset (truncation). Returns (complete_lines, new_offset). A file that vanished has
+    nothing new; any other OSError (no permission, a failing disk) is the caller's to report.
     """
-    try:
-        size = os.path.getsize(path)
-    except OSError:
-        return [], offset
-    if size < offset:            # truncated -> reread from the start
-        offset = 0
-    if size <= offset:
-        return [], offset
     lines: list[bytes] = []
-    consumed = offset
     try:                         # TOCTOU: the file can vanish/rotate between getsize and open
+        size = os.path.getsize(path)
+        if size < offset:        # truncated -> reread from the start
+            offset = 0
+        if size <= offset:
+            return [], offset
+        consumed = offset
         with open(path, "rb") as fh:
             fh.seek(offset)
             for raw in fh:
@@ -111,8 +124,8 @@ def read_new_lines(path: str, offset: int) -> tuple[list[bytes], int]:
                         break    # commit here; next scan continues from `consumed`
                 else:
                     break        # trailing partial line at EOF; picked up whole next time
-    except OSError:
-        return [], offset        # gone/unreadable now; leave the offset put, retry next scan
+    except FileNotFoundError:
+        return [], offset        # gone now; leave the offset put
     return lines, consumed
 
 
@@ -135,15 +148,19 @@ def same_file(fstate: dict, st: os.stat_result) -> bool:
     return fstate.get("ino") == st.st_ino and st.st_size >= safe_int(fstate.get("off"))
 
 
-def scan_file(path: str, fstate: dict) -> tuple[list[bytes], dict]:
+def scan_file(path: str, fstate: dict, skipped: Counter) -> tuple[list[bytes], dict]:
     """Inode-aware tail. `fstate` carries {'dev','ino','off'} (empty on first sight); the offset
-    restarts at 0 unless same_file allows resuming. Returns (complete_lines, new_fstate)."""
+    restarts at 0 unless same_file allows resuming. Returns (complete_lines, new_fstate). A file
+    that cannot be read keeps its fstate and is counted in skipped["unreadable"]."""
     try:
         st = os.stat(path)
-    except OSError:
+        off = safe_int(fstate.get("off")) if same_file(fstate, st) else 0
+        lines, new_off = read_new_lines(path, off)
+    except FileNotFoundError:
         return [], fstate
-    off = safe_int(fstate.get("off")) if same_file(fstate, st) else 0
-    lines, new_off = read_new_lines(path, off)
+    except OSError:
+        skipped["unreadable"] += 1
+        return [], fstate
     new_fstate = dict(fstate)
     new_fstate["dev"] = st.st_dev
     new_fstate["ino"] = st.st_ino
@@ -151,24 +168,28 @@ def scan_file(path: str, fstate: dict) -> tuple[list[bytes], dict]:
     return lines, new_fstate
 
 
-def changed_files(paths: Iterable[str], files: dict,
-                  fresh: Callable[[os.stat_result], dict]) -> Iterator[tuple[str, dict, int, list[bytes], int]]:
+def changed_files(paths: Iterable[str], files: dict, fresh: Callable[[os.stat_result], dict],
+                  skipped: Counter) -> Iterator[tuple[str, dict, int, list[bytes], int]]:
     """Each file of `paths` with bytes past its watermark entry in `files`: (path, private copy of
     the entry, offset read from, complete new lines, new offset). `fresh(st)` is the entry of a
     file seen for the first time or replaced. The copy is deep so that only the caller's watermark
-    callback can publish a chunk's state."""
+    callback can publish a chunk's state. A file that cannot be read is counted in
+    skipped["unreadable"]."""
     for path in paths:
         try:
             st = os.stat(path)
-        except OSError:         # gone since the glob: nothing to read, and no offset to lose
+            prev = files.get(path) or {}
+            if not same_file(prev, st):
+                prev = fresh(st)
+            off = safe_int(prev.get("off"))
+            if st.st_size <= off:
+                continue
+            lines, new_off = read_new_lines(path, off)
+        except FileNotFoundError:   # gone since the glob: nothing to read, and no offset to lose
             continue
-        prev = files.get(path) or {}
-        if not same_file(prev, st):
-            prev = fresh(st)
-        off = safe_int(prev.get("off"))
-        if st.st_size <= off:
+        except OSError:
+            skipped["unreadable"] += 1
             continue
-        lines, new_off = read_new_lines(path, off)
         yield path, copy.deepcopy(prev), off, lines, new_off
 
 

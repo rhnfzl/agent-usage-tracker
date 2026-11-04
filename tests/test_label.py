@@ -397,5 +397,12 @@ def test_cli_wiring(tmp_path, monkeypatch):
         cli.main(["label", "teach", "--task", "daily_note", "--n", "1"])
 
 
+def test_a_recent_task_says_since_does_not_apply(capsys):
+    now = datetime(2026, 11, 3, tzinfo=timezone.utc)
+    start, until = run._window("soft_outcome", {}, now - timedelta(days=90), now)
+    assert start == now - timedelta(days=14) and until is None
+    assert "do not apply" in capsys.readouterr().err
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))

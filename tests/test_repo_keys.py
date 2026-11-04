@@ -68,5 +68,12 @@ def test_repo_key_salt(monkeypatch) -> None:
     print("ok repo_key_salt")
 
 
+def test_a_binary_salt_file_means_null_keys_not_a_crash(tmp_path, monkeypatch, capsys) -> None:
+    monkeypatch.setenv("AUT_STATE", str(tmp_path / "state.json"))
+    (tmp_path / "repo_key.salt").write_bytes(b"\xff\xfe" * 40)
+    assert RepoKeys(None).of("github.com/o/r") is None
+    assert "repo_key stays NULL" in capsys.readouterr().err
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))

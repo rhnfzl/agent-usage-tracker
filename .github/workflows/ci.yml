@@ -22,6 +22,9 @@ jobs:
           - { os: macos-latest, python-version: "3.12" }
           - { os: macos-latest, python-version: "3.13" }
           - { os: macos-latest, python-version: "3.14" }
+        # One job runs off UTC, so local-time code (`aut time add`, label days) is exercised.
+        include:
+          - { os: ubuntu-latest, python-version: "3.13", tz: America/Los_Angeles }
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -29,6 +32,8 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - run: pip install -e ".[test]"
       - run: pytest -q
+        env:
+          TZ: ${{ matrix.tz }}
 
   # The sink layer's SQL against a real server; every other job skips these tests.
   sink-sql:

@@ -78,7 +78,7 @@ def test_duplicate_session_paths_counted_once() -> None:
         assert report["by_model"]["claude-opus-5"]["events"] == 1
 
         buf = io.StringIO()
-        written, _skipped = run_export(cfg, ["claude_code"], buf)
+        written, _skipped, _failed = run_export(cfg, ["claude_code"], buf)
         assert written == 2, written                  # 1 human + 1 assistant, each once
         ids = [ln.split(",")[0] for ln in buf.getvalue().strip().splitlines()[1:]]
         assert len(ids) == len(set(ids)), ids         # a COPY load has no ON CONFLICT to save it

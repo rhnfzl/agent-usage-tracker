@@ -37,8 +37,8 @@ from .cursor import connect_ro, cursor_db
 
 NAME = "cursor_api"      # registry / config key + event_id namespace (internal)
 _AGENT = "cursor"        # emitted agent label: this IS the accurate Cursor source, so it reads as
-                         # plain "cursor" in Grafana + reports (the local lower-bound collector is
-                         # kept out of the default agent set, so there is no clash).
+                         # plain "cursor" in Grafana + reports. The local `cursor` collector emits
+                         # the same label: run one token source, or set cursor_human_only = true.
 _ORIGIN = "https://cursor.com"
 _BASE = f"{_ORIGIN}/api/dashboard"
 _DAY_MS = 86_400 * MS_PER_S

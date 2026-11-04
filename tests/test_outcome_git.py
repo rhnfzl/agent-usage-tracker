@@ -372,5 +372,15 @@ def test_patch_ids_leaves_no_process_behind_on_timeout(monkeypatch):
     assert len(started) == 2 and all(p.poll() is not None for p in started)
 
 
+def test_a_failed_origin_read_is_an_unreadable_clone_not_a_clone_without_origin(tmp_path, monkeypatch):
+    real = og.run_git
+    monkeypatch.setattr(og, "_default_ref", lambda path: ("main", True))
+    monkeypatch.setattr(og, "run_git", lambda path, *a, **kw: None if a[0] == "remote" else real(path, *a, **kw))
+    assert not og._clone_at(str(tmp_path), str(tmp_path), RepoKeys("s" * 40)).readable
+    monkeypatch.setattr(og, "run_git", lambda path, *a, **kw: "upstream\n" if a[0] == "remote" else None)
+    clone = og._clone_at(str(tmp_path), str(tmp_path), RepoKeys("s" * 40))
+    assert clone.readable and clone.key is None, "no origin at all is still readable"
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))

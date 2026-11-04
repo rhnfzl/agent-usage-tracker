@@ -2,7 +2,8 @@
 from event_id + ON CONFLICT at the sink, so the watermark can be slightly over-inclusive
 without ever double-counting.
 
-Layout (JSON): {"collectors": {"<name>": {<collector-private state>}}}
+Layout (JSON): {"collectors": {"<name>": {<private state>}}}; `aut label` keeps its watermark under
+the name "label". A process writes back only the names it owns (see save_state).
 A collector that changes its file entries keeps a `state_v` in its state and upgrades older state
 once, in its own _upgrade_state, when it starts.
 The watermark is only committed AFTER a successful push, so a failed push means the next
@@ -11,13 +12,14 @@ run re-reads and re-sends (idempotent at the sink).
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import stat
 import sys
 import tempfile
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable, Iterator
 
 
 def state_path() -> Path:
@@ -36,7 +38,9 @@ def _warn_unusable(path: Path, reason: str) -> None:
     same run and would otherwise destroy the only evidence of what went wrong."""
     kept = path.with_suffix(".corrupt")
     try:
-        kept.write_bytes(path.read_bytes())     # copy, not move: save_state still wants the path
+        data = path.read_bytes()                # copy, not move: save_state still wants the path
+        with os.fdopen(os.open(kept, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "wb") as fh:
+            fh.write(data)
         detail = f"a copy is at {kept}"
     except OSError as exc:
         detail = f"could not copy it aside ({exc})"
@@ -51,7 +55,7 @@ def load_state() -> dict[str, Any]:
         return {"collectors": {}}       # first run on this machine: genuinely nothing yet
     try:
         obj = json.loads(path.read_text())
-    except (json.JSONDecodeError, OSError) as exc:
+    except (ValueError, OSError) as exc:    # JSONDecodeError and UnicodeDecodeError are ValueErrors
         _warn_unusable(path, str(exc))
         return {"collectors": {}}
     if not isinstance(obj, dict) or not isinstance(obj.get("collectors"), dict):
@@ -60,8 +64,40 @@ def load_state() -> dict[str, Any]:
     return obj
 
 
-def save_state(state: dict) -> None:
-    atomic_write_text(state_path(), json.dumps(state, indent=1))
+@contextlib.contextmanager
+def _locked(path: Path) -> Iterator[None]:
+    """Hold an advisory lock on a file beside `path`, for one short read-merge-write."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path.with_suffix(".lock"), "a+b") as fh:
+        if sys.platform == "win32":
+            import msvcrt
+            msvcrt.locking(fh.fileno(), msvcrt.LK_LOCK, 1)  # OSError after about 10 s of retries
+            try:
+                yield
+            finally:
+                msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(fh, fcntl.LOCK_EX)      # closing the file releases it
+            yield
+
+
+def save_state(state: dict, names: Iterable[str]) -> None:
+    """Write the named collectors' watermarks (a name gone from `state` is dropped) over what is on
+    disk now. A scan and a long `aut label run` each hold a copy from when they started; writing
+    that copy back whole would roll the other's watermarks back. Two runs of one collector still
+    race on its own entry, which costs a re-read at most: the sink dedups on event_id."""
+    path = state_path()
+    with _locked(path):
+        disk = load_json_dict(path)
+        if not isinstance(disk.get("collectors"), dict):
+            disk["collectors"] = {}
+        for name in names:
+            if name in state["collectors"]:
+                disk["collectors"][name] = state["collectors"][name]
+            else:
+                disk["collectors"].pop(name, None)
+        atomic_write_text(path, json.dumps(disk, indent=1))
 
 
 def warn_if_group_readable(path: Path) -> None:

@@ -120,8 +120,9 @@ watermark only advances after a push succeeds, and the sink drops re-sends by `e
 
 ## Commands
 
-`--agents a,b` (before the subcommand) overrides the configured agent list for one run, for
-example `aut --agents codex,pi scan --dry-run`.
+`--agents a,b` (before or after the subcommand) overrides the configured agent list for one run
+of `scan`, `backfill`, `export` or `status`, for example `aut --agents codex,pi scan --dry-run`. Any
+other command refuses it.
 
 | Command | What it does | Needs |
 |---|---|---|
@@ -130,16 +131,16 @@ example `aut --agents codex,pi scan --dry-run`.
 | `aut backfill --sessions-only [--dry-run]` | re-read all history and send only session rows; the watermark is untouched | `pg_dsn` (not with `--dry-run`) |
 | `aut backfill --activity-only [--dry-run]` | the same for activity rows (steers, commits, turns, links, ...); never usage. Both flags may be given together | `pg_dsn` (not with `--dry-run`) |
 | `aut status` | show machine, agents, transports and watermarks | |
-| `aut export [--out FILE]` | write all usage rows as CSV (stdout by default), deduplicated, columns in sink order for `COPY` | |
+| `aut export [--out FILE]` | write all usage rows as CSV (stdout by default), deduplicated, columns in sink order for `COPY`. Exits 1 if a source could not be fully read, so the CSV is partial; `backfill --sessions-only`/`--activity-only` do the same | |
 | `aut sync-prices [--out FILE] [--litellm-url URL] [--models-dev-url URL]` | build the API-equivalent price map, `model_prices.json` in the config dir by default; the URLs must be http(s) | network |
 | `aut time add --start T --end T` | record a manual active-time interval in local time, e.g. `--start "2026-11-03 09:00"` | `pg_dsn` |
 | `aut time add --minutes N [--at T] [--not-relevant]` | the same as a length ending at `--at` (default now); `--not-relevant` marks it not work time. At most 16 hours, never in the future | `pg_dsn` |
 | `aut outcomes [--fetch] [--dry-run]` | score every commit row against your local clones and write `agents.commit_outcome`. `--fetch` fetches first and asks `gh`. `--dry-run` writes nothing and never fetches or asks `gh`, even with `--fetch` | `pg_dsn`, clones under `outcome_repo_roots` |
 | `aut outcome shipped\|ruled-out\|open [--session ID]` | your verdict on this project's newest interactive Claude Code session (or `--session`) | `pg_dsn` |
 | `aut episodes review [--month YYYY-MM]` | hand-check a sample of 30 of a month's episodes (default: last completed month) on a local page; writes `agents.episode_correction` | `pg_dsn` |
-| `aut inspect --episode ID \| --day YYYY-MM-DD \| --label UNIT_ID` | read-only local page: why an episode (id or prefix), a day's episodes, or a label exists | `pg_dsn` |
+| `aut inspect --episode ID \| --day YYYY-MM-DD \| --label UNIT_ID` | local evidence page: why an episode (id or prefix), a day's episodes, or a label exists. Its linked correction form writes `agents.episode_correction` | `pg_dsn` |
 | `aut label run [--task T] [--since YYYY-MM-DD] [--dry-run]` | label new units since the watermark, for `label_tasks` or one task | `label` extra, `pg_dsn`, the model in the HF cache |
-| `aut label backfill --task T --days N` | label one task over the last N days; the nightly watermark is not moved back | same |
+| `aut label backfill --task T --days N` | label one task over the last N days; the nightly watermark is not moved back. `soft_outcome` always covers the last 14 days, whatever `--days` or `--since` say (it notes this on stderr) | same |
 | `aut label teach --task T --n N [--budget-usd X] [--days D]` | teacher (silver) labels for a stratified sample of up to N units (default spend cap 5 USD, window 90 days) | same, plus `claude` on `PATH` |
 | `aut label review [--task T] [--days D]` | answer gold labels one unit at a time on a local page | `pg_dsn` |
 | `aut label eval --task T [--days D]` | score every backend on your gold labels | same as `run` |
@@ -198,6 +199,7 @@ Files aut keeps on this machine:
 | watermarks | `~/.local/state/agent-usage-tracker/state.json` (`$XDG_STATE_HOME`, `AUT_STATE` overrides) |
 | `repo_key.salt`, `outcomes_cache.json` | next to the state file |
 | `state.corrupt` | next to the state file: a copy of an unreadable `state.json`, kept before aut starts clean |
+| `state.lock` | next to the state file: an empty file, the advisory lock for one short watermark save, so overlapping `scan` and `label` runs keep each other's watermarks |
 | `model_prices.json`, `label.json` | next to `config.toml`. Nothing in aut reads `model_prices.json` today |
 | label gold, silver and eval files; the trained encoder; the label run cache | `~/.local/share/aut/eval/`, `~/.local/share/aut/label/encoder/`, `~/.local/share/aut/label/cache.json` (`$XDG_DATA_HOME`) |
 | `scan.env`, `scan.log`, `retry-pending`, `outcomes-day`, `label-day` | `~/.config/agent-usage-tracker/`, used by the timer wrapper. The wrapper hard-codes this path, so it ignores `$XDG_CONFIG_HOME` and `AUT_CONFIG` |
@@ -300,8 +302,9 @@ self-calibration (`time_params`, `app_learned`) all live there, not in aut. It n
   `agents.episode` and `episode_member`, which the review and inspect commands read. Labels are
   read from `activity_event` rows with `kind = 'label'`.
 
-Every table, column and key is in [CONTRACT.md](CONTRACT.md). A deploy walkthrough is in
-[DEPLOY.md](DEPLOY.md).
+Every table, column and key this client writes is in [CONTRACT.md](CONTRACT.md), along with the
+columns it reads from the sink-built episode views. Those views and `episode_link()` are defined
+only in the infrastructure repo. A deploy walkthrough is in [DEPLOY.md](DEPLOY.md).
 
 ## How it stays correct
 

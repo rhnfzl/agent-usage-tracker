@@ -26,8 +26,8 @@ from ..repo_keys import RepoKeys
 from .activity_common import (Link, TurnAgg, add_call, blank_tool_tally, commit_rows, first_record, ms_between,
                               pad_pending, text_of, tool_key, turn_attrs)
 from .commits import commit_call, commit_dir, commit_shas
-from ._util import (changed_files, count_field, dict_or_empty, parse_record, project_name, safe_int,
-                    str_or_none, warn_skipped)
+from ._util import (changed_files, count_field, dict_or_empty, parse_record, project_name,
+                    raise_if_unreadable, safe_int, str_or_none, warn_skipped)
 
 NAME = "pi"
 _UUID = re.compile(r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$")
@@ -91,7 +91,7 @@ class _Activity:
     def __init__(self, carried: dict, sid: str, cwd: str | None, keys: RepoKeys) -> None:
         self.carried, self.sid, self.cwd, self.keys = carried, sid, cwd, keys
         self.events: list[ActivityEvent] = []
-        self.errors = 0                       # records whose extraction raised (skipped)
+        self.errors: Counter = Counter()      # records whose extraction raised (skipped)
 
     def _emit(self, kind: ActivityKind, ts: object, seed: str, turn: str | None, attrs: dict) -> None:
         self.events.append(ActivityEvent(
@@ -113,8 +113,8 @@ class _Activity:
         """Best effort: a record whose extraction raises is counted and skipped."""
         try:
             self._record(o, sess)
-        except Exception:
-            self.errors += 1
+        except Exception as exc:
+            self.errors[f"activity:{type(exc).__name__}"] += 1
 
     def _record(self, o: dict, sess: EventSession) -> None:
         carried, ts, eid = self.carried, o.get("timestamp"), o.get("id")
@@ -213,11 +213,10 @@ def _upgrade_state(wm: dict) -> None:
 
 
 def _note_model_change(o: dict, cur: dict) -> None:
-    m = o.get("modelId") or o.get("model")
-    if m:
-        cur["model"] = m
-    if o.get("provider"):
-        cur["provider"] = o["provider"]
+    cur["model"] = str_or_none(o.get("modelId")) or str_or_none(o.get("model")) or cur.get("model")
+    provider = str_or_none(o.get("provider"))
+    if provider:
+        cur["provider"] = provider
 
 
 def _record_id(o: dict, path: str) -> object:
@@ -248,8 +247,8 @@ def _usage_event(o: dict, msg: dict, cur: dict, path: str, project: str | None,
         event_id=make_event_id(NAME, _record_id(o, path)),
         ts=o.get("timestamp"),
         agent=NAME,
-        model=model or cur["model"],
-        provider=provider or cur.get("provider"),
+        model=str_or_none(model) or cur["model"],
+        provider=str_or_none(provider) or cur.get("provider"),
         input_tokens=inp,
         output_tokens=out,
         cache_read_tokens=cr,
@@ -313,7 +312,7 @@ def _chunk_rows(path: str, lines: list[bytes], cur: dict, keys: RepoKeys,
             continue
         if event:
             events.append(event)
-    skipped["activity"] += act.errors
+    skipped.update(act.errors)
     return events + act.events
 
 
@@ -335,7 +334,7 @@ def collect(cfg: Config, wm: dict) -> Iterator[Batch]:
     def fresh(st: os.stat_result) -> dict:
         return {"off": 0, "dev": st.st_dev, "ino": st.st_ino, "model": None}
 
-    for path, cur, _off, lines, new_off in changed_files(session_files(cfg.home), files, fresh):
+    for path, cur, _off, lines, new_off in changed_files(session_files(cfg.home), files, fresh, skipped):
         events = _chunk_rows(path, lines, cur, keys, skipped)
         cur["off"] = new_off
         # shortcut: the last open turn of a file is emitted only when a later scan reads its end
@@ -347,3 +346,4 @@ def collect(cfg: Config, wm: dict) -> Iterator[Batch]:
 
         yield events, advance_watermark
     warn_skipped(NAME, skipped)
+    raise_if_unreadable(NAME, skipped)

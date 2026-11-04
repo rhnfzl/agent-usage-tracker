@@ -23,7 +23,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from agent_usage_tracker import push  # noqa: E402
 from agent_usage_tracker.config import AutError, Config, load_config  # noqa: E402
-from agent_usage_tracker.state import atomic_write_text, load_json_dict, load_state  # noqa: E402
+from agent_usage_tracker.state import (atomic_write_text, load_json_dict, load_state,  # noqa: E402
+                                       save_state)
 
 
 @contextlib.contextmanager
@@ -116,7 +117,8 @@ def test_config_errors_and_permission_warning(monkeypatch) -> None:
         except AutError as exc:
             assert str(p) in str(exc) and "TOML" in str(exc), exc
         if os.name != "nt":
-            p.write_text('[transport]\nwebhook_secret = "env:AUT_TEST_UNSET"\n')
+            monkeypatch.setenv("AUT_TEST_SET", "s")
+            p.write_text('[transport]\nwebhook_secret = "env:AUT_TEST_SET"\n')
             p.chmod(0o644)
             with contextlib.redirect_stderr(io.StringIO()) as err:
                 load_config()
@@ -147,6 +149,29 @@ def test_missing_psycopg_names_the_extra_and_spares_the_heartbeat() -> None:
     finally:
         sys.modules.pop("psycopg") if prev is None else sys.modules.update(psycopg=prev)
     print("ok missing_psycopg_names_the_extra_and_spares_the_heartbeat")
+
+
+def test_undecodable_state_recovers_like_any_corrupt_file() -> None:
+    with _state_file(None) as p:
+        p.write_bytes(b"\xff\xfe")
+        state, err = _load_capturing_stderr()
+        assert state == {"collectors": {}} and "unusable" in err
+        assert p.with_suffix(".corrupt").read_bytes() == b"\xff\xfe"
+        if os.name != "nt":
+            assert p.with_suffix(".corrupt").stat().st_mode & 0o077 == 0
+
+
+def test_a_save_never_rolls_back_another_process_watermark() -> None:
+    with _state_file(json.dumps({"collectors": {"label": {"t": "old"}, "codex": {"off": 1}}})) as p:
+        scan_copy, label_copy = load_state(), load_state()      # both started from the same file
+        label_copy["collectors"]["label"]["t"] = "new"
+        save_state(label_copy, ["label"])
+        scan_copy["collectors"]["codex"]["off"] = 2
+        save_state(scan_copy, ["codex"])
+        assert json.loads(p.read_text())["collectors"] == {"label": {"t": "new"}, "codex": {"off": 2}}
+        del scan_copy["collectors"]["codex"]
+        save_state(scan_copy, ["codex"])                        # a name gone from state is dropped
+        assert json.loads(p.read_text())["collectors"] == {"label": {"t": "new"}}
 
 
 if __name__ == "__main__":

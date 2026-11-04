@@ -191,5 +191,29 @@ def test_collect_yields_one_batch_with_nothing_to_advance(tmp_path):
     assert len(batches) == 1 and len(batches[0][0]) == 1 and batches[0][1]() is None
 
 
+def test_cursor_sdk_reports_a_manifest_it_cannot_open_as_unavailable(tmp_path, monkeypatch):
+    import builtins
+
+    from agent_usage_tracker.event import CollectorUnavailable
+    good = tmp_path / "a.json"
+    good.write_text(json.dumps({"ticket": "T", "runs": [{"usage": {"input_tokens": 4}}]}))
+    bad = tmp_path / "b.json"
+    bad.write_text("{}")
+    real = open
+
+    def refusing(file, *a, **kw):
+        if str(file) == str(bad):
+            raise PermissionError(13, "denied")
+        return real(file, *a, **kw)
+    monkeypatch.setattr(builtins, "open", refusing)
+    cfg = _cfg(tmp_path)
+    cfg.cursor_sdk_manifests = str(tmp_path / "*.json")
+    batches = cursor_sdk.collect(cfg, {})
+    events, _advance = next(batches)
+    assert len(events) == 1, "what it could read still goes out"
+    with pytest.raises(CollectorUnavailable, match="1 file"):
+        next(batches)
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))

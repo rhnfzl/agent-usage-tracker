@@ -189,15 +189,15 @@ class _Activity:
     def __init__(self, keys: RepoKeys) -> None:
         self.keys = keys
         self.calls: dict = {}     # toolCallId -> args, across the chat's lists
-        self.errors = 0           # messages whose extraction raised (skipped)
+        self.errors: Counter = Counter()      # messages whose extraction raised (skipped)
 
     def record(self, message: dict, turn: _Turn) -> None:
         """Best effort: a message whose extraction raises is counted and skipped, so activity
         never blocks the human and session rows."""
         try:
             self._record(message, turn)
-        except Exception:
-            self.errors += 1
+        except Exception as exc:
+            self.errors[f"activity:{type(exc).__name__}"] += 1
 
     def _record(self, message: dict, turn: _Turn) -> None:
         """One assistant or tool message: tool aggregates, commits, rejections, link."""
@@ -331,7 +331,7 @@ def _turn_rows(rid: str, turn: _Turn, sid: str, human: bool, origin: dict, creat
 
 
 def _chat(path: str, con: sqlite3.Connection, meta: dict, cur: dict, idle: bool,
-          keys: RepoKeys) -> tuple[list, int]:
+          keys: RepoKeys) -> tuple[list, Counter]:
     """Rows of every turn that closed since the last scan; updates `cur` (a copy) in place."""
     sid = str_or_none(meta.get("agentId")) or os.path.basename(os.path.dirname(path))
     # A subagent chat's prompts are its parent agent talking, not a person. Its parent is in
@@ -407,7 +407,7 @@ def describe(cfg: Config, wm: dict) -> str:
     return describe_files(cfg, wm)
 
 
-def _read_chat(path: str, prev: dict, keys: RepoKeys) -> tuple[list, dict, int] | None:
+def _read_chat(path: str, prev: dict, keys: RepoKeys) -> tuple[list, dict, Counter] | None:
     """(rows, the chat's new watermark entry, messages skipped); None when it has nothing new.
     Raises sqlite3.DatabaseError when the store is locked or corrupt."""
     con = connect_ro(path)
@@ -464,7 +464,7 @@ def collect(cfg: Config, wm: dict) -> Iterator[Batch]:
         if read is None:
             continue
         events, cur, errs = read
-        skipped["activity"] += errs
+        skipped.update(errs)
         if not events and cur == prev:
             continue
 

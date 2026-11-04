@@ -21,7 +21,8 @@
   aut episodes review [--month YYYY-MM]
                         hand-check a month's episodes on a local page -> agents.episode_correction
   aut inspect --episode ID | --day YYYY-MM-DD | --label UNIT_ID
-                        why an episode, a day's episodes or a label exist, on a local read-only page
+                        why an episode, a day's episodes or a label exist, on a local evidence page
+                        (its linked correction form writes agents.episode_correction)
   aut label run [--task T] [--since YYYY-MM-DD] [--dry-run]
                         a local model labels new units (optional extra aut[label]) -> label rows
   aut label backfill --task T --days N
@@ -42,16 +43,22 @@ from __future__ import annotations
 import argparse
 import os
 import sys
-from datetime import date, datetime, timedelta, timezone
-from typing import NamedTuple, Sequence
+from datetime import date, timedelta
+from typing import Sequence
 
-from . import inspector, outcomes, pricing, review, scan
+from . import inspector, manual_time, outcomes, pricing, review, scan
 from .collectors import REGISTRY
 from .config import ALL_AGENTS, AutError, Config, load_config, config_path
-from .event import TimeInterval, make_event_id
 from .label.names import DAYS, DECISION_TASKS, TASK_NAMES
-from .push import insert_pg
-from .state import load_state
+from .push import is_operational_failure, local_error
+from .state import collector_wm, load_state
+
+
+def _fail_if_partial(what: str, failed: set[str]) -> None:
+    """A one-shot command has no heartbeat, so its exit code is what stops `aut export && load`."""
+    if failed:
+        raise AutError(f"{what}: partial, could not fully read {', '.join(sorted(failed))} "
+                       "(reasons above)")
 
 
 def cmd_scan(cfg: Config, agents: Sequence[str], args: argparse.Namespace) -> None:
@@ -65,6 +72,7 @@ def cmd_backfill(cfg: Config, agents: Sequence[str], args: argparse.Namespace) -
                                            sessions=args.sessions_only, activity=args.activity_only)
         scan.print_history_backfill(counts, dry_run=args.dry_run, sessions=args.sessions_only,
                                     activity=args.activity_only)
+        _fail_if_partial("backfill", counts["failed"])
         return
     scan.reset_watermarks(agents)
     print(f"watermark reset for: {', '.join(agents)}")
@@ -74,11 +82,12 @@ def cmd_backfill(cfg: Config, agents: Sequence[str], args: argparse.Namespace) -
 def cmd_export(cfg: Config, agents: Sequence[str], args: argparse.Namespace) -> None:
     out = open(args.out, "w", newline="", encoding="utf-8") if args.out else sys.stdout
     try:
-        written, skipped = scan.run_export(cfg, agents, out)
+        written, skipped, failed = scan.run_export(cfg, agents, out)
     finally:
         if args.out:
             out.close()
     scan.print_export(written, skipped, args.out)
+    _fail_if_partial("export", failed)
 
 
 def cmd_status(cfg: Config, agents: Sequence[str], args: argparse.Namespace) -> None:
@@ -93,86 +102,33 @@ def cmd_status(cfg: Config, agents: Sequence[str], args: argparse.Namespace) -> 
     print(f"pg fallback   : {'configured' if cfg.has_pg else 'not set'}")
     print("watermarks    :")
     for name in agents:
-        wm = state.get("collectors", {}).get(name, {})
-        print(f"    {name:<12} {REGISTRY[name].describe(cfg, wm)}")
+        print(f"    {name:<12} {REGISTRY[name].describe(cfg, collector_wm(state, name))}")
 
 
-_MAX_MANUAL = timedelta(hours=16)
+def cmd_time_add(cfg: Config, args: argparse.Namespace) -> None:
+    span = manual_time.ManualSpan(args.start, args.end, args.minutes, args.at)
+    manual_time.print_time_add(manual_time.run_time_add(cfg, span, not_relevant=args.not_relevant))
 
 
-def _local(value: str) -> datetime:
-    """A datetime typed by the user; no zone means this machine's local time."""
-    try:
-        dt = datetime.fromisoformat(value)
-    except ValueError:
-        raise SystemExit(f"time add: not a date and time: {value!r} (use YYYY-MM-DD HH:MM)") \
-            from None
-    return dt if dt.tzinfo else dt.astimezone()
-
-
-class ManualSpan(NamedTuple):
-    """The interval as typed: --start and --end, or --minutes ending at --at (default now)."""
-    start: str | None = None
-    end: str | None = None
-    minutes: int | None = None
-    at: str | None = None
-
-
-def build_manual_interval(cfg: Config, span: ManualSpan, *, not_relevant: bool = False,
-                          now: datetime | None = None) -> TimeInterval:
-    """One manual agents.time_interval row, or SystemExit with the reason it was refused."""
-    now = now or datetime.now(timezone.utc)
-    if span.minutes is not None:
-        if span.start or span.end:
-            raise SystemExit("time add: use --start/--end or --minutes, not both")
-        end_dt = _local(span.at) if span.at else now
-        start_dt = end_dt - timedelta(minutes=span.minutes)
-    elif span.start and span.end and not span.at:
-        start_dt, end_dt = _local(span.start), _local(span.end)
-    else:
-        raise SystemExit("time add: give --start and --end, or --minutes [--at]")
-    if end_dt <= start_dt:
-        raise SystemExit("time add: the end must be after the start")
-    if end_dt - start_dt > _MAX_MANUAL:
-        raise SystemExit("time add: an interval can span at most 16 hours")
-    if end_dt > now:                    # hours not yet worked are not active time
-        raise SystemExit("time add: the end is in the future")
-    s_iso = start_dt.astimezone(timezone.utc).isoformat()
-    e_iso = end_dt.astimezone(timezone.utc).isoformat()
-    return TimeInterval(event_id=make_event_id("manual", cfg.machine, s_iso, e_iso), ts=s_iso,
-                        end_ts=e_iso, source="manual", app=None, title=None, category=None,
-                        work_relevant=not not_relevant, attrs={}, machine=cfg.machine)
-
-
-def cmd_time_add(cfg: Config, agents: Sequence[str], args: argparse.Namespace) -> None:
-    row = build_manual_interval(cfg, ManualSpan(args.start, args.end, args.minutes, args.at),
-                                not_relevant=args.not_relevant)
-    insert_pg(cfg.require_pg("time add"), [row])
-    s, e = (datetime.fromisoformat(x).astimezone() for x in (row.ts, row.end_ts))
-    mins = (e - s).total_seconds() / 60
-    print(f"added manual interval {s:%Y-%m-%d %H:%M} -> {e:%Y-%m-%d %H:%M} ({mins:.0f} min, "
-          f"{'relevant' if row.work_relevant else 'not relevant'})")
-
-
-def cmd_outcomes(cfg: Config, agents: Sequence[str], args: argparse.Namespace) -> None:
+def cmd_outcomes(cfg: Config, args: argparse.Namespace) -> None:
     report = outcomes.run_outcomes(cfg, refresh=args.fetch or cfg.outcome_fetch,
                                    dry_run=args.dry_run)
     outcomes.print_outcomes(report, args.dry_run)
 
 
-def cmd_outcome(cfg: Config, agents: Sequence[str], args: argparse.Namespace) -> None:
+def cmd_outcome(cfg: Config, args: argparse.Namespace) -> None:
     dsn = cfg.require_pg("outcome")
     row = outcomes.build_manual_outcome(cfg, args.outcome, os.getcwd(), args.session)
     outcomes.insert_manual_outcome(dsn, row)
     print(f"marked session {row['session_id'][:8]} {row['outcome']}")
 
 
-def cmd_inspect(cfg: Config, agents: Sequence[str], args: argparse.Namespace) -> None:
+def cmd_inspect(cfg: Config, args: argparse.Namespace) -> None:
     inspector.print_inspect(inspector.run_inspect(cfg, episode=args.episode, day=args.day,
                                                   label=args.label))
 
 
-def cmd_episodes(cfg: Config, agents: Sequence[str], args: argparse.Namespace) -> None:
+def cmd_episodes(cfg: Config, args: argparse.Namespace) -> None:
     review.print_review(review.run_episode_review(cfg, args.month))
 
 
@@ -207,7 +163,7 @@ def _label_bakeoff(cfg: Config, args: argparse.Namespace) -> None:
         bakeoff.print_train_encoder(args.task, bakeoff.train_encoder(cfg, args.task, args.days))
 
 
-def cmd_label(cfg: Config, agents: Sequence[str], args: argparse.Namespace) -> None:
+def cmd_label(cfg: Config, args: argparse.Namespace) -> None:
     if args.label_cmd in ("run", "backfill"):
         _label_run(cfg, args)
     elif args.label_cmd == "teach":
@@ -234,15 +190,16 @@ def cmd_report(args: argparse.Namespace) -> None:
 
 
 _NO_CONFIG_COMMANDS = {"sync-prices": cmd_sync_prices, "report": cmd_report}
-_COMMANDS = {"scan": cmd_scan, "backfill": cmd_backfill, "export": cmd_export,
-             "status": cmd_status, "time": cmd_time_add, "outcomes": cmd_outcomes,
-             "outcome": cmd_outcome, "inspect": cmd_inspect, "episodes": cmd_episodes,
-             "label": cmd_label}
+_AGENT_COMMANDS = {"scan": cmd_scan, "backfill": cmd_backfill, "export": cmd_export,
+                   "status": cmd_status}
+_COMMANDS = {"time": cmd_time_add, "outcomes": cmd_outcomes, "outcome": cmd_outcome,
+             "inspect": cmd_inspect, "episodes": cmd_episodes, "label": cmd_label}
 
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="aut", description="passive coding-agent usage, activity, active-time and outcome tracker")
-    parser.add_argument("--agents", help="comma-separated subset override (default: config)")
+    agents_help = "comma-separated subset override (default: config)"
+    parser.add_argument("--agents", help=f"{agents_help}; for scan, backfill, export and status")
     sub = parser.add_subparsers(dest="cmd", required=True)
     p_scan = sub.add_parser("scan", help="push new usage since the watermark")
     p_scan.add_argument("--dry-run", action="store_true", help="parse + report, send nothing")
@@ -254,10 +211,11 @@ def _build_parser() -> argparse.ArgumentParser:
                         help="send only activity rows for all history; watermark untouched")
     p_back.add_argument("--dry-run", action="store_true",
                         help="with --sessions-only/--activity-only: counts only")
-    p_back.add_argument("--agents", default=argparse.SUPPRESS, help=argparse.SUPPRESS)
-    sub.add_parser("status", help="show config + watermark state")
+    p_status = sub.add_parser("status", help="show config + watermark state")
     p_export = sub.add_parser("export", help="write all usage as CSV (bulk load / offline bridge)")
     p_export.add_argument("--out", help="output CSV file (default: stdout)")
+    for sp in (p_scan, p_back, p_status, p_export):     # accepted after the subcommand too
+        sp.add_argument("--agents", default=argparse.SUPPRESS, help=agents_help)
     p_sync = sub.add_parser("sync-prices", help="refresh the API-equivalent model price map")
     p_sync.add_argument("--out", help="output JSON (default: <config-dir>/model_prices.json)")
     p_sync.add_argument("--litellm-url", default=pricing.LITELLM_URL)
@@ -326,6 +284,11 @@ def main(argv: list[str] | None = None) -> int:
     except AutError as exc:
         print(exc, file=sys.stderr)
         return 1
+    except Exception as exc:
+        if not is_operational_failure(exc):     # a bug keeps its traceback
+            raise
+        print(f"aut: {local_error(exc)}", file=sys.stderr)
+        return 1
     return 0
 
 
@@ -334,7 +297,12 @@ def _dispatch(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None
         _NO_CONFIG_COMMANDS[args.cmd](args)
         return
 
+    if args.agents and args.cmd not in _AGENT_COMMANDS:     # it would run over everything
+        parser.error(f"--agents does not apply to {args.cmd}")
     cfg = load_config()
+    if args.cmd in _COMMANDS:
+        _COMMANDS[args.cmd](cfg, args)
+        return
     agents = cfg.agents
     if args.agents:
         agents = tuple(a.strip() for a in args.agents.split(",") if a.strip())
@@ -345,7 +313,7 @@ def _dispatch(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None
         parser.error("backfill --dry-run needs --sessions-only or --activity-only (a plain "
                      "backfill resets the watermark; preview it with `aut scan --dry-run`)")
 
-    _COMMANDS[args.cmd](cfg, agents, args)
+    _AGENT_COMMANDS[args.cmd](cfg, agents, args)
 
 
 if __name__ == "__main__":

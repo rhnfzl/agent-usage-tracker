@@ -1,5 +1,7 @@
 """The one way to reach the sink: every Postgres connection goes through connect(). Reads and
 feature tables keep their SQL next to their feature; the scan's rows are written by push.py.
+connect() and write_many() let the driver's errors through; cli.main reports them on one redacted
+line.
 """
 
 from __future__ import annotations

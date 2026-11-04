@@ -285,9 +285,13 @@ def evaluate(rows: list[dict], clones: list[Clone], now_ts: float, cache: dict,
             stats["gh_failed"] += failed
         for stat in pool.map(lambda j: _measure(j, cache), jobs):
             stats[stat] += 1
-    # a NULL-key row resolved to a clone can repeat a keyed row of the same commit: keep one
-    outs = list({(o["sha"], o["repo_key"]): o for o in reversed(outs)}.values())[::-1]
-    return outs, stats
+    # a NULL-key row resolved to a clone can repeat a keyed row of the same commit: keep the keyed
+    # anchor's, whatever order the rows came in, because it alone says which repo it means
+    kept: dict[tuple[str, str], Outcome] = {}
+    for a, o in zip(anchors, outs):
+        if a.key is not None or (o["sha"], o["repo_key"]) not in kept:
+            kept[(o["sha"], o["repo_key"])] = o
+    return list(kept.values()), stats
 
 
 def pending(outs: list[Outcome], stored: dict[tuple[str, str], tuple]) -> list[Outcome]:

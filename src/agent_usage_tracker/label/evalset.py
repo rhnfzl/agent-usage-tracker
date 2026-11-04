@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import itertools
 import json
+import os
 import random
 from collections import defaultdict
 from datetime import date, datetime, timedelta
@@ -50,7 +51,8 @@ def read_jsonl(p: Path) -> list[dict]:
 
 def append_jsonl(p: Path, row: dict) -> None:
     p.parent.mkdir(parents=True, exist_ok=True)
-    with open(p, "a", encoding="utf-8") as fh:
+    fd = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)  # private, as write_jsonl's is
+    with os.fdopen(fd, "a", encoding="utf-8") as fh:
         fh.write(json.dumps(row, sort_keys=True) + "\n")
 
 

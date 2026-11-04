@@ -653,6 +653,17 @@ def test_ctrl_c_sends_no_heartbeat():
     print("ok ctrl_c_sends_no_heartbeat")
 
 
+def test_the_keyed_anchor_wins_a_duplicate_whatever_the_row_order(monkeypatch):
+    keyed, null = _row("abcdef1234", "K", 3), _row("abcdef1234", None, 3)
+    monkeypatch.setattr(oc, "_resolve", lambda anchors, clones, stats: None)
+    monkeypatch.setattr(oc, "_decide", lambda a, *rest: ({
+        "sha": a.sha, "repo_key": "K", "survival": None,
+        "state": "merged" if a.key else "undecided"}, None))
+    for rows in ([keyed, null], [null, keyed]):
+        outs, _ = oc.evaluate(rows, [], NOW, cache={})
+        assert [o["state"] for o in outs] == ["merged"], rows
+
+
 if __name__ == "__main__":
     import pytest
     raise SystemExit(pytest.main([__file__, "-q"]))

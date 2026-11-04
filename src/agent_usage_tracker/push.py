@@ -158,7 +158,7 @@ def _check_webhook(cfg: Config) -> None:
     # (http to a remote host, or ftp:/file:/no-scheme) could leak the secret or misfire.
     if not (scheme == "https" or (scheme == "http" and host in LOCAL_HOSTS)):
         raise AutError(
-            f"refusing to send the webhook secret to '{url}': only https:// "
+            f"refusing to send the webhook secret to host '{host}': only https:// "
             f"(or http:// to localhost for testing) is allowed, not '{scheme or 'no'}-scheme'."
         )
     # A warning, not a refusal: a webhook outside Access works today without these headers.
@@ -188,7 +188,8 @@ class _Sender:
         if cfg.pg_dsn:
             insert_pg(cfg.pg_dsn, batch)
             return
-        raise RuntimeError(f"webhook delivery failed and no PG fallback: {webhook_err}") \
+        raise RuntimeError("webhook delivery failed and no PG fallback: "
+                           f"{local_error(webhook_err) if webhook_err else 'not sent'}") \
             from webhook_err
 
     def _post_usage(self, batch: list[Row], url: str, secret: str) -> Exception | None:
@@ -201,7 +202,7 @@ class _Sender:
             if self.cfg.pg_dsn and not self.fallback_shown:  # printed first: a PG failure shows both
                 self.fallback_shown = True
                 print(f"aut: warning: webhook delivery failed, using transport.pg_dsn: "
-                      f"{_local_error(exc)}", file=sys.stderr)
+                      f"{local_error(exc)}", file=sys.stderr)
             return exc
         return None
 
@@ -240,9 +241,16 @@ def scrub_error(exc: BaseException) -> str:
     return type(exc).__name__[:_ERROR_MAX]
 
 
-def _local_error(exc: BaseException) -> str:
+def local_error(exc: BaseException) -> str:
     """The error for this machine's stderr: type and message on one line, credentials redacted."""
     return f"{type(exc).__name__}: {redact(' '.join(str(exc).split()))}"
+
+
+def is_operational_failure(exc: Exception) -> bool:
+    """An outage, not a bug: a sink or webhook that failed, or a file that could not be read or
+    written. By module name because the driver is an optional extra; its errors are not imported."""
+    return isinstance(exc, (*HTTP_ERRORS, RuntimeError)) \
+        or type(exc).__module__.partition(".")[0] == "psycopg"
 
 
 def scan_row(cfg: Config, collector: str, started_at: datetime, *, status: str = "ok",
@@ -273,4 +281,4 @@ def deliver_scan_rows(cfg: Config, rows: list[dict], what: str = "scan") -> None
     try:
         send_scan_rows(cfg.pg_dsn, rows)
     except Exception as exc:
-        print(f"aut: warning: {what} heartbeat not delivered: {_local_error(exc)}", file=sys.stderr)
+        print(f"aut: warning: {what} heartbeat not delivered: {local_error(exc)}", file=sys.stderr)

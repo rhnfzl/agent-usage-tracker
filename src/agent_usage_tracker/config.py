@@ -8,10 +8,10 @@ from __future__ import annotations
 import os
 import re
 import socket
+import sys
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
 
 from .label.names import TASK_NAMES
 from .state import warn_if_group_readable
@@ -40,11 +40,25 @@ def config_path() -> Path:
     return Path(base) / "agent-usage-tracker" / "config.toml"
 
 
-def _resolve(value: Any) -> Any:
-    """Resolve an "env:VAR" indirection to its environment value; pass through otherwise."""
-    if isinstance(value, str) and value.startswith("env:"):
-        return os.environ.get(value[4:])
+def _text(section: dict, key: str) -> str | None:
+    """A string setting, or None when absent. A TypeError names the key, never the value."""
+    value = section.get(key)
+    if value is not None and not isinstance(value, str):
+        raise TypeError(f"{key} must be a string")
     return value
+
+
+def _resolve(section: dict, key: str) -> str | None:
+    """A string setting, with an "env:VAR" indirection resolved from the environment. An unset
+    variable reads as not configured, and says so: a scheduled job often lacks the variable."""
+    value = _text(section, key)
+    if value is None or not value.startswith("env:"):
+        return value
+    resolved = os.environ.get(value[4:])
+    if resolved is None:
+        print(f"aut: warning: {key} names the environment variable {value[4:]}, which is not set; "
+              "treating it as not configured.", file=sys.stderr)
+    return resolved
 
 
 def _as_bool(value: object) -> bool:
@@ -170,6 +184,13 @@ def _repo_roots(data: dict) -> tuple[str, ...]:
     return tuple(roots)
 
 
+def _aw_url(data: dict) -> str:
+    url = str(data.get("activitywatch_url") or DEFAULT_AW_URL)
+    if not url.startswith(("http://", "https://")):
+        raise AutError("config: activitywatch_url must start with http:// or https://")
+    return url
+
+
 def _aw_title_days(data: dict) -> int:
     # 0 (the default) keeps titles for good; a number of days turns the limit on.
     days = int(data.get("activitywatch_title_days") or 0)
@@ -214,21 +235,21 @@ def _config_from(data: dict, path: Path) -> Config:
     _warn_if_secrets_written(path, transport, data)
 
     return Config(
-        machine=data.get("machine") or socket.gethostname().split(".")[0],
+        machine=_text(data, "machine") or socket.gethostname().split(".")[0],
         agents=agents,
-        webhook_url=_resolve(transport.get("webhook_url")),
-        webhook_secret=_resolve(transport.get("webhook_secret")),
-        pg_dsn=_resolve(transport.get("pg_dsn")),
+        webhook_url=_resolve(transport, "webhook_url"),
+        webhook_secret=_resolve(transport, "webhook_secret"),
+        pg_dsn=_resolve(transport, "pg_dsn"),
         home=Path(data.get("home") or Path.home()).expanduser(),
-        cursor_db_path=_resolve(data.get("cursor_db_path")),
+        cursor_db_path=_resolve(data, "cursor_db_path"),
         cursor_human_only=_as_bool(data.get("cursor_human_only", False)),
-        cursor_sdk_manifests=_resolve(data.get("cursor_sdk_manifests")),
+        cursor_sdk_manifests=_resolve(data, "cursor_sdk_manifests"),
         cursor_api=_as_bool(data.get("cursor_api", False)),
         cursor_api_lookback_days=int(data.get("cursor_api_lookback_days") or 90),
-        cf_access_client_id=_resolve(transport.get("cf_access_client_id")),
-        cf_access_client_secret=_resolve(transport.get("cf_access_client_secret")),
-        repo_key_salt=_resolve(data.get("repo_key_salt")),
-        activitywatch_url=str(data.get("activitywatch_url") or DEFAULT_AW_URL),
+        cf_access_client_id=_resolve(transport, "cf_access_client_id"),
+        cf_access_client_secret=_resolve(transport, "cf_access_client_secret"),
+        repo_key_salt=_resolve(data, "repo_key_salt"),
+        activitywatch_url=_aw_url(data),
         activitywatch_title_days=aw_days,
         activitywatch_titles=_as_bool(data.get("activitywatch_titles", True)),
         activitywatch_deny_apps=tuple(str(a).strip().lower()

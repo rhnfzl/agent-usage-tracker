@@ -17,7 +17,9 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from agent_usage_tracker import cli, episode_store, local_page, push, scan  # noqa: E402
+from agent_usage_tracker import cli, episode_store, local_page, manual_time, push, scan  # noqa: E402
+from agent_usage_tracker.collectors import Collector  # noqa: E402
+from agent_usage_tracker.event import CollectorUnavailable  # noqa: E402
 from agent_usage_tracker.config import load_config  # noqa: E402
 from agent_usage_tracker.state import load_state  # noqa: E402
 
@@ -136,6 +138,106 @@ def test_script_mode_runs_a_test_file_on_its_own():
     r = subprocess.run([sys.executable, str(Path(__file__).with_name("test_state.py"))],
                        capture_output=True, text=True, timeout=120)
     assert r.returncode == 0 and " passed" in r.stdout, r.stdout + r.stderr
+
+
+def _psycopg_error() -> Exception:
+    return type("OperationalError", (Exception,), {"__module__": "psycopg"})(
+        "connection to postgresql://aut:hunter2@db.example/agents failed")
+
+
+def test_a_sink_outage_is_one_redacted_line_and_exit_1(world, monkeypatch, capsys):
+    def down(*a, **kw):
+        raise _psycopg_error()
+    monkeypatch.setattr(manual_time, "insert_pg", down)
+    assert cli.main(["time", "add", "--minutes", "5"]) == 1
+    err = capsys.readouterr().err
+    assert "OperationalError" in err and "hunter2" not in err and "Traceback" not in err
+
+
+def test_a_bug_keeps_its_traceback(world, monkeypatch):
+    def bug(*a, **kw):
+        raise KeyError("bug")
+    monkeypatch.setattr(manual_time, "insert_pg", bug)
+    with pytest.raises(KeyError):
+        cli.main(["time", "add", "--minutes", "5"])
+
+
+def test_a_refused_time_add_returns_1_from_main(world, capsys):
+    assert cli.main(["time", "add", "--minutes", "5", "--start", "2026-01-01 09:00"]) == 1
+    assert "not both" in capsys.readouterr().err
+
+
+def test_a_partial_export_exits_1_after_writing_the_csv(world, monkeypatch, capsys):
+    def partial(cfg, wm):
+        return
+        yield
+
+    def unavailable(cfg, wm):
+        raise CollectorUnavailable("flaky: locked")
+        yield
+    monkeypatch.setitem(scan.REGISTRY, "claude_code", Collector(partial))
+    monkeypatch.setitem(scan.REGISTRY, "codex", Collector(unavailable))
+    out = world / "usage.csv"
+    assert cli.main(["--agents", "claude_code,codex", "export", "--out", str(out)]) == 1
+    assert out.exists()
+    err = capsys.readouterr().err
+    assert "exported 0 events" in err and "export: partial" in err and "codex" in err
+    assert cli.main(["--agents", "claude_code", "export", "--out", str(out)]) == 0
+    assert cli.main(["--agents", "codex", "backfill", "--sessions-only", "--dry-run"]) == 1
+
+
+def test_agents_is_refused_where_it_would_be_ignored_and_taken_on_both_sides(world, capsys):
+    for argv in (["--agents", "codex", "outcomes"], ["--agents", "codex", "label", "run"]):
+        with pytest.raises(SystemExit) as exc:
+            cli.main(argv)
+        assert exc.value.code == 2
+    for argv in (["scan", "--dry-run", "--agents", "codex"], ["status", "--agents", "codex"],
+                 ["export", "--agents", "codex"]):
+        assert cli.main(argv) == 0
+    assert "agents        : codex" in capsys.readouterr().out
+
+
+def test_status_survives_a_non_dict_watermark(world, capsys):
+    (world / "state.json").write_text(json.dumps({"collectors": {"codex": 5}}))
+    assert cli.main(["status"]) == 0
+    assert "never scanned" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("line, key", [('machine = 5', "machine"), ('cursor_db_path = 7', "cursor_db_path"),
+                                       ('repo_key_salt = 9', "repo_key_salt"),
+                                       ('[transport]\npg_dsn = 5', "pg_dsn"),
+                                       ('[transport]\nwebhook_url = 5', "webhook_url")])
+def test_a_non_string_setting_is_refused_by_name(world, capsys, line, key):
+    (world / "config.toml").write_text(line + "\n")
+    assert cli.main(["status"]) == 1
+    err = capsys.readouterr().err
+    assert "wrong type" in err and key in err
+
+
+def test_a_bad_activitywatch_url_is_refused_at_load(world, capsys):
+    (world / "config.toml").write_text('activitywatch_url = "ftp://secret-host"\n')
+    assert cli.main(["status"]) == 1
+    err = capsys.readouterr().err
+    assert "activitywatch_url" in err and "secret-host" not in err
+
+
+def test_an_unset_env_credential_warns_by_name(world, monkeypatch, capsys):
+    monkeypatch.delenv("AUT_TEST_UNSET", raising=False)
+    monkeypatch.setenv("AUT_TEST_SET", "hunter2")
+    (world / "config.toml").write_text('repo_key_salt = "env:AUT_TEST_UNSET"\n'
+                                       '[transport]\npg_dsn = "env:AUT_TEST_SET"\n')
+    cfg = load_config()
+    assert cfg.repo_key_salt is None and cfg.pg_dsn == "hunter2"
+    err = capsys.readouterr().err
+    assert "repo_key_salt" in err and "AUT_TEST_UNSET" in err
+    assert "pg_dsn" not in err and "hunter2" not in err
+
+
+def test_print_scan_shows_an_activity_only_collector(world, capsys):
+    report = {"cursor_cli": {**scan._blank_agent_tally(), "activity": {"turn": 7}}}
+    scan.print_scan(load_config(), report, dry_run=True)
+    out = capsys.readouterr().out
+    assert '{"turn": 7}' in out and "no new usage" not in out
 
 
 if __name__ == "__main__":

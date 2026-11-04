@@ -5,6 +5,7 @@ Run: `python tests/test_label_evalset.py`  (or `pytest`).
 
 from __future__ import annotations
 
+import os
 import sys
 from datetime import date, timedelta
 from pathlib import Path
@@ -139,6 +140,13 @@ def test_window_units_reads_whole_local_days_up_to_today(tmp_path, monkeypatch):
     assert seen["task"] == TASK and seen["src"] is src
     assert seen["since"] == core.local_midnight(date(2026, 6, 8))
     assert seen["until"] == core.local_midnight(date(2026, 6, 15))
+
+
+@pytest.mark.skipif(os.name == "nt", reason="no POSIX modes")
+def test_append_jsonl_creates_a_private_file(tmp_path):
+    p = tmp_path / "gold.jsonl"
+    evalset.append_jsonl(p, {"a": 1})
+    assert p.stat().st_mode & 0o077 == 0
 
 
 if __name__ == "__main__":

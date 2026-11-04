@@ -236,5 +236,26 @@ def test_send_scan_rows_transport() -> None:
     print("ok send_scan_rows_transport")
 
 
+def test_a_failed_state_save_still_sends_the_heartbeat() -> None:
+    calls: list[list[dict]] = []
+    with _patched({"good": _ok_collector}, lambda cfg, rows: calls.append(list(rows))), \
+            pytest.MonkeyPatch.context() as mp:
+        mp.setattr(scan, "save_state", lambda *a: (_ for _ in ()).throw(OSError(28, "disk full")))
+        with pytest.raises(OSError, match="disk full"):
+            scan.run_scan(_cfg(pg_dsn="postgresql://x"), ["good"], dry_run=False)
+    assert [(r["collector"], r["status"], r["error"]) for r in calls[0]] == [
+        ("good", "error", "OSError")]
+
+
+def test_a_failed_state_save_does_not_replace_the_pass_own_failure(capsys) -> None:
+    calls: list[list[dict]] = []
+    with _patched({"bad": _bad_collector}, lambda cfg, rows: calls.append(list(rows))), \
+            pytest.MonkeyPatch.context() as mp:
+        mp.setattr(scan, "save_state", lambda *a: (_ for _ in ()).throw(OSError(28, "disk full")))
+        with pytest.raises(RuntimeError, match="boom"):
+            scan.run_scan(_cfg(pg_dsn="postgresql://x"), ["bad"], dry_run=False)
+    assert calls[0][0]["error"] == "RuntimeError" and "disk full" in capsys.readouterr().err
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))

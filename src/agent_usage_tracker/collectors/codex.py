@@ -26,8 +26,8 @@ from ..repo_keys import RepoKeys, repo_identity
 from .activity_common import (Link, TurnAgg, add_call, blank_tool_tally, commit_rows, first_record,
                               ms_between, text_of, turn_attrs)
 from .commits import commit_call, commit_dir, commit_shas
-from ._util import (changed_files, count_field, dict_or_empty, parse_record, project_name, safe_int,
-                    str_or_none, warn_skipped)
+from ._util import (changed_files, count_field, dict_or_empty, parse_record, project_name,
+                    raise_if_unreadable, safe_int, str_or_none, warn_skipped)
 
 NAME = "codex"
 # The watermark's format. Older state is upgraded once by _upgrade_state; delete a step from there
@@ -163,7 +163,7 @@ class _Activity:
         self.cur, self.path, self.keys = cur, path, keys
         self.carried: dict = cur.setdefault("act", {})
         self.events: list[ActivityEvent] = []
-        self.errors = 0                       # records whose extraction raised (skipped)
+        self.errors: Counter = Counter()      # records whose extraction raised (skipped)
 
     def _emit(self, kind: ActivityKind, ts: object, seed: str, sess: EventSession, attrs: dict) -> None:
         self.events.append(ActivityEvent(
@@ -175,8 +175,8 @@ class _Activity:
         blocks the usage and session rows of the same chunk."""
         try:
             self._record(record)
-        except Exception:
-            self.errors += 1
+        except Exception as exc:
+            self.errors[f"activity:{type(exc).__name__}"] += 1
 
     def _record(self, record: dict) -> None:
         """Non-prompt activity of one record: tool aggregates, interrupt, turn, commit, compaction,
@@ -312,7 +312,7 @@ def _note_session_meta(payload: dict, cur: dict, keys: RepoKeys) -> None:
     # the usage event_id seed keeps its old rule (payload.session_id, any meta line),
     # so stored usage rows never change id; session rows use the thread id instead
     cur["session_id"] = payload.get("session_id") or payload.get("id") or cur["session_id"]
-    cur["provider"] = payload.get("model_provider") or cur["provider"]
+    cur["provider"] = str_or_none(payload.get("model_provider")) or cur["provider"]
     if "meta" not in cur:
         _set_meta(cur, payload, keys)
 
@@ -322,8 +322,7 @@ def _note_context(rtype: object, payload: dict, copied: bool, cur: dict, keys: R
     if rtype == "session_meta":
         _note_session_meta(payload, cur, keys)
     elif rtype == "turn_context":
-        if payload.get("model"):
-            cur["model"] = payload.get("model")
+        cur["model"] = str_or_none(payload.get("model")) or cur["model"]
         if payload.get("cwd"):
             cur["cwd"] = payload.get("cwd")
     elif rtype == "event_msg" and payload.get("type") == "task_started" and not copied:
@@ -426,7 +425,7 @@ def _chunk_rows(path: str, recs: list[tuple], cur: dict, keys: RepoKeys, skipped
             events.extend(_prompt_rows(o, prompt, cur, path, act))
             continue
         act.record(o)
-    skipped["activity"] += act.errors
+    skipped.update(act.errors)
     return events + act.events
 
 
@@ -452,7 +451,7 @@ def collect(cfg: Config, wm: dict) -> Iterator[Batch]:
     def fresh(st: os.stat_result) -> dict:
         return _fresh_state(st.st_dev, st.st_ino)
 
-    for path, cur, off, lines, new_off in changed_files(session_files(cfg.home), files, fresh):
+    for path, cur, off, lines, new_off in changed_files(session_files(cfg.home), files, fresh, skipped):
         recs = parsed_records(lines, off, cur, skipped)
         events = _chunk_rows(path, recs, cur, keys, skipped)
         cur["off"] = new_off
@@ -463,3 +462,4 @@ def collect(cfg: Config, wm: dict) -> Iterator[Batch]:
 
         yield events, advance_watermark
     warn_skipped(NAME, skipped)
+    raise_if_unreadable(NAME, skipped)

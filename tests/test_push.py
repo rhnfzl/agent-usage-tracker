@@ -124,5 +124,14 @@ def test_cf_access_headers() -> None:
     print("ok cf_access_headers")
 
 
+def test_a_refused_webhook_names_the_host_not_the_url() -> None:
+    cfg = Config(machine="t", agents=(), webhook_url="http://me:hunter2@remote.example/hook?k=tok",
+                 webhook_secret="s", pg_dsn=None, home=Path("."))
+    with pytest.raises(AutError) as exc:
+        push.make_sender(cfg)
+    assert "remote.example" in str(exc.value)
+    assert "hunter2" not in str(exc.value) and "tok" not in str(exc.value)
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))

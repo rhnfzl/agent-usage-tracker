@@ -109,7 +109,7 @@ both transports, re-scans) never double-counts.
   its collector stores `input = input - cached_input` and `cache_read = cached_input`.
 - One row per assistant response / `token_count` event, not per session. Codex uses the
   per-turn `last_token_usage` delta (not the cumulative total) to avoid double counting.
-- `est_cost_usd` is only populated where the source logs a cost (Pi, Cursor). It is an
+- `est_cost_usd` is only populated where the source logs a cost (Pi alone today). It is an
   API-equivalent estimate, never a real bill.
 - `ts` is required at the sink (hypertable partition column). The collector **drops** any
   record whose source line has no timestamp (they are counted as skipped, never pushed), so
@@ -122,7 +122,7 @@ both transports, re-scans) never double-counts.
 | **claude_code** | `~/.claude/projects/**/*.jsonl` `assistant.message.usage` | yes | record `timestamp` | Most tokens are in the **cache** fields; summing only `input_tokens` undercounts ~460x. Globs all files (20k+); an inode+offset watermark reads only changed ones. |
 | **codex** | `~/.codex/sessions/**/rollout-*.jsonl` `token_count` | `turn_context.model` | event `timestamp` | `input` includes cached; we split it. Captures `reasoning_tokens`. Known gap, not fixed: some Codex Desktop `token_count` rows carry only `total_tokens` (input and output 0, no model) and are dropped (177 rows, about half of the Desktop tokens, when measured). |
 | **pi** | `~/.pi/agent/sessions/**/*.jsonl` `message.usage`, plus the `usage` of `compaction` records | `message.model` / `model_change.modelId` | record `timestamp` | Cleanest schema; older sessions may log zeros. `reasoning_tokens` from `usage.reasoning` (part of output). `project` from the session header's `cwd`. |
-| **cursor** | `state.vscdb` `cursorDiskKV bubbleId:*` | **often null** (not in DB) | bubble `createdAt` or joined `composerData` | EXPERIMENTAL: a LOWER BOUND on tokens. For complete + model-attributed + costed data use `cursor_api`. Full-scans each run + dedups at the sink. **The only source of Cursor IDE human turns** (CLI prompts come from `cursor_cli`); see below. |
+| **cursor** | `state.vscdb` `cursorDiskKV bubbleId:*` | **often null** (not in DB) | bubble `createdAt` or joined `composerData` | EXPERIMENTAL: a LOWER BOUND on tokens. For complete + model-attributed data use `cursor_api`. Full-scans each run + dedups at the sink. **The only source of Cursor IDE human turns** (CLI prompts come from `cursor_cli`); see below. |
 | **cursor_cli** | `~/.cursor/chats/<h>/<uuid>/store.db` (cursor-agent CLI chats) and `~/.cursor/projects/*/sdk-agent-store/*/index.db` (SDK runs) | none | prompt's embedded `<timestamp>` (minute precision), else the chat's `createdAt`; SDK: run `started_at` | **No token rows** (the stores hold none, and `cursor_api` counts these tokens). Human rows, session rows and activity only. See the Cursor CLI sections below. |
 
 ### The two Cursor sources are complementary, not redundant
@@ -152,8 +152,8 @@ it ran, after the usage for that collector has been delivered:
 |---|---|
 | `machine`, `collector` | who ran, which collector |
 | `started_at`, `finished_at` | wall clock around that collector's drain loop (UTC) |
-| `status` | `ok`; `degraded` if the collector ran but could not read a source that is there (an expired Cursor token, a stopped aw-server, a locked or corrupt store: what it could read is still delivered, the reason is on local stderr, and the scan goes on to the next collector); or `error` if the collector raised (the scan still fails exactly as before). A source that is simply absent (the tool is not installed) stays `ok` |
-| `events`, `human` | new agent / human turns this scan, the same counts the scan report prints |
+| `status` | `ok`; `degraded` if the collector ran but could not read a source that is there (an expired Cursor token, a stopped aw-server, a locked or corrupt store, a log or manifest it has no permission to read: what it could read is still delivered, the reason is on local stderr, and the scan goes on to the next collector); or `error` if the collector raised (the scan still fails exactly as before). A source that is simply absent (the tool is not installed) stays `ok` |
+| `events`, `human` | `events`: new agent turns plus ActivityWatch intervals this scan (the report prints those two apart); `human`: new human turns |
 | `newest_ts` | latest valid event timestamp seen this scan, null if none |
 | `error` | the exception type only (for example `OperationalError`, or `HTTPError` on a `degraded` row; `CollectorUnavailable` when no exception caused it). The message never leaves the machine: it can name a project path or part of a credential, so it stays on local stderr |
 | `aut_version` | the client version |
@@ -476,7 +476,7 @@ should merge with #n -> `merge` (b = that episode's first seed session), not bui
 `reject`; `attrs` holds `repo_keys` (and `b_repo_keys`) copied from `episode_member`. It prints
 the share of reviewed episodes marked right.
 
-`aut inspect --episode ID | --day YYYY-MM-DD | --label UNIT_ID` is the read-only evidence page
+`aut inspect --episode ID | --day YYYY-MM-DD | --label UNIT_ID` is the evidence page
 for the same episodes, served the same way (127.0.0.1, random port and token, local titles and
 branch names). Per episode it shows the member sessions, the seed sessions' link keys by type
 (commit, pr, branch, ticket; a key two sessions share is what joined them), each commit's latest
@@ -484,6 +484,30 @@ branch names). Per episode it shows the member sessions, the seed sessions' link
 `label_latest` picks it, below-tau labels shown as unknown) and the `episode_correction` rows of
 its sessions. `--label` also lists every label row of that unit. Its only write is the
 `aut episodes review` form it links to, for the episodes on the page.
+
+## Episodes (sink-built): agents.episode, episode_member
+
+The schema SQL in the infrastructure repo (see [DEPLOY.md](DEPLOY.md)) defines these views and the
+linker; this repo only reads them, so a change there must be made here too. What aut relies on:
+
+| View | Columns aut reads |
+|---|---|
+| `agents.episode` | `episode_id`, `first_ts`, `last_ts`, `n_sessions`, `n_seed_sessions`, `n_commits`, `n_prs`, `n_steers`, `outcome`, `outcome_source` (`manual` when a manual outcome decided it), `confirmed` (hand-confirmed) |
+| `agents.episode_member` | `episode_id`, `session_id`, `role` (`seed`, or a non-seed member), `repo_keys` |
+
+`agents.episode_link()` sets an episode's `outcome`. The latest `aut outcome` on a seed session wins;
+otherwise the first of these that holds, in this order (`inspector.RULES` explains each on the page
+and must stay in step):
+
+1. `reworked`: a commit was reverted or reworked
+2. `shipped`: a commit merged (survival at least 0.5 where known), none reverted or reworked
+3. `open`: no commit merged or reworked, and a commit is still open
+4. `ruled_out`: every commit was abandoned
+5. `undecided`: a commit still waits for an outcome
+6. `no_code`: no commits
+
+`aut inspect --day` matches the days `agents.episode_activity_day` counts: a member session has a
+`steer`, `link`, `commit` or `pr` row that day, inside the episode's span (not span overlap).
 
 ## Active time: agents.time_interval
 

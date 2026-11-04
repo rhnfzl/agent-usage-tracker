@@ -4,8 +4,8 @@ Shows why an episode (or each episode of a local day, or the episode a label bel
 its member sessions, the anchors by type that the linker joins on, the outcome rule that fired,
 labels with probability and model, and hand corrections. Everything is read from the sink, ids
 and keys only; titles and branch names come from THIS machine's logs (session_digest) and
-exist only in the page served from 127.0.0.1 under a random token. The page is read-only and
-links to the existing correction form of `aut episodes review` for the episodes it shows.
+exist only in the page served from 127.0.0.1 under a random token. The page itself only reads;
+its one write is the correction form of `aut episodes review` it links to, for the episodes it shows.
 """
 
 from __future__ import annotations
@@ -25,7 +25,7 @@ from .sink import connect
 # (sha_refs), both HMACs of the first 7 hex, so they meet in one type
 ANCHORS = (("commit key", ("commit_keys", "sha_refs")), ("pr key", ("pr_keys",)),
            ("branch key", ("branch_key",)), ("ticket key (a hint, never an edge)", ("ticket_keys",)))
-RULES = {   # agents.episode_link(): the latest manual outcome wins, else git in this order
+RULES = {   # keep in step with "Episodes (sink-built)" in CONTRACT.md, which states episode_link()
     "manual": "manual outcome: the latest `aut outcome` on a seed session wins over git",
     "reworked": "a commit was reverted or reworked",
     "shipped": "a commit merged (survival at least 0.5 where known), none reverted or reworked",

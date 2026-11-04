@@ -98,14 +98,22 @@ def _origin_ids(url: str, keys: RepoKeys) -> tuple[str | None, str | None]:
                             if ident.startswith("github.com/") else None)
 
 
+def _origin_url(path: str) -> str | None:
+    """origin's URL, "" for a clone without one, None when git failed to say."""
+    remotes = run_git(path, "remote", timeout=10)
+    if remotes is None or "origin" not in remotes.split():
+        return None if remotes is None else ""
+    return run_git(path, "remote", "get-url", "origin", timeout=10)
+
+
 def _clone_at(path: str, common: str, keys: RepoKeys) -> Clone:
-    url = (run_git(path, "remote", "get-url", "origin", timeout=10) or "").strip()
-    key, gh = _origin_ids(url, keys)
+    url = _origin_url(path)
+    key, gh = _origin_ids((url or "").strip(), keys)
     heads = glob(os.path.join(glob_escape(common), "FETCH_HEAD")) + glob(
         os.path.join(glob_escape(common), "worktrees", "*", "FETCH_HEAD"))
     default, readable = _default_ref(path)
     return Clone(path, key, gh, default, max((os.path.getmtime(h) for h in heads), default=0.0),
-                 readable)
+                 readable and url is not None)
 
 
 def find_clones(roots: list[str], keys: RepoKeys) -> list[Clone]:

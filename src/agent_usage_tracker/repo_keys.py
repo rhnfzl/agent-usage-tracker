@@ -52,8 +52,10 @@ def _load_salt(configured: str | None) -> bytes:
         warn_if_group_readable(p)
     except OSError:
         return b""
+    except UnicodeDecodeError:          # corrupt: the warning below
+        salt = ""
     if len(salt) < 32:
-        print(f"aut: warning: {p} is too short; repo_key stays NULL until it is fixed",
+        print(f"aut: warning: {p} is too short or not text; repo_key stays NULL until it is fixed",
               file=sys.stderr)
         return b""
     return salt.encode("utf-8")

@@ -56,7 +56,7 @@ class _Run:
         if ts and (not self.wm.get(name)
                    or datetime.fromisoformat(ts) > datetime.fromisoformat(self.wm[name])):
             self.wm[name] = ts
-        save_state(self.state)
+        save_state(self.state, [NAME])
 
 
 def _window(name: str, wm: dict, since: datetime | None,
@@ -65,6 +65,9 @@ def _window(name: str, wm: dict, since: datetime | None,
     unit's ts. A day task covers whole past days, so until is today's local midnight."""
     window = "day" if name == NOTE else TASKS[name].window
     if window == "recent":
+        if since:
+            print(f"aut: label {name}: --since and --days do not apply; it always covers the last "
+                  f"{OUTCOME_DAYS} days", file=sys.stderr)
         return now - timedelta(days=OUTCOME_DAYS), None
     today = local_midnight(now.astimezone().date())
     start = since or (datetime.fromisoformat(wm[name]) if wm.get(name) else today - timedelta(1))
