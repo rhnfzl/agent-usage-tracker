@@ -39,8 +39,12 @@ _ENDS = ("stop", "aborted", "length")   # an `error` followed by another assista
 _STATE_V = 1
 
 
+def sessions_dir(home: Path) -> Path:
+    return home / ".pi" / "agent" / "sessions"
+
+
 def session_files(home: Path) -> list[str]:
-    return glob.glob(str(home / ".pi" / "agent" / "sessions" / "**" / "*.jsonl"), recursive=True)
+    return glob.glob(str(sessions_dir(home) / "**" / "*.jsonl"), recursive=True)
 
 
 def _cost_total(cost) -> float | None:
@@ -297,8 +301,7 @@ def _trim_state(cur: dict) -> None:
 
 
 def collect(cfg: Config, wm: dict) -> Iterator[Batch]:
-    base = cfg.home / ".pi" / "agent" / "sessions"
-    if not base.exists():
+    if not sessions_dir(cfg.home).exists():
         return
     _upgrade_state(wm)
     files: dict = wm["files"]

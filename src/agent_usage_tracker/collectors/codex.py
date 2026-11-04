@@ -37,8 +37,12 @@ NAME = "codex"
 _STATE_V = 1
 
 
+def sessions_dir(home: Path) -> Path:
+    return home / ".codex" / "sessions"
+
+
 def session_files(home: Path) -> list[str]:
-    return glob.glob(str(home / ".codex" / "sessions" / "**" / "rollout-*.jsonl"), recursive=True)
+    return glob.glob(str(sessions_dir(home) / "**" / "rollout-*.jsonl"), recursive=True)
 
 
 def thread_names(home: Path) -> dict[str, str]:
@@ -433,8 +437,7 @@ def _trim_state(cur: dict) -> None:
 
 
 def collect(cfg: Config, wm: dict) -> Iterator[Batch]:
-    base = cfg.home / ".codex" / "sessions"
-    if not base.exists():
+    if not sessions_dir(cfg.home).exists():
         return
     keys = RepoKeys(cfg.repo_key_salt)
     _upgrade_state(wm, keys)

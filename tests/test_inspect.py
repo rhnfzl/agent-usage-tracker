@@ -179,6 +179,18 @@ def test_run_inspect_passes_mode_and_stops_on_empty():
     print("ok run_inspect_passes_mode_and_stops_on_empty")
 
 
+def test_exactly_one_selector():
+    for kw in ({}, {"episode": "0f0f", "day": "2001-01-05"}):
+        for call in (inspector.fetch, inspector.run_inspect):
+            try:
+                call("not reached", **kw)
+            except ValueError as exc:
+                assert "exactly one" in str(exc)
+            else:
+                raise AssertionError(f"accepted {kw}")
+    print("ok exactly_one_selector")
+
+
 def test_fetch_checks_episode_and_day_uses_activity_rows():
     import types
     sqls: list = []

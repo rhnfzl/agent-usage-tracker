@@ -160,7 +160,7 @@ def corrections(form: dict[str, list[str]], episodes: list[dict],
             new = [row("split", by_id[s]) for s in form.get(f"split{i}", []) if s in by_id]
         elif ans == "merge":
             j = (form.get(f"merge{i}") or [""])[0].strip().lstrip("#")
-            ok = j.isdigit() and int(j) < len(episodes) and int(j) != i
+            ok = j.isdecimal() and len(j) < 10 and int(j) < len(episodes) and int(j) != i
             new = [row("merge", seed, _seeds(episodes[int(j)])[0])] if ok else []
         elif ans in ("right", "reject"):
             new = [row(_ACTIONS[ans], seed)]

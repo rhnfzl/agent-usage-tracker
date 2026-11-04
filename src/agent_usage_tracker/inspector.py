@@ -63,9 +63,15 @@ def _episode_prefix(episode: str) -> str:
     return ep
 
 
+def _check_one_selector(episode: str | None, day: str | None, label: str | None) -> None:
+    if sum(x is not None for x in (episode, day, label)) != 1:
+        raise ValueError("inspect: exactly one of episode, day and label")
+
+
 def fetch(dsn: str, episode: str | None = None, day: str | None = None,
           label: str | None = None) -> dict:
     """Raw rows for one view. Read-only; every SELECT is ids, keys, enums and numbers."""
+    _check_one_selector(episode, day, label)
     start = end = _EPOCH
     if episode is not None:
         where, params = "e.episode_id::text LIKE %s", (_episode_prefix(episode) + "%",)
@@ -292,6 +298,7 @@ def pages(view: dict, info: dict, title: str, label: str | None = None) -> Calla
 
 def run_inspect(cfg: Config, episode: str | None = None, day: str | None = None,
                 label: str | None = None, fetch_fn=fetch, serve_fn=review.serve) -> dict:
+    _check_one_selector(episode, day, label)
     dsn = cfg.require_pg("inspect")
     if episode is not None:
         episode = _episode_prefix(episode)

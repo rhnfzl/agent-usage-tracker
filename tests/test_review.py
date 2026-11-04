@@ -101,6 +101,11 @@ def test_answers_become_key_only_corrections():
            "a2": ["split"], "a3": ["bogus"]}
     rows, summary = review.corrections(bad, _episodes(), T0)
     assert rows == [] and summary == {"reviewed": 0, "right": 0}, (rows, summary)
+    # one odd merge answer drops only itself: isdigit() takes these, int() does not
+    odd = {"a0": ["merge"], "merge0": ["\u00b2"], "a1": ["merge"], "merge1": ["9" * 5000],
+           "a2": ["right"]}
+    rows, summary = review.corrections(odd, _episodes(), T0)
+    assert [r["action"] for r in rows] == ["confirm"] and summary["reviewed"] == 1, rows
     print("ok answers_become_key_only_corrections")
 
 
@@ -384,6 +389,19 @@ def test_bad_values_in_one_log_cost_only_that_session():
     assert list(info) == ["cx1"], info
     assert (info["cx1"]["branches"], info["cx1"]["titles"]) == ([], ["named"]), info
     print("ok bad_values_in_one_log_cost_only_that_session")
+
+
+def test_codex_fork_skips_the_copied_history():
+    def um(text):
+        return {"type": "event_msg", "payload": {"type": "user_message", "message": text}}
+    recs = [{"type": "session_meta", "payload": {"id": "cx1", "forked_from_id": "p",
+                                                 "subagent_history_start_ordinal": 3}},
+            um("parent's"), um("parent's too"), um("mine")]
+    with tempfile.TemporaryDirectory() as t:
+        _jsonl(Path(t) / ".codex" / "sessions" / "rollout-2001-cx1.jsonl", recs)
+        v = session_digest.local_info(Path(t), {"cx1"})["cx1"]
+    assert (v["n_prompts"], v["first"]) == (1, "mine"), v
+    print("ok codex_fork_skips_the_copied_history")
 
 
 def test_digest_lists_hold_only_text():
