@@ -190,7 +190,7 @@ def test_truncated_body_is_a_handled_fetch_failure(monkeypatch) -> None:
 def test_stand_in_schema_names_only_what_the_contract_names():
     # the Postgres tests run on a schema of their own: it may not grow a table or column the
     # contract does not know, or they stop saying anything about the contract
-    contract = (Path(__file__).parents[1] / "CONTRACT.md").read_text(encoding="utf-8")
+    contract = (Path(__file__).parents[2] / "CONTRACT.md").read_text(encoding="utf-8")
     tables = re.findall(r"CREATE TABLE agents\.(\w+) \((.*?)\);", STAND_IN_SCHEMA, re.S)
     assert tables
     for table, body in tables:

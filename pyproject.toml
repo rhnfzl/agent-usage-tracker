@@ -38,7 +38,8 @@ line-length = 100
 target-version = "py311"
 
 [tool.pytest.ini_options]
-pythonpath = ["src", "tests"]
+# the test folders import each other's fixtures by module name
+pythonpath = ["src", "tests/collectors", "tests/label", "tests/outcomes", "tests/pipeline"]
 
 [tool.mypy]
 python_version = "3.11"

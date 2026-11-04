@@ -7,9 +7,9 @@ Locks the rules:
     the watermark moves only on commit, and a re-run of a range gives the same event ids;
   - aw-server down or without this host's buckets: no rows and no error;
   - deny-list and idle apps are dropped before anything leaves the machine, counts only logged;
-  - the per-machine title switch (every redaction pattern is in tests/test_redact.py);
+  - the per-machine title switch (every redaction pattern is in tests/pipeline/test_redact.py);
   - the app -> category mapping, browser work titles and unknown apps (macOS app categories are in
-    tests/test_activitywatch_macos.py);
+    tests/collectors/test_activitywatch_macos.py);
   - the purge is bounded and never fails the scan, and a dry run purges nothing;
   - `aut time add` validation; time rows ride the same Postgres transaction as usage.
 """

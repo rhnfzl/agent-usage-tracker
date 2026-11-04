@@ -95,7 +95,7 @@ def _sessions(home: Path) -> dict:
     out = {}
     for events, _commit in claude_code.collect(_cfg(home), {}):
         for e in events:
-            if not isinstance(e, ActivityEvent):    # activity rows: tests/test_activity.py
+            if not isinstance(e, ActivityEvent):    # activity rows: tests/collectors/test_activity.py
                 out[e.event_id] = e
     return out
 

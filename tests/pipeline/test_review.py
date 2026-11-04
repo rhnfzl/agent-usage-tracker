@@ -1,7 +1,7 @@
 """Hermetic tests for `aut episodes review` (the hand check of one month's episodes).
 
 Locks the rules:
-  - local text (tests/test_session_digest.py reads it) is escaped on the page;
+  - local text (tests/collectors/test_session_digest.py reads it) is escaped on the page;
   - "don't know" is the default answer and writes nothing;
   - the page shows a sample of 30 spread over outcome and size, and links to all;
   - the page answers only on 127.0.0.1 and only under its random token;

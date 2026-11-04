@@ -54,7 +54,7 @@ jobs:
         with:
           python-version: "3.11"
       - run: pip install -e ".[test,postgres]"
-      - run: pytest -q tests/test_sink_sql.py
+      - run: pytest -q tests/pipeline/test_sink_sql.py
 
   lint:
     runs-on: ubuntu-latest

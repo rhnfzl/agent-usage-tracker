@@ -22,7 +22,7 @@ ALL_AGENTS = ("claude_code", "codex", "cursor", "cursor_sdk", "cursor_api", "cur
               "activitywatch")
 # activitywatch reads window titles, so it is opt-in: a config without `agents` never enables it.
 DEFAULT_AGENTS = tuple(a for a in ALL_AGENTS if a != "activitywatch")
-# Must name what label.tasks.TASKS names (tests/test_label_tasks.py asserts it): label.tasks imports
+# Must name what label.tasks.TASKS names (tests/label/test_label_tasks.py asserts it): label.tasks imports
 # this module, so this module cannot derive the list from it.
 LABEL_DECISION_TASKS = ("work_category", "steer_intent", "soft_outcome", "aw_title_relevance")
 LABEL_NOTE = "daily_note"    # generative, private: one draft per day (label/run.py), not a decision

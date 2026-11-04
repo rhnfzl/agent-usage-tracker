@@ -1,12 +1,12 @@
 """The sink layer's SQL, run against a real Postgres. Skipped unless AUT_TEST_PG_DSN is set.
 
-Run: `AUT_TEST_PG_DSN=postgresql://... pytest tests/test_sink_sql.py`. The DSN must be a scratch
+Run: `AUT_TEST_PG_DSN=postgresql://... pytest tests/pipeline/test_sink_sql.py`. The DSN must be a scratch
 database: the tests create the `agents` schema, and refuse to touch a database that already has one.
 
 STAND_IN_SCHEMA is this file's own, written from CONTRACT.md and the columns the code names: the
 deployed DDL lives in the infrastructure repo (DEPLOY.md). So this catches invalid SQL, a wrong
 column and an ON CONFLICT target with no matching key against the stand-in. It proves nothing about
-the deployed schema; tests/test_sink.py only checks the stand-in names what CONTRACT.md names.
+the deployed schema; tests/pipeline/test_sink.py only checks the stand-in names what CONTRACT.md names.
 """
 
 from __future__ import annotations

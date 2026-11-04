@@ -4,7 +4,7 @@ Locks the rules:
   - one steer per human prompt (same uuid seed), with `via`, words, chars, after_interrupt;
   - the machine-message filters (system-reminder only, Stop hook feedback, IDE-only, /usage-only);
   - interrupt, rejection vs hook block, commit pairing, pr host + repo_key (commit detection is in
-    tests/test_commits.py, repo keys in tests/test_repo_keys.py), turn aggregates with the
+    tests/collectors/test_commits.py, repo keys in tests/pipeline/test_repo_keys.py), turn aggregates with the
     retry and runaway flags, compaction, invoke;
   - attrs never carry free text;
   - the activity backfill sends zero usage rows and never touches the watermark.

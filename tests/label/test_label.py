@@ -29,7 +29,7 @@ from agent_usage_tracker.label import backends, core, run, tasks
 from agent_usage_tracker.label import bakeoff, gold, teach
 from label_helpers import ById, DAY1, FakeSource, NOW, TASK, _cfg, _claude_log, _env, _steer, _win
 
-REPO = Path(__file__).resolve().parents[1]
+REPO = Path(__file__).resolve().parents[2]
 
 
 class Sink:
