@@ -29,11 +29,12 @@ from typing import Callable, Iterator
 
 from ..config import Config
 from ..event import ActivityEvent, EventSession, UsageEvent, make_event_id
-from ._activity_common import (Link, RepoKeys, add_call, blank_agg, commit_call, commit_dir,
-                               commit_repo, commit_shas,
-                               ms_between, text_of, turn_attrs)
+from ..repo_keys import RepoKeys
+from .activity_common import (Link, add_call, blank_agg, commit_call, commit_dir,
+                              commit_repo, commit_shas,
+                              ms_between, text_of, turn_attrs)
 from ._util import epoch_ms_to_iso
-from .cursor import _connect_ro
+from .cursor import connect_ro
 
 NAME = "cursor_cli"
 # The store has no turn-end record, so a turn ends at the next prompt or once the chat sits idle.
@@ -44,8 +45,8 @@ _ENDED = {"FINISHED": "finished", "CANCELLED": "cancelled", "ERROR": "error"}
 _BATCH = 500
 _TS = re.compile(r"<timestamp>\s*\w+,\s*([A-Za-z]{3})\w*\.?\s+(\d{1,2}),\s*(\d{4}),\s*(\d{1,2}):(\d\d)"
                  r"\s*([AP]M)\s*\(UTC(?:([+-])(\d{1,2})(?::(\d\d))?)?\)\s*</timestamp>")
-_QUERY = re.compile(r"<user_query>(.*?)</user_query>", re.S)
-_EXIT = re.compile(r"^Exit code: (-?\d+)\s*(?:Command output:\s*)?")
+USER_QUERY = re.compile(r"<user_query>(.*?)</user_query>", re.S)
+EXIT_LINE = re.compile(r"^Exit code: (-?\d+)\s*(?:Command output:\s*)?")
 _IDENT = re.compile(r"[A-Za-z][A-Za-z_]*")
 _UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 
@@ -56,7 +57,7 @@ def _po(m: dict) -> dict:
     return c if isinstance(c, dict) else {}
 
 
-def _rid(m: dict) -> str | None:
+def request_id(m: dict) -> str | None:
     """requestId of a real prompt; None for any other message."""
     c = _po(m)
     r = c.get("requestId")
@@ -72,7 +73,7 @@ def _tool(name: str) -> str:
     return name if _IDENT.fullmatch(name) else "other"
 
 
-def _prompt_ts(text: str, created: str | None) -> str | None:
+def prompt_ts(text: str, created: str | None) -> str | None:
     """The prompt's embedded `<timestamp>Weekday, Mon D, YYYY, H:MM AM (UTC+N)</timestamp>`
     (minute precision), else the chat's createdAt."""
     m = _TS.search(text)
@@ -120,7 +121,7 @@ def _field1_ids(b: bytes) -> tuple[str, ...]:
     return tuple(out)
 
 
-def _lists(con: sqlite3.Connection) -> list[tuple[str, ...]]:
+def root_lists(con: sqlite3.Connection) -> list[tuple[str, ...]]:
     """Every root list that is no other list's prefix. A root starts with its first field-1
     entry (measured on every root of real stores)."""
     seqs = set()
@@ -136,7 +137,7 @@ def _lists(con: sqlite3.Connection) -> list[tuple[str, ...]]:
     return [a for a, b in zip(srt, srt[1:] + [()]) if b[:len(a)] != a]
 
 
-def _messages(con: sqlite3.Connection, ids: set[str]) -> dict[str, dict]:
+def messages(con: sqlite3.Connection, ids: set[str]) -> dict[str, dict]:
     """The listed messages, plus every prompt (a prompt can be in no surviving root)."""
     out: dict[str, dict] = {}
 
@@ -197,7 +198,7 @@ def _activity(m: dict, t: dict, calls: dict, keys: RepoKeys) -> None:
             hit = commit_call(cmd) if isinstance(cmd, str) else None
             if not hit:
                 continue
-            ex = _EXIT.match(res)       # "Exit code: N\n\nCommand output:\n..." when it ran
+            ex = EXIT_LINE.match(res)       # "Exit code: N\n\nCommand output:\n..." when it ran
             found = commit_shas(res[ex.end():] if ex else res, err or not ex or ex[1] != "0",
                                 hit[1])
             key = commit_repo(keys, wd, commit_dir(cmd), None) if found else None
@@ -223,8 +224,8 @@ def _chat(path: str, con: sqlite3.Connection, meta: dict, cur: dict, idle: bool,
         "run_origin": "subagent",
         "parent_session_id": parent if isinstance(parent, str) and _UUID.fullmatch(parent) else None}
     created = epoch_ms_to_iso(meta.get("createdAt"))
-    lists = _lists(con)
-    msgs = _messages(con, {i for seq in lists for i in seq})
+    lists = root_lists(con)
+    msgs = messages(con, {i for seq in lists for i in seq})
     done = set(cur.get("done", ()))
     turns: dict[str, dict] = {}
     calls: dict = {}
@@ -236,7 +237,7 @@ def _chat(path: str, con: sqlite3.Connection, meta: dict, cur: dict, idle: bool,
             m = msgs.get(mid)
             if m is None:
                 continue
-            r = _rid(m)
+            r = request_id(m)
             if r:
                 if rid and rid != r:
                     turns[rid]["closed"] = True
@@ -260,7 +261,7 @@ def _chat(path: str, con: sqlite3.Connection, meta: dict, cur: dict, idle: bool,
                 except Exception:
                     errors += 1
     for m in msgs.values():             # a prompt no surviving root lists
-        r = _rid(m)
+        r = request_id(m)
         if r and r not in turns:
             # its history was dropped, or it is newer than the root that will list it: wait
             # until the chat is idle so a still-running turn is not closed early
@@ -273,7 +274,7 @@ def _chat(path: str, con: sqlite3.Connection, meta: dict, cur: dict, idle: bool,
             continue
         done.add(rid)
         text = text_of(t["msg"].get("content"))
-        ts = _prompt_ts(text, created)
+        ts = prompt_ts(text, created)
 
         def emit(kind: str, seed: str, attrs: dict, r: str = rid, ts: str | None = ts) -> None:
             events.append(ActivityEvent(event_id=make_event_id(NAME, kind, f"{sid}|{seed}"),
@@ -283,8 +284,8 @@ def _chat(path: str, con: sqlite3.Connection, meta: dict, cur: dict, idle: bool,
         prompts = [((), t["msg"])] + [((mid,), pm) for mid, pm in t["more"].values()]
         for extra, pm in prompts if human else ():
             ptext = text_of(pm.get("content"))
-            pts = _prompt_ts(ptext, created)
-            q = _QUERY.search(ptext)
+            pts = prompt_ts(ptext, created)
+            q = USER_QUERY.search(ptext)
             words = (q[1] if q else ptext).strip()
             c = pm.get("content")
             images = sum(isinstance(b, dict) and b.get("type") == "image" for b in c) \
@@ -309,7 +310,7 @@ def _chat(path: str, con: sqlite3.Connection, meta: dict, cur: dict, idle: bool,
     return events, errors
 
 
-def _meta(con: sqlite3.Connection) -> dict | None:
+def chat_meta(con: sqlite3.Connection) -> dict | None:
     row = con.execute("SELECT value FROM meta WHERE key = '0'").fetchone()
     try:
         m = json.loads(bytes.fromhex(row[0]))
@@ -326,7 +327,7 @@ def _mtime(path: str) -> float:
 def _sdk(path: str, have: set[str]) -> list[ActivityEvent]:
     """One turn row per run that ended and was not sent yet. Queued and running runs wait: a
     row is insert-only, so one stored as running would never become finished."""
-    con = _connect_ro(path)
+    con = connect_ro(path)
     if con is None:
         return []
     try:
@@ -356,11 +357,11 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list, Callable[[], None]]]:
     act_errors = 0
     for path in sorted(glob.glob(str(cfg.home / ".cursor" / "chats" / "*" / "*" / "store.db"))):
         prev = chats.get(path) or {}
-        con = _connect_ro(path)
+        con = connect_ro(path)
         if con is None:
             continue
         try:
-            meta = _meta(con)
+            meta = chat_meta(con)
             if meta is None or (meta.get("latestRootBlobId") == prev.get("root")
                                 and not prev.get("open")):
                 continue

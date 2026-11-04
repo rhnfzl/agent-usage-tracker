@@ -13,6 +13,8 @@ import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .label.names import TASK_NAMES
+
 ALL_AGENTS = ("claude_code", "codex", "cursor", "cursor_sdk", "cursor_api", "cursor_cli", "pi",
               "activitywatch")
 # activitywatch reads window titles, so it is opt-in: a config without `agents` never enables it.
@@ -21,7 +23,7 @@ AW_CATEGORIES = ("editor", "terminal", "agent", "dev", "browser", "comms", "docs
                  "media", "other")
 
 
-def _config_path() -> Path:
+def config_path() -> Path:
     if os.environ.get("AUT_CONFIG"):
         return Path(os.environ["AUT_CONFIG"]).expanduser()
     base = os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config"))
@@ -101,7 +103,7 @@ class Config:
 
 
 def load_config() -> Config:
-    path = _config_path()
+    path = config_path()
     data: dict = {}
     if path.exists():
         with open(path, "rb") as fh:
@@ -137,7 +139,6 @@ def load_config() -> Config:
     if aw_days < 0:
         raise SystemExit("config: activitywatch_title_days must be 0 (keep) or a number of days")
 
-    from .label.tasks import TASK_NAMES      # late: label imports config
     label_tasks = data.get("label_tasks") or []
     if not isinstance(label_tasks, list) or any(t not in TASK_NAMES for t in label_tasks):
         raise SystemExit(f"config: label_tasks must be a list of {list(TASK_NAMES)}")

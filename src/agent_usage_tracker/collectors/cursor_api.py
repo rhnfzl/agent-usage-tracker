@@ -31,7 +31,7 @@ from typing import Any, Callable, Iterator
 from ..config import Config
 from ..event import UsageEvent, make_event_id
 from ._util import epoch_ms_to_iso, safe_int
-from .cursor import _cursor_db
+from .cursor import cursor_db
 
 NAME = "cursor_api"      # registry / config key + event_id namespace (internal)
 _AGENT = "cursor"        # emitted agent label: this IS the accurate Cursor source, so it reads as
@@ -44,7 +44,7 @@ _MAX_PAGES = 200                 # hard stop (200*100 = 20k events/scan) so a bu
 
 def _auth(cfg: Config) -> tuple[str, int] | None:
     """(session-cookie, teamId) from the local Cursor state DB, or None if unavailable."""
-    db = _cursor_db(cfg)
+    db = cursor_db(cfg)
     if db is None or not db.exists():
         return None
     try:

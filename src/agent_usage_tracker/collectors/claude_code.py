@@ -24,10 +24,10 @@ from typing import Callable, Iterator
 
 from ..config import Config
 from ..event import EventSession, UsageEvent, make_event_id
-from ._activity_common import IDLE_S
+from ..repo_keys import RepoKeys
+from .activity_common import IDLE_S, text_of
 from ._util import basename, safe_int, scan_file
-from .claude_code_activity import Activity, RepoKeys
-from .claude_code_activity import _text as _text_of
+from .claude_code_activity import Activity
 
 NAME = "claude_code"
 
@@ -80,7 +80,7 @@ _INJECTED_PREFIXES = (
 )
 # Context blocks the harness or IDE attaches to a turn. A turn made of nothing else was not typed
 # (filter ported from AgentsView, github.com/kenn-io/agentsview, MIT licence).
-_CONTEXT_BLOCK_RE = re.compile(
+CONTEXT_BLOCK_RE = re.compile(
     r"<(system-reminder|ide_selection|ide_opened_file)>.*?</\1>", re.S)
 _USAGE_CMD = "<command-name>/usage</command-name>"
 
@@ -88,7 +88,7 @@ _USAGE_CMD = "<command-name>/usage</command-name>"
 _LOOP_RE = re.compile(r"<command-(?:message>(?:[\w-]+:)?loop</command-message|name>/loop</command-name)>")
 
 
-def _is_old_loop(o: dict, text: str) -> bool:
+def is_old_loop(o: dict, text: str) -> bool:
     """A /loop record from before Claude Code wrote turnOrigin. Then, every scheduled firing
     looked exactly like the /loop you typed; newer files mark all repeats `scheduled`."""
     return "turnOrigin" not in o and bool(_LOOP_RE.search(text))
@@ -98,7 +98,7 @@ def _is_injected(text: str) -> bool:
     """True for harness-generated role=user turns. A `<command-name>` slash-command expansion is
     deliberately NOT here: you typed the slash command, so it stays a human turn."""
     return (text.lstrip().startswith(_INJECTED_PREFIXES)
-            or (bool(text.strip()) and not _CONTEXT_BLOCK_RE.sub("", text).strip()))
+            or (bool(text.strip()) and not CONTEXT_BLOCK_RE.sub("", text).strip()))
 
 
 def human_text(o: dict) -> str | None:
@@ -115,7 +115,7 @@ def human_text(o: dict) -> str | None:
     m = o.get("message")
     if not isinstance(m, dict) or not _is_human_text(m.get("content")):
         return None
-    text = _text_of(m.get("content"))
+    text = text_of(m.get("content"))
     return None if _is_injected(text) else text
 
 
@@ -220,7 +220,7 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[UsageEvent], Callable[
             if typ == "user":
                 text = human_text(o)
                 if text is not None:
-                    if _is_old_loop(o, text):
+                    if is_old_loop(o, text):
                         old_loops += 1
                         if old_loops > 1:        # you typed the first; the rest are firings
                             continue

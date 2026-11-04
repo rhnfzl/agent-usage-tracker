@@ -30,7 +30,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from test_activity import (SALT, _base, _collect, _git_repo, _key, _plain_value,  # noqa: E402
                            _result, _tools, _turn_end, _use, _user, _write_jsonl)
 
-from agent_usage_tracker.collectors import _activity_common as ac  # noqa: E402
+from agent_usage_tracker.collectors import activity_common as ac  # noqa: E402
+from agent_usage_tracker.repo_keys import RepoKeys  # noqa: E402
 from agent_usage_tracker.collectors import codex, pi  # noqa: E402
 from agent_usage_tracker.config import Config  # noqa: E402
 from agent_usage_tracker.event import ActivityEvent, make_event_id  # noqa: E402
@@ -60,8 +61,8 @@ def _repos(d: Path) -> tuple[Path, Path]:
     return _git_repo(d / "a", R1), _git_repo(d / "b", R2)
 
 
-def _keys() -> ac.RepoKeys:
-    return ac.RepoKeys(SALT)
+def _keys() -> RepoKeys:
+    return RepoKeys(SALT)
 
 
 # ---------------------------------------------------------------- unit rules

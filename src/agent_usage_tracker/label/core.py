@@ -13,15 +13,19 @@ import math
 import os
 import sys
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 
-from ..config import _config_path
+from ..config import config_path
 from ..event import ActivityEvent, make_event_id
 
 PROMPT_VER = 1               # bump when render() changes; task_ver covers candidates/definitions
 LETTERS = "ABCDEFGHIJ"
 TAU_FLOOR = 0.5
+
+
+def local_midnight(d: date) -> datetime:
+    return datetime(d.year, d.month, d.day).astimezone()
 
 
 def data_dir() -> Path:
@@ -32,7 +36,7 @@ def data_dir() -> Path:
 
 def choice_path() -> Path:
     """The chosen backend, model, temperature and tau per task (written by `aut label choose`)."""
-    return _config_path().parent / "label.json"
+    return config_path().parent / "label.json"
 
 
 @dataclass(slots=True)

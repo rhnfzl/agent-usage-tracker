@@ -17,10 +17,12 @@ from pathlib import Path
 from typing import Callable
 
 from ..collectors import activitywatch as aw
-from ..collectors._activity_common import RepoKeys, text_of
+from ..collectors.activity_common import text_of
 from ..config import Config
 from ..event import make_event_id
-from .core import Request
+from ..redact import redact
+from ..repo_keys import RepoKeys
+from .core import Request, local_midnight
 
 TEXT_MAX = 1500              # chars of one steer text a prompt carries
 AW_BLOCK_MIN_S = 300
@@ -85,8 +87,6 @@ TASKS: dict[str, Task] = {t.name: t for t in (
         ("relevant", "building, learning or collaboration work, employer or personal"),
         ("not_relevant", "leisure or private admin")), None, "day", cached=True),
 )}
-NOTE = "daily_note"          # generative, private: one draft per day (run.py), not a decision
-TASK_NAMES = (*TASKS, NOTE)
 
 
 class SourceUnavailable(RuntimeError):
@@ -161,7 +161,7 @@ class Source:
                     eid = make_event_id("claude_code", "steer", uid)
                     m = o.get("message")
                     if eid in want and isinstance(m, dict):
-                        out[eid] = aw.redact(text_of(m.get("content")))[:TEXT_MAX]
+                        out[eid] = redact(text_of(m.get("content")))[:TEXT_MAX]
         return out
 
     def windows(self, since: datetime, until: datetime) -> list[dict]:
@@ -179,7 +179,7 @@ class Source:
             if wm["end"] == before:
                 break
         # collect stops on its own short of now - lag; anything earlier means it skipped
-        if datetime.fromisoformat(wm["end"]) < min(until, aw._now() - aw._LAG) - 2 * aw._MIN_RANGE:
+        if datetime.fromisoformat(wm["end"]) < aw.readable_until(until):
             raise SourceUnavailable("activitywatch: aw-server not readable for the label window")
         res = []
         for t in out:
@@ -193,7 +193,7 @@ class Source:
 def _days(since: datetime, until: datetime):
     d, end = since.astimezone().date(), until.astimezone().date()
     while d < end:
-        start = datetime(d.year, d.month, d.day).astimezone()
+        start = local_midnight(d)
         yield d, start, start + timedelta(days=1)
         d += timedelta(days=1)
 

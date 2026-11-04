@@ -342,7 +342,7 @@ give no activity rows and no `turn_id` (the copy ends in a `turn_aborted` that i
 interrupt). A spawned child without `forked_from_id` can carry an ordinal too (measured: equal to its line count, with no copy): it is
 read in full. The commit rules (command segments, SHA parsing, `repo_key`) and the turn
 aggregates (`by_tool` with the MCP collapse, `max_identical_run`, `retry_flag`, `runaway_flag`)
-are the shared code in `collectors/_activity_common.py`.
+are the shared code in `collectors/activity_common.py` and `repo_keys.py`.
 
 | kind | Codex | Pi |
 |---|---|---|

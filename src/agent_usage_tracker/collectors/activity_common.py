@@ -1,4 +1,4 @@
-"""Activity helpers shared by the collectors: commit detection and SHA parsing, repo keys, the
+"""Activity helpers shared by the collectors: commit detection and SHA parsing, the
 per-turn tool aggregates and the per-turn link fields. attrs built from these carry counts, flags, short enums and hashes only.
 
 The turn aggregates' retry and runaway rules are ported from AgentsView
@@ -8,25 +8,19 @@ The turn aggregates' retry and runaway rules are ported from AgentsView
 from __future__ import annotations
 
 import hashlib
-import hmac
 import json
 import os
 import re
-import secrets
-import subprocess
-import sys
 from datetime import datetime
-from urllib.parse import urlparse
 
-from ..git_safe import git_argv, git_env
-from ..state import _state_path
+from ..repo_keys import RepoKeys, repo_identity
 
 _SEGMENTS = re.compile(r"&&|\|\||[;|\n]")
 _HEREDOC = re.compile(r"""<<-?\s*(['"]?)(\w+)\1([^\n]*)\n.*?\n\s*\2[ \t]*(?=\n|$)""", re.S)
 _ARG = r"""(?:[^\s"']|"[^"]*"|'[^']*')+"""
 # optional wrappers (VAR=x, env, command, timeout N, rtk [proxy]), then `git`, then only global
 # options (-C <dir>, -c <k=v>, --flag[=v]), then the commit subcommand itself
-_GIT_COMMIT = re.compile(
+GIT_COMMIT = re.compile(
     rf"^\s*[({{]?\s*(?:(?:\w+={_ARG}|(?:\S*/)?env|command|timeout\s+\S+|rtk(?:\s+proxy)?)\s+)*"
     rf"(?:\S*/)?git(?:\s+(?:-[Cc]\s+{_ARG}|--[\w-]+(?:={_ARG})?|-\w+))*\s+commit(?:\s|$)")
 # segments that print nothing, so a commit after only these still owns the output's first line
@@ -39,7 +33,7 @@ _CONDENSED = re.compile(r"(?:ok )?(?P<sha>[0-9a-f]{7,40})(?:\s|$)")
 _HEX_SHA = re.compile(r"[0-9a-f]{7,40}")
 _OK_LINE = re.compile(r"^ok (?P<sha>[0-9a-f]{7,40})\s*$", re.M)
 # git's commit line with its branch and subject, for the link row (both are text: hashed or dropped)
-_COMMIT_LINE = re.compile(
+COMMIT_LINE = re.compile(
     r"^\[(?P<br>[^\]\s]+)(?: \(root-commit\))? [0-9a-f]{7,40}\] ?(?P<subj>[^\n]*)", re.M)
 _CD = re.compile(rf"^\s*[({{]?\s*(?:cd|pushd)\s+({_ARG})\s*$")
 _DASH_C = re.compile(rf"\s-C\s+({_ARG})")
@@ -97,91 +91,13 @@ def first_record(path: str) -> dict | None:
     return o if isinstance(o, dict) else None
 
 
-def repo_identity(url: str) -> str:
-    """host/owner/repo, lowercased, with credentials, port and a .git suffix dropped, so the https
-    and scp-style remotes of one repo (and a PR's host + repository) give the same key."""
-    m = re.match(r"^[\w.-]+@([^:/]+):(.+)$", url)       # git@host:owner/repo
-    if m:
-        host, path = m.groups()
-    else:
-        p = urlparse(url)                 # raises ValueError on a malformed URL
-        host, path = p.hostname or "", p.path
-    return f"{host}/{path.strip('/').removesuffix('.git')}".lower()
-
-
-def _load_salt(configured: str | None) -> bytes:
-    """The config's repo_key_salt, else a random salt kept next to the state file (created 0600 on
-    first use). b"" when neither can be had: repo keys are then NULL, never an unsalted hash."""
-    if configured:
-        return configured.encode("utf-8")
-    p = _state_path().parent / "repo_key.salt"
-    try:
-        if not p.exists():
-            # Written in full to a temp file, then linked into place: a crash or a second process
-            # never sees a half-written salt, and the first link wins a race.
-            p.parent.mkdir(parents=True, exist_ok=True)
-            tmp = p.with_name(f"{p.name}.{os.getpid()}.tmp")
-            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-            with os.fdopen(fd, "w") as fh:
-                fh.write(secrets.token_hex(32))
-            try:
-                os.link(tmp, p)
-            except FileExistsError:
-                pass
-            finally:
-                tmp.unlink(missing_ok=True)
-        salt = p.read_text().strip()
-        if os.name != "nt" and p.stat().st_mode & 0o077:     # Windows has no POSIX modes
-            print(f"aut: warning: {p} is group/other-readable; run: chmod 600 {p}", file=sys.stderr)
-    except OSError:
-        return b""
-    if len(salt) < 32:
-        print(f"aut: warning: {p} is too short; repo_key stays NULL until it is fixed",
-              file=sys.stderr)
-        return b""
-    return salt.encode("utf-8")
-
-
-class RepoKeys:
-    """repo_key = HMAC-SHA256(salt, host/owner/repo), so a list of candidate repo names cannot be
-    tested against stored keys without the salt. Cached per cwd for one collect() pass."""
-
-    def __init__(self, salt: str | None) -> None:
-        self._configured, self._salt, self._cwd = salt, None, {}
-
-    def of(self, identity: str) -> str | None:
-        if self._salt is None:
-            self._salt = _load_salt(self._configured)
-        if not self._salt:
-            return None
-        return hmac.new(self._salt, identity.encode("utf-8"), hashlib.sha256).hexdigest()
-
-    def of_cwd(self, cwd: object) -> str | None:
-        """Key of the origin remote for a working dir; None when the directory or the remote is
-        gone. The URL itself is never stored or logged."""
-        if not isinstance(cwd, str):
-            return None
-        if cwd not in self._cwd:
-            self._cwd[cwd] = None
-            if os.path.isdir(cwd):
-                try:
-                    r = subprocess.run(git_argv(cwd, "remote", "get-url", "origin"),
-                                       capture_output=True, timeout=2, env=git_env())
-                    url = r.stdout.decode("utf-8", "replace").strip()
-                    if r.returncode == 0 and url:
-                        self._cwd[cwd] = self.of(repo_identity(url))
-                except (OSError, subprocess.SubprocessError, ValueError):
-                    pass
-        return self._cwd[cwd]
-
-
 def commit_call(cmd: str) -> tuple[bool, bool] | None:
     """(is_amend, printed_before) when a command segment runs `git commit` (not --dry-run);
     printed_before: a segment ahead of the commit may have printed, so the output's first line is
     not necessarily the commit's."""
     # a heredoc body is data (a file, a commit message), not commands: drop it before splitting
     segs = [x for x in _SEGMENTS.split(_HEREDOC.sub(r"\3", cmd)) if x.strip()]
-    hits = [i for i, x in enumerate(segs) if _GIT_COMMIT.match(x) and "--dry-run" not in x.split()]
+    hits = [i for i, x in enumerate(segs) if GIT_COMMIT.match(x) and "--dry-run" not in x.split()]
     if not hits:
         return None
     return (any("--amend" in segs[i].split() for i in hits),
@@ -194,7 +110,7 @@ def commit_dir(cmd: str) -> str | None:
     or the move is not knowable (a variable, a command substitution)."""
     d = None
     for x in [x for x in _SEGMENTS.split(_HEREDOC.sub(r"\3", cmd)) if x.strip()]:
-        m, g = _CD.match(x), _GIT_COMMIT.match(x)
+        m, g = _CD.match(x), GIT_COMMIT.match(x)
         if not (m or (g and "--dry-run" not in x.split())):
             continue
         # a cd moves the shell for the segments after it; a -C only the commit itself
@@ -283,9 +199,9 @@ class Link:
         branch and subject of git's commit line."""
         for sha in shas:
             self._add("cks", sha_key(self.keys, sha), MAX_SHAS)
-        m = _COMMIT_LINE.search(text)
+        m = COMMIT_LINE.search(text)
         self.place(0, repo_key, m["br"] if m else None)
-        for m in _COMMIT_LINE.finditer(text):
+        for m in COMMIT_LINE.finditer(text):
             self.tickets(m["subj"])
 
     def text(self, text: object) -> None:

@@ -38,7 +38,7 @@ from agent_usage_tracker import cli  # noqa: E402
 from agent_usage_tracker.collectors import activitywatch as aw  # noqa: E402
 from agent_usage_tracker.config import Config  # noqa: E402
 from agent_usage_tracker.event import make_event_id  # noqa: E402
-from agent_usage_tracker.label import backends, core, run, tasks  # noqa: E402
+from agent_usage_tracker.label import backends, core, names, run, tasks  # noqa: E402
 
 REPO = Path(__file__).resolve().parents[1]
 SALT = "test-salt-for-labels-0123456789abcdef"
@@ -493,6 +493,23 @@ def test_unreadable_windows_keep_the_watermark(tmp_path, sink):
         assert "work_category" not in wm and "steer_intent" in wm
         assert sink.scans[-1]["status"] == "error"
         assert sink.scans[-1]["error"] == "SourceUnavailable"
+
+
+def test_task_names_match_the_tasks():
+    assert names.DECISION_TASKS == tuple(tasks.TASKS) and names.NOTE not in tasks.TASKS
+
+
+def test_config_and_evalset_stay_below_their_callers():
+    env = {**os.environ, "PYTHONPATH": str(Path(cli.__file__).parents[1])}
+
+    def loaded(mod: str) -> set[str]:
+        code = f"import sys, {mod}; print(*sys.modules)"
+        return set(subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
+                                  check=True, env=env).stdout.split())
+
+    assert not {m for m in loaded("agent_usage_tracker.config")
+                if ".collectors" in m or m.endswith((".tasks", ".core"))}
+    assert "agent_usage_tracker.push" not in loaded("agent_usage_tracker.label.evalset")
 
 
 def test_cli_and_config(tmp_path, monkeypatch):

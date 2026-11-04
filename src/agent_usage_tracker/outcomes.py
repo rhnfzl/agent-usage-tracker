@@ -40,11 +40,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from . import __version__
-from .collectors._activity_common import RepoKeys, repo_identity
 from .config import Config
 from .git_safe import git_argv, git_env
 from .push import scrub_error, send_scan_rows
-from .state import _state_path, atomic_write_text, load_json_dict
+from .repo_keys import RepoKeys, repo_identity
+from .state import state_path, atomic_write_text, load_json_dict
 
 DAY = 86400
 DECIDE_S = 14 * DAY          # undecided until day 14; also the revert and survival window
@@ -436,7 +436,7 @@ def pending(outs: list[dict], stored: dict[tuple[str, str], tuple]) -> list[dict
 
 
 def _cache_path() -> Path:
-    return _state_path().parent / CACHE_NAME
+    return state_path().parent / CACHE_NAME
 
 
 def _load_rows(dsn: str) -> list[dict]:

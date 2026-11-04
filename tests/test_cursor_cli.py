@@ -212,7 +212,7 @@ def _eid(kind: str, seed: str) -> str:
 
 
 def test_registered() -> None:
-    assert NAME in REGISTRY and NAME in ALL_AGENTS
+    assert NAME in REGISTRY and set(REGISTRY) == set(ALL_AGENTS), "config and registry drifted"
     print("ok registered")
 
 

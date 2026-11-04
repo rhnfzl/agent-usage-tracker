@@ -24,14 +24,15 @@ from typing import Callable, Iterator
 
 from ..config import Config
 from ..event import ActivityEvent, EventSession, UsageEvent, make_event_id
-from ._activity_common import (Link, RepoKeys, add_call, blank_agg, commit_call, commit_dir,
-                               commit_repo, commit_shas, first_record, ms_between, text_of,
-                               tool_key, turn_attrs)
+from ..repo_keys import RepoKeys
+from .activity_common import (Link, add_call, blank_agg, commit_call, commit_dir,
+                              commit_repo, commit_shas, first_record, ms_between, text_of,
+                              tool_key, turn_attrs)
 from ._util import basename, read_new_lines, safe_int
 
 NAME = "pi"
 _UUID = re.compile(r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$")
-_SKILL = re.compile(r'\s*<skill name="([\w.:-]+)"')
+SKILL = re.compile(r'\s*<skill name="([\w.:-]+)"')
 _ENDS = ("stop", "aborted", "length")   # an `error` followed by another assistant is a retry
 
 
@@ -52,13 +53,13 @@ def _str(v: object) -> str | None:
     return v if isinstance(v, str) and v else None
 
 
-def _uuid_in(path: str) -> str | None:
+def uuid_in(path: str) -> str | None:
     """The session uuid in a Pi file name (`<ts>_<uuid>.jsonl`)."""
     m = _UUID.search(os.path.basename(path))
     return m.group(1) if m else None
 
 
-def _header(o: dict, path: str) -> dict:
+def header(o: dict, path: str) -> dict:
     """What the watermark keeps of line 1. A fork's parent is the header id of the file named in
     parentSession, else the uuid in that name; the path itself is never kept."""
     ps = _str(o.get("parentSession"))
@@ -66,8 +67,8 @@ def _header(o: dict, path: str) -> dict:
     if ps:
         first = first_record(ps) if ps.endswith(".jsonl") and os.path.isfile(ps) else None
         parent = (_str(first.get("id")) if first and first.get("type") == "session" else None) \
-            or _uuid_in(ps)
-    return {"id": _str(o.get("id")) or _uuid_in(path) or Path(path).stem,
+            or uuid_in(ps)
+    return {"id": _str(o.get("id")) or uuid_in(path) or Path(path).stem,
             "ts": o.get("timestamp"), "cwd": _str(o.get("cwd")), "parent": parent,
             "fork": bool(ps)}
 
@@ -114,7 +115,7 @@ class _Activity:
             if open_:
                 self._close(open_["last"])
             text = text_of(content)
-            skill = _SKILL.match(text)
+            skill = SKILL.match(text)
             via = "skill" if text.lstrip().startswith('<skill name="') else \
                 "queued" if a.get("prev") == "toolResult" else "typed"
             self._emit("steer", ts, str(eid), sess.turn_id, {
@@ -193,8 +194,8 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list, Callable[[], None]]]:
         if off and "hdr" not in cur:      # resumed from a state saved before the header was kept
             first = first_record(path)
             if first and first.get("type") == "session":
-                cur["hdr"] = _header(first, path)
-        hdr = cur.get("hdr") or _header({}, path)
+                cur["hdr"] = header(first, path)
+        hdr = cur.get("hdr") or header({}, path)
         act = _Activity(cur.setdefault("act", {}), hdr["id"], hdr["cwd"], keys)
         events: list = []
         for raw in lines:
@@ -210,7 +211,7 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list, Callable[[], None]]]:
                 msg = {}
             if t == "session":
                 if "hdr" not in cur:
-                    cur["hdr"] = hdr = _header(o, path)
+                    cur["hdr"] = hdr = header(o, path)
                     act.sid, act.cwd = hdr["id"], hdr["cwd"]
                 continue
             if t == "model_change":

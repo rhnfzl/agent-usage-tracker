@@ -23,9 +23,10 @@ from typing import Callable, Iterator
 
 from ..config import Config
 from ..event import ActivityEvent, EventSession, UsageEvent, make_event_id
-from ._activity_common import (Link, RepoKeys, add_call, blank_agg, commit_call, commit_dir,
-                               commit_repo, commit_shas, first_record, ms_between, repo_identity,
-                               text_of, turn_attrs)
+from ..repo_keys import RepoKeys
+from .activity_common import (Link, add_call, blank_agg, commit_call, commit_dir,
+                              commit_repo, commit_shas, first_record, ms_between, repo_identity,
+                              text_of, turn_attrs)
 from ._util import basename, read_new_lines, safe_int
 
 NAME = "codex"
@@ -43,7 +44,7 @@ def _fresh_state(dev: int | None = None, ino: int | None = None) -> dict:
 _PROGRAM_SOURCES = {"exec", "mcp"}
 
 
-def _run_origin(p: dict) -> str:
+def run_origin(p: dict) -> str:
     """run_origin from the thread's FIRST session_meta. Structural signals only: originator,
     source and thread_source are recorded by codex itself.
 
@@ -62,7 +63,7 @@ def _run_origin(p: dict) -> str:
     return "interactive" if src in ("vscode", "cli") else "unknown"
 
 
-def _is_scheduled_automation(message: object) -> bool:
+def is_scheduled_automation(message: object) -> bool:
     """True for the preamble older Codex Desktop files put on a scheduled automation run (newer
     files flag it structurally with thread_source). Both markers are required so an ordinary
     message that merely opens with the word 'Automation' is not swallowed."""
@@ -81,7 +82,7 @@ def _set_meta(cur: dict, p: dict, keys: RepoKeys) -> None:
     parent's meta on a later line. Its git block gives the link fields every turn carries: the
     repo from the cwd, else the remote URL (hashed, never kept), and the branch, as keys."""
     cur["meta"] = {"id": _str(p.get("id")), "parent": _str(p.get("parent_thread_id")),
-                   "origin": _run_origin(p)}
+                   "origin": run_origin(p)}
     cur["cwd"] = p.get("cwd") or cur.get("cwd")
     cur["meta"]["link"] = _meta_link(p, keys)
 
@@ -107,7 +108,7 @@ def _session(cur: dict, path: str) -> EventSession:
                         m.get("parent"), m.get("origin") or "unknown", cur.get("turn"))
 
 
-def _script(cmd: object) -> str | None:
+def script_of(cmd: object) -> str | None:
     """The shell script of a CommandExecution: codex runs `[shell, -c|-lc, script]`."""
     if isinstance(cmd, str):
         return cmd
@@ -116,7 +117,7 @@ def _script(cmd: object) -> str | None:
     return None
 
 
-def _prompt(t: object, p: dict, has_um: bool) -> tuple[str, int] | None:
+def prompt_of(t: object, p: dict, has_um: bool) -> tuple[str, int] | None:
     """(text, images) when the record is a prompt: a user_message, or a UserMessage item in a
     file that has no user_message (older files carry both for one prompt)."""
     if t != "event_msg":
@@ -186,7 +187,7 @@ def _activity(o: dict, t: object, p: dict, a: dict, sess: EventSession, keys: Re
             code = it.get("exit_code")
             err = isinstance(code, int) and code != 0
             agg["errors"] += err
-            script = _script(it.get("command"))
+            script = script_of(it.get("command"))
             call = commit_call(script) if script else None
             out_text = it.get("aggregated_output")
             out_text = out_text if isinstance(out_text, str) else ""
@@ -335,7 +336,7 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list, Callable[[], None]]]:
                 continue
             if copied:      # the parent's turns, not this thread's (usage above is unchanged)
                 continue
-            prompt = _prompt(t, p, bool(cur.get("has_um")))
+            prompt = prompt_of(t, p, bool(cur.get("has_um")))
             if prompt is not None:
                 after_intr = bool(a.pop("intr", False))
                 text, images = prompt
@@ -343,7 +344,7 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list, Callable[[], None]]]:
                 sess = _session(cur, path)
                 # A prompt someone typed. Threads a program drives (subagents, `codex exec`, MCP
                 # calls, another agent's integration, scheduled automations) are not human turns.
-                if sess.run_origin in ("subagent", "automated") or _is_scheduled_automation(text):
+                if sess.run_origin in ("subagent", "automated") or is_scheduled_automation(text):
                     continue
                 # No tokens; a stable per-session ordinal makes the id deterministic so a
                 # re-read (file reset) re-emits the same id and the sink dedups it. The ordinal

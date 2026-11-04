@@ -35,6 +35,7 @@ from agent_usage_tracker import cli, push  # noqa: E402
 from agent_usage_tracker.collectors import REGISTRY  # noqa: E402
 from agent_usage_tracker.collectors import activitywatch as aw  # noqa: E402
 from agent_usage_tracker.config import ALL_AGENTS, AW_CATEGORIES, DEFAULT_AGENTS, Config, load_config  # noqa: E402
+from agent_usage_tracker.redact import PATTERNS, clean_text  # noqa: E402
 from agent_usage_tracker.event import TimeInterval, UsageEvent  # noqa: E402
 from test_activity import _fake_psycopg  # noqa: E402
 
@@ -289,17 +290,17 @@ def test_redaction_each_pattern() -> None:
                          ("access_to" + "ken=abcdEFGH1234", "abcdEFGH1234"),
                          ("export AWS_SECRET_ACCESS_K" + "EY=abcd/efgh", "abcd/efgh"),
                          ("Authorization: Bea" + "rer abc123def", "abc123def")):
-        out = aw.clean_title(text)
+        out = clean_text(text)
         assert secret not in out and "[redacted]" in out, (text, out)
     samples["bearer"] = ("curl -H 'Authorization: Bearer " + "zyx987'", "zyx987")
-    names = {name for name, _, _ in aw._REDACT}
+    names = {name for name, _, _ in PATTERNS}
     for name, (text, secret) in samples.items():
-        out = aw.clean_title("Fix login - " + text)
+        out = clean_text("Fix login - " + text)
         assert secret not in out, (name, out)
         assert out.startswith("Fix login - ") and "[redacted]" in out, (name, out)
     assert names == set(samples) - {"long_hex", "long_base64"} | {"long_run"}, names
-    assert aw.clean_title("A plain editor title") == "A plain editor title"
-    assert len(aw.clean_title("word " * 200)) == 300
+    assert clean_text("A plain editor title") == "A plain editor title"
+    assert len(clean_text("word " * 200)) == 300
     print("ok redaction_each_pattern")
 
 

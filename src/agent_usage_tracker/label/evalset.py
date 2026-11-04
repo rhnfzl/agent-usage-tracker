@@ -19,11 +19,10 @@ from pathlib import Path
 
 from ..config import Config
 from ..state import atomic_write_text
-from .core import Request, data_dir
-from .run import local_midnight
+from .core import Request, data_dir, local_midnight
+from .names import DAYS
 from .tasks import TASKS, Source, units
 
-DAYS = 90                    # the window units are rebuilt over (teach, review, eval, train)
 # map.md section 6: gold per label, (floor, target). AW titles: 150 per class.
 FLOORS = {"work_category": (30, 50), "steer_intent": (30, 50), "soft_outcome": (30, 30),
           "aw_title_relevance": (150, 150)}

@@ -16,7 +16,7 @@ import tempfile
 from pathlib import Path
 
 
-def _state_path() -> Path:
+def state_path() -> Path:
     if os.environ.get("AUT_STATE"):
         return Path(os.environ["AUT_STATE"]).expanduser()
     base = os.environ.get("XDG_STATE_HOME", str(Path.home() / ".local" / "state"))
@@ -42,7 +42,7 @@ def _warn_unusable(path: Path, reason: str) -> None:
 
 
 def load_state() -> dict:
-    path = _state_path()
+    path = state_path()
     if not path.exists():
         return {"collectors": {}}       # first run on this machine: genuinely nothing yet
     try:
@@ -57,7 +57,7 @@ def load_state() -> dict:
 
 
 def save_state(state: dict) -> None:
-    atomic_write_text(_state_path(), json.dumps(state, indent=1))
+    atomic_write_text(state_path(), json.dumps(state, indent=1))
 
 
 def atomic_write_text(path: Path, text: str) -> None:

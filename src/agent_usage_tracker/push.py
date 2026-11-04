@@ -113,7 +113,7 @@ def _split(batch: list) -> tuple[list[UsageEvent], list[ActivityEvent], list[Tim
     return usage, acts, [e for e in batch if isinstance(e, TimeInterval)]
 
 
-def _insert_pg(dsn: str, batch: list) -> None:
+def insert_pg(dsn: str, batch: list) -> None:
     """Usage rows, their session rows, and the activity and time rows of the batch in ONE
     transaction: all land or none does, so a raise leaves the watermark where it was and the batch
     is re-sent."""
@@ -216,11 +216,11 @@ def make_sender(cfg: Config) -> Callable[[list[UsageEvent]], None]:
                 webhook_err = exc
             else:
                 if cfg.has_pg and (acts or times):     # the webhook carries usage only
-                    _insert_pg(cfg.pg_dsn, acts + times)
+                    insert_pg(cfg.pg_dsn, acts + times)
                 _note_sessions_skipped(usage if cfg.has_pg else batch, cfg.has_pg)
                 return
         if cfg.has_pg:
-            _insert_pg(cfg.pg_dsn, batch)
+            insert_pg(cfg.pg_dsn, batch)
             return
         raise RuntimeError(f"webhook delivery failed and no PG fallback: {webhook_err}")
 

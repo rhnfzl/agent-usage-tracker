@@ -33,7 +33,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from agent_usage_tracker import outcomes as oc  # noqa: E402
-from agent_usage_tracker.collectors._activity_common import RepoKeys, repo_identity  # noqa: E402
+from agent_usage_tracker.repo_keys import RepoKeys, repo_identity  # noqa: E402
 from agent_usage_tracker.config import Config  # noqa: E402
 from agent_usage_tracker.git_safe import git_argv, git_env  # noqa: E402
 

@@ -5,6 +5,7 @@ shape (an agents.activity_event row of kind `label`: an enum value, a probabilit
 never text). The text a decision reads (steer text, window titles) comes from this machine's own
 logs at run time, is redacted, and is never stored or logged.
 
+  names     the task names and the eval window, with no imports (config and the CLI read them)
   core      Request / Response, temperature scaling, per-label tau, the label row
   backends  mlx_letter (an instruct model read through answer-letter logits) and the encoder slot
   tasks     the closed candidate lists, questions and unit builders per task

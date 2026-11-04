@@ -776,13 +776,13 @@ def test_hardening_edges() -> None:
 
 
 def test_cursor_db_path() -> None:
-    from agent_usage_tracker.collectors.cursor import _cursor_db
+    from agent_usage_tracker.collectors.cursor import cursor_db
     home = Path("/tmp/fakehome")
     override = _cfg(home)
     object.__setattr__(override, "cursor_db_path", "/custom/state.vscdb")
     # compare Paths, not strings: Windows renders the same path with backslashes
-    assert _cursor_db(override) == Path("/custom/state.vscdb")
-    p = _cursor_db(_cfg(home))
+    assert cursor_db(override) == Path("/custom/state.vscdb")
+    p = cursor_db(_cfg(home))
     assert p is not None
     assert p.parts[-4:] == ("Cursor", "User", "globalStorage", "state.vscdb")  # same subpath every OS
     assert str(home) in str(p) or "AppData" in str(p)

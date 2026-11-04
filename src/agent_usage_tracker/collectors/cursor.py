@@ -37,7 +37,7 @@ _CURSOR_SUBPATH = "Cursor/User/globalStorage/state.vscdb"
 _BATCH = 500
 
 
-def _cursor_db(cfg: Config) -> Path | None:
+def cursor_db(cfg: Config) -> Path | None:
     """Locate Cursor's state.vscdb across macOS / Windows / Linux, or an explicit override."""
     if cfg.cursor_db_path:
         return Path(cfg.cursor_db_path).expanduser()
@@ -50,7 +50,7 @@ def _cursor_db(cfg: Config) -> Path | None:
     return home / ".config" / _CURSOR_SUBPATH  # linux + other
 
 
-def _connect_ro(path) -> sqlite3.Connection | None:
+def connect_ro(path) -> sqlite3.Connection | None:
     """Read-only connect, safe alongside a running Cursor (WAL allows concurrent readers)."""
     try:
         con = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=5.0)
@@ -81,10 +81,10 @@ def _ts(bubble: dict, meta: dict) -> str | None:
 
 
 def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[UsageEvent], Callable[[], None]]]:
-    db = _cursor_db(cfg)
+    db = cursor_db(cfg)
     if db is None or not db.exists():
         return
-    con = _connect_ro(db)
+    con = connect_ro(db)
     if con is None:
         print("aut: cursor state.vscdb exists but could not be opened (locked/corrupt); "
               "skipping cursor this run", file=sys.stderr)

@@ -42,9 +42,10 @@ from datetime import date, datetime, timedelta, timezone
 
 from . import __version__, pricing
 from .collectors import REGISTRY, activitywatch
-from .config import Config, load_config, _config_path
+from .config import Config, load_config, config_path
 from .event import ActivityEvent, TimeInterval, UsageEvent, make_event_id, valid_ts
-from .push import (_insert_pg, make_sender, scrub_error, send_activity_rows, send_scan_rows,
+from .label.names import DAYS, DECISION_TASKS, TASK_NAMES
+from .push import (insert_pg, make_sender, scrub_error, send_activity_rows, send_scan_rows,
                    send_session_rows)
 from .state import collector_wm, load_state, save_state
 
@@ -417,7 +418,7 @@ def cmd_time_add(cfg: Config, args) -> None:
     row = build_manual(cfg, args.start, args.end, args.minutes, args.at, args.not_relevant)
     if not cfg.has_pg:
         raise SystemExit("time add needs transport.pg_dsn")
-    _insert_pg(cfg.pg_dsn, [row])
+    insert_pg(cfg.pg_dsn, [row])
     s, e = (datetime.fromisoformat(x).astimezone() for x in (row.ts, row.end_ts))
     mins = (e - s).total_seconds() / 60
     print(f"added manual interval {s:%Y-%m-%d %H:%M} -> {e:%Y-%m-%d %H:%M} ({mins:.0f} min, "
@@ -501,7 +502,6 @@ def main(argv: list[str] | None = None) -> int:
     ins.add_argument("--episode", help="episode id (a prefix is enough)")
     ins.add_argument("--day", help="local YYYY-MM-DD: the episodes with a member row that day")
     ins.add_argument("--label", help="a label's unit_id (steer event id, <episode>:<date>, ...)")
-    from .label.tasks import TASK_NAMES
     p_lab = sub.add_parser("label", help="local model labels (optional extra aut[label])")
     lab_sub = p_lab.add_subparsers(dest="label_cmd", required=True)
     p_lrun = lab_sub.add_parser("run", help="label new units since the watermark")
@@ -512,19 +512,17 @@ def main(argv: list[str] | None = None) -> int:
     p_lback = lab_sub.add_parser("backfill", help="label one task over the last N days")
     p_lback.add_argument("--task", choices=TASK_NAMES, required=True)
     p_lback.add_argument("--days", type=int, required=True)
-    from .label.evalset import DAYS
-    from .label.tasks import TASKS
     p_teach = lab_sub.add_parser("teach", help="teacher (silver) labels for a stratified sample")
-    p_teach.add_argument("--task", choices=list(TASKS), required=True)
+    p_teach.add_argument("--task", choices=DECISION_TASKS, required=True)
     p_teach.add_argument("--n", type=int, required=True, help="units to label this run")
     p_teach.add_argument("--budget-usd", type=float, default=5.0,
                          help="cap on this run's Sonnet spend (default 5)")
     p_lrev = lab_sub.add_parser("review", help="label gold answers on a local page")
-    p_lrev.add_argument("--task", choices=list(TASKS))
+    p_lrev.add_argument("--task", choices=DECISION_TASKS)
     for name, text in (("eval", "score every backend on the gold labels"),
                        ("choose", "write the smallest backend that passes into label.json"),
                        ("train-encoder", "fit the small encoder on gold + silver")):
-        lab_sub.add_parser(name, help=text).add_argument("--task", choices=list(TASKS),
+        lab_sub.add_parser(name, help=text).add_argument("--task", choices=DECISION_TASKS,
                                                          required=True)
     for sp in (p_teach, p_lrev, lab_sub.choices["eval"], lab_sub.choices["train-encoder"]):
         sp.add_argument("--days", type=int, default=DAYS,
@@ -532,7 +530,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     if args.cmd == "sync-prices":
-        out = args.out or str(_config_path().parent / "model_prices.json")
+        out = args.out or str(config_path().parent / "model_prices.json")
         n = pricing.sync_prices(out, litellm_url=args.litellm_url,
                                 models_dev_url=args.models_dev_url)
         print(f"synced {n} model prices -> {out}", file=sys.stderr)
@@ -595,13 +593,13 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.cmd == "label":
         from .label import run as label_run
+        from .label.core import local_midnight
         if args.label_cmd == "backfill":
             since = date.today() - timedelta(days=args.days)
             tasks, dry = [args.task], False
         else:
             since, tasks, dry = args.since, [args.task] if args.task else None, args.dry_run
-        report = label_run.run_label(cfg, tasks, label_run.local_midnight(since) if since
-                                     else None, dry)
+        report = label_run.run_label(cfg, tasks, local_midnight(since) if since else None, dry)
         label_run.print_report(report, dry)
         return 0
 

@@ -3,7 +3,7 @@
 Called record by record from the claude_code collector. attrs carry counts, flags, short enums,
 ids and hashes only, never prompt text, tool output, paths, titles or commit messages.
 
-The turn aggregates and the retry and runaway rules live in _activity_common (from AgentsView,
+The turn aggregates and the retry and runaway rules live in activity_common (from AgentsView,
 github.com/kenn-io/agentsview, MIT licence, (c) its authors).
 """
 
@@ -13,13 +13,12 @@ import copy
 from urllib.parse import urlparse
 
 from ..event import ActivityEvent, EventSession, make_event_id
-# repo_identity and _GIT_COMMIT are re-exported for the tests that lock them
-from ._activity_common import _GIT_COMMIT, RepoKeys, repo_identity  # noqa: F401
-from ._activity_common import (IDLE_S, Link, add_call, blank_agg, commit_call, commit_dir,
-                               commit_repo, commit_shas, ms_between, turn_attrs)
-from ._activity_common import h as _h
-from ._activity_common import text_of as _text
-from ._activity_common import tool_key as _tool
+from ..repo_keys import RepoKeys
+from .activity_common import (IDLE_S, Link, add_call, blank_agg, commit_call, commit_dir,
+                              commit_repo, commit_shas, ms_between, turn_attrs)
+from .activity_common import h as _h
+from .activity_common import text_of as _text
+from .activity_common import tool_key as _tool
 
 _INTERRUPT = "[Request interrupted"
 _REJECTED = "The user doesn't want to proceed"

@@ -203,11 +203,11 @@ def test_codex_sessions() -> None:
         [child] = _usage(evs, sid="C1")
         assert child.event_id == make_event_id("codex", "P1", T(3), 10, 0, 5, 0, 15, ""), child
         assert child.project == "repo"                       # the parent meta's cwd is ignored
-        assert [m(p) for m, p in [(codex._run_origin, {"source": "cli"}),
-                                  (codex._run_origin, {"source": "mcp"}),
-                                  (codex._run_origin, {"source": "vscode",
+        assert [m(p) for m, p in [(codex.run_origin, {"source": "cli"}),
+                                  (codex.run_origin, {"source": "mcp"}),
+                                  (codex.run_origin, {"source": "vscode",
                                                        "originator": "Claude Code"}),
-                                  (codex._run_origin, {})]] == \
+                                  (codex.run_origin, {})]] == \
             ["interactive", "automated", "automated", "unknown"]
     _run(check)
     print("ok codex_sessions")
@@ -452,8 +452,8 @@ def test_pi_usage_and_sessions() -> None:
         assert {e.event_id for e in _acts(evs, sid=FORK)} == {
             make_event_id("pi", k, f"{FORK}|f1") for k in ("steer", "turn", "link")}
         # parent and session fallbacks: the uuid in a file name, never the path
-        assert pi._uuid_in(f"/gone/2026-01-01T00-00-00-000Z_{FORK}.jsonl") == FORK
-        assert pi._uuid_in("/gone/not-a-session.jsonl") is None
+        assert pi.uuid_in(f"/gone/2026-01-01T00-00-00-000Z_{FORK}.jsonl") == FORK
+        assert pi.uuid_in("/gone/not-a-session.jsonl") is None
     _run(check)
     print("ok pi_usage_and_sessions")
 

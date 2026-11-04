@@ -19,15 +19,12 @@ from ..config import Config
 from ..push import scrub_error, send_activity_rows, send_scan_rows
 from ..state import atomic_write_text, collector_wm, load_json_dict, load_state, save_state
 from .backends import make_backend
-from .core import data_dir, decide, label_event, load_choice
-from .tasks import NOTE, OUTCOME_DAYS, TASKS, Source, SourceUnavailable, units
+from .core import data_dir, decide, label_event, load_choice, local_midnight
+from .names import NOTE
+from .tasks import OUTCOME_DAYS, TASKS, Source, SourceUnavailable, units
 
 BATCH = 50
 NAME = "label"
-
-
-def local_midnight(d: date) -> datetime:
-    return datetime(d.year, d.month, d.day).astimezone()
 
 
 def _cache_path():

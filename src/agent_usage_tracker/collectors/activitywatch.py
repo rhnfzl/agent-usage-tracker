@@ -37,12 +37,12 @@ from typing import Any, Callable, Iterator
 
 from ..config import Config
 from ..event import TimeInterval, make_event_id
+from ..redact import clean_text
 
 NAME = "activitywatch"
 _LAG = timedelta(minutes=5)          # aw-watcher-window extends its last event; leave it settle
 _CHUNK = timedelta(days=1)           # one query per pass; the scan's drain loop runs the next day
 _MIN_RANGE = timedelta(minutes=1)    # below this, wait for the next scan (lets the drain loop end)
-_TITLE_MAX = 300
 _PURGE_BATCH = 500
 _PURGE_BUDGET = 20.0                 # seconds of GET+DELETE per scan; a backlog drains over scans
 _TIMEOUT = 10
@@ -51,27 +51,6 @@ _QUERY = """window = flood(query_bucket({win}));
 afk = flood(query_bucket({afk}));
 not_afk = filter_keyvals(afk, "status", ["not-afk"]);
 RETURN = filter_period_intersect(window, not_afk);"""
-
-R = "[redacted]"
-# (name, pattern, replacement). Order matters: URL credentials before emails, specific before
-# the generic long run.
-_REDACT = (
-    ("url_credentials", re.compile(r"\b([a-z][a-z0-9+.-]*://)[^\s/@:]+:[^\s/@]+@", re.I),
-     r"\1" + R + "@"),
-    # no leading \b: env names (PGPASSWORD=, DB_PASSWORD=, GITHUB_TOKEN=) carry a prefix
-    ("assignment", re.compile(r"([A-Za-z0-9_]*(?:password|passwd|pwd|secret|token|api[_-]?key"
-                              r"|access[_-]?key))(\s*[=:]\s*)\S+", re.I), r"\1\2" + R),
-    ("bearer", re.compile(r"\b(bearer\s+)\S+", re.I), r"\1" + R),
-    ("jwt", re.compile(r"\beyJ[\w-]+\.[\w-]+\.[\w-]+"), R),
-    ("sk_key", re.compile(r"\bsk-[\w-]{16,}"), R),
-    ("github_pat", re.compile(r"\bgithub_pat_\w{20,}"), R),
-    ("github_token", re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}"), R),
-    ("slack_token", re.compile(r"\bxox[abprs]-[\w-]{10,}"), R),
-    ("aws_key", re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b"), R),
-    ("email", re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+"), R),
-    # long hex and base64 runs; also takes long slugs and paths, which is the safe side
-    ("long_run", re.compile(r"[A-Za-z0-9+/_=-]{32,}"), R),
-)
 
 _IDLE_APPS = ("loginwindow", "screensaverengine", "screen saver")
 _DENY_APPS = ("1password", "bitwarden", "keepassxc", "keychain access", "passwords", "dashlane",
@@ -136,6 +115,11 @@ def _http(cfg: Config, method: str, path: str, body: Any = None) -> Any:
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def readable_until(until: datetime) -> datetime:
+    """How far collect() must get on its own toward `until`: earlier means it skipped."""
+    return min(until, _now() - _LAG) - 2 * _MIN_RANGE
 
 
 def _parse(ts: str) -> datetime:
@@ -222,17 +206,6 @@ def denied(cfg: Config, app: str, title: str, data: dict | None = None) -> bool:
     return any(re.search(p, text, re.I) for p in (*_DENY_TITLES, *cfg.activitywatch_deny_titles))
 
 
-def redact(text: str) -> str:
-    """The redaction alone, for any local text (titles here, steer text in `aut label`)."""
-    for _, pattern, repl in _REDACT:
-        text = pattern.sub(repl, text)
-    return text
-
-
-def clean_title(title: str) -> str:
-    return redact(title)[:_TITLE_MAX]
-
-
 def browser_category(cfg: Config, title: str, url: str = "") -> tuple[str, str]:
     """Browser row -> (web-work | web, rule). Seam: phase 4 replaces this rule with a model.
     The URL is matched here, on the machine, and is never sent."""
@@ -302,7 +275,7 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[TimeInterval], Callabl
             continue
         category, relevant, rule = classify(cfg, app, title, str(data.get("url") or ""))
         keep = cfg.activitywatch_titles and (title_from is None or s >= title_from)
-        sent = (clean_title(title) or None) if keep else None
+        sent = (clean_text(title) or None) if keep else None
         s_iso, e_iso = s.astimezone(timezone.utc).isoformat(), e.astimezone(timezone.utc).isoformat()
         # No title in the id: only one window has focus at a time, and an id must not let anyone
         # confirm a guessed title.

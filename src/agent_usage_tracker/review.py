@@ -39,11 +39,11 @@ from .collectors import codex as _cx
 from .collectors import cursor as _cursor
 from .collectors import cursor_cli as _cu
 from .collectors import pi as _pi
-from .collectors._activity_common import (_COMMIT_LINE, commit_call, first_record, ms_between,
-                                           text_of)
+from .collectors.activity_common import (COMMIT_LINE, commit_call, first_record, ms_between,
+                                          text_of)
 from .collectors._util import epoch_ms_to_iso, safe_int
-from .collectors.activitywatch import clean_title
 from .config import Config
+from .redact import clean_text
 
 _TITLE = re.compile(r'"(?:aiTitle|customTitle)":\s*"((?:[^"\\]|\\.)*)"')
 _BRANCH = re.compile(r'"(?:gitBranch|worktreeBranch)":\s*"((?:[^"\\]|\\.)*)"')
@@ -76,10 +76,10 @@ def _unescape(s: str) -> str:
 
 
 def clip(text: str, n: int = _TEXT_MAX) -> str:
-    """Local text as one short line for the page: context blocks and tags out, secrets redacted
-    (the ActivityWatch title rules), then cut to about n characters."""
-    t = _WS.sub(" ", _TAG.sub(" ", _cc._CONTEXT_BLOCK_RE.sub("", text))).strip()
-    t = clean_title(t)
+    """Local text as one short line for the page: context blocks and tags out, secrets redacted,
+    then cut to about n characters."""
+    t = _WS.sub(" ", _TAG.sub(" ", _cc.CONTEXT_BLOCK_RE.sub("", text))).strip()
+    t = clean_text(t)
     return t if len(t) <= n else t[:n - 1].rstrip() + "\u2026"
 
 
@@ -132,7 +132,7 @@ class _Digest:
             return
         out = out if isinstance(out, str) else ""
         if commit_call(cmd):
-            subj = [m["subj"] for m in _COMMIT_LINE.finditer(out)]
+            subj = [m["subj"] for m in COMMIT_LINE.finditer(out)]
             g = _GIT_COMMIT.search(cmd)
             self.commits += subj or [_quoted(_MSG, cmd, g.end()) if g else None]
         i = cmd.find("gh pr create")
@@ -161,9 +161,9 @@ class _Digest:
                 "last": clip(self.prompts[-1]) if len(self.prompts) > 1 else "",
                 "commits": [clip(c, 120) for c in _uniq(self.commits)][:5],
                 "prs": [clip(t, 120) for t in _uniq(self.prs)][:3],
-                "files": [clean_title(self._file(p)) for p, _n in self.files.most_common(3)],
-                "titles": [clean_title(t) for t in _uniq(self.titles)],
-                "branches": [clean_title(b) for b in _uniq(self.branches)]}
+                "files": [clean_text(self._file(p)) for p, _n in self.files.most_common(3)],
+                "titles": [clean_text(t) for t in _uniq(self.titles)],
+                "branches": [clean_text(b) for b in _uniq(self.branches)]}
 
 
 def _claude(f: str, d: _Digest) -> None:
@@ -183,8 +183,8 @@ def _claude(f: str, d: _Digest) -> None:
             d.at(o.get("timestamp"), o.get("cwd"))
             text = _cc.human_text(o)
             if text is not None:
-                loops += _cc._is_old_loop(o, text)
-                if loops <= 1 or not _cc._is_old_loop(o, text):
+                loops += _cc.is_old_loop(o, text)
+                if loops <= 1 or not _cc.is_old_loop(o, text):
                     d.prompts.append(text)
                 continue
             m = o.get("message")
@@ -217,7 +217,7 @@ def _codex(f: str, d: _Digest) -> None:
     meta = recs[0]["payload"] if recs[0].get("type") == "session_meta" else {}
     git = meta.get("git") if isinstance(meta.get("git"), dict) else {}
     d.branches.append(git.get("branch"))
-    human = _cx._run_origin(meta) not in ("subagent", "automated")
+    human = _cx.run_origin(meta) not in ("subagent", "automated")
     # a fork opens with a copy of its parent's history (the collector's rule)
     skip = max(safe_int(meta.get("subagent_history_start_ordinal")) - 1, 0) \
         if meta.get("forked_from_id") else 0
@@ -228,9 +228,9 @@ def _codex(f: str, d: _Digest) -> None:
             continue
         t, p = o.get("type"), o["payload"]
         d.at(o.get("timestamp"), p.get("cwd") if t in ("session_meta", "turn_context") else None)
-        pr = _cx._prompt(t, p, has_um)
+        pr = _cx.prompt_of(t, p, has_um)
         if pr is not None:
-            if human and not _cx._is_scheduled_automation(pr[0]):
+            if human and not _cx.is_scheduled_automation(pr[0]):
                 d.prompts.append(pr[0])
             continue
         it = p.get("item")
@@ -238,7 +238,7 @@ def _codex(f: str, d: _Digest) -> None:
             continue
         if it.get("type") == "CommandExecution":
             code = it.get("exit_code")
-            d.shell(_cx._script(it.get("command")), it.get("aggregated_output"),
+            d.shell(_cx.script_of(it.get("command")), it.get("aggregated_output"),
                     isinstance(code, int) and code != 0)
         elif it.get("type") == "FileChange" and isinstance(it.get("changes"), dict):
             d.files.update(k for k in it["changes"] if isinstance(k, str))
@@ -261,7 +261,7 @@ def _pi_log(f: str, hdr: dict, d: _Digest) -> None:
             role, content = m.get("role"), m.get("content")
             if role == "user":
                 text = text_of(content)
-                sk = _pi._SKILL.match(text)     # a skill invocation: its name, not SKILL.md
+                sk = _pi.SKILL.match(text)     # a skill invocation: its name, not SKILL.md
                 d.prompts.append(f"/{sk[1]} {text.partition('</skill>')[2]}".strip() if sk
                                  else text)
             elif role == "assistant" and isinstance(content, list):
@@ -276,12 +276,12 @@ def _pi_log(f: str, hdr: dict, d: _Digest) -> None:
 
 
 def _cursor_chat(f: str, d: _Digest) -> None:
-    con = _cursor._connect_ro(f)
+    con = _cursor.connect_ro(f)
     if con is None:
         return
     try:
-        meta = _cu._meta(con) or {}
-        msgs = _cu._messages(con, {i for seq in _cu._lists(con) for i in seq})
+        meta = _cu.chat_meta(con) or {}
+        msgs = _cu.messages(con, {i for seq in _cu.root_lists(con) for i in seq})
     finally:
         con.close()
     created = epoch_ms_to_iso(meta.get("createdAt"))
@@ -289,11 +289,11 @@ def _cursor_chat(f: str, d: _Digest) -> None:
     prompts: dict = {}
     calls: dict = {}
     for m in msgs.values():
-        r = _cu._rid(m)
+        r = _cu.request_id(m)
         if r and r not in prompts:
             text = text_of(m.get("content"))
-            q = _cu._QUERY.search(text)
-            ts = _cu._prompt_ts(text, created)
+            q = _cu.USER_QUERY.search(text)
+            ts = _cu.prompt_ts(text, created)
             d.at(ts)
             prompts[r] = (_when(ts) or datetime.min.replace(tzinfo=timezone.utc),
                           q[1] if q else _BLOCK.sub(" ", text))
@@ -309,7 +309,7 @@ def _cursor_chat(f: str, d: _Digest) -> None:
             if isinstance(args, dict) and b.get("type") == "tool-result" \
                     and b.get("toolName") == "Shell":
                 res = b.get("result") if isinstance(b.get("result"), str) else ""
-                ex = _cu._EXIT.match(res)
+                ex = _cu.EXIT_LINE.match(res)
                 d.at(None, args.get("working_directory"))
                 d.shell(args.get("command"), res[ex.end():] if ex else res,
                         not ex or ex[1] != "0")
@@ -350,11 +350,11 @@ def local_info(home: Path, sessions: set[str]) -> dict[str, dict]:
                 digests[sid].titles.insert(0, names.get(sid, ""))
     for f in glob.glob(str(home / ".pi" / "agent" / "sessions" / "**" / "*.jsonl"),
                        recursive=True):
-        u = _pi._uuid_in(f)
+        u = _pi.uuid_in(f)
         if u and u not in sessions:
             continue
         first = first_record(f) or {}
-        hdr = _pi._header(first if first.get("type") == "session" else {}, f)
+        hdr = _pi.header(first if first.get("type") == "session" else {}, f)
         if hdr["id"] in sessions:
             read(hdr["id"], "Pi", _pi_log, f, hdr)
     # shortcut: a chat is found by its directory name, which is its agentId in every store seen
