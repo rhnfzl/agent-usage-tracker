@@ -19,16 +19,16 @@ import os
 import re
 from collections import Counter
 from pathlib import Path
-from typing import Iterator
+from typing import Any, Iterator
 
 from ..config import Config
 from ..event import ActivityKind, Batch, ActivityEvent, EventSession, UsageEvent, make_event_id
 from ..repo_keys import RepoKeys
-from .activity_common import (Link, add_call, blank_tool_tally, commit_rows, first_record, ms_between,
+from .activity_common import (Link, TurnAgg, add_call, blank_tool_tally, commit_rows, first_record, ms_between,
                               pad_pending, text_of, tool_key, turn_attrs)
 from .commits import commit_call, commit_dir, commit_shas
-from ._util import (dict_or_empty, parse_record, project_name, read_new_lines, safe_int, same_file, str_or_none,
-                    warn_skipped)
+from ._util import (count_field, dict_or_empty, parse_record, project_name, read_new_lines, safe_int,
+                    same_file, str_or_none, warn_skipped)
 
 NAME = "pi"
 _UUID = re.compile(r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$")
@@ -66,7 +66,7 @@ def uuid_in(path: str) -> str | None:
     return m.group(1) if m else None
 
 
-def header(o: dict, path: str) -> dict:
+def header(o: dict, path: str) -> dict[str, Any]:
     """What the watermark keeps of line 1. A fork's parent is the header id of the file named in
     parentSession, else the uuid in that name; the path itself is never kept."""
     ps = str_or_none(o.get("parentSession"))
@@ -78,6 +78,12 @@ def header(o: dict, path: str) -> dict:
     return {"id": str_or_none(o.get("id")) or uuid_in(path) or Path(path).stem,
             "ts": o.get("timestamp"), "cwd": str_or_none(o.get("cwd")), "parent": parent,
             "fork": bool(ps)}
+
+
+def is_fork_copy(o: dict, hdr: dict) -> bool:
+    """A fork copies its parent's entries, with their ids and timestamps, all before its own header."""
+    gap = ms_between(o.get("timestamp"), hdr["ts"]) if hdr["fork"] else None
+    return gap is not None and gap > 0
 
 
 class _Activity:
@@ -124,57 +130,73 @@ class _Activity:
         role, content = m.get("role"), m.get("content")
         open_ = carried.get("open")
         link = Link(self.keys, carried.setdefault("link", {}))
-        if role != "user":           # a prompt's text belongs to the turn it opens, below
+        if role != "user":           # a prompt's text belongs to the turn it opens
             link.text(text_of(content))
         if role == "user":
-            if open_:
-                self._close(open_["last"])
-            text = text_of(content)
-            skill = SKILL.match(text)
-            via = "skill" if text.lstrip().startswith('<skill name="') else \
-                "queued" if carried.get("prev") == "toolResult" else "typed"
-            self._emit("steer", ts, str(eid), sess.turn_id, {
-                "via": via, "words": len(text.split()), "chars": len(text),
-                "after_interrupt": bool(carried.pop("intr", False))})
-            if skill:
-                self._emit("invoke", ts, str(eid), sess.turn_id, {"skill": tool_key(skill[1])})
-            carried["open"] = {"id": eid, "ts": ts, "n": 1, "last": ts}
-            Link(self.keys, carried.setdefault("link", {})).text(text)
-            carried["agg"] = blank_tool_tally()
+            self._prompt(ts, eid, content, sess, open_)
         elif role in ("assistant", "toolResult"):
             if open_:
                 open_["n"] += 1
                 open_["last"] = ts
             agg = carried.setdefault("agg", blank_tool_tally())
-            blocks = [b for b in content if isinstance(b, dict)] if isinstance(content, list) else []
             if role == "assistant":
-                for b in blocks:
-                    if b.get("type") == "toolCall" and isinstance(b.get("name"), str):
-                        args = b.get("arguments")
-                        add_call(agg, b["name"], args)
-                        cmd = args.get("command") if isinstance(args, dict) else None
-                        if b["name"] == "bash" and isinstance(cmd, str) \
-                                and isinstance(b.get("id"), str) and (call := commit_call(cmd)):
-                            carried.setdefault("pend", {})[b["id"]] = [*call, commit_dir(cmd)]
-                stop = m.get("stopReason")
-                carried["intr"] = stop == "aborted"
-                if stop == "aborted":
-                    self._emit("interrupt", ts, str(eid), sess.turn_id,
-                               {"during_tool": carried.get("prev") == "toolResult"})
-                if stop in _ENDS and open_:
-                    self._close(ts)
+                self._assistant(m, ts, eid, sess, agg, open_)
             else:
-                err = m.get("isError") is True
-                agg["errors"] += err
-                tid = m.get("toolCallId")
-                pend = carried.get("pend") or {}
-                if isinstance(tid, str) and tid in pend:
-                    amend, before, target = pend.pop(tid)
-                    text = text_of(content)
-                    found = commit_shas(text, err, bool(before))
-                    for sha, attrs in commit_rows(link, self.cwd, target, text, found, bool(amend)):
-                        self._emit("commit", ts, f"{tid}|{sha}", sess.turn_id, attrs)
+                self._tool_result(m, ts, sess, agg, link)
         carried["prev"] = role
+
+    def _prompt(self, ts: object, eid: object, content: object, sess: EventSession,
+                open_: dict | None) -> None:
+        carried = self.carried
+        if open_:
+            self._close(open_["last"])
+        text = text_of(content)
+        skill = SKILL.match(text)
+        via = "skill" if text.lstrip().startswith('<skill name="') else \
+            "queued" if carried.get("prev") == "toolResult" else "typed"
+        self._emit("steer", ts, str(eid), sess.turn_id, {
+            "via": via, "words": len(text.split()), "chars": len(text),
+            "after_interrupt": bool(carried.pop("intr", False))})
+        if skill:
+            self._emit("invoke", ts, str(eid), sess.turn_id, {"skill": tool_key(skill[1])})
+        carried["open"] = {"id": eid, "ts": ts, "n": 1, "last": ts}
+        Link(self.keys, carried.setdefault("link", {})).text(text)
+        carried["agg"] = blank_tool_tally()
+
+    def _assistant(self, m: dict, ts: object, eid: object, sess: EventSession, agg: TurnAgg,
+                   open_: dict | None) -> None:
+        carried, content = self.carried, m.get("content")
+        for b in content if isinstance(content, list) else ():
+            if isinstance(b, dict) and b.get("type") == "toolCall" and isinstance(b.get("name"), str):
+                self._tool_call(b, agg)
+        stop = m.get("stopReason")
+        carried["intr"] = stop == "aborted"
+        if stop == "aborted":
+            self._emit("interrupt", ts, str(eid), sess.turn_id,
+                       {"during_tool": carried.get("prev") == "toolResult"})
+        if stop in _ENDS and open_:
+            self._close(ts)
+
+    def _tool_call(self, b: dict, agg: TurnAgg) -> None:
+        args = b.get("arguments")
+        add_call(agg, b["name"], args)
+        cmd = args.get("command") if isinstance(args, dict) else None
+        if b["name"] == "bash" and isinstance(cmd, str) and isinstance(b.get("id"), str) \
+                and (call := commit_call(cmd)):
+            self.carried.setdefault("pend", {})[b["id"]] = [*call, commit_dir(cmd)]
+
+    def _tool_result(self, m: dict, ts: object, sess: EventSession, agg: TurnAgg,
+                     link: Link) -> None:
+        err = m.get("isError") is True
+        agg["errors"] += err
+        tid = m.get("toolCallId")
+        pend = self.carried.get("pend") or {}
+        if isinstance(tid, str) and tid in pend:
+            amend, before, target = pend.pop(tid)
+            text = text_of(m.get("content"))
+            found = commit_shas(text, err, bool(before))
+            for sha, attrs in commit_rows(link, self.cwd, target, text, found, bool(amend)):
+                self._emit("commit", ts, f"{tid}|{sha}", sess.turn_id, attrs)
 
 
 def _upgrade_state(wm: dict) -> None:
@@ -214,10 +236,10 @@ def _usage_event(o: dict, msg: dict, cur: dict, path: str, project: str | None,
         return None
     if not isinstance(u, dict):
         return None
-    inp = int(u.get("input") or 0)
-    out = int(u.get("output") or 0)
-    cr = int(u.get("cacheRead") or 0)
-    cw = int(u.get("cacheWrite") or 0)
+    inp = count_field(u, "input")
+    out = count_field(u, "output")
+    cr = count_field(u, "cacheRead")
+    cw = count_field(u, "cacheWrite")
     total = int(u.get("totalTokens") or (inp + out + cr + cw))
     # a SUBSET of output: informational, never added to totals or cost
     rea = int(u["reasoning"]) if u.get("reasoning") is not None else None
@@ -241,6 +263,16 @@ def _usage_event(o: dict, msg: dict, cur: dict, path: str, project: str | None,
     )
 
 
+def _session_of(o: dict, hdr: dict, cur: dict, is_prompt: bool) -> EventSession | None:
+    """The record's session, a prompt opening a new turn; None for a fork's copied entry, whose
+    usage id dedupes but whose session and activity rows belong to the parent."""
+    if is_fork_copy(o, hdr):
+        return None
+    if is_prompt:
+        cur["turn"] = str_or_none(o.get("id")) or cur.get("turn")
+    return EventSession(hdr["id"], hdr["parent"], "unknown", cur.get("turn"))
+
+
 def _chunk_rows(path: str, lines: list[bytes], cur: dict, keys: RepoKeys,
                 skipped: Counter) -> list:
     """All rows of one file's new lines; updates `cur`, the private copy of its watermark entry."""
@@ -262,14 +294,8 @@ def _chunk_rows(path: str, lines: list[bytes], cur: dict, keys: RepoKeys,
             _note_model_change(o, cur)
             continue
         msg = dict_or_empty(o.get("message"))
-        # A fork copies the parent's entries (same ids and timestamps, all before its own
-        # header): their usage ids dedupe, but session and activity rows belong to the parent.
-        gap = ms_between(o.get("timestamp"), hdr["ts"]) if hdr["fork"] else None
-        copied = gap is not None and gap > 0
         is_prompt = t == "message" and msg.get("role") == "user"
-        if is_prompt and not copied:
-            cur["turn"] = str_or_none(o.get("id")) or cur.get("turn")
-        sess = None if copied else EventSession(hdr["id"], hdr["parent"], "unknown", cur.get("turn"))
+        sess = _session_of(o, hdr, cur, is_prompt)
         if sess is not None:
             act.record(o, sess)
         project = project_name(hdr["cwd"])
@@ -310,7 +336,7 @@ def collect(cfg: Config, wm: dict) -> Iterator[Batch]:
     for path in session_files(cfg.home):
         try:
             st = os.stat(path)
-        except OSError:
+        except OSError:         # gone since the glob: nothing to read, and no offset to lose
             continue
         prev = files.get(path) or {}
         if not same_file(prev, st):

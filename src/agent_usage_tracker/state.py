@@ -17,6 +17,7 @@ import stat
 import sys
 import tempfile
 from pathlib import Path
+from typing import Any
 
 
 def state_path() -> Path:
@@ -44,7 +45,7 @@ def _warn_unusable(path: Path, reason: str) -> None:
           "expect a slow scan.", file=sys.stderr)
 
 
-def load_state() -> dict:
+def load_state() -> dict[str, Any]:
     path = state_path()
     if not path.exists():
         return {"collectors": {}}       # first run on this machine: genuinely nothing yet
@@ -98,7 +99,7 @@ def atomic_write_text(path: Path, text: str, *, shared: bool = False) -> None:
             os.unlink(tmp)
 
 
-def load_json_dict(path: Path) -> dict:
+def load_json_dict(path: Path) -> dict[str, Any]:
     """A rebuildable cache's contents; {} when it is missing or unusable (it is simply redone)."""
     try:
         obj = json.loads(path.read_text(encoding="utf-8"))
@@ -107,7 +108,7 @@ def load_json_dict(path: Path) -> dict:
     return obj if isinstance(obj, dict) else {}
 
 
-def collector_wm(state: dict, name: str) -> dict:
+def collector_wm(state: dict, name: str) -> dict[str, Any]:
     """Return (creating if needed) the private watermark dict for one collector. Resets a
     non-dict value (from external corruption) to an empty dict so a scan can't crash on it."""
     collectors = state.setdefault("collectors", {})

@@ -982,6 +982,20 @@ def test_repo_cannot_switch_a_protocol_back_on():
         assert r.returncode != 0 and not mark.exists(), r.stderr
 
 
+def test_patch_ids_leaves_no_process_behind_on_timeout(monkeypatch):
+    started = []
+    real = subprocess.Popen
+
+    def popen(cmd, **kw):
+        started.append(real([sys.executable, "-c", "import time; time.sleep(60)"], **kw))
+        return started[-1]
+
+    monkeypatch.setattr(oc.subprocess, "Popen", popen)
+    monkeypatch.setattr(oc, "PATCH_ID_TIMEOUT_S", 0.2)
+    assert oc._patch_ids("/nowhere", ["--no-merges"], "abc\n") is None
+    assert len(started) == 2 and all(p.poll() is not None for p in started)
+
+
 if __name__ == "__main__":
     import pytest
     raise SystemExit(pytest.main([__file__, "-q"]))

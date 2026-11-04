@@ -31,6 +31,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections import Counter
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Iterator
 
@@ -39,7 +40,7 @@ from ..event import CollectorUnavailable, TimeInterval, make_event_id
 from ..net import HTTP_ERRORS
 from ..redact import clean_text
 from ..sink import LOCAL_HOSTS
-from ._util import dict_or_empty
+from ._util import dict_or_empty, warn_skipped
 
 NAME = "activitywatch"
 _LAG = timedelta(minutes=5)          # aw-watcher-window extends its last event; leave it settle
@@ -136,6 +137,11 @@ def _parse(ts: str) -> datetime:
     return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
 
+def _event_span(ev: dict) -> tuple[datetime, datetime]:
+    start = _parse(ev["timestamp"])
+    return start, start + timedelta(seconds=float(ev.get("duration") or 0))
+
+
 def _buckets(cfg: Config) -> tuple[str, str, datetime] | None:
     """(window bucket, afk bucket, window bucket's first moment) of THIS host, or None."""
     host = _http(cfg, "GET", "/api/0/info").get("hostname")
@@ -196,18 +202,22 @@ class _MacCategories:
             hit = next((p for p in out if p.startswith(dirs)), None)
             if hit is None:
                 return None
-            with open(f"{hit}/Contents/Info.plist", "rb") as f:
-                info = plistlib.load(f)
-            schemes = {str(x).lower() for t in info.get("CFBundleURLTypes") or ()
-                       for x in t.get("CFBundleURLSchemes") or ()}
-            cat = "browser" if schemes & {"http", "https"} \
-                else info.get("LSApplicationCategoryType")
+            cat = _bundle_category(hit)
         except subprocess.TimeoutExpired:
             self.off = True
             return None
         except Exception:                 # a lookup must never fail a scan
             return None
         return cat if isinstance(cat, str) and cat else None
+
+
+def _bundle_category(bundle: str) -> object:
+    """'browser' when the bundle opens http(s) links, else its declared category, if any."""
+    with open(f"{bundle}/Contents/Info.plist", "rb") as f:
+        info = plistlib.load(f)
+    schemes = {str(x).lower() for t in info.get("CFBundleURLTypes") or ()
+               for x in t.get("CFBundleURLSchemes") or ()}
+    return "browser" if schemes & {"http", "https"} else info.get("LSApplicationCategoryType")
 
 
 # One per process, not per collect(): a pass covers one day, and a catch-up runs many.
@@ -260,7 +270,8 @@ def describe(cfg: Config, wm: dict) -> str:
     return f"read until {wm['end']}" if "end" in wm else "never scanned"
 
 
-def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[TimeInterval], Callable[[], None]]]:
+def _read_range(cfg: Config, wm: dict) -> tuple[list, datetime, datetime] | None:
+    """(raw events, start, end) of this pass; None while the range is too short to read yet."""
     try:
         found = _buckets(cfg)
         if found is None:
@@ -270,25 +281,47 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[TimeInterval], Callabl
         start = _parse(wm["end"]) if wm.get("end") else first
         end = min(_now() - _LAG, start + _CHUNK)
         if end - start < _MIN_RANGE:
-            return
+            return None
         query = _QUERY.format(win=json.dumps(win), afk=json.dumps(afk)).splitlines()
         res = _http(cfg, "POST", "/api/0/query/",
                     {"query": query, "timeperiods": [f"{start.isoformat()}/{end.isoformat()}"]})
-        raw = res[0] if isinstance(res, list) and res and isinstance(res[0], list) else []
+        return (res[0] if isinstance(res, list) and res and isinstance(res[0], list) else []), \
+            start, end
     except (*HTTP_ERRORS, ValueError, TypeError, AttributeError, KeyError) as exc:
         raise CollectorUnavailable(f"activitywatch: aw-server not usable ({type(exc).__name__}); "
                                    "skipping") from exc
 
+
+def _interval(cfg: Config, s: datetime, e: datetime, app: str, title: str, data: dict,
+              title_from: datetime | None) -> TimeInterval:
+    category, relevant, rule = classify(cfg, app, title, str(data.get("url") or ""))
+    keep = cfg.activitywatch_titles and (title_from is None or s >= title_from)
+    sent = (clean_text(title) or None) if keep else None
+    s_iso, e_iso = s.astimezone(timezone.utc).isoformat(), e.astimezone(timezone.utc).isoformat()
+    # No title in the id: only one window has focus at a time, and an id must not let anyone
+    # confirm a guessed title.
+    return TimeInterval(
+        event_id=make_event_id(NAME, cfg.machine, app, s_iso, e_iso),
+        ts=s_iso, end_ts=e_iso, source="aw", app=app or None, title=sent,
+        category=category, work_relevant=relevant, attrs={"rule": rule})
+
+
+def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[TimeInterval], Callable[[], None]]]:
+    read = _read_range(cfg, wm)
+    if read is None:
+        return
+    raw, start, end = read
     rows: list[TimeInterval] = []
     days = cfg.activitywatch_title_days
     title_from = _now() - timedelta(days=days) if days else None
     denied_n, denied_s, idle_s = 0, 0.0, 0.0
+    skipped: Counter = Counter()
     for ev in raw:
         try:
-            s = _parse(ev["timestamp"])
-            e = s + timedelta(seconds=float(ev.get("duration") or 0))
+            s, e = _event_span(ev)
             data = dict_or_empty(ev.get("data"))
-        except (KeyError, TypeError, ValueError, AttributeError):
+        except (KeyError, TypeError, ValueError, AttributeError, OverflowError):
+            skipped["malformed"] += 1
             continue
         s, e = max(s, start), min(e, end)
         if e <= s:
@@ -302,16 +335,8 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[TimeInterval], Callabl
         if denied(cfg, app, title, data):
             denied_n, denied_s = denied_n + 1, denied_s + secs
             continue
-        category, relevant, rule = classify(cfg, app, title, str(data.get("url") or ""))
-        keep = cfg.activitywatch_titles and (title_from is None or s >= title_from)
-        sent = (clean_text(title) or None) if keep else None
-        s_iso, e_iso = s.astimezone(timezone.utc).isoformat(), e.astimezone(timezone.utc).isoformat()
-        # No title in the id: only one window has focus at a time, and an id must not let anyone
-        # confirm a guessed title.
-        rows.append(TimeInterval(
-            event_id=make_event_id(NAME, cfg.machine, app, s_iso, e_iso),
-            ts=s_iso, end_ts=e_iso, source="aw", app=app or None, title=sent,
-            category=category, work_relevant=relevant, attrs={"rule": rule}))
+        rows.append(_interval(cfg, s, e, app, title, data, title_from))
+    warn_skipped(NAME, skipped)
     if denied_n or idle_s:
         print(f"aut: activitywatch: dropped {denied_n} intervals ({denied_s / 60:.1f} min) by the "
               f"deny-list, {idle_s / 60:.1f} min idle (login window / screen saver)",
@@ -343,8 +368,7 @@ def purge(cfg: Config) -> int:
             batch = _http(cfg, "GET", f"/api/0/buckets/{win}/events?{query}") or []
             # aw-server-rust clips the event spanning `end` to it, so one that reaches the cutoff
             # is partly inside the retention window and stays
-            gone = [int(ev["id"]) for ev in batch if _parse(ev["timestamp"])
-                    + timedelta(seconds=float(ev.get("duration") or 0)) < cutoff]
+            gone = [int(ev["id"]) for ev in batch if _event_span(ev)[1] < cutoff]
             if not gone:
                 break
             for i in gone:

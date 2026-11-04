@@ -16,7 +16,7 @@ from __future__ import annotations
 import hashlib
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
-from typing import Callable, Literal, Sequence
+from typing import Any, Callable, Literal, Sequence
 
 RunOrigin = Literal["interactive", "automated", "subagent", "unknown"]
 UsageKind = Literal["agent", "human"]    # agent: an assistant turn with tokens; human: a user prompt
@@ -76,12 +76,12 @@ class UsageEvent:
     machine: str | None = field(default=None)  # stamped by the runner, not the collector
     session: EventSession | None = None        # claude_code, codex, pi, cursor_cli; never in to_dict()
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
         del d["session"]                # session rows go out separately, never in the usage payload
         return d
 
-    def session_row(self) -> dict | None:
+    def session_row(self) -> dict[str, Any] | None:
         if self.session is None:
             return None
         return {"event_id": self.event_id, "machine": self.machine, "agent": self.agent,

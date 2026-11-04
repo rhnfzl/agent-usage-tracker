@@ -17,14 +17,15 @@ import sys
 import time
 from collections import Counter
 from datetime import date, datetime, timezone
+from typing import Any
 
 from ..config import AutError, Config
 from ..event import ActivityEvent, make_event_id
 from ..push import send_activity_rows
 from ..state import atomic_write_text
 from .backends import MODELS, Encoder, encoder_path, features, make_backend
-from .core import (Backend, Choice, choice_path, fit_tau, fit_temperature, read_choices, softmax,
-                   temper, top_label)
+from .core import (Backend, Choice, Request, choice_path, fit_tau, fit_temperature, read_choices,
+                   softmax, temper, top_label)
 from .evalset import (DAYS, append_jsonl, eval_path, gold_latest, held_out,
                       in_encoder_train_split, read_jsonl, silver_by_unit, stratum, window_units)
 from .tasks import TASKS, Source
@@ -81,8 +82,31 @@ def weights(task: str, golds: list[str]) -> dict[str, float]:
             for u in golds for s in [stratum(silver.get(u))]}
 
 
+def _label_metrics(lab: str, rep: list[int], top: list[str], gold: dict[int, str],
+                   passed: list[int], w: dict[int, float],
+                   tau: float | None) -> dict[str, Any]:
+    """One label's row of the eval record, over the reported items `rep`; `passed`: those at or
+    above their tau; w: each item's weight."""
+    tp = sum(top[i] == lab == gold[i] for i in rep)
+    pred = sum(top[i] == lab for i in rep)
+    true = sum(gold[i] == lab for i in rep)
+    p = tp / pred if pred else None
+    r = tp / true if true else None
+    ok = [i for i in passed if top[i] == lab]
+    hits = sum(gold[i] == lab for i in ok)
+    wk, wa = sum(w[i] for i in passed), sum(w.values())
+    return {"n": true, "precision": _round4(p), "recall": _round4(r),
+            "f1": _round4(2 * p * r / (p + r)) if p and r else (0.0 if pred or true else None),
+            "tau": _round4(tau), "coverage": _round4(len(ok) / pred) if pred else None,
+            "precision_at_tau": _round4(hits / len(ok)) if ok else None,
+            "precision_lb": _round4(wilson_lb(hits, len(ok))),
+            "share_error_pp": _round4(abs(sum(w[i] for i in ok) / wk
+                                          - sum(w[i] for i in rep if gold[i] == lab) / wa)
+                                      * 100) if wk else None}
+
+
 def evaluate(task: str, backend: Backend, items: list[tuple], precision: float,
-             today: date) -> dict:
+             today: date) -> dict[str, Any]:
     """items: (request, gold, held_out, weight). The eval record of one backend (numbers)."""
     ver, labels = TASKS[task].ver, [c for c, _d in TASKS[task].candidates]
     t0 = time.monotonic()
@@ -101,24 +125,7 @@ def evaluate(task: str, backend: Backend, items: list[tuple], precision: float,
     w = {i: items[i][3] for i in rep}
     passed = [i for i in rep
               if (cut := tau.get(top[i])) is not None and dists[i][top[i]] >= cut]
-    wk, wa = sum(w[i] for i in passed), sum(w.values())
-    per: dict[str, dict] = {}
-    for lab in labels:
-        tp = sum(top[i] == lab == gold[i] for i in rep)
-        pred = sum(top[i] == lab for i in rep)
-        true = sum(gold[i] == lab for i in rep)
-        p = tp / pred if pred else None
-        r = tp / true if true else None
-        ok = [i for i in passed if top[i] == lab]
-        hits = sum(gold[i] == lab for i in ok)
-        per[lab] = {"n": true, "precision": _round4(p), "recall": _round4(r),
-                    "f1": _round4(2 * p * r / (p + r)) if p and r else (0.0 if pred or true else None),
-                    "tau": _round4(tau.get(lab)), "coverage": _round4(len(ok) / pred) if pred else None,
-                    "precision_at_tau": _round4(hits / len(ok)) if ok else None,
-                    "precision_lb": _round4(wilson_lb(hits, len(ok))),
-                    "share_error_pp": _round4(abs(sum(w[i] for i in passed if top[i] == lab) / wk
-                                             - sum(w[i] for i in rep if gold[i] == lab) / wa)
-                                         * 100) if wk else None}
+    per = {lab: _label_metrics(lab, rep, top, gold, passed, w, tau.get(lab)) for lab in labels}
     f1s = [v["f1"] for v in per.values() if v["f1"] is not None]
     return {"task": task, "task_ver": ver, "backend": "encoder" if isinstance(backend, Encoder)
             else "mlx_letter", "model_id": backend.model_id, "model_rev": backend.model_rev,
@@ -194,7 +201,7 @@ def passes(rec: dict, coverage: float, precision: float) -> bool:
         and all(e is not None and e <= SHARE_ERROR_PP for e in errs)
 
 
-def choose(cfg: Config, task: str) -> dict:
+def choose(cfg: Config, task: str) -> dict[str, Any]:
     """Write the smallest backend whose newest eval passes into label.json; others untouched."""
     newest: dict[str, dict] = {}
     for r in read_jsonl(eval_path(task, "eval")):
@@ -243,15 +250,9 @@ def _fit(data: list[tuple[list[int], list[float], float]], k: int, epochs: int =
     return w
 
 
-def train_encoder(cfg: Config, task: str, days: int = DAYS, *, src: Source | None = None,
-                  today: date | None = None) -> dict:
-    """Fit the encoder on half the calibration-day gold (in_encoder_train_split, GOLD_WEIGHT) and
-    silver (teachers averaged), never on a held-out gold unit nor on the gold eval calibrates it with;
-    report accuracy and macro-F1 on the held-out gold only."""
-    labels = [c for c, _d in TASKS[task].candidates]
-    reqs = window_units(cfg, task, days, src, today)
-    gold, silver = gold_latest(task), silver_by_unit(task)
-    test = {u for u in gold if u in reqs and held_out(reqs[u])}
+def _training_data(gold: dict[str, str], silver: dict[str, dict], reqs: dict[str, Request],
+                   test: set[str], labels: list[str]) -> list[tuple[list[int], list[float], float]]:
+    """(features, target distribution, weight) of each gold and silver unit the encoder may see."""
     data = []
     for u, g in gold.items():
         if u in reqs and u not in test and in_encoder_train_split(reqs[u]):
@@ -260,25 +261,42 @@ def train_encoder(cfg: Config, task: str, days: int = DAYS, *, src: Source | Non
         if u in reqs and u not in test and u not in gold and ts:
             avg = [sum(d.get(x, 0.0) for d in ts.values()) / len(ts) for x in labels]
             data.append((features(reqs[u].state), avg, 1.0))
-    if not data:
-        raise AutError(f"label train-encoder: no gold or silver labels for {task} yet")
-    w = _fit(data, len(labels))
-    p = encoder_path(task)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps({"task": task, "task_ver": TASKS[task].ver, "labels": labels,
-                             "w": {str(f): [round(x, 5) for x in r] for f, r in w.items()}}))
-    enc = Encoder(task)
-    pairs = [(top_label(enc.distribution(reqs[u])), gold[u]) for u in sorted(test)]
+    return data
+
+
+def _macro_f1(pairs: list[tuple[str, str]], labels: list[str]) -> float | None:
     f1s = []
     for lab in labels:
         tp = sum(a == lab == b for a, b in pairs)
         pred, true = sum(a == lab for a, _ in pairs), sum(b == lab for _, b in pairs)
         if pred or true:
             f1s.append(2 * tp / (pred + true))
+    return _round4(sum(f1s) / len(f1s)) if f1s else None
+
+
+def train_encoder(cfg: Config, task: str, days: int = DAYS, *, src: Source | None = None,
+                  today: date | None = None) -> dict[str, Any]:
+    """Fit the encoder on half the calibration-day gold (in_encoder_train_split, GOLD_WEIGHT) and
+    silver (teachers averaged), never on a held-out gold unit nor on the gold eval calibrates it with;
+    report accuracy and macro-F1 on the held-out gold only."""
+    labels = [c for c, _d in TASKS[task].candidates]
+    reqs = window_units(cfg, task, days, src, today)
+    gold, silver = gold_latest(task), silver_by_unit(task)
+    test = {u for u in gold if u in reqs and held_out(reqs[u])}
+    data = _training_data(gold, silver, reqs, test, labels)
+    if not data:
+        raise AutError(f"label train-encoder: no gold or silver labels for {task} yet")
+    w = _fit(data, len(labels))
+    # atomic: a crash mid-write must not leave a corrupt encoder that the nightly run then loads
+    atomic_write_text(encoder_path(task), json.dumps(
+        {"task": task, "task_ver": TASKS[task].ver, "labels": labels,
+         "w": {str(f): [round(x, 5) for x in r] for f, r in w.items()}}))
+    enc = Encoder(task)
+    pairs = [(top_label(enc.distribution(reqs[u])), gold[u]) for u in sorted(test)]
     return {"model_id": enc.model_id, "model_rev": enc.model_rev, "trained_on": len(data),
             "held_out": len(pairs),
             "accuracy": _round4(sum(a == b for a, b in pairs) / len(pairs)) if pairs else None,
-            "macro_f1": _round4(sum(f1s) / len(f1s)) if f1s else None}
+            "macro_f1": _macro_f1(pairs, labels)}
 
 
 def print_eval(task: str, records: list[dict]) -> None:

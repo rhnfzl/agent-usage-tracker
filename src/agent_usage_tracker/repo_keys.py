@@ -44,7 +44,7 @@ def _load_salt(configured: str | None) -> bytes:
                 fh.write(secrets.token_hex(32))
             try:
                 os.link(tmp, p)
-            except FileExistsError:
+            except FileExistsError:     # another process linked first: its salt wins
                 pass
             finally:
                 tmp.unlink(missing_ok=True)
@@ -81,15 +81,15 @@ class RepoKeys:
         if not isinstance(cwd, str):
             return None
         if cwd not in self._cwd:
-            self._cwd[cwd] = None
-            if os.path.isdir(cwd):
-                try:
-                    r = subprocess.run(  # nosec B603 # constant args after -C cwd, no shell
-                        git_argv(cwd, "remote", "get-url", "origin"),
-                        capture_output=True, timeout=2, env=git_env())
-                    url = r.stdout.decode("utf-8", "replace").strip()
-                    if r.returncode == 0 and url:
-                        self._cwd[cwd] = self.of(repo_identity(url))
-                except (OSError, subprocess.SubprocessError, ValueError):
-                    pass
+            self._cwd[cwd] = self._origin_key(cwd) if os.path.isdir(cwd) else None
         return self._cwd[cwd]
+
+    def _origin_key(self, cwd: str) -> str | None:
+        try:
+            r = subprocess.run(  # nosec B603 # constant args after -C cwd, no shell
+                git_argv(cwd, "remote", "get-url", "origin"),
+                capture_output=True, timeout=2, env=git_env())
+            url = r.stdout.decode("utf-8", "replace").strip()
+            return self.of(repo_identity(url)) if r.returncode == 0 and url else None
+        except (OSError, subprocess.SubprocessError, ValueError):
+            return None     # no git, a stuck remote config, a malformed URL: the key is NULL

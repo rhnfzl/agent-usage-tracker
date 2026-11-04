@@ -15,7 +15,7 @@ import sys
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Callable, Protocol
+from typing import Any, Callable, Protocol
 
 from ..config import config_path
 from ..event import ActivityEvent, make_event_id
@@ -99,7 +99,7 @@ class NoteBackend(Backend, Protocol):
     def generate(self, prompt: str, max_tokens: int = 300) -> str: ...
 
 
-def read_choices() -> dict:
+def read_choices() -> dict[str, Any]:
     """label.json; {} when there is none yet. Raises OSError or ValueError when it is unusable."""
     try:
         obj = json.loads(choice_path().read_text())

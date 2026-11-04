@@ -15,7 +15,7 @@ import html
 import json
 from collections import Counter
 from datetime import date
-from typing import Callable
+from typing import Any, Callable
 
 from .. import local_page
 from ..config import Config
@@ -113,69 +113,87 @@ def _drop_last(task: str, unit_id: str) -> None:
     write_jsonl(p, rows)
 
 
+class _Session:
+    """One sitting of the gold page: the queue, the position in it, and what can be undone."""
+
+    def __init__(self, task: str, reqs: dict[str, Request], today: date | None) -> None:
+        self.task, self.silver, self.gold = task, silver_by_unit(task), gold_latest(task)
+        self.queue = stratified([r for u, r in reqs.items() if u not in self.gold],
+                                lambda r: stratum(self.silver.get(r.unit_id)), seed=task)
+        self.pos = 0
+        self.hist: list[tuple[str, str]] = []
+        self.last: dict | None = None
+        self.counts: Counter = Counter(answered=0, skipped=0)
+        self.ids = {c for c, _d in TASKS[task].candidates}
+        self.day = (today or date.today()).isoformat()
+
+    def _item(self) -> Request | None:
+        return self.queue[self.pos] if self.pos < len(self.queue) else None
+
+    def page(self, token: str) -> bytes:
+        return render(self.task, token, self._item(), self.gold, self.last,
+                      len(self.queue) - self.pos, self.counts).encode()
+
+    def _undo(self) -> None:
+        kind, uid = self.hist.pop()
+        self.pos -= 1
+        self.last = None
+        if kind == "gold":
+            _drop_last(self.task, uid)
+            self.gold.pop(uid, None)
+            self.counts["answered"] -= 1
+        else:
+            self.counts["skipped"] -= 1
+
+    def _answer(self, u: str, a: str) -> None:
+        append_jsonl(eval_path(self.task, "gold"), {"unit_id": u, "gold": a, "labeller": LABELLER,
+                                                    "date": self.day,
+                                                    "task_ver": TASKS[self.task].ver})
+        self.gold[u] = a
+        self.hist.append(("gold", u))
+        self.pos += 1
+        self.last = {"gold": a, "teachers": _teachers(self.silver.get(u))}
+        self.counts["answered"] += 1
+
+    def act(self, form: dict) -> bool:
+        """Apply one answer; True when the session ends."""
+        a, u = (form.get("a") or [""])[0], (form.get("u") or [""])[0]
+        item = self._item()
+        if a == ":quit":
+            return True
+        if a == ":undo" and self.hist:
+            self._undo()
+        elif item is None or u != item.unit_id:
+            pass                              # a stale page (another tab, a double press)
+        elif a == ":skip":
+            self.hist.append(("skip", u))
+            self.pos += 1
+            self.counts["skipped"] += 1
+        elif a in self.ids:
+            self._answer(u, a)
+        return False
+
+
 def serve(task: str, reqs: dict[str, Request], *, open_browser: bool = True,
           on_ready: Callable[[str], None] | None = None, today: date | None = None) -> Counter:
     """Serve the page until q (or Ctrl-C). Returns {answered, skipped} of this session."""
     token = local_page.new_token()
-    silver, gold = silver_by_unit(task), gold_latest(task)
-    queue = stratified([r for u, r in reqs.items() if u not in gold],
-                       lambda r: stratum(silver.get(r.unit_id)), seed=task)
-    st: dict = {"pos": 0, "hist": [], "last": None}
-    session: Counter = Counter(answered=0, skipped=0)
-    ids = {c for c, _d in TASKS[task].candidates}
-    day = (today or date.today()).isoformat()
-
-    def page() -> bytes:
-        item = queue[st["pos"]] if st["pos"] < len(queue) else None
-        return render(task, token, item, gold, st["last"], len(queue) - st["pos"],
-                      session).encode()
-
-    def act(form: dict) -> bool:
-        """Apply one answer; True when the session ends."""
-        a, u = (form.get("a") or [""])[0], (form.get("u") or [""])[0]
-        item = queue[st["pos"]] if st["pos"] < len(queue) else None
-        if a == ":quit":
-            return True
-        if a == ":undo" and st["hist"]:
-            kind, uid = st["hist"].pop()
-            st["pos"] -= 1
-            st["last"] = None
-            if kind == "gold":
-                _drop_last(task, uid)
-                gold.pop(uid, None)
-                session["answered"] -= 1
-            else:
-                session["skipped"] -= 1
-        elif item is None or u != item.unit_id:
-            pass                              # a stale page (another tab, a double press)
-        elif a == ":skip":
-            st["hist"].append(("skip", u))
-            st["pos"] += 1
-            session["skipped"] += 1
-        elif a in ids:
-            append_jsonl(eval_path(task, "gold"), {"unit_id": u, "gold": a, "labeller": LABELLER,
-                                                     "date": day, "task_ver": TASKS[task].ver})
-            gold[u] = a
-            st["hist"].append(("gold", u))
-            st["pos"] += 1
-            st["last"] = {"gold": a, "teachers": _teachers(silver.get(u))}
-            session["answered"] += 1
-        return False
+    session = _Session(task, reqs, today)
 
     def on_post(form: dict) -> bytes | None:
-        if act(form):
-            return f"<p>Saved {session['answered']} answers. You can close this tab.</p>".encode()
+        if session.act(form):
+            return f"<p>Saved {session.counts['answered']} answers. You can close this tab.</p>".encode()
         return None
 
-    local_page.serve(token, lambda tail: page() if tail == "" else None, on_post,
+    local_page.serve(token, lambda tail: session.page(token) if tail == "" else None, on_post,
                      "gold page at {url} (q on the page, or Ctrl-C, to stop; answers are already "
                      "saved)", open_browser=open_browser, on_ready=on_ready)
-    return session
+    return session.counts
 
 
 def run_gold_review(cfg: Config, task: str | None, days: int = DAYS, *, src: Source | None = None,
                     open_browser: bool = True,
-                    on_ready: Callable[[str], None] | None = None) -> dict:
+                    on_ready: Callable[[str], None] | None = None) -> dict[str, Any]:
     task = task or next((t for t in cfg.label_tasks if t in TASKS), "steer_intent")
     session = serve(task, window_units(cfg, task, days, src), open_browser=open_browser,
                     on_ready=on_ready)

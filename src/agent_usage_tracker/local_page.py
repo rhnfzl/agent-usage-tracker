@@ -93,7 +93,7 @@ def serve(token: str, on_get: Callable[[str], bytes | None],
         webbrowser.open(url)
     try:
         srv.serve_forever()
-    except KeyboardInterrupt:
+    except KeyboardInterrupt:       # the documented way to stop without saving
         pass
     finally:
         srv.server_close()

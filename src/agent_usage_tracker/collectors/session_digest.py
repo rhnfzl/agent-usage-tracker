@@ -12,10 +12,11 @@ from __future__ import annotations
 import json
 import os
 import re
+import sys
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path, PurePath
-from typing import Callable
+from typing import Any, Callable, Iterator
 
 from ..redact import clean_text
 from . import claude_code as _cc
@@ -23,8 +24,8 @@ from . import codex as _cx
 from . import cursor as _cursor
 from . import cursor_cli as _cu
 from . import pi as _pi
-from ._util import dict_or_empty, epoch_ms_to_iso
-from .activity_common import first_record, ms_between, text_of
+from ._util import dict_or_empty, epoch_ms_to_iso, parse_record
+from .activity_common import first_record, text_of
 from .commits import COMMIT_LINE, commit_call
 
 _TITLE = re.compile(r'"(?:aiTitle|customTitle)":\s*"((?:[^"\\]|\\.)*)"')
@@ -134,7 +135,7 @@ class Digest:
             return p[len(base) + 1:]
         return "/".join(PurePath(p).parts[-2:])
 
-    def view(self) -> dict:
+    def view(self) -> dict[str, Any]:
         mins = int((self.last - self.first).total_seconds() // 60) \
             if self.first and self.last else None
         return {"agent": self.agent,
@@ -150,6 +151,20 @@ class Digest:
                 "branches": [clean_text(b) for b in _uniq(self.branches)]}
 
 
+def _claude_blocks(content: object, d: Digest, pend: dict, seen: set) -> None:
+    for b in content if isinstance(content, list) else ():
+        if not isinstance(b, dict):
+            continue
+        if b.get("type") == "tool_use" and b.get("id") not in seen:
+            seen.add(b.get("id"))       # Claude Code re-logs a message's blocks
+            d.edit(b.get("name"), b.get("input"))
+            if b.get("name") == "Bash" and isinstance(b.get("input"), dict):
+                pend[b.get("id")] = b["input"].get("command")
+        elif b.get("type") == "tool_result" and b.get("tool_use_id") in pend:
+            d.shell(pend.pop(b["tool_use_id"]), text_of(b.get("content")),
+                    b.get("is_error") is True)
+
+
 def _digest_claude_log(f: str, d: Digest) -> None:
     pend: dict = {}
     seen: set = set()
@@ -158,11 +173,8 @@ def _digest_claude_log(f: str, d: Digest) -> None:
         for line in fh:
             d.titles += map(_unescape, _TITLE.findall(line))
             d.branches += map(_unescape, _BRANCH.findall(line))
-            try:
-                o = json.loads(line)
-            except ValueError:
-                continue
-            if not isinstance(o, dict):
+            o = parse_record(line)      # a malformed line holds nothing to show
+            if o is None:
                 continue
             d.at(o.get("timestamp"), o.get("cwd"))
             text = _cc.human_text(o)
@@ -172,18 +184,25 @@ def _digest_claude_log(f: str, d: Digest) -> None:
                     d.prompts.append(text)
                 continue
             m = o.get("message")
-            content = m.get("content") if isinstance(m, dict) else None
-            for b in content if isinstance(content, list) else ():
-                if not isinstance(b, dict):
-                    continue
-                if b.get("type") == "tool_use" and b.get("id") not in seen:
-                    seen.add(b.get("id"))       # Claude Code re-logs a message's blocks
-                    d.edit(b.get("name"), b.get("input"))
-                    if b.get("name") == "Bash" and isinstance(b.get("input"), dict):
-                        pend[b.get("id")] = b["input"].get("command")
-                elif b.get("type") == "tool_result" and b.get("tool_use_id") in pend:
-                    d.shell(pend.pop(b["tool_use_id"]), text_of(b.get("content")),
-                            b.get("is_error") is True)
+            _claude_blocks(m.get("content") if isinstance(m, dict) else None, d, pend, seen)
+
+
+def _codex_item(it: dict, d: Digest) -> None:
+    if it.get("type") == "CommandExecution":
+        code = it.get("exit_code")
+        d.shell(_cx.script_of(it.get("command")), it.get("aggregated_output"),
+                isinstance(code, int) and code != 0)
+    elif it.get("type") == "FileChange" and isinstance(it.get("changes"), dict):
+        d.files.update(k for k in it["changes"] if isinstance(k, str))
+
+
+def _codex_record(t: object, p: dict, has_um: bool, human: bool, d: Digest) -> None:
+    pr = _cx.prompt_of(t, p, has_um)
+    if pr is not None:
+        if human and not _cx.is_scheduled_automation(pr[0]):
+            d.prompts.append(pr[0])
+    elif t == "event_msg" and p.get("type") == "item_completed" and isinstance(p.get("item"), dict):
+        _codex_item(p["item"], d)
 
 
 def _digest_codex_log(f: str, title: str, d: Digest) -> None:
@@ -202,20 +221,24 @@ def _digest_codex_log(f: str, title: str, d: Digest) -> None:
         if copied and i:
             continue
         d.at(o.get("timestamp"), p.get("cwd") if t in ("session_meta", "turn_context") else None)
-        pr = _cx.prompt_of(t, p, has_um)
-        if pr is not None:
-            if human and not _cx.is_scheduled_automation(pr[0]):
-                d.prompts.append(pr[0])
-            continue
-        it = p.get("item")
-        if t != "event_msg" or p.get("type") != "item_completed" or not isinstance(it, dict):
-            continue
-        if it.get("type") == "CommandExecution":
-            code = it.get("exit_code")
-            d.shell(_cx.script_of(it.get("command")), it.get("aggregated_output"),
-                    isinstance(code, int) and code != 0)
-        elif it.get("type") == "FileChange" and isinstance(it.get("changes"), dict):
-            d.files.update(k for k in it["changes"] if isinstance(k, str))
+        _codex_record(t, p, has_um, human, d)
+
+
+def _pi_message(m: dict, d: Digest, pend: dict) -> None:
+    role, content = m.get("role"), m.get("content")
+    if role == "user":
+        text = text_of(content)
+        sk = _pi.SKILL.match(text)     # a skill invocation: its name, not SKILL.md
+        d.prompts.append(f"/{sk[1]} {text.partition('</skill>')[2]}".strip() if sk else text)
+    elif role == "assistant" and isinstance(content, list):
+        for b in content:
+            if isinstance(b, dict) and b.get("type") == "toolCall":
+                d.edit(b.get("name"), b.get("arguments"))
+                args = b.get("arguments")
+                if b.get("name") == "bash" and isinstance(args, dict):
+                    pend[b.get("id")] = args.get("command")
+    elif role == "toolResult" and m.get("toolCallId") in pend:
+        d.shell(pend.pop(m["toolCallId"]), text_of(content), m.get("isError") is True)
 
 
 def _digest_pi_log(f: str, hdr: dict, d: Digest) -> None:
@@ -223,45 +246,16 @@ def _digest_pi_log(f: str, hdr: dict, d: Digest) -> None:
     pend: dict = {}
     with open(f, encoding="utf-8", errors="replace") as fh:
         for line in fh:
-            try:
-                o = json.loads(line)
-            except ValueError:
+            o = parse_record(line)      # a malformed line holds nothing to show
+            if o is None or not isinstance(o.get("message"), dict) \
+                    or o.get("type") != "message" or _pi.is_fork_copy(o, hdr):
                 continue
-            m = o.get("message") if isinstance(o, dict) else None
-            if not isinstance(m, dict) or o.get("type") != "message" or (
-                    hdr["fork"] and (ms_between(o.get("timestamp"), hdr["ts"]) or 0) > 0):
-                continue                # a fork's copy of its parent's entries
             d.at(o.get("timestamp"))
-            role, content = m.get("role"), m.get("content")
-            if role == "user":
-                text = text_of(content)
-                sk = _pi.SKILL.match(text)     # a skill invocation: its name, not SKILL.md
-                d.prompts.append(f"/{sk[1]} {text.partition('</skill>')[2]}".strip() if sk
-                                 else text)
-            elif role == "assistant" and isinstance(content, list):
-                for b in content:
-                    if isinstance(b, dict) and b.get("type") == "toolCall":
-                        d.edit(b.get("name"), b.get("arguments"))
-                        args = b.get("arguments")
-                        if b.get("name") == "bash" and isinstance(args, dict):
-                            pend[b.get("id")] = args.get("command")
-            elif role == "toolResult" and m.get("toolCallId") in pend:
-                d.shell(pend.pop(m["toolCallId"]), text_of(content), m.get("isError") is True)
+            _pi_message(o["message"], d, pend)
 
 
-def _digest_cursor_chat(f: str, d: Digest) -> None:
-    con = _cursor.connect_ro(f)
-    if con is None:
-        return
-    try:
-        meta = _cu.chat_meta(con) or {}
-        msgs = _cu.messages(con, {i for seq in _cu.root_lists(con) for i in seq})
-    finally:
-        con.close()
-    created = epoch_ms_to_iso(meta.get("createdAt"))
-    d.at(created)
+def _cursor_prompts(msgs: dict[str, dict], created: str | None, d: Digest, calls: dict) -> None:
     prompts: dict = {}
-    calls: dict = {}
     for m in msgs.values():
         r = _cu.request_id(m)
         if r and r not in prompts:
@@ -277,6 +271,9 @@ def _digest_cursor_chat(f: str, d: Digest) -> None:
                 calls[b.get("toolCallId")] = b.get("args")
                 d.edit(b.get("toolName"), b.get("args"))
     d.prompts = [t for _ts, t in sorted(prompts.values(), key=lambda x: x[0])]
+
+
+def _cursor_shell_results(msgs: dict[str, dict], d: Digest, calls: dict) -> None:
     for m in msgs.values():
         content = m.get("content") if m.get("role") == "tool" else None
         for b in content if isinstance(content, list) else ():
@@ -290,29 +287,25 @@ def _digest_cursor_chat(f: str, d: Digest) -> None:
                         not ex or ex[1] != "0")
 
 
-def local_info(home: Path, sessions: set[str]) -> dict[str, dict]:
-    """session id -> what the logs on this machine say about it (see Digest.view). Best effort:
-    a session that cannot be read or shown is skipped without a word, so no local text reaches the
-    terminal. shortcut: Cursor IDE chats (state.vscdb) are not read; their sessions show no local
-    text."""
-    info: dict[str, dict] = {}
+def _digest_cursor_chat(f: str, d: Digest) -> None:
+    con = _cursor.connect_ro(f)
+    if con is None:
+        return
+    try:
+        meta = _cu.chat_meta(con) or {}
+        msgs = _cu.messages(con, {i for seq in _cu.root_lists(con) for i in seq})
+    finally:
+        con.close()
+    created = epoch_ms_to_iso(meta.get("createdAt"))
+    d.at(created)
+    calls: dict = {}
+    _cursor_prompts(msgs, created, d, calls)
+    _cursor_shell_results(msgs, d, calls)
 
-    def read(sid: str, agent: str, fn: Callable[..., None], *args: object) -> None:
-        d = Digest(agent)
-        try:
-            fn(*args, d)
-            info[sid] = d.view()
-        except Exception:  # noqa: BLE001  # nosec B110 # a traceback could print local text
-            pass
 
-    for f in _cc.main_session_files(home):
-        if Path(f).stem in sessions:
-            read(Path(f).stem, "Claude Code", _digest_claude_log, f)
-    names = _cx.thread_names(home)
-    for f in _cx.session_files(home):
-        sid = next((s for s in sessions if f.endswith(f"-{s}.jsonl")), None)
-        if sid:
-            read(sid, "Codex", _digest_codex_log, f, names.get(sid, ""))
+def _pi_logs(home: Path, sessions: set[str]) -> Iterator[tuple[str, str, dict]]:
+    """(session id, file, header) of each wanted Pi session. The id is in the file name, except
+    where only the header has it."""
     for f in _pi.session_files(home):
         u = _pi.uuid_in(f)
         if u and u not in sessions:
@@ -320,10 +313,45 @@ def local_info(home: Path, sessions: set[str]) -> dict[str, dict]:
         first = first_record(f) or {}
         hdr = _pi.header(first if first.get("type") == "session" else {}, f)
         if hdr["id"] in sessions:
-            read(hdr["id"], "Pi", _digest_pi_log, f, hdr)
+            yield hdr["id"], f, hdr
+
+
+def _session_logs(home: Path, sessions: set[str]) -> Iterator[tuple[str, str, Callable[..., None],
+                                                                    tuple]]:
+    """(session id, agent name, its digest function, that function's arguments) of each local log
+    of a wanted session."""
+    for f in _cc.main_session_files(home):
+        if Path(f).stem in sessions:
+            yield Path(f).stem, "Claude Code", _digest_claude_log, (f,)
+    names = _cx.thread_names(home)
+    for f in _cx.session_files(home):
+        sid = next((s for s in sessions if f.endswith(f"-{s}.jsonl")), None)
+        if sid:
+            yield sid, "Codex", _digest_codex_log, (f, names.get(sid, ""))
+    for sid, f, hdr in _pi_logs(home, sessions):
+        yield sid, "Pi", _digest_pi_log, (f, hdr)
     # shortcut: a chat is found by its directory name, which is its agentId in every store seen
     for f in _cu.chat_stores(home):
         sid = os.path.basename(os.path.dirname(f))
         if sid in sessions:
-            read(sid, "Cursor", _digest_cursor_chat, f)
+            yield sid, "Cursor", _digest_cursor_chat, (f,)
+
+
+def local_info(home: Path, sessions: set[str]) -> dict[str, dict]:
+    """session id -> what the logs on this machine say about it (see Digest.view). Best effort: a
+    session that cannot be read or shown is skipped, and only its count and the exception's type
+    reach stderr, because a message or traceback could print local text. shortcut: Cursor IDE chats
+    (state.vscdb) are not read; their sessions show no local text."""
+    info: dict[str, dict] = {}
+    failed: Counter = Counter()
+    for sid, agent, fn, args in _session_logs(home, sessions):
+        d = Digest(agent)
+        try:
+            fn(*args, d)
+            info[sid] = d.view()
+        except Exception as exc:  # noqa: BLE001  # any shape of old log record can land here
+            failed[type(exc).__name__] += 1
+    if failed:
+        print(f"aut: {sum(failed.values())} local session log(s) not shown "
+              f"({', '.join(sorted(failed))})", file=sys.stderr)
     return info

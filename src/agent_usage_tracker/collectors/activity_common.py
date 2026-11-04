@@ -12,9 +12,10 @@ import hashlib
 import json
 import re
 from datetime import datetime
-from typing import NotRequired, TypedDict
+from typing import Any, NotRequired, TypedDict
 
 from ..repo_keys import RepoKeys, repo_identity
+from ._util import MS_PER_S
 from .commits import COMMIT_LINE, commit_repo
 
 _HEX_SHA = re.compile(r"[0-9a-f]{7,40}")
@@ -58,7 +59,7 @@ def ms_between(start: object, end: object) -> int | None:
     try:
         a = datetime.fromisoformat(str(start).replace("Z", "+00:00"))
         b = datetime.fromisoformat(str(end).replace("Z", "+00:00"))
-        return int((b - a).total_seconds() * 1000)
+        return int((b - a).total_seconds() * MS_PER_S)
     except (TypeError, ValueError):
         return None
 
@@ -111,7 +112,7 @@ class Link:
         if s.get("shas"):     # a watermark from before sha_refs were keyed held raw hex: drop it
             s["shas"] = [v for v in s["shas"] if len(v) == 64]
 
-    def source(self, repo_key: str | None, branch: object = None) -> list:
+    def source(self, repo_key: str | None, branch: object = None) -> list[str | bool | None]:
         """[repo_key, branch_key] of one source (its branch's tickets go to this turn)."""
         self.tickets(branch)
         named = repo_key and isinstance(branch, str) and branch in _DEFAULT_BRANCHES
@@ -163,7 +164,7 @@ class Link:
         if host and isinstance(repo, str):
             self._add("prs", pr_key(self.keys, host, repo, number), MAX_PRS)
 
-    def attrs(self, origin: str | None) -> dict:
+    def attrs(self, origin: str | None) -> dict[str, Any]:
         at = [self.s["at"][k] for k in sorted(self.s.get("at", {}))]
         # the repo of the first source that has one; its branch from that source, or from a lower
         # one in the SAME repo (a branch edge must never join two repos)
@@ -227,7 +228,7 @@ def add_call(agg: TurnAgg, name: str, args: object) -> None:
     agg["last"], agg["max"] = key, max(agg["max"], agg["run"])
 
 
-def turn_attrs(agg: TurnAgg) -> dict:
+def turn_attrs(agg: TurnAgg) -> dict[str, Any]:
     top = max(agg["by"].values(), default=0)
     return {
         "tool_calls": agg["calls"], "tool_errors": agg["errors"], "by_tool": dict(agg["by"]),

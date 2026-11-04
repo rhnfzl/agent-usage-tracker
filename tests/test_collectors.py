@@ -1074,6 +1074,39 @@ def test_cf_access_headers() -> None:
     print("ok cf_access_headers")
 
 
+def test_is_interactive_survives_a_line_that_is_no_record():
+    with tempfile.TemporaryDirectory() as t:
+        p = Path(t) / "s.jsonl"
+        p.write_text('["entrypoint"]\n')
+        assert claude_code.is_interactive(p) is False
+
+
+def test_cursor_counts_a_composer_with_bad_bytes(capsys):
+    with tempfile.TemporaryDirectory() as t:
+        db = Path(t) / "state.vscdb"
+        con = sqlite3.connect(db)
+        con.execute("CREATE TABLE cursorDiskKV (key TEXT, value BLOB)")
+        con.execute("INSERT INTO cursorDiskKV VALUES (?, ?)", ("composerData:c1", b"\xff\xfe"))
+        con.execute("INSERT INTO cursorDiskKV VALUES (?, ?)", ("bubbleId:c1:b1", json.dumps(
+            {"createdAt": "2026-01-02T09:30:07Z",
+             "tokenCount": {"inputTokens": 5, "outputTokens": 5}})))
+        con.commit()
+        con.close()
+        cfg = _cfg(Path(t))
+        cfg.cursor_db_path = str(db)
+        assert [e.total_tokens for e in _drain(cursor.collect, cfg)] == [10]
+    assert "1 malformed record(s)" in capsys.readouterr().err
+
+
+def test_cursor_sdk_says_a_manifest_was_unreadable(capsys):
+    with tempfile.TemporaryDirectory() as t:
+        (Path(t) / "manifest.json").write_text("{cut off")
+        cfg = _cfg(Path(t))
+        cfg.cursor_sdk_manifests = str(Path(t) / "*.json")
+        assert _drain(cursor_sdk.collect, cfg) == []
+    assert "1 malformed record(s)" in capsys.readouterr().err
+
+
 if __name__ == "__main__":
     import pytest
     raise SystemExit(pytest.main([__file__, "-q"]))

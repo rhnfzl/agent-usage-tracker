@@ -23,6 +23,7 @@ import json
 import os
 import sys
 import tempfile
+import time
 import urllib.error
 import urllib.parse
 from datetime import datetime, timedelta, timezone
@@ -563,16 +564,19 @@ def test_purge_bounded_and_not_on_dry_run(monkeypatch) -> None:
 def test_time_add_validation(monkeypatch) -> None:
     cfg = _cfg(pg_dsn="postgresql://x")
     now = datetime(2026, 11, 3, 12, 0, tzinfo=timezone.utc)
-    row = cli.build_manual_interval(cfg, minutes=30, now=now)
+    row = cli.build_manual_interval(cfg, cli.ManualSpan(minutes=30), now=now)
     assert (row.ts, row.end_ts) == ((now - timedelta(minutes=30)).isoformat(), now.isoformat())
     assert row.source == "manual" and row.work_relevant and row.title is None
     assert row.app is None and row.attrs == {} and row.machine == "test"
-    nr = cli.build_manual_interval(cfg, start="2026-11-03T09:00+00:00", end="2026-11-03T10:00+00:00",
-                          not_relevant=True, now=now)
+    nr = cli.build_manual_interval(cfg, cli.ManualSpan(start="2026-11-03T09:00+00:00",
+                                                       end="2026-11-03T10:00+00:00"),
+                                   not_relevant=True, now=now)
     assert not nr.work_relevant and nr.ts == "2026-11-03T09:00:00+00:00"
-    at = cli.build_manual_interval(cfg, minutes=15, at="2026-11-03T08:00+00:00", now=now)
+    at = cli.build_manual_interval(cfg, cli.ManualSpan(minutes=15, at="2026-11-03T08:00+00:00"),
+                                   now=now)
     assert at.end_ts == "2026-11-03T08:00:00+00:00"
-    local = cli.build_manual_interval(cfg, start="2026-11-03 09:00", end="2026-11-03 09:30", now=now)
+    local = cli.build_manual_interval(cfg, cli.ManualSpan(start="2026-11-03 09:00",
+                                                          end="2026-11-03 09:30"), now=now)
     assert datetime.fromisoformat(local.ts).utcoffset() is not None, "local time gets a zone"
     bad = [dict(start="2026-11-03T10:00+00:00", end="2026-11-03T10:00+00:00"),       # end == start
            dict(start="2026-11-03T10:00+00:00", end="2026-11-03T09:00+00:00"),       # end < start
@@ -584,7 +588,7 @@ def test_time_add_validation(monkeypatch) -> None:
            dict(minutes=10, start="2026-11-03T09:00+00:00"), dict(start="not a date", end="x")]
     for kw in bad:
         try:
-            cli.build_manual_interval(cfg, now=now, **kw)
+            cli.build_manual_interval(cfg, cli.ManualSpan(**kw), now=now)
             raise AssertionError(f"must refuse {kw}")
         except SystemExit:
             pass
@@ -671,6 +675,30 @@ def test_titles_kept_for_good_by_default() -> None:
         assert aw.purge(cfg) == 0
     assert not [c for c in fake.calls if c[0] == "DELETE"], fake.calls
     print("ok titles_kept_for_good_by_default")
+
+
+def test_an_infinite_duration_is_a_malformed_event(monkeypatch) -> None:
+    now = CREATED + timedelta(hours=3)
+    raw = [_ev(1, CREATED + timedelta(hours=1), float("inf"), "Code", "bad"),
+           _ev(2, CREATED + timedelta(hours=2), 60, "Code", "good")]
+    monkeypatch.setattr(aw, "_read_range", lambda cfg, wm: (raw, CREATED, now))
+    out, err = _rows(_cfg(), _wm(), FakeAW(), now)
+    assert [r.title for r in out[0][0]] == ["good"] and "1 malformed record(s)" in err
+
+
+def test_redaction_stays_fast_on_long_runs() -> None:
+    # was cubic on a word run (a pasted base64 blob hung the scan) and quadratic on dotted text
+    start = time.monotonic()
+    for run in ("a" * 200_000, "a." * 100_000, "a-" * 100_000):
+        clean_text(run)
+    assert time.monotonic() - start < 10
+
+
+def test_redaction_keeps_its_catches() -> None:
+    assert clean_text("PGPASSWORD=hunter2 go") == "PGPASSWORD=[redacted] go"
+    assert clean_text("git+ssh://me:pw@host/x") == "git+ssh://[redacted]@host/x"
+    assert clean_text("mail a.b+c@d-e.co.uk.") == "mail [redacted]."
+    assert clean_text("a@b.com+x@d.org") == "[redacted][redacted]"
 
 
 if __name__ == "__main__":

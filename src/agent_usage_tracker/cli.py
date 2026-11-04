@@ -43,9 +43,9 @@ import argparse
 import os
 import sys
 from datetime import date, datetime, timedelta, timezone
-from typing import Sequence
+from typing import NamedTuple, Sequence
 
-from . import pricing, scan
+from . import inspector, outcomes, pricing, review, scan
 from .collectors import REGISTRY
 from .config import ALL_AGENTS, AutError, Config, load_config, config_path
 from .event import TimeInterval, make_event_id
@@ -110,18 +110,25 @@ def _local(value: str) -> datetime:
     return dt if dt.tzinfo else dt.astimezone()
 
 
-def build_manual_interval(cfg: Config, start: str | None = None, end: str | None = None,
-                          minutes: int | None = None, at: str | None = None, *,
-                          not_relevant: bool = False, now: datetime | None = None) -> TimeInterval:
+class ManualSpan(NamedTuple):
+    """The interval as typed: --start and --end, or --minutes ending at --at (default now)."""
+    start: str | None = None
+    end: str | None = None
+    minutes: int | None = None
+    at: str | None = None
+
+
+def build_manual_interval(cfg: Config, span: ManualSpan, *, not_relevant: bool = False,
+                          now: datetime | None = None) -> TimeInterval:
     """One manual agents.time_interval row, or SystemExit with the reason it was refused."""
     now = now or datetime.now(timezone.utc)
-    if minutes is not None:
-        if start or end:
+    if span.minutes is not None:
+        if span.start or span.end:
             raise SystemExit("time add: use --start/--end or --minutes, not both")
-        end_dt = _local(at) if at else now
-        start_dt = end_dt - timedelta(minutes=minutes)
-    elif start and end and not at:
-        start_dt, end_dt = _local(start), _local(end)
+        end_dt = _local(span.at) if span.at else now
+        start_dt = end_dt - timedelta(minutes=span.minutes)
+    elif span.start and span.end and not span.at:
+        start_dt, end_dt = _local(span.start), _local(span.end)
     else:
         raise SystemExit("time add: give --start and --end, or --minutes [--at]")
     if end_dt <= start_dt:
@@ -138,7 +145,7 @@ def build_manual_interval(cfg: Config, start: str | None = None, end: str | None
 
 
 def cmd_time_add(cfg: Config, agents: Sequence[str], args: argparse.Namespace) -> None:
-    row = build_manual_interval(cfg, args.start, args.end, args.minutes, args.at,
+    row = build_manual_interval(cfg, ManualSpan(args.start, args.end, args.minutes, args.at),
                                 not_relevant=args.not_relevant)
     insert_pg(cfg.require_pg("time add"), [row])
     s, e = (datetime.fromisoformat(x).astimezone() for x in (row.ts, row.end_ts))
@@ -148,14 +155,12 @@ def cmd_time_add(cfg: Config, agents: Sequence[str], args: argparse.Namespace) -
 
 
 def cmd_outcomes(cfg: Config, agents: Sequence[str], args: argparse.Namespace) -> None:
-    from . import outcomes
     report = outcomes.run_outcomes(cfg, refresh=args.fetch or cfg.outcome_fetch,
                                    dry_run=args.dry_run)
     outcomes.print_outcomes(report, args.dry_run)
 
 
 def cmd_outcome(cfg: Config, agents: Sequence[str], args: argparse.Namespace) -> None:
-    from . import outcomes
     dsn = cfg.require_pg("outcome")
     row = outcomes.build_manual_outcome(cfg, args.outcome, os.getcwd(), args.session)
     outcomes.insert_manual_outcome(dsn, row)
@@ -163,16 +168,16 @@ def cmd_outcome(cfg: Config, agents: Sequence[str], args: argparse.Namespace) ->
 
 
 def cmd_inspect(cfg: Config, agents: Sequence[str], args: argparse.Namespace) -> None:
-    from . import inspector
     inspector.print_inspect(inspector.run_inspect(cfg, episode=args.episode, day=args.day,
                                                   label=args.label))
 
 
 def cmd_episodes(cfg: Config, agents: Sequence[str], args: argparse.Namespace) -> None:
-    from . import review
     review.print_review(review.run_episode_review(cfg, args.month))
 
 
+# The label modules are imported where used: every other command must not pay for them (a test
+# holds the CLI to label.names alone).
 def _label_run(cfg: Config, args: argparse.Namespace) -> None:
     """run | backfill: label new units, or one task over the last N days."""
     from .label import run as label_run

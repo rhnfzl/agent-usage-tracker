@@ -22,7 +22,7 @@ import random
 import uuid
 from collections import Counter
 from datetime import datetime, timedelta, timezone
-from typing import Callable
+from typing import Any, Callable
 
 from . import episode_store, local_page
 from .collectors.session_digest import local_info
@@ -138,34 +138,39 @@ def render(episodes: list[dict], info: dict, token: str, heading: str,
     return "".join(parts)
 
 
+def _correction(now: datetime, action: str, a: dict, b: dict | None = None) -> dict[str, Any]:
+    attrs = {"repo_keys": a["repo_keys"]}
+    if b:
+        attrs["b_repo_keys"] = b["repo_keys"]
+    return {"id": str(uuid.uuid4()), "ts": now, "action": action, "a_session": a["session_id"],
+            "b_session": b["session_id"] if b else None, "attrs": attrs}
+
+
+def _answer_rows(form: dict[str, list[str]], i: int, episodes: list[dict],
+                 now: datetime) -> list[dict]:
+    """The rows of episode i's answer."""
+    ans = (form.get(f"a{i}") or [""])[0]
+    seeds = _seeds(episodes[i])
+    if ans == "split":
+        by_id = {m["session_id"]: m for m in seeds}
+        return [_correction(now, "split", by_id[s]) for s in form.get(f"split{i}", [])
+                if s in by_id]
+    if ans == "merge":
+        j = (form.get(f"merge{i}") or [""])[0].strip().lstrip("#")
+        ok = j.isdecimal() and len(j) < 10 and int(j) < len(episodes) and int(j) != i
+        return [_correction(now, "merge", seeds[0], _seeds(episodes[int(j)])[0])] if ok else []
+    return [_correction(now, _ACTIONS[ans], seeds[0])] if ans in ("right", "reject") else []
+
+
 def corrections(form: dict[str, list[str]], episodes: list[dict],
-                now: datetime) -> tuple[list[dict], dict]:
+                now: datetime) -> tuple[list[dict], dict[str, int]]:
     """episode_correction rows for the answers, and {reviewed, right}. Answers that name a
     session or episode the page did not show are dropped."""
     rows: list[dict] = []
     reviewed = right = 0
-
-    def row(action: str, a: dict, b: dict | None = None) -> dict:
-        attrs = {"repo_keys": a["repo_keys"]}
-        if b:
-            attrs["b_repo_keys"] = b["repo_keys"]
-        return {"id": str(uuid.uuid4()), "ts": now, "action": action, "a_session": a["session_id"],
-                "b_session": b["session_id"] if b else None, "attrs": attrs}
-
-    for i, ep in enumerate(episodes):
+    for i in range(len(episodes)):
         ans = (form.get(f"a{i}") or [""])[0]
-        seed = _seeds(ep)[0]
-        if ans == "split":
-            by_id = {m["session_id"]: m for m in _seeds(ep)}
-            new = [row("split", by_id[s]) for s in form.get(f"split{i}", []) if s in by_id]
-        elif ans == "merge":
-            j = (form.get(f"merge{i}") or [""])[0].strip().lstrip("#")
-            ok = j.isdecimal() and len(j) < 10 and int(j) < len(episodes) and int(j) != i
-            new = [row("merge", seed, _seeds(episodes[int(j)])[0])] if ok else []
-        elif ans in ("right", "reject"):
-            new = [row(_ACTIONS[ans], seed)]
-        else:
-            new = []
+        new = _answer_rows(form, i, episodes, now)
         rows += new
         reviewed += bool(new)
         right += bool(new) and ans == "right"
@@ -182,12 +187,13 @@ def month_pages(episodes: list[dict], info: dict, heading: str,
 
 def serve(episodes: list[dict], write: Callable[[list[dict]], None],
           pages: Callable[[str], dict[str, str]], *, open_browser: bool = True,
-          on_ready: Callable[[str], None] | None = None, now: datetime | None = None) -> dict:
+          on_ready: Callable[[str], None] | None = None,
+          now: datetime | None = None) -> dict[str, int]:
     """Serve pages(token) (what follows /<token> in the path -> html) until the answers are posted;
     write(rows) stores them. Returns {reviewed, right}."""
     token = local_page.new_token()
     built = {k: v.encode() for k, v in pages(token).items()}
-    result: dict = {"reviewed": 0, "right": 0}
+    result = {"reviewed": 0, "right": 0}
 
     def on_post(form: dict[str, list[str]]) -> bytes:
         rows, summary = corrections(form, episodes, now or datetime.now(timezone.utc))
@@ -215,7 +221,7 @@ def _month_bounds(month: str | None) -> tuple[str, datetime, datetime]:
     return f"{start:%Y-%m}", start.astimezone(), end.astimezone()
 
 
-def run_episode_review(cfg: Config, month: str | None) -> dict:
+def run_episode_review(cfg: Config, month: str | None) -> dict[str, Any]:
     dsn = cfg.require_pg("episodes review")
     label, start, end = _month_bounds(month)
     episodes = episode_store.load_month(dsn, start, end)

@@ -16,23 +16,29 @@ from .config import AutError
 LOCAL_HOSTS = ("localhost", "127.0.0.1", "::1")
 
 
+def _host_and_mode(dsn: str) -> tuple[str, str] | None:
+    """(host, sslmode) a DSN names, "" where it names none; None for one that cannot be parsed."""
+    if "://" not in dsn:
+        keys = dict(re.findall(r"(\w+)\s*=\s*('[^']*'|\S+)", dsn))
+        return (keys.get("host") or keys.get("hostaddr") or "").strip("'"), \
+            keys.get("sslmode", "").strip("'")
+    try:
+        uri = urlparse(dsn)
+    except ValueError:
+        return None
+    query = parse_qs(uri.query)
+    return query.get("host", [unquote(uri.hostname or "")])[0], query.get("sslmode", [""])[0]
+
+
 @functools.lru_cache(maxsize=None)     # once per DSN per run: a scan connects many times
 def _warn_if_plaintext(dsn: str) -> None:
     """libpq's default sslmode=prefer falls back to plaintext without a word. Warn, never refuse:
     a Tailscale or tunnelled sink without TLS works today. An explicit sslmode=disable is the
     opt-out. The warning names the host only: the DSN can hold the password."""
-    if "://" in dsn:
-        try:
-            uri = urlparse(dsn)
-        except ValueError:
-            return                          # let libpq report a DSN it cannot parse either
-        query = parse_qs(uri.query)
-        host = query.get("host", [unquote(uri.hostname or "")])[0]
-        mode = query.get("sslmode", [None])[0]
-    else:
-        keys = dict(re.findall(r"(\w+)\s*=\s*('[^']*'|\S+)", dsn))
-        host = (keys.get("host") or keys.get("hostaddr") or "").strip("'")
-        mode = keys.get("sslmode", "").strip("'")
+    named = _host_and_mode(dsn)
+    if named is None:
+        return                              # let libpq report a DSN it cannot parse either
+    host, mode = named
     host = host or os.environ.get("PGHOST") or ""
     mode = mode or os.environ.get("PGSSLMODE") or ""
     if not host or host.startswith("/") or host in LOCAL_HOSTS:

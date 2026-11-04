@@ -18,6 +18,7 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Callable, TypeVar
 
+from ..collectors._util import parse_record
 from ..config import AutError, Config
 from ..state import atomic_write_text
 from .core import Request, data_dir, local_midnight, top_label
@@ -43,15 +44,8 @@ def read_jsonl(p: Path) -> list[dict]:
         return []
     except (OSError, UnicodeDecodeError) as exc:    # never "no labels": those labels exist
         raise AutError(f"label: cannot read {p}: {exc}") from None
-    out = []
-    for line in lines:
-        try:
-            o = json.loads(line)
-        except ValueError:
-            continue                  # a line cut by a crash mid-write
-        if isinstance(o, dict):
-            out.append(o)
-    return out
+    # None: a line cut by a crash mid-write
+    return [o for line in lines if (o := parse_record(line)) is not None]
 
 
 def append_jsonl(p: Path, row: dict) -> None:

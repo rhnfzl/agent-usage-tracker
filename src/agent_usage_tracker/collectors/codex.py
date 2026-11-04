@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import copy
 import glob
-import json
 import os
 from collections import Counter
 from pathlib import Path
@@ -28,9 +27,8 @@ from ..repo_keys import RepoKeys, repo_identity
 from .activity_common import (Link, TurnAgg, add_call, blank_tool_tally, commit_rows, first_record,
                               ms_between, text_of, turn_attrs)
 from .commits import commit_call, commit_dir, commit_shas
-from ._util import (dict_or_empty, parse_record, project_name, read_new_lines, safe_int, same_file,
-                    str_or_none,
-                    warn_skipped)
+from ._util import (count_field, dict_or_empty, parse_record, project_name, read_new_lines, safe_int,
+                    same_file, str_or_none, warn_skipped)
 
 NAME = "codex"
 # The watermark's format. Older state is upgraded once by _upgrade_state; delete a step from there
@@ -52,15 +50,11 @@ def thread_names(home: Path) -> dict[str, str]:
     try:
         with open(home / ".codex" / "session_index.jsonl", encoding="utf-8") as fh:
             for line in fh:
-                try:
-                    o = json.loads(line)
-                except ValueError:
-                    continue
-                if isinstance(o, dict) and isinstance(o.get("id"), str) \
-                        and isinstance(o.get("thread_name"), str):
+                o = parse_record(line)
+                if o and isinstance(o.get("id"), str) and isinstance(o.get("thread_name"), str):
                     names[o["id"]] = o["thread_name"]
-    except (OSError, ValueError):
-        pass
+    except (OSError, ValueError):       # no index, or a bad byte: threads show what it had so far
+        return names
     return names
 
 
@@ -121,8 +115,8 @@ def _meta_link(p: dict, keys: RepoKeys) -> dict:
     if not rk and isinstance(g.get("repository_url"), str):
         try:
             rk = keys.of(repo_identity(g["repository_url"]))
-        except ValueError:
-            pass
+        except ValueError:      # a malformed URL names no repo: the key stays NULL
+            rk = None
     # shortcut: a later turn_context cwd in another repo keeps the first meta's repo; take the
     # turn's cwd if Codex threads start moving between repos
     link = Link(keys, {})
@@ -196,15 +190,15 @@ class _Activity:
         if record_type == "response_item":
             link.text(payload.get("output"))           # a tool call's output
             self._tool_call(payload, agg)
-            return
-        if record_type != "event_msg":
-            return
+        elif record_type == "event_msg":
+            self._event_msg(payload, ts, sess, link, agg)
+
+    def _event_msg(self, payload: dict, ts: object, sess: EventSession, link: Link,
+                   agg: TurnAgg) -> None:
         kind, item = payload.get("type"), payload.get("item")
         turn_seed = str(payload.get("turn_id") or ts)
         if kind in ("task_complete", "turn_aborted"):
-            link.merge((self.cur.get("meta") or {}).get("link") or {})
-            self._emit("link", ts, turn_seed, sess, link.attrs(sess.run_origin))
-            link.reset()
+            self._close_link(link, ts, turn_seed, sess)
         if kind == "agent_message":
             link.text(payload.get("message"))
         elif kind == "task_started":
@@ -213,14 +207,21 @@ class _Activity:
             self.carried["intr"] = True
             self._emit("interrupt", ts, turn_seed, sess, {})
         elif kind == "task_complete":
-            d = payload.get("duration_ms")
-            dur = d if isinstance(d, int) and not isinstance(d, bool) \
-                else ms_between(self.carried.get("start"), ts)
-            self._emit("turn", ts, turn_seed, sess, {"duration_ms": dur, **turn_attrs(agg)})
-            self.carried["agg"] = blank_tool_tally()
-            self.carried.pop("start", None)
+            self._turn(payload.get("duration_ms"), ts, turn_seed, sess, agg)
         elif kind == "item_completed" and isinstance(item, dict):
             self._item(item, ts, sess, link, agg)
+
+    def _close_link(self, link: Link, ts: object, seed: str, sess: EventSession) -> None:
+        link.merge((self.cur.get("meta") or {}).get("link") or {})
+        self._emit("link", ts, seed, sess, link.attrs(sess.run_origin))
+        link.reset()
+
+    def _turn(self, d: object, ts: object, seed: str, sess: EventSession, agg: TurnAgg) -> None:
+        dur = d if isinstance(d, int) and not isinstance(d, bool) \
+            else ms_between(self.carried.get("start"), ts)
+        self._emit("turn", ts, seed, sess, {"duration_ms": dur, **turn_attrs(agg)})
+        self.carried["agg"] = blank_tool_tally()
+        self.carried.pop("start", None)
 
     @staticmethod
     def _tool_call(payload: dict, agg: TurnAgg) -> None:
@@ -308,15 +309,19 @@ def parsed_records(lines: list[bytes], off: int, cur: dict, skipped: Counter) ->
     return recs
 
 
+def _note_session_meta(payload: dict, cur: dict, keys: RepoKeys) -> None:
+    # the usage event_id seed keeps its old rule (payload.session_id, any meta line),
+    # so stored usage rows never change id; session rows use the thread id instead
+    cur["session_id"] = payload.get("session_id") or payload.get("id") or cur["session_id"]
+    cur["provider"] = payload.get("model_provider") or cur["provider"]
+    if "meta" not in cur:
+        _set_meta(cur, payload, keys)
+
+
 def _note_context(rtype: object, payload: dict, copied: bool, cur: dict, keys: RepoKeys) -> None:
     """Streaming state from a record: session identity, model, cwd, the current turn."""
     if rtype == "session_meta":
-        # the usage event_id seed keeps its old rule (payload.session_id, any meta line),
-        # so stored usage rows never change id; session rows use the thread id instead
-        cur["session_id"] = payload.get("session_id") or payload.get("id") or cur["session_id"]
-        cur["provider"] = payload.get("model_provider") or cur["provider"]
-        if "meta" not in cur:
-            _set_meta(cur, payload, keys)
+        _note_session_meta(payload, cur, keys)
     elif rtype == "turn_context":
         if payload.get("model"):
             cur["model"] = payload.get("model")
@@ -332,10 +337,10 @@ def _token_event(record: dict, payload: dict, cur: dict, path: str) -> UsageEven
     last = info.get("last_token_usage") if isinstance(info, dict) else None
     if not isinstance(last, dict):
         return None
-    inp = int(last.get("input_tokens") or 0)
-    cached = int(last.get("cached_input_tokens") or 0)
-    out = int(last.get("output_tokens") or 0)
-    rea = int(last.get("reasoning_output_tokens") or 0)
+    inp = count_field(last, "input_tokens")
+    cached = count_field(last, "cached_input_tokens")
+    out = count_field(last, "output_tokens")
+    rea = count_field(last, "reasoning_output_tokens")
     total = int(last.get("total_tokens") or (inp + out))
     cur["tc_ord"] += 1
     # Known gap: some Desktop rows carry only total_tokens (input and output 0) and
@@ -448,7 +453,7 @@ def collect(cfg: Config, wm: dict) -> Iterator[Batch]:
     for path in session_files(cfg.home):
         try:
             st = os.stat(path)
-        except OSError:
+        except OSError:         # gone since the glob: nothing to read, and no offset to lose
             continue
         prev = files.get(path) or {}
         if not same_file(prev, st):

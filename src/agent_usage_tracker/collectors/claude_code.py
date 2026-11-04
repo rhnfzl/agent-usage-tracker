@@ -14,7 +14,6 @@ intended cross-check for that.
 from __future__ import annotations
 
 import glob
-import json
 import os
 import re
 import time
@@ -26,7 +25,8 @@ from ..config import Config
 from ..event import Batch, EventSession, RunOrigin, UsageEvent, make_event_id
 from ..repo_keys import RepoKeys
 from .activity_common import IDLE_S, pad_pending, text_of
-from ._util import parse_record, project_name, safe_int, scan_file, str_or_none, warn_skipped
+from ._util import (count_field, parse_record, project_name, safe_int, scan_file, str_or_none,
+                    warn_skipped)
 from .claude_code_activity import Activity
 
 NAME = "claude_code"
@@ -55,9 +55,10 @@ def is_interactive(path: Path) -> bool:
         with open(path, encoding="utf-8", errors="replace") as fh:
             for _, line in zip(range(200), fh):
                 if '"entrypoint"' in line:
-                    return json.loads(line).get("entrypoint") == "cli"
-    except (OSError, ValueError):
-        pass
+                    o = parse_record(line)
+                    return o is not None and o.get("entrypoint") == "cli"
+    except OSError:                     # unreadable: it cannot be shown to be interactive
+        return False
     return False
 
 
@@ -204,11 +205,8 @@ def steer_texts(home: Path, sessions: set[str], want: set[str]) -> dict[str, str
             for line in fh:
                 if '"user"' not in line:
                     continue
-                try:
-                    o = json.loads(line)
-                except ValueError:
-                    continue
-                if not isinstance(o, dict) or o.get("type") != "user":
+                o = parse_record(line)          # a malformed line holds no steer to show
+                if o is None or o.get("type") != "user":
                     continue
                 eid = make_event_id(NAME, "steer", _record_uid(o, f))
                 m = o.get("message")
@@ -227,10 +225,10 @@ def _usage_event(o: dict, path: str, ident: tuple[bool, str, str | None],
     u = msg.get("usage")
     if not isinstance(u, dict):
         return None
-    inp = int(u.get("input_tokens") or 0)
-    out = int(u.get("output_tokens") or 0)
-    cr = int(u.get("cache_read_input_tokens") or 0)
-    cw = int(u.get("cache_creation_input_tokens") or 0)
+    inp = count_field(u, "input_tokens")
+    out = count_field(u, "output_tokens")
+    cr = count_field(u, "cache_read_input_tokens")
+    cw = count_field(u, "cache_creation_input_tokens")
     total = inp + out + cr + cw
     if total == 0:
         return None
@@ -252,6 +250,43 @@ def _usage_event(o: dict, path: str, ident: tuple[bool, str, str | None],
         project=project_name(o.get("cwd")),
         session=_session_of(o, ident, turn),
     )
+
+
+def _carried_over(fstate: dict, new_fstate: dict) -> tuple[str | None, dict | None, bool]:
+    """(turn, activity state, read from byte 0) a chunk starts with. The watermark entry's are
+    dropped when scan_file restarted: same_file said the path now holds a different file (rotated
+    or replaced) or it was truncated, so the offset did not carry on."""
+    if fstate.get("ino") != new_fstate.get("ino") \
+            or safe_int(new_fstate.get("off")) < safe_int(fstate.get("off")):
+        return None, None, True
+    return str_or_none(fstate.get("turn")), fstate.get("act"), safe_int(fstate.get("off")) == 0
+
+
+def _next_turn(o: dict, is_subagent: bool, turn: str | None) -> str | None:
+    """turn_id after a user record: the latest promptId (tool_results carry it too); a subagent
+    keeps its first one, the parent turn that spawned it."""
+    pid = str_or_none(o.get("promptId"))
+    return pid if pid and not (is_subagent and turn) else turn
+
+
+def _keep_fuller(best: dict[str, UsageEvent], o: dict, path: str,
+                 ident: tuple[bool, str, str | None], turn: str | None, skipped: Counter) -> None:
+    """Fold an assistant record into best: the fuller record wins, an equal one keeps the first."""
+    try:
+        found = _usage_event(o, path, ident, turn)
+    except (ValueError, TypeError, OverflowError):  # OverflowError: int(inf) from 1e400
+        skipped["malformed"] += 1
+        return
+    if found and (found[0] not in best or best[found[0]].total_tokens < found[1].total_tokens):
+        best[found[0]] = found[1]
+
+
+def _only_ran_usage(fresh: bool, best: dict, steers: list) -> bool:
+    """A session that only ran /usage (no model call, every prompt a /usage) was nobody working
+    (AgentsView, MIT). Judged only on a read from byte 0, so a /usage typed mid-session and caught
+    alone by a live scan is kept, as a full re-read keeps it. shortcut: a file whose first chunk
+    held only the /usage keeps it dropped if real work follows; rare."""
+    return fresh and not best and bool(steers) and all(is_usage for _s, is_usage in steers)
 
 
 def _chunk_rows(path: str, base: Path, lines: list[bytes], fstate: dict, new_fstate: dict,
@@ -281,18 +316,11 @@ def _chunk_rows(path: str, base: Path, lines: list[bytes], fstate: dict, new_fst
     # harmless while old files are complete on disk and scanned once.
     old_loops = 0
     ident = _file_identity(base, path)
-    # turn_id: promptId of the latest user record (tool_results carry it too); a subagent keeps
-    # its first one, the parent turn that spawned it.
-    # Carried across chunks in the file's watermark entry, so a turn that began in an earlier
-    # scan is not lost. Dropped when scan_file restarted: same_file said the path now holds a
-    # different file (rotated/replaced) or was truncated, so the offset did not carry on.
+    # turn_id is carried across chunks in the file's watermark entry, so a turn that began in an
+    # earlier scan is not lost.
     # shortcut: files first read before this existed start at NULL until their next user record.
-    resumed = (fstate.get("ino") == new_fstate.get("ino")
-               and safe_int(new_fstate.get("off")) >= safe_int(fstate.get("off")))
-    turn: str | None = str_or_none(fstate.get("turn")) if resumed else None
-    # activity state rides in the same watermark entry and is dropped with it on a restart
-    act = Activity(NAME, path, ident[0], fstate.get("act") if resumed else None, keys)
-    fresh = not resumed or safe_int(fstate.get("off")) == 0     # read from byte 0
+    turn, carried, fresh = _carried_over(fstate, new_fstate)
+    act = Activity(NAME, path, ident[0], carried, keys)
     steers: list = []
     for raw in lines:
         o = parse_record(raw)
@@ -301,9 +329,7 @@ def _chunk_rows(path: str, base: Path, lines: list[bytes], fstate: dict, new_fst
             continue
         typ = o.get("type")
         if typ == "user":
-            pid = str_or_none(o.get("promptId"))
-            if pid and not (ident[0] and turn):
-                turn = pid
+            turn = _next_turn(o, ident[0], turn)
         act.record(o, _session_of(o, ident, turn))
         if typ == "user":
             text = human_text(o)
@@ -322,22 +348,10 @@ def _chunk_rows(path: str, base: Path, lines: list[bytes], fstate: dict, new_fst
             ))
             steers.append((act.steer(o, uid, text, sess), _USAGE_CMD in text))
         elif typ == "assistant":
-            try:
-                found = _usage_event(o, path, ident, turn)
-            except (ValueError, TypeError, OverflowError):  # OverflowError: int(inf) from 1e400
-                skipped["malformed"] += 1
-                continue
-            # the fuller record wins; an equal one keeps the first
-            if found and (found[0] not in best
-                          or best[found[0]].total_tokens < found[1].total_tokens):
-                best[found[0]] = found[1]
+            _keep_fuller(best, o, path, ident, turn, skipped)
     if _complete(path, safe_int(new_fstate.get("off"))):
         act.finish()
-    # A session that only ran /usage (no model call, every prompt a /usage) was nobody working
-    # (AgentsView, MIT). Judged only on a read from byte 0, so a /usage typed mid-session and
-    # caught alone by a live scan is kept, as a full re-read keeps it. shortcut: a file whose
-    # first chunk held only the /usage keeps it dropped if real work follows; rare.
-    if fresh and not best and steers and all(is_usage for _s, is_usage in steers):
+    if _only_ran_usage(fresh, best, steers):
         human, steers = [], []
     skipped["activity"] += act.errors
     _keep_or_drop(new_fstate, "turn", turn)

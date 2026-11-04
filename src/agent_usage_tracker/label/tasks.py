@@ -232,20 +232,9 @@ def _claude_steers(steers: list[dict]) -> list[dict]:
     return [r for r in steers if r["agent"] == "claude_code"]
 
 
-def _category_units(task: Task, src: Source, since: datetime, until: datetime | None) -> list:
-    until = until or datetime.now(timezone.utc)
-    steers = [r for r in src.steers(since) if r["ts"] < until]
-    text = src.texts(steers)
-    mine = _claude_steers(steers)
-    claude_sessions = {r["session_id"] for r in mine}
-    eps = src.episodes(since)
-    of_session: dict[str, list[str]] = defaultdict(list)
-    for episode in eps:
-        for sid in episode["sessions"]:
-            of_session[sid].append(episode["episode_id"])
-    sids = sorted(claude_sessions & set(of_session))
-    acts = src.activity(sids, since, until) if sids else []
-    day_of = {d for d, _s, _e in _days(since, until)}
+def _episode_days(mine: list[dict], acts: list[dict], of_session: dict[str, list[str]],
+                  day_of: set[date]) -> dict[tuple, dict]:
+    """(episode, local day) -> its steers, sessions and activity rows that day."""
     days: dict[tuple, dict] = {}
     for r in mine:
         d = r["ts"].astimezone().date()
@@ -260,24 +249,46 @@ def _category_units(task: Task, src: Source, since: datetime, until: datetime | 
         for ep in of_session.get(a["session_id"], ()):
             if (ep, d) in days:
                 days[(ep, d)]["acts"].append(a)
-    out = []
-    for (ep, d), u in days.items():
-        st = sorted(u["steers"], key=lambda r: r["ts"])
-        said = [text[r["event_id"]] for r in st if r["event_id"] in text]
-        if not said:
-            continue
-        tools: Counter = Counter()
-        kinds = Counter(a["kind"] for a in u["acts"])
-        for a in u["acts"]:
-            if a["kind"] == "turn":
-                tools.update((a["attrs"] or {}).get("by_tool") or {})
-        out.append(task.request("episode_day", f"{ep}:{d.isoformat()}", st[0]["ts"], {
-            "first_steer": said[0], "last_steers": said[1:][-3:], "steers": len(st),
-            "sessions": len(u["sessions"]), "tool_calls_by_tool": dict(tools),
-            "tool_errors": sum((a["attrs"] or {}).get("tool_errors") or 0 for a in u["acts"]
-                               if a["kind"] == "turn"),
-            "interrupts": kinds["interrupt"], "rejections": kinds["rejection"],
-            "commits": kinds["commit"]}))
+    return days
+
+
+def _episode_day_unit(task: Task, ep: str, d: date, u: dict, text: dict[str, str]) -> Request | None:
+    """The unit of one episode day; None when none of its steers has local text."""
+    st = sorted(u["steers"], key=lambda r: r["ts"])
+    said = [text[r["event_id"]] for r in st if r["event_id"] in text]
+    if not said:
+        return None
+    tools: Counter = Counter()
+    kinds = Counter(a["kind"] for a in u["acts"])
+    for a in u["acts"]:
+        if a["kind"] == "turn":
+            tools.update((a["attrs"] or {}).get("by_tool") or {})
+    return task.request("episode_day", f"{ep}:{d.isoformat()}", st[0]["ts"], {
+        "first_steer": said[0], "last_steers": said[1:][-3:], "steers": len(st),
+        "sessions": len(u["sessions"]), "tool_calls_by_tool": dict(tools),
+        "tool_errors": sum((a["attrs"] or {}).get("tool_errors") or 0 for a in u["acts"]
+                           if a["kind"] == "turn"),
+        "interrupts": kinds["interrupt"], "rejections": kinds["rejection"],
+        "commits": kinds["commit"]})
+
+
+def _category_units(task: Task, src: Source, since: datetime, until: datetime | None) -> list:
+    until = until or datetime.now(timezone.utc)
+    steers = [r for r in src.steers(since) if r["ts"] < until]
+    text = src.texts(steers)
+    mine = _claude_steers(steers)
+    claude_sessions = {r["session_id"] for r in mine}
+    eps = src.episodes(since)
+    of_session: dict[str, list[str]] = defaultdict(list)
+    for episode in eps:
+        for sid in episode["sessions"]:
+            of_session[sid].append(episode["episode_id"])
+    sids = sorted(claude_sessions & set(of_session))
+    acts = src.activity(sids, since, until) if sids else []
+    day_of = {d for d, _s, _e in _days(since, until)}
+    days = _episode_days(mine, acts, of_session, day_of)
+    built = (_episode_day_unit(task, ep, d, u, text) for (ep, d), u in days.items())
+    out = [r for r in built if r]
     wins = src.windows(since, until)
     out += _aw_blocks(task, wins, [r["ts"] for r in steers])
     return out

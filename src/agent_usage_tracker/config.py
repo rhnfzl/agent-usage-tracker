@@ -22,6 +22,9 @@ ALL_AGENTS = ("claude_code", "codex", "cursor", "cursor_sdk", "cursor_api", "cur
               "activitywatch")
 # activitywatch reads window titles, so it is opt-in: a config without `agents` never enables it.
 DEFAULT_AGENTS = tuple(a for a in ALL_AGENTS if a != "activitywatch")
+DEFAULT_AW_URL = "http://localhost:5600"
+DEFAULT_LABEL_MODEL = "mlx-community/gemma-4-31b-it-4bit"
+DEFAULT_REPO_ROOTS = ("~/projects",)
 AW_CATEGORIES = ("editor", "terminal", "agent", "dev", "browser", "comms", "docs", "design",
                  "media", "other")
 
@@ -74,7 +77,7 @@ class Config:
     # next to the state file. Set the same value on every machine so their keys match.
     repo_key_salt: str | None = None
     # activitywatch (opt-in): local aw-server, title retention there, and the guards' extensions.
-    activitywatch_url: str = "http://localhost:5600"
+    activitywatch_url: str = DEFAULT_AW_URL
     activitywatch_title_days: int = 0                  # 0: keep titles for good (no purge)
     activitywatch_titles: bool = True                  # false: intervals and categories, no titles
     activitywatch_deny_apps: tuple[str, ...] = ()      # lowercased app names, dropped entirely
@@ -82,12 +85,12 @@ class Config:
     activitywatch_work_titles: tuple[str, ...] = ()    # regexes that make a browser row web-work
     activitywatch_categories: dict[str, str] = field(default_factory=dict)   # lowercased app -> cat
     # `aut outcomes`: where the local clones live, and whether it fetches them (and asks gh) first.
-    outcome_repo_roots: tuple[str, ...] = ("~/projects",)
+    outcome_repo_roots: tuple[str, ...] = DEFAULT_REPO_ROOTS
     outcome_fetch: bool = False
     # `aut label` (local model on this machine): which tasks the nightly run labels, the model,
     # the precision bar for tau and the coverage gate, and the run's time budget.
     label_tasks: tuple[str, ...] = ()
-    label_model: str = "mlx-community/gemma-4-31b-it-4bit"
+    label_model: str = DEFAULT_LABEL_MODEL
     label_precision: float = 0.90
     label_coverage: float = 0.75
     label_budget_s: int = 3600
@@ -131,83 +134,112 @@ def load_config() -> Config:
         raise AutError(f"config: {path} has a value of the wrong type ({exc})") from None
 
 
-def _config_from(data: dict, path: Path) -> Config:
-    transport = data.get("transport", {})
-    machine = data.get("machine") or socket.gethostname().split(".")[0]
+def _agents_of(data: dict) -> tuple[str, ...]:
     agents = tuple(data.get("agents") or DEFAULT_AGENTS)
     unknown = [a for a in agents if a not in ALL_AGENTS]
     if unknown:
         raise AutError(f"config: unknown agent(s) {unknown}; valid = {list(ALL_AGENTS)}")
+    return agents
 
-    aw_cats = {str(k).strip().lower(): v
-               for k, v in (data.get("activitywatch_categories") or {}).items()}
-    bad = sorted(k for k, v in aw_cats.items() if v not in AW_CATEGORIES)
+
+def _aw_categories(data: dict) -> dict[str, str]:
+    cats = {str(k).strip().lower(): v
+            for k, v in (data.get("activitywatch_categories") or {}).items()}
+    bad = sorted(k for k, v in cats.items() if v not in AW_CATEGORIES)
     if bad:
         raise AutError(f"config: activitywatch_categories {bad}: category must be one of "
                        f"{list(AW_CATEGORIES)}")
-    aw_titles = {k: tuple(str(p) for p in data.get(k) or ())
-                 for k in ("activitywatch_deny_titles", "activitywatch_work_titles")}
-    for key, patterns in aw_titles.items():
-        for i, pat in enumerate(patterns):
-            try:
-                re.compile(pat)
-            except re.error as exc:     # the pattern itself may name a bank: never echo it
-                raise AutError(f"config: {key}[{i}] is not a valid regex ({exc.msg})") from None
-    roots = data.get("outcome_repo_roots") or ["~/projects"]
+    return cats
+
+
+def _regex_list(data: dict, key: str) -> tuple[str, ...]:
+    patterns = tuple(str(p) for p in data.get(key) or ())
+    for i, pat in enumerate(patterns):
+        try:
+            re.compile(pat)
+        except re.error as exc:     # the pattern itself may name a bank: never echo it
+            raise AutError(f"config: {key}[{i}] is not a valid regex ({exc.msg})") from None
+    return patterns
+
+
+def _repo_roots(data: dict) -> tuple[str, ...]:
+    roots = data.get("outcome_repo_roots") or list(DEFAULT_REPO_ROOTS)
     roots = [roots] if isinstance(roots, str) else roots
     if not isinstance(roots, list) or not all(isinstance(r, str) and r for r in roots):
         raise AutError("config: outcome_repo_roots must be a list of directory strings")
+    return tuple(roots)
+
+
+def _aw_title_days(data: dict) -> int:
     # 0 (the default) keeps titles for good; a number of days turns the limit on.
-    aw_days = int(data.get("activitywatch_title_days") or 0)
-    if aw_days < 0:
+    days = int(data.get("activitywatch_title_days") or 0)
+    if days < 0:
         raise AutError("config: activitywatch_title_days must be 0 (keep) or a number of days")
+    return days
 
-    label_tasks = data.get("label_tasks") or []
-    if not isinstance(label_tasks, list) or any(t not in TASK_NAMES for t in label_tasks):
+
+def _label_tasks(data: dict) -> tuple[str, ...]:
+    tasks = data.get("label_tasks") or []
+    if not isinstance(tasks, list) or any(t not in TASK_NAMES for t in tasks):
         raise AutError(f"config: label_tasks must be a list of {list(TASK_NAMES)}")
-    label_precision, label_coverage = (float(data.get(k, d)) for k, d in
-                                       (("label_precision", 0.90), ("label_coverage", 0.75)))
-    if not (0 < label_precision <= 1 and 0 <= label_coverage <= 1):
-        raise AutError("config: label_precision and label_coverage must lie in 0..1")
+    return tuple(tasks)
 
-    webhook_secret = _resolve(transport.get("webhook_secret"))
-    pg_dsn = _resolve(transport.get("pg_dsn"))
-    cf_id = _resolve(transport.get("cf_access_client_id"))
-    cf_secret = _resolve(transport.get("cf_access_client_secret"))
-    salt = _resolve(data.get("repo_key_salt"))
+
+def _label_bars(data: dict) -> tuple[float, float]:
+    precision, coverage = (float(data.get(k, d)) for k, d in
+                           (("label_precision", 0.90), ("label_coverage", 0.75)))
+    if not (0 < precision <= 1 and 0 <= coverage <= 1):
+        raise AutError("config: label_precision and label_coverage must lie in 0..1")
+    return precision, coverage
+
+
+def _warn_if_secrets_written(path: Path, transport: dict, data: dict) -> None:
     # Only a value written in the file counts: an env:VAR reference keeps the secret out of it.
     written = (transport.get("webhook_secret"), transport.get("pg_dsn"),
                transport.get("cf_access_client_secret"), data.get("repo_key_salt"))
     if path.exists() and any(v and not str(v).startswith("env:") for v in written):
         warn_if_group_readable(path)
 
+
+def _config_from(data: dict, path: Path) -> Config:
+    transport = data.get("transport", {})
+    agents = _agents_of(data)
+    aw_cats = _aw_categories(data)
+    deny_titles = _regex_list(data, "activitywatch_deny_titles")
+    work_titles = _regex_list(data, "activitywatch_work_titles")
+    roots = _repo_roots(data)
+    aw_days = _aw_title_days(data)
+    label_tasks = _label_tasks(data)
+    label_precision, label_coverage = _label_bars(data)
+    _warn_if_secrets_written(path, transport, data)
+
     return Config(
-        machine=machine,
+        machine=data.get("machine") or socket.gethostname().split(".")[0],
         agents=agents,
         webhook_url=_resolve(transport.get("webhook_url")),
-        webhook_secret=webhook_secret,
-        pg_dsn=pg_dsn,
+        webhook_secret=_resolve(transport.get("webhook_secret")),
+        pg_dsn=_resolve(transport.get("pg_dsn")),
         home=Path(data.get("home") or Path.home()).expanduser(),
         cursor_db_path=_resolve(data.get("cursor_db_path")),
         cursor_human_only=_as_bool(data.get("cursor_human_only", False)),
         cursor_sdk_manifests=_resolve(data.get("cursor_sdk_manifests")),
         cursor_api=_as_bool(data.get("cursor_api", False)),
         cursor_api_lookback_days=int(data.get("cursor_api_lookback_days") or 90),
-        cf_access_client_id=cf_id,
-        cf_access_client_secret=cf_secret,
-        repo_key_salt=salt,
-        activitywatch_url=str(data.get("activitywatch_url") or "http://localhost:5600"),
+        cf_access_client_id=_resolve(transport.get("cf_access_client_id")),
+        cf_access_client_secret=_resolve(transport.get("cf_access_client_secret")),
+        repo_key_salt=_resolve(data.get("repo_key_salt")),
+        activitywatch_url=str(data.get("activitywatch_url") or DEFAULT_AW_URL),
         activitywatch_title_days=aw_days,
         activitywatch_titles=_as_bool(data.get("activitywatch_titles", True)),
         activitywatch_deny_apps=tuple(str(a).strip().lower()
                                       for a in data.get("activitywatch_deny_apps") or ()),
-        activitywatch_deny_titles=aw_titles["activitywatch_deny_titles"],
-        activitywatch_work_titles=aw_titles["activitywatch_work_titles"],
+        activitywatch_deny_titles=deny_titles,
+        activitywatch_work_titles=work_titles,
         activitywatch_categories=aw_cats,
-        outcome_repo_roots=tuple(roots),
+        outcome_repo_roots=roots,
         outcome_fetch=_as_bool(data.get("outcome_fetch", False)),
-        label_tasks=tuple(label_tasks),
-        label_model=str(data.get("label_model") or "mlx-community/gemma-4-31b-it-4bit"),
+        label_tasks=label_tasks,
+        label_model=str(data.get("label_model") or DEFAULT_LABEL_MODEL),
         label_precision=label_precision,
         label_coverage=label_coverage,
         label_budget_s=int(data.get("label_budget_s") or 3600),

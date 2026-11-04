@@ -427,6 +427,19 @@ def test_digest_lists_hold_only_text():
     print("ok digest_lists_hold_only_text")
 
 
+def test_local_info_says_a_log_failed_without_its_text(capsys):
+    with tempfile.TemporaryDirectory() as t:
+        home = Path(t)
+        log = home / ".claude" / "projects" / "p" / "s1.jsonl"
+        log.parent.mkdir(parents=True)
+        log.write_text("{}\n")
+        with patch.object(session_digest, "_digest_claude_log",
+                          side_effect=KeyError("private prompt text")):
+            assert session_digest.local_info(home, {"s1"}) == {}
+    err = capsys.readouterr().err
+    assert "1 local session log(s) not shown (KeyError)" in err and "private" not in err
+
+
 if __name__ == "__main__":
     import pytest
     raise SystemExit(pytest.main([__file__, "-q"]))

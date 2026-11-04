@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, Callable, cast
 
 from ..config import Config
+from ..event import ActivityEvent
 from ..push import deliver_scan_rows, scan_row, scrub_error, send_activity_rows
 from ..sink import connect
 from ..state import atomic_write_text, collector_wm, load_json_dict, load_state, save_state
@@ -115,6 +116,20 @@ def _run_notes(run: _Run, backend: NoteBackend, since: datetime, until: datetime
     return c
 
 
+def _flush(run: _Run, task: Task, key: str, pending: list[ActivityEvent],
+           next_wm: str | None) -> None:
+    """Deliver a batch, then remember it and move the watermark. A dry run only drops it."""
+    if not run.dry_run:
+        if pending:
+            send_activity_rows(run.dsn, pending)      # raises: watermark stays
+        if task.cached and pending:
+            run.cache.setdefault(key, []).extend(e.attrs["unit_id"] for e in pending)
+            atomic_write_text(_cache_path(), json.dumps(run.cache))
+        if task.window != "recent":
+            run.advance(task.name, next_wm)
+    pending.clear()
+
+
 def _run_task(run: _Run, task: Task, choice: Choice, backend: Backend, since: datetime,
               until: datetime | None) -> TaskReport:
     c: TaskReport = defaultdict(int)
@@ -123,19 +138,7 @@ def _run_task(run: _Run, task: Task, choice: Choice, backend: Backend, since: da
     key = f"{task.name}@{task.ver}|{backend.model_id}|{choice.calib_ver}"
     done = set(run.cache.get(key, ())) if task.cached else set()
     reqs = [r for r in units(task.name, run.src, since, until) if r.unit_id not in done]
-    pending: list = []
-
-    def flush(next_wm: str | None) -> None:
-        if not run.dry_run:
-            if pending:
-                send_activity_rows(run.dsn, pending)      # raises: watermark stays
-            if task.cached and pending:
-                run.cache.setdefault(key, []).extend(e.attrs["unit_id"] for e in pending)
-                atomic_write_text(_cache_path(), json.dumps(run.cache))
-            if task.window != "recent":
-                run.advance(task.name, next_wm)
-        pending.clear()
-
+    pending: list[ActivityEvent] = []
     cut = None
     for r in reqs:
         if time.monotonic() >= run.deadline:
@@ -150,13 +153,34 @@ def _run_task(run: _Run, task: Task, choice: Choice, backend: Backend, since: da
         c["below_tau"] += res.below_tau
         labels[res.chosen] += 1
         if len(pending) >= BATCH:
-            flush(r.ts)
+            _flush(run, task, key, pending, r.ts)
     if cut is not None:
         c["cut"] = 1
-        flush(cut.ts)
+        _flush(run, task, key, pending, cut.ts)
     else:
-        flush(until.isoformat() if until else (reqs[-1].ts if reqs else None))
+        _flush(run, task, key, pending,
+               until.isoformat() if until else (reqs[-1].ts if reqs else None))
     return c
+
+
+def _label_one(run: _Run, name: str, since: datetime, until: datetime | None, choice: Choice,
+               backend_for: Callable[[str, Choice], Backend]) -> tuple[TaskReport, Exception | None]:
+    """One task's report, and the error that stopped only it: its watermark stays, the others go
+    on, and the heartbeat row records it."""
+    try:
+        backend = backend_for(name, choice)
+        if name != NOTE:
+            return _run_task(run, TASKS[name], choice, backend, since, until), None
+        # `aut label choose` never picks a note's backend: no encoder
+        if until is None:               # a note's window is whole days
+            raise ValueError(f"label {name}: a day window has no end")
+        return _run_notes(run, cast(NoteBackend, backend), since, until), None
+    except SourceUnavailable as exc:
+        print(f"aut: label {name}: {exc}; retried on the next run", file=sys.stderr)
+        return defaultdict(int, unavailable=1), exc
+    except BackendUnavailable as exc:     # the same, and the exit status says so
+        print(f"aut: {exc}", file=sys.stderr)
+        return defaultdict(int, failed=1), exc
 
 
 def run_label(cfg: Config, tasks: list[str] | None = None, since: datetime | None = None, *,
@@ -190,23 +214,9 @@ def run_label(cfg: Config, tasks: list[str] | None = None, since: datetime | Non
     try:
         for name in tasks if tasks is not None else cfg.label_tasks:
             s, u = _window(name, wm, since, now)
-            choice = load_choice(name)
-            try:
-                backend = backend_for(name, choice)
-                if name == NOTE:     # `aut label choose` never picks a note's backend: no encoder
-                    if u is None:               # a note's window is whole days
-                        raise ValueError(f"label {name}: a day window has no end")
-                    report[name] = _run_notes(run, cast(NoteBackend, backend), s, u)
-                else:
-                    report[name] = _run_task(run, TASKS[name], choice, backend, s, u)
-            except SourceUnavailable as exc:      # its watermark stays; the others go on
-                print(f"aut: label {name}: {exc}; retried on the next run", file=sys.stderr)
-                report[name] = defaultdict(int, unavailable=1)
-                status, error = "error", scrub_error(exc)
-            except BackendUnavailable as exc:     # the same, and the exit status says so
-                print(f"aut: {exc}", file=sys.stderr)
-                report[name] = defaultdict(int, failed=1)
-                status, error = "error", scrub_error(exc)
+            report[name], stopped = _label_one(run, name, s, u, load_choice(name), backend_for)
+            if stopped:
+                status, error = "error", scrub_error(stopped)
         return report
     except BaseException as exc:
         status, error = "error", scrub_error(exc)
@@ -215,7 +225,8 @@ def run_label(cfg: Config, tasks: list[str] | None = None, since: datetime | Non
     finally:
         if not dry_run and not interrupted:
             events = sum(c["rows"] + c["notes"] for c in report.values())
-            deliver_scan_rows(cfg, [scan_row(cfg, NAME, started, status, error, events)], NAME)
+            deliver_scan_rows(cfg, [scan_row(cfg, NAME, started, status=status, error=error,
+                                             events=events)], NAME)
 
 
 def print_report(report: dict[str, TaskReport], dry_run: bool) -> None:

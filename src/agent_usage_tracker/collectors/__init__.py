@@ -71,4 +71,4 @@ def drain(collect: Collect, cfg: Config, wm: dict, name: str) -> Iterator[Iterat
           file=sys.stderr)
 
 
-__all__ = ["REGISTRY", "Collector", "drain"]
+__all__ = ["REGISTRY", "Collect", "Collector", "drain"]

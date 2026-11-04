@@ -12,6 +12,7 @@ github.com/kenn-io/agentsview, MIT licence, (c) its authors).
 from __future__ import annotations
 
 import copy
+from typing import Any
 from urllib.parse import urlparse
 
 from ..event import ActivityKind, ActivityEvent, EventSession, make_event_id
@@ -19,7 +20,7 @@ from ..repo_keys import RepoKeys
 from .activity_common import (IDLE_S, Link, TurnAgg, add_call, blank_tool_tally, commit_rows, ms_between,
                               text_of, text_sha256, tool_key, turn_attrs)
 from .commits import commit_call, commit_dir, commit_shas
-from ._util import dict_or_empty, str_or_none
+from ._util import MS_PER_S, dict_or_empty, str_or_none
 
 _INTERRUPT = "[Request interrupted"
 _REJECTED = "The user doesn't want to proceed"
@@ -59,8 +60,8 @@ class Activity:
         self.lo = s.get("lo")      # the open link turn: last record's uid, ts, session and origin
         self._at3: tuple | None = None     # the (cwd, gitBranch) last placed in this turn
 
-    def state(self) -> dict:
-        s: dict = {}
+    def state(self) -> dict[str, Any]:
+        s: dict[str, Any] = {}
         if self.intr:
             s["intr"] = True
         # A subagent file never gets a turn_duration, so its aggregates would never be used.
@@ -114,73 +115,95 @@ class Activity:
 
     def _record(self, o: dict, sess: EventSession) -> None:
         typ = o.get("type")
+        self._close_link_after_gap(o)
+        if typ in ("queue-operation", "attachment"):
+            self._note_queued(o)
+        elif typ == "pr-link":
+            self._pr(o, sess)
+        elif typ == "worktree-state":
+            self._worktree(o)
+        elif typ in ("ai-title", "custom-title"):
+            self.link.tickets(o.get("aiTitle") or o.get("customTitle"))
+        elif typ == "system":
+            self._system(o, sess)
+        elif typ in ("assistant", "user"):
+            self._note_link_turn(o, sess)
+            m = o.get("message")
+            content = m.get("content") if isinstance(m, dict) else None
+            blocks = [b for b in content if isinstance(b, dict)] if isinstance(content, list) else []
+            if typ == "assistant":
+                self._assistant(o, blocks, sess)
+            else:
+                self._user(o, content, blocks, sess)
+
+    def _close_link_after_gap(self, o: dict) -> None:
         # A record IDLE_S or more after the open link turn's last one: that turn closed there,
         # as a live scan that saw the file idle in between closed it, so any split of scans and
         # one full read cut the same place. shortcut: assumes a record reaches the file within
         # IDLE_S of its timestamp (a synced log that lags longer can split differently); upgrade
         # if synced files show split-vs-full drift.
         gap = ms_between(self.lo["ts"], o.get("timestamp")) if self.lo else None
-        if gap is not None and gap >= IDLE_S * 1000:
+        if gap is not None and gap >= IDLE_S * MS_PER_S:
             self.finish()
-        if typ in ("assistant", "user"):
-            self.lo = {"uid": self._uid(o), "ts": str_or_none(o.get("timestamp")), "sid": sess.session_id,
-                       "turn": sess.turn_id, "origin": sess.run_origin}
-            at3 = (o.get("cwd"), o.get("gitBranch"))
-            if at3 != self._at3:
-                self._at3 = at3
-                self.link.place(3, self.keys.of_cwd(at3[0]), at3[1])
-        if typ == "queue-operation":
+
+    def _note_link_turn(self, o: dict, sess: EventSession) -> None:
+        self.lo = {"uid": self._uid(o), "ts": str_or_none(o.get("timestamp")), "sid": sess.session_id,
+                   "turn": sess.turn_id, "origin": sess.run_origin}
+        at3 = (o.get("cwd"), o.get("gitBranch"))
+        if at3 != self._at3:
+            self._at3 = at3
+            self.link.place(3, self.keys.of_cwd(at3[0]), at3[1])
+
+    def _note_queued(self, o: dict) -> None:
+        if o.get("type") == "queue-operation":
             if o.get("operation") == "enqueue" and isinstance(o.get("content"), str):
                 self.queued.add(text_sha256(o["content"]))
-        elif typ == "attachment":
-            a = o.get("attachment")
-            if isinstance(a, dict) and a.get("type") == "queued_command":
-                self.queued.add(text_sha256(text_of(a.get("prompt"))))
-        elif typ == "pr-link":
-            self._pr(o, sess)
-        elif typ == "worktree-state":
-            ws = o.get("worktreeSession")
-            if isinstance(ws, dict):
-                rk = self.keys.of_cwd(ws.get("originalCwd")) \
-                    or self.keys.of_cwd(ws.get("worktreePath"))
-                self.wt = self.link.source(rk, ws.get("worktreeBranch"))
-            else:                        # the session left its worktree
-                self.wt = None
-        elif typ in ("ai-title", "custom-title"):
-            self.link.tickets(o.get("aiTitle") or o.get("customTitle"))
-        elif typ == "system" and o.get("subtype") == "turn_duration":
+            return
+        a = o.get("attachment")
+        if isinstance(a, dict) and a.get("type") == "queued_command":
+            self.queued.add(text_sha256(text_of(a.get("prompt"))))
+
+    def _worktree(self, o: dict) -> None:
+        ws = o.get("worktreeSession")
+        if isinstance(ws, dict):
+            rk = self.keys.of_cwd(ws.get("originalCwd")) \
+                or self.keys.of_cwd(ws.get("worktreePath"))
+            self.wt = self.link.source(rk, ws.get("worktreeBranch"))
+        else:                        # the session left its worktree
+            self.wt = None
+
+    def _system(self, o: dict, sess: EventSession) -> None:
+        if o.get("subtype") == "turn_duration":
             self._turn(o, sess)
-        elif typ == "system" and o.get("subtype") == "compact_boundary":
+        elif o.get("subtype") == "compact_boundary":
             meta = o.get("compactMetadata")
             trig = meta.get("trigger") if isinstance(meta, dict) else None
             self._emit("compaction", o, self._uid(o), sess,
                        {"trigger": trig} if isinstance(trig, str) else {})
-        elif typ in ("assistant", "user"):
-            m = o.get("message")
-            content = m.get("content") if isinstance(m, dict) else None
-            blocks = [b for b in content if isinstance(b, dict)] if isinstance(content, list) else []
-            if typ == "assistant":
-                for b in blocks:
-                    if b.get("type") == "tool_use":
-                        self._tool_use(o, b, sess)
-                    elif b.get("type") == "text":
-                        # shortcut: a re-logged text block is read again (its SHAs and PRs are
-                        # the session's own, so only the next turn's lists grow); dedup by uuid
-                        # if that skews the link lists
-                        self.link.text(b.get("text"))
-                return
-            self.link.text(text_of(content))
-            for b in blocks:
-                if b.get("type") == "tool_result":
-                    self._tool_result(o, b, sess)
-            if o.get("isMeta"):
-                return
-            is_intr = text_of(content).lstrip().startswith(_INTERRUPT)
-            self.after_intr, self.intr = self.intr, is_intr
-            # A subagent's copy of the interrupt is the same keypress the parent already logged.
-            if is_intr and not (self.subagent or o.get("isSidechain")):
-                self._emit("interrupt", o, self._uid(o), sess,
-                           {"during_tool": "for tool use" in text_of(content)})
+
+    def _assistant(self, o: dict, blocks: list[dict], sess: EventSession) -> None:
+        for b in blocks:
+            if b.get("type") == "tool_use":
+                self._tool_use(o, b, sess)
+            elif b.get("type") == "text":
+                # shortcut: a re-logged text block is read again (its SHAs and PRs are the
+                # session's own, so only the next turn's lists grow); dedup by uuid if that skews
+                # the link lists
+                self.link.text(b.get("text"))
+
+    def _user(self, o: dict, content: object, blocks: list[dict], sess: EventSession) -> None:
+        self.link.text(text_of(content))
+        for b in blocks:
+            if b.get("type") == "tool_result":
+                self._tool_result(o, b, sess)
+        if o.get("isMeta"):
+            return
+        is_intr = text_of(content).lstrip().startswith(_INTERRUPT)
+        self.after_intr, self.intr = self.intr, is_intr
+        # A subagent's copy of the interrupt is the same keypress the parent already logged.
+        if is_intr and not (self.subagent or o.get("isSidechain")):
+            self._emit("interrupt", o, self._uid(o), sess,
+                       {"during_tool": "for tool use" in text_of(content)})
 
     def steer(self, o: dict, uid: str, text: str, sess: EventSession) -> ActivityEvent | None:
         """The steer row for a prompt the collector counted as human (None if it raised). Call after

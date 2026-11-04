@@ -23,13 +23,46 @@ from __future__ import annotations
 import glob
 import json
 import os
+from collections import Counter
 from typing import Callable, Iterator
 
 from ..config import Config
 from ..event import UsageEvent, make_event_id
-from ._util import noop_advance, project_name, safe_int
+from ._util import noop_advance, project_name, safe_int, warn_skipped
 
 NAME = "cursor_sdk"
+
+
+def _run_event(r: object, pos: int, ticket: object, project: str | None) -> UsageEvent | None:
+    """One entry of runs[] as a usage row; None when it has no usage."""
+    if not isinstance(r, dict) or not isinstance(r.get("usage"), dict):
+        return None
+    u = r["usage"]
+    inp = safe_int(u.get("input_tokens"))
+    out = safe_int(u.get("output_tokens"))
+    cr = safe_int(u.get("cache_read_tokens"))
+    cw = safe_int(u.get("cache_write_tokens"))
+    total = safe_int(u.get("total_tokens")) or (inp + out + cr + cw)
+    if total == 0:
+        return None
+    # runs[] is append-only (never reordered/removed mid-list), so `pos` is a stable,
+    # unique per-manifest run id even when the optional `index`/`run_id` fields are absent.
+    idx = r.get("index")
+    run_disc = str(pos if idx is None else idx)
+    model = r.get("model")
+    return UsageEvent(
+        event_id=make_event_id(NAME, str(ticket), run_disc, str(r.get("run_id") or "")),
+        ts=r.get("finished_at") or r.get("started_at"),
+        agent=NAME,
+        model=model if isinstance(model, str) else None,    # a list/dict is unhashable downstream
+        provider="cursor",
+        input_tokens=inp,
+        output_tokens=out,
+        cache_read_tokens=cr,
+        cache_write_tokens=cw,
+        total_tokens=total,
+        project=project,
+    )
 
 
 def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[UsageEvent], Callable[[], None]]]:
@@ -38,47 +71,19 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[UsageEvent], Callable[
         return
     pattern = os.path.expanduser(pattern)   # glob does not expand ~; the documented form uses it
     events: list[UsageEvent] = []
+    skipped: Counter = Counter()
     for path in glob.glob(pattern, recursive=True):
         try:
             with open(path, encoding="utf-8") as fh:
                 m = json.load(fh)
         except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+            skipped["malformed"] += 1       # a later scan re-reads it: this is a full scan
             continue
         if not isinstance(m, dict) or not isinstance(m.get("runs"), list):
             continue
         ticket = m.get("ticket") or path
         project = project_name(m.get("project"))   # basename-only (never a full path) per CONTRACT.md
-        for pos, r in enumerate(m["runs"]):
-            if not isinstance(r, dict):
-                continue
-            u = r.get("usage")
-            if not isinstance(u, dict):
-                continue
-            inp = safe_int(u.get("input_tokens"))
-            out = safe_int(u.get("output_tokens"))
-            cr = safe_int(u.get("cache_read_tokens"))
-            cw = safe_int(u.get("cache_write_tokens"))
-            total = safe_int(u.get("total_tokens")) or (inp + out + cr + cw)
-            if total == 0:
-                continue
-            # runs[] is append-only (never reordered/removed mid-list), so `pos` is a stable,
-            # unique per-manifest run id even when the optional `index`/`run_id` fields are absent.
-            idx = r.get("index")
-            run_disc = str(pos if idx is None else idx)
-            model = r.get("model")
-            if not isinstance(model, str):   # a list/dict here becomes an unhashable dict key downstream
-                model = None
-            events.append(UsageEvent(
-                event_id=make_event_id(NAME, str(ticket), run_disc, str(r.get("run_id") or "")),
-                ts=r.get("finished_at") or r.get("started_at"),
-                agent=NAME,
-                model=model,
-                provider="cursor",
-                input_tokens=inp,
-                output_tokens=out,
-                cache_read_tokens=cr,
-                cache_write_tokens=cw,
-                total_tokens=total,
-                project=project,
-            ))
+        rows = (_run_event(r, pos, ticket, project) for pos, r in enumerate(m["runs"]))
+        events += [e for e in rows if e]
     yield events, noop_advance
+    warn_skipped(NAME, skipped)

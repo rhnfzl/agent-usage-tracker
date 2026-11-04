@@ -7,10 +7,12 @@ import os
 import sys
 from collections import Counter
 from datetime import datetime, timezone
+from typing import Any
 
 # Cap lines read per file per scan so a huge first-scan/backfill file can't spike memory.
 # The offset is committed at the cap, so the next scan simply continues from there.
 _MAX_LINES = 50000
+MS_PER_S = 1000
 
 
 def describe_files(cfg: object, wm: dict) -> str:
@@ -28,7 +30,7 @@ def str_or_none(value: object) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
-def dict_or_empty(value: object) -> dict:
+def dict_or_empty(value: object) -> dict[str, Any]:
     """A dict as is; anything else is {}, for an untrusted nested object in a log record."""
     return value if isinstance(value, dict) else {}
 
@@ -47,13 +49,20 @@ def safe_int(value: object, default: int = 0) -> int:
     return parsed if parsed >= 0 else default
 
 
+def count_field(record: dict[str, Any], key: str) -> int:
+    """A token count from a log record; absent or null is 0. Raises on a malformed one, which the
+    caller counts as a malformed record."""
+    return int(record.get(key) or 0)
+
+
 def noop_advance() -> None:
     """The watermark callback of a full-scan collector: it has no watermark to advance."""
 
 
-def parse_record(raw: bytes) -> dict | None:
-    """One complete JSONL line as a dict, else None. read_new_lines holds back partial lines, so a
-    None is a real anomaly: the caller counts it as malformed and skips it."""
+def parse_record(raw: bytes | str) -> dict | None:
+    """One complete JSONL line as a dict, else None. read_new_lines holds back partial lines, so
+    there a None is a real anomaly: the caller counts it as malformed and skips it. A reader that
+    only shows local text just skips it."""
     try:
         o = json.loads(raw)
     except ValueError:              # JSONDecodeError and UnicodeDecodeError are ValueErrors
@@ -194,6 +203,6 @@ def epoch_ms_to_iso(ms: object) -> str | None:
     if not isinstance(ms, (int, float, str)):
         return None
     try:
-        return datetime.fromtimestamp(float(ms) / 1000.0, tz=timezone.utc).isoformat()
+        return datetime.fromtimestamp(float(ms) / MS_PER_S, tz=timezone.utc).isoformat()
     except (ValueError, OSError, OverflowError):
         return None

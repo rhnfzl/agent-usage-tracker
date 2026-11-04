@@ -21,7 +21,7 @@ import sys
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
-from typing import Callable
+from typing import Any, Callable
 from urllib.parse import urlparse
 
 from . import __version__
@@ -143,73 +143,94 @@ def send_session_rows(dsn: str, rows: list[dict]) -> None:
     write_many(dsn, _SESSION_SQL, [tuple(r[c] for c in SESSION_COLUMNS) for r in rows])
 
 
-def make_sender(cfg: Config) -> Callable[[list[Row]], None]:
-    """Return a send(batch): usage over the webhook, or over pg_dsn without one or when it fails,
-    and every other row over pg_dsn. Raises (before any send) if nothing is configured or a
-    configured webhook is missing its secret."""
-    url, secret, dsn = cfg.webhook_url, cfg.webhook_secret, cfg.pg_dsn
-    if not url and not dsn:
-        raise AutError(
-            "no transport configured: set [transport].webhook_url (and/or pg_dsn) in your "
-            "config, or run with --dry-run to preview without sending."
-        )
-    if url and not secret:
+def _check_webhook(cfg: Config) -> None:
+    """Raises if a configured webhook is missing its secret or would leak it."""
+    url = cfg.webhook_url or ""
+    if not cfg.webhook_secret:
         raise AutError(
             "transport.webhook_url is set but webhook_secret is missing or unresolved; "
             "refusing to send unauthenticated. Set webhook_secret (or its env: value)."
         )
-    if url:
-        parsed = urlparse(url)
-        scheme = parsed.scheme.lower()
-        host = (parsed.hostname or "").lower()
-        # Allowlist, not blocklist: only https, or http to localhost for testing. Anything else
-        # (http to a remote host, or ftp:/file:/no-scheme) could leak the secret or misfire.
-        if not (scheme == "https" or (scheme == "http" and host in LOCAL_HOSTS)):
-            raise AutError(
-                f"refusing to send the webhook secret to '{url}': only https:// "
-                f"(or http:// to localhost for testing) is allowed, not '{scheme or 'no'}-scheme'."
-            )
-        # A warning, not a refusal: a webhook outside Access works today without these headers.
-        if bool(cfg.cf_access_client_id) != bool(cfg.cf_access_client_secret):
-            print("aut: warning: only one of cf_access_client_id and cf_access_client_secret is "
-                  "set, so no Cloudflare Access headers are sent.", file=sys.stderr)
+    parsed = urlparse(url)
+    scheme = parsed.scheme.lower()
+    host = (parsed.hostname or "").lower()
+    # Allowlist, not blocklist: only https, or http to localhost for testing. Anything else
+    # (http to a remote host, or ftp:/file:/no-scheme) could leak the secret or misfire.
+    if not (scheme == "https" or (scheme == "http" and host in LOCAL_HOSTS)):
+        raise AutError(
+            f"refusing to send the webhook secret to '{url}': only https:// "
+            f"(or http:// to localhost for testing) is allowed, not '{scheme or 'no'}-scheme'."
+        )
+    # A warning, not a refusal: a webhook outside Access works today without these headers.
+    if bool(cfg.cf_access_client_id) != bool(cfg.cf_access_client_secret):
+        print("aut: warning: only one of cf_access_client_id and cf_access_client_secret is "
+              "set, so no Cloudflare Access headers are sent.", file=sys.stderr)
 
-    note_shown = fallback_shown = False
 
-    def send(batch: list[Row]) -> None:
-        nonlocal note_shown, fallback_shown
+class _Sender:
+    """send(batch): usage over the webhook, or over pg_dsn without one or when it fails, and every
+    other row over pg_dsn. Each stderr note shows once per scan."""
+
+    def __init__(self, cfg: Config) -> None:
+        self.cfg = cfg
+        self.note_shown = self.fallback_shown = False
+
+    def __call__(self, batch: list[Row]) -> None:
         if not batch:
             return
-        usage, acts, times = _split(batch)
-        webhook_err: Exception | None = None
-        if url and secret:
-            try:
-                if usage:
-                    _post_webhook(url, secret, usage, cfg.cf_access_headers)
-            except (*HTTP_ERRORS, RuntimeError) as exc:
-                webhook_err = exc
-                if dsn and not fallback_shown:      # printed first, so a PG failure shows both
-                    fallback_shown = True
-                    print(f"aut: warning: webhook delivery failed, using transport.pg_dsn: "
-                          f"{_local_error(exc)}", file=sys.stderr)
-            else:
-                if acts or times or any(e.session for e in usage):
-                    if dsn:
-                        insert_pg(dsn, batch, with_usage=False)
-                    elif not note_shown:
-                        # shortcut: the webhook carries usage only; upgrade when a machine runs
-                        # webhook-only (time rows have no backfill, so that machine loses them).
-                        note_shown = True
-                        print("aut: note: session/activity/time rows not sent over the webhook "
-                              "(needs transport.pg_dsn)", file=sys.stderr)
+        cfg = self.cfg
+        webhook_err = None
+        if cfg.webhook_url and cfg.webhook_secret:
+            webhook_err = self._post_usage(batch, cfg.webhook_url, cfg.webhook_secret)
+            if webhook_err is None:
+                self._send_the_rest(batch)
                 return
-        if dsn:
-            insert_pg(dsn, batch)
+        if cfg.pg_dsn:
+            insert_pg(cfg.pg_dsn, batch)
             return
         raise RuntimeError(f"webhook delivery failed and no PG fallback: {webhook_err}") \
             from webhook_err
 
-    return send
+    def _post_usage(self, batch: list[Row], url: str, secret: str) -> Exception | None:
+        """The webhook's failure, if any: the caller falls back to pg_dsn on it."""
+        usage = _split(batch)[0]
+        try:
+            if usage:
+                _post_webhook(url, secret, usage, self.cfg.cf_access_headers)
+        except (*HTTP_ERRORS, RuntimeError) as exc:
+            if self.cfg.pg_dsn and not self.fallback_shown:  # printed first: a PG failure shows both
+                self.fallback_shown = True
+                print(f"aut: warning: webhook delivery failed, using transport.pg_dsn: "
+                      f"{_local_error(exc)}", file=sys.stderr)
+            return exc
+        return None
+
+    def _send_the_rest(self, batch: list[Row]) -> None:
+        """What the webhook does not carry goes over pg_dsn; its failure raises, watermark stays."""
+        usage, acts, times = _split(batch)
+        if not (acts or times or any(e.session for e in usage)):
+            return
+        if self.cfg.pg_dsn:
+            insert_pg(self.cfg.pg_dsn, batch, with_usage=False)
+        elif not self.note_shown:
+            # shortcut: the webhook carries usage only; upgrade when a machine runs
+            # webhook-only (time rows have no backfill, so that machine loses them).
+            self.note_shown = True
+            print("aut: note: session/activity/time rows not sent over the webhook "
+                  "(needs transport.pg_dsn)", file=sys.stderr)
+
+
+def make_sender(cfg: Config) -> Callable[[list[Row]], None]:
+    """Return a send(batch), see _Sender. Raises (before any send) if nothing is configured or a
+    configured webhook is missing its secret."""
+    if not cfg.webhook_url and not cfg.pg_dsn:
+        raise AutError(
+            "no transport configured: set [transport].webhook_url (and/or pg_dsn) in your "
+            "config, or run with --dry-run to preview without sending."
+        )
+    if cfg.webhook_url:
+        _check_webhook(cfg)
+    return _Sender(cfg)
 
 
 def scrub_error(exc: BaseException) -> str:
@@ -224,9 +245,9 @@ def _local_error(exc: BaseException) -> str:
     return f"{type(exc).__name__}: {redact(' '.join(str(exc).split()))}"
 
 
-def scan_row(cfg: Config, collector: str, started_at: datetime, status: str = "ok",
+def scan_row(cfg: Config, collector: str, started_at: datetime, *, status: str = "ok",
              error: str | None = None, events: int = 0, human: int = 0,
-             newest_ts: datetime | None = None) -> dict:
+             newest_ts: datetime | None = None) -> dict[str, Any]:
     """One agents.collector_scan row, finished now."""
     return {"machine": cfg.machine, "collector": collector, "started_at": started_at,
             "finished_at": datetime.now(timezone.utc), "status": status, "events": events,

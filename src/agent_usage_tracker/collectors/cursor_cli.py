@@ -27,7 +27,7 @@ from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Iterable, Iterator
+from typing import Any, Generator, Iterable, Iterator
 
 from ..config import Config
 from ..event import (ActivityKind, Batch, ActivityEvent, CollectorUnavailable, EventSession, UsageEvent,
@@ -45,7 +45,7 @@ NAME = "cursor_cli"
 # (turn rows are insert-only); upgrade if Cursor ever logs a turn end in the store.
 _IDLE_S = 3600
 _ENDED = {"FINISHED": "finished", "CANCELLED": "cancelled", "ERROR": "error"}
-_BATCH = 500
+_SQL_IN_CHUNK = 500
 _TS = re.compile(r"<timestamp>\s*\w+,\s*([A-Za-z]{3})\w*\.?\s+(\d{1,2}),\s*(\d{4}),\s*(\d{1,2}):(\d\d)"
                  r"\s*([AP]M)\s*\(UTC(?:([+-])(\d{1,2})(?::(\d\d))?)?\)\s*</timestamp>")
 USER_QUERY = re.compile(r"<user_query>(.*?)</user_query>", re.S)
@@ -137,7 +137,7 @@ def root_lists(con: sqlite3.Connection) -> list[tuple[str, ...]]:
     for (data,) in con.execute("SELECT data FROM blobs WHERE substr(data, 1, 2) = X'0A20'"):
         try:
             ids = _field1_ids(bytes(data))
-        except (ValueError, IndexError):
+        except (ValueError, IndexError):    # a message blob that merely opens like a root
             continue
         if ids:
             seqs.add(ids)
@@ -154,13 +154,13 @@ def messages(con: sqlite3.Connection, ids: set[str]) -> dict[str, dict]:
         for k, v in rows:
             try:
                 m = json.loads(v)
-            except (ValueError, TypeError):
+            except (ValueError, TypeError):     # a listed id can be a protobuf root, not a message
                 continue
             if isinstance(m, dict):
                 out[k] = m
     q = sorted(ids)
-    for j in range(0, len(q), _BATCH):
-        part = q[j:j + _BATCH]
+    for j in range(0, len(q), _SQL_IN_CHUNK):
+        part = q[j:j + _SQL_IN_CHUNK]
         marks = ",".join("?" * len(part))
         sql = f"SELECT id, data FROM blobs WHERE id IN ({marks})"  # nosec B608 # marks is only ?s
         take(con.execute(sql, part))
@@ -205,18 +205,22 @@ class _Activity:
         content = [b for b in message["content"] if isinstance(b, dict)] \
             if isinstance(message.get("content"), list) else []
         if message.get("role") == "assistant":
-            link.text(text_of(content))
-            for b in content:
-                if b.get("type") == "tool-call" and isinstance(b.get("toolName"), str):
-                    cid = b.get("toolCallId")
-                    self.calls[cid] = b.get("args")
-                    if isinstance(cid, str) and cid in turn.cids:
-                        continue        # a rewritten blob that a later root lists again
-                    turn.cids.add(cid)
-                    add_call(turn.agg, _tool(b["toolName"]), b.get("args"))
-            return
-        if message.get("role") != "tool":
-            return
+            self._assistant(content, turn, link)
+        elif message.get("role") == "tool":
+            self._tool_message(message, content, turn, link)
+
+    def _assistant(self, content: list[dict], turn: _Turn, link: Link) -> None:
+        link.text(text_of(content))
+        for b in content:
+            if b.get("type") == "tool-call" and isinstance(b.get("toolName"), str):
+                cid = b.get("toolCallId")
+                self.calls[cid] = b.get("args")
+                if isinstance(cid, str) and cid in turn.cids:
+                    continue        # a rewritten blob that a later root lists again
+                turn.cids.add(cid)
+                add_call(turn.agg, _tool(b["toolName"]), b.get("args"))
+
+    def _tool_message(self, message: dict, content: list[dict], turn: _Turn, link: Link) -> None:
         hl = _cursor_options(message).get("highLevelToolCallResult")
         err = isinstance(hl, dict) and hl.get("isError") is True
         turn.agg["errors"] += err
@@ -248,34 +252,40 @@ class _Activity:
             turn.acts.append(("commit", f"{cid}|{sha}", attrs))
 
 
+def _read_list(seq: tuple[str, ...], msgs: dict[str, dict], done: set[str], act: _Activity,
+               turns: dict[str, _Turn], seen: set[str]) -> None:
+    """One root list: its prompts open and close turns, its other messages belong to the open one."""
+    rid = None
+    for mid in seq:
+        m = msgs.get(mid)
+        if m is None:
+            continue
+        r = request_id(m)
+        if r:
+            if rid and rid != r:
+                turns[rid].closed = True
+            rid = r
+            turn = turns.setdefault(r, _Turn(m))
+            # A prompt sent while the turn runs reuses its requestId. A blob with the first
+            # prompt's text is a rewrite of it, not a new prompt.
+            # shortcut: "first" is the first one seen in list order, so a follow-up that sits
+            # only in a list sorting before the original's swaps their ids; upgrade if
+            # backfill and live steer ids ever disagree.
+            text = text_of(m.get("content"))
+            if m is not turn.msg and text != text_of(turn.msg.get("content")):
+                turn.more.setdefault(text, (mid, m))
+        elif rid and rid not in done and mid not in seen:
+            seen.add(mid)
+            act.record(m, turns[rid])
+
+
 def _read_turns(lists: list[tuple[str, ...]], msgs: dict[str, dict], done: set[str], idle: bool,
                 act: _Activity) -> dict[str, _Turn]:
     """Every requestId's turn, its activity read unless the turn was already sent."""
     turns: dict[str, _Turn] = {}
     seen: set[str] = set()
     for seq in lists:
-        rid = None
-        for mid in seq:
-            m = msgs.get(mid)
-            if m is None:
-                continue
-            r = request_id(m)
-            if r:
-                if rid and rid != r:
-                    turns[rid].closed = True
-                rid = r
-                turn = turns.setdefault(r, _Turn(m))
-                # A prompt sent while the turn runs reuses its requestId. A blob with the first
-                # prompt's text is a rewrite of it, not a new prompt.
-                # shortcut: "first" is the first one seen in list order, so a follow-up that sits
-                # only in a list sorting before the original's swaps their ids; upgrade if
-                # backfill and live steer ids ever disagree.
-                text = text_of(m.get("content"))
-                if m is not turn.msg and text != text_of(turn.msg.get("content")):
-                    turn.more.setdefault(text, (mid, m))
-            elif rid and rid not in done and mid not in seen:
-                seen.add(mid)
-                act.record(m, turns[rid])
+        _read_list(seq, msgs, done, act, turns, seen)
     for m in msgs.values():             # a prompt no surviving root lists
         r = request_id(m)
         if r and r not in turns:
@@ -397,42 +407,30 @@ def describe(cfg: Config, wm: dict) -> str:
     return describe_files(cfg, wm)
 
 
-def collect(cfg: Config, wm: dict) -> Iterator[Batch]:
-    chats: dict = wm.setdefault("chats", {})
-    sdk: dict = wm.setdefault("sdk", {})
-    keys = RepoKeys(cfg.repo_key_salt)
-    skipped: Counter = Counter()
+def _read_chat(path: str, prev: dict, keys: RepoKeys) -> tuple[list, dict, int] | None:
+    """(rows, the chat's new watermark entry, messages skipped); None when it has nothing new.
+    Raises sqlite3.DatabaseError when the store is locked or corrupt."""
+    con = connect_ro(path)
+    if con is None:
+        raise sqlite3.OperationalError("store could not be opened")
+    try:
+        meta = chat_meta(con)
+        if meta is None or (meta.get("latestRootBlobId") == prev.get("root")
+                            and not prev.get("open")):
+            return None
+        # A deep copy: only advance_watermark() may publish this chat's state into the watermark.
+        cur = copy.deepcopy(prev)
+        cur["root"] = meta.get("latestRootBlobId")
+        events, errs = _chat(path, con, meta, cur, time.time() - _mtime(path) >= _IDLE_S, keys)
+        return events, cur, errs
+    finally:
+        con.close()
+
+
+def _sdk_batches(home: Path, sdk: dict) -> Generator[Batch, None, int]:
+    """The SDK stores' batches; returns how many stores could not be read."""
     unreadable = 0
-    for path in chat_stores(cfg.home):
-        prev = chats.get(path) or {}
-        con = connect_ro(path)
-        if con is None:
-            unreadable += 1
-            continue
-        try:
-            meta = chat_meta(con)
-            if meta is None or (meta.get("latestRootBlobId") == prev.get("root")
-                                and not prev.get("open")):
-                continue
-            # A deep copy: only advance_watermark() may publish this chat's state into the watermark.
-            cur = copy.deepcopy(prev)
-            cur["root"] = meta.get("latestRootBlobId")
-            events, errs = _chat(path, con, meta, cur, time.time() - _mtime(path) >= _IDLE_S,
-                                 keys)
-        except sqlite3.DatabaseError:   # locked or corrupt: the next scan retries
-            unreadable += 1
-            continue
-        finally:
-            con.close()
-        skipped["activity"] += errs
-        if not events and cur == prev:
-            continue
-
-        def advance_watermark(p: str = path, c: dict = cur) -> None:
-            chats[p] = c
-
-        yield events, advance_watermark
-    for path in sorted(glob.glob(str(cfg.home / ".cursor" / "projects" / "*" / "sdk-agent-store"
+    for path in sorted(glob.glob(str(home / ".cursor" / "projects" / "*" / "sdk-agent-store"
                                      / "*" / "index.db"))):
         have = set(sdk.get(path, {}).get("runs", ()))
         runs = _sdk(path, have)
@@ -447,6 +445,34 @@ def collect(cfg: Config, wm: dict) -> Iterator[Batch]:
             sdk[p] = {"runs": seen}
 
         yield runs, advance_sdk_watermark
+    return unreadable
+
+
+def collect(cfg: Config, wm: dict) -> Iterator[Batch]:
+    chats: dict = wm.setdefault("chats", {})
+    sdk: dict = wm.setdefault("sdk", {})
+    keys = RepoKeys(cfg.repo_key_salt)
+    skipped: Counter = Counter()
+    unreadable = 0
+    for path in chat_stores(cfg.home):
+        prev = chats.get(path) or {}
+        try:
+            read = _read_chat(path, prev, keys)
+        except sqlite3.DatabaseError:   # locked or corrupt: counted below, the next scan retries
+            unreadable += 1
+            continue
+        if read is None:
+            continue
+        events, cur, errs = read
+        skipped["activity"] += errs
+        if not events and cur == prev:
+            continue
+
+        def advance_watermark(p: str = path, c: dict = cur) -> None:
+            chats[p] = c
+
+        yield events, advance_watermark
+    unreadable += yield from _sdk_batches(cfg.home, sdk)
     warn_skipped(NAME, skipped, unaffected="human")
     if unreadable:
         raise CollectorUnavailable(f"{NAME}: {unreadable} store(s) locked or corrupt, left for the "
