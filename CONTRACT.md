@@ -415,7 +415,7 @@ commit's `(state, survival)` differs from its latest stored row.
 | `open` | reachable from a local or remote branch, not from the default branch |
 | `abandoned` | reachable from no branch, no twin, no merged PR; also a commit no local clone holds |
 | `superseded` | reachable from no branch and the session's next commit row was an `--amend` (the pre-amend SHA) |
-| `undecided` | under 14 days since the merge (merged) or since the commit row (everything else); also a merged commit whose default ref was last updated before merge + 14 days, and a commit gh could not answer for |
+| `undecided` | under 14 days since the merge (merged) or since the commit row (everything else); also a merged commit whose default ref was last updated before merge + 14 days, a commit gh could not answer for, and a commit whose clone git could not read or whose survival it could not measure |
 
 - `sha` is the commit row's form (often abbreviated); `repo_key` is the row's, else the key of the
   clone that holds the SHA, else `''`. A clone counts as holding a SHA only when its committer
@@ -425,18 +425,23 @@ commit's `(state, survival)` differs from its latest stored row.
   commit before merge + 14 days, only once the default ref was updated after that time (its tip
   is newer, its FETCH_HEAD is newer, or this run fetched it). It is computed once and cached by
   full SHA in `outcomes_cache.json` next to the state file (saved before the sink is written),
-  with gh answers (a "no" only once the commit is 60 days old).
+  with gh answers (a "no" only once the commit is 60 days old). A failed git read is never
+  cached or scored; the next run measures again. A file gone from the base commit counts as 0
+  lines alive.
 - When several clones hold a commit, the one where it is furthest along wins (on the default
   branch, then on a branch, then unreachable).
 - A commit this run cannot see or decide (no clone holds it any more, gh failed, a stale default
-  ref) never replaces a stored row of its sha: decided states stay decided.
+  ref, a failed or timed-out git read of a clone that holds or might hold it) never replaces a
+  stored row of its sha: decided states stay decided. Such a git failure is counted as
+  `repo_unreadable` or `survival_failed` in the run's report.
 - `--fetch` (or `outcome_fetch = true`) runs `git fetch --upload-pack=git-upload-pack --quiet
   --no-tags --no-auto-maintenance --no-write-fetch-head --no-recurse-submodules origin` only in
   a clone whose origin's repo_key a commit row carries (30 s
   each, then SIGTERM so git removes its locks; failures are skipped and counted) and turns on the
   gh lookup. Without it, a commit whose GitHub PR was squash-merged ends `abandoned`, so set
-  `outcome_fetch = true` on the machine that runs the nightly job. A dry run reads the sink and the clones and writes nothing: no rows, no
-  cache, no heartbeat. A real run sends one `agents.collector_scan` row, collector `outcomes`.
+  `outcome_fetch = true` on the machine that runs the nightly job. A dry run reads the sink and the clones as they are and changes nothing: no
+  rows, no cache, no heartbeat, no fetch and no gh even with `--fetch` or `outcome_fetch` (so a
+  squash-merged commit gh would settle previews as `abandoned`). A real run sends one `agents.collector_scan` row, collector `outcomes`.
 
 - Every git command aut runs (here, and `git remote get-url origin` for repo keys) goes through
   `git_safe`: `-c core.fsmonitor= -c core.hooksPath=/dev/null -c protocol.ext.allow=never

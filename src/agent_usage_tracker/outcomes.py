@@ -14,7 +14,8 @@ States (a commit moves through them by new rows; readers take the latest):
   abandoned   unreachable, no twin, no merged PR
   superseded  a pre-amend SHA (unreachable, and the session's next commit was an amend)
   undecided   younger than 14 days (from the merge, or from the commit row when not merged), or
-              not decidable this run (default ref older than merge + 14 days, gh failed)
+              not decidable this run (default ref older than merge + 14 days, gh failed, a git
+              read of the clone failed)
 A run that cannot see or decide a commit never replaces its stored state.
 
 `aut outcome <shipped|ruled-out|open>`: the manual outcome of the newest interactive session of
@@ -32,11 +33,12 @@ import subprocess
 import time
 from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from glob import escape as glob_escape
 from glob import glob
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Literal, NamedTuple, NotRequired, TypedDict
 
 from .collectors import claude_code
 from .config import Config
@@ -59,6 +61,17 @@ _MAX_DEPTH = 6
 _WORKERS = 8
 MANUAL = {"shipped": "shipped", "ruled-out": "ruled_out", "open": "open"}
 
+OutcomeState = Literal["merged", "reverted", "reworked", "open", "abandoned", "superseded",
+                       "undecided"]
+
+
+class Outcome(TypedDict):
+    sha: str
+    repo_key: str
+    state: OutcomeState
+    survival: float | None
+    sticky: NotRequired[bool]     # this run could not see or decide it: keep any stored state
+
 
 def _git(path: str, *args: str, inp: str | None = None, timeout: float = 300) -> str | None:
     """stdout of a git command, or None when it fails or times out."""
@@ -77,18 +90,19 @@ class Clone:
     gh: str | None            # owner/repo when origin is on github.com (for gh)
     default: str | None       # origin/HEAD's target ref, or an origin main/master/develop
     fetched_at: float = 0.0   # when origin was last fetched (FETCH_HEAD, or this run's fetch)
+    readable: bool = True     # False: git failed reading its refs, so `default` says nothing
 
 
-def _default_ref(path: str) -> str | None:
-    """origin's default branch; never a local branch, so unpushed work is never merged."""
-    ref = (_git(path, "symbolic-ref", "-q", "refs/remotes/origin/HEAD") or "").strip()
-    if ref:
-        return ref
-    for cand in ("refs/remotes/origin/main", "refs/remotes/origin/master",
-                 "refs/remotes/origin/develop"):
-        if _git(path, "rev-parse", "--verify", "-q", cand) is not None:
-            return cand
-    return None
+def _default_ref(path: str) -> tuple[str | None, bool]:
+    """(origin's default branch, whether git answered); never a local branch, so unpushed work is
+    never merged. for-each-ref exits 0 for an absent ref, so a None from it is a real failure."""
+    head, *fallbacks = ("refs/remotes/origin/HEAD", "refs/remotes/origin/main",
+                        "refs/remotes/origin/master", "refs/remotes/origin/develop")
+    out = _git(path, "for-each-ref", "--format=%(refname) %(symref)", head, *fallbacks)
+    if out is None:
+        return None, False
+    refs = dict(line.partition(" ")[::2] for line in out.splitlines())
+    return refs.get(head) or next((r for r in fallbacks if r in refs), None), True
 
 
 def find_clones(roots: list[str], keys: RepoKeys) -> list[Clone]:
@@ -116,8 +130,10 @@ def find_clones(roots: list[str], keys: RepoKeys) -> list[Clone]:
                             pass
                     heads = glob(os.path.join(glob_escape(common), "FETCH_HEAD")) + glob(
                         os.path.join(glob_escape(common), "worktrees", "*", "FETCH_HEAD"))
-                    out.append(Clone(dirpath, key, gh, _default_ref(dirpath),
-                                     max((os.path.getmtime(h) for h in heads), default=0.0)))
+                    default, readable = _default_ref(dirpath)
+                    out.append(Clone(dirpath, key, gh, default,
+                                     max((os.path.getmtime(h) for h in heads), default=0.0),
+                                     readable))
             dirnames[:] = [] if depth >= _MAX_DEPTH else \
                 [n for n in dirnames if n not in _SKIP_DIRS]
     return out
@@ -162,12 +178,13 @@ def fetch_clones(clones: list[Clone]) -> tuple[int, int]:
     return ok, failed
 
 
-def _lookup(clone: Clone, shas: list[str]) -> dict[str, tuple[str, int]]:
-    """sha (as stored, possibly abbreviated) -> (full sha, committer time) for those it holds."""
+def _lookup(clone: Clone, shas: list[str]) -> dict[str, tuple[str, int]] | None:
+    """sha (as stored, possibly abbreviated) -> (full sha, committer time) for those it holds;
+    None when git failed."""
     out = _git(clone.path, "cat-file", "--batch-check",
                inp="".join(f"{s}^{{commit}}\n" for s in shas))
     if out is None:
-        return {}
+        return None
     full = {}
     for s, line in zip(shas, out.splitlines()):
         p = line.split()
@@ -176,13 +193,15 @@ def _lookup(clone: Clone, shas: list[str]) -> dict[str, tuple[str, int]]:
     if not full:
         return {}
     log = _git(clone.path, "log", "--no-walk=unsorted", "--stdin", "--format=%H %ct",
-               inp="".join(f"{f}\n" for f in set(full.values()))) or ""
+               inp="".join(f"{f}\n" for f in set(full.values())))
+    if log is None:
+        return None
     ct = dict(line.split() for line in log.splitlines() if line.strip())
     return {s: (f, int(ct[f])) for s, f in full.items() if f in ct}
 
 
-def _patch_ids(path: str, args: list[str], inp: str | None = None) -> dict[str, str]:
-    """full sha -> stable patch id for the commits `git log -p <args>` prints."""
+def _patch_ids(path: str, args: list[str], inp: str | None = None) -> dict[str, str] | None:
+    """full sha -> stable patch id for the commits `git log -p <args>` prints; None when git failed."""
     try:
         log = subprocess.Popen(git_argv(path, "log", "-p", "--format=commit %H", *args),
                                stdin=subprocess.PIPE if inp is not None else subprocess.DEVNULL,
@@ -197,70 +216,104 @@ def _patch_ids(path: str, args: list[str], inp: str | None = None) -> dict[str, 
         out, _ = pid.communicate(timeout=600)
         log.wait(timeout=60)
     except (OSError, subprocess.SubprocessError):
-        return {}
+        return None
+    if log.returncode or pid.returncode:
+        return None
     return {c: p for p, c in (line.split() for line in out.splitlines() if line.strip())}
 
 
+@dataclass(slots=True)
 class _Repo:
-    """What one clone says about its anchors, computed once per run."""
-
-    def __init__(self, clone: Clone, since: int, off_default: list[str]) -> None:
-        d, path = clone.default, clone.path
-        log = (_git(path, "log", "--format=%H %ct %P", d) or "") if d else ""
-        par, ct = {}, {}
-        for line in log.splitlines():
-            h, t, *ps = line.split()
-            par[h], ct[h] = ps, int(t)
-        self.tip_t = ct[log.split(None, 1)[0]] if log else 0
-        # on_default: commit -> when it landed = committer time of the first-parent commit of the
-        # default branch that brought it in (oldest first, so each commit gets its first landing)
-        fp, h = [], log.split(None, 1)[0] if log else None
-        while h in par:
-            fp.append(h)
-            h = par[h][0] if par[h] else None
-        self.on_default: dict[str, int] = {}
-        for f in reversed(fp):
-            stack = [f]
-            while stack:
-                x = stack.pop()
-                if x not in self.on_default:
-                    self.on_default[x] = ct[f]
-                    stack.extend(q for q in par.get(x, ()) if q in par)
-        branches = _git(path, "rev-list", "--branches", "--remotes", *([f"^{d}"] if d else []))
-        self.on_branch = set((branches or "").split())
-        self.twin: dict[str, str] = {}            # off-default full sha -> its twin on default
-        off = [f for f in off_default if f not in self.on_default]
-        if d and off:
-            by_pid = {p: c for c, p in _patch_ids(path, ["--no-merges", f"--since=@{since}",
-                                                         d]).items()}
-            for c, p in _patch_ids(path, ["--no-walk=unsorted", "--stdin"],
-                                   "".join(f"{f}\n" for f in off)).items():
-                if p in by_pid and by_pid[p] != c:
-                    self.twin[c] = by_pid[p]
-        self.reverted: dict[str, int] = {}        # reverted full sha -> earliest revert time
-        rv = _git(path, "log", "--branches", "--remotes", f"--since=@{since}",
-                  "--grep=This reverts commit", "--format=%ct%n%B%x00") or ""
-        for chunk in rv.split("\0"):
-            head, _, body = chunk.strip().partition("\n")
-            for x in _REVERTS.findall(body) if head.isdigit() else ():
-                self.reverted[x] = min(self.reverted.get(x, int(head)), int(head))
+    """What one clone says about its anchors, read once per run. Not ok: a git read failed, so
+    nothing here may decide a commit."""
+    ok: bool = False
+    tip_t: int = 0
+    on_default: dict[str, int] = field(default_factory=dict)  # commit -> when it landed
+    on_branch: set[str] = field(default_factory=set)
+    twin: dict[str, str] = field(default_factory=dict)        # off-default full sha -> twin on default
+    reverted: dict[str, int] = field(default_factory=dict)    # reverted sha -> earliest revert time
 
     def revert_time(self, full: str) -> int | None:
         hits = [t for x, t in self.reverted.items() if full.startswith(x)]
         return min(hits) if hits else None
 
 
+def _landings(log: str) -> tuple[int, dict[str, int]]:
+    """From `git log --format='%H %ct %P' <default>`: (tip time, commit -> when it landed = committer
+    time of the first-parent commit that brought it in; oldest first, so each commit gets its first
+    landing)."""
+    par, ct = {}, {}
+    for line in log.splitlines():
+        h, t, *ps = line.split()
+        par[h], ct[h] = ps, int(t)
+    tip = log.split(None, 1)[0] if log else None
+    fp, h = [], tip
+    while h in par:
+        fp.append(h)
+        h = par[h][0] if par[h] else None
+    on_default: dict[str, int] = {}
+    for f in reversed(fp):
+        stack = [f]
+        while stack:
+            x = stack.pop()
+            if x not in on_default:
+                on_default[x] = ct[f]
+                stack.extend(q for q in par.get(x, ()) if q in par)
+    return (ct[tip] if tip else 0), on_default
+
+
+def _twins(path: str, default: str, since: int, off: list[str]) -> dict[str, str] | None:
+    """off-default full sha -> the commit on default with its patch id; None when git failed."""
+    on_default = _patch_ids(path, ["--no-merges", f"--since=@{since}", default])
+    theirs = _patch_ids(path, ["--no-walk=unsorted", "--stdin"], "".join(f"{f}\n" for f in off))
+    if on_default is None or theirs is None:
+        return None
+    by_pid = {p: c for c, p in on_default.items()}
+    return {c: by_pid[p] for c, p in theirs.items() if p in by_pid and by_pid[p] != c}
+
+
+def _read_repo(clone: Clone, since: int, off_default: list[str]) -> _Repo:
+    d, path = clone.default, clone.path
+    log = _git(path, "log", "--format=%H %ct %P", d) if d else ""
+    branches = _git(path, "rev-list", "--branches", "--remotes", *([f"^{d}"] if d else []))
+    rv = _git(path, "log", "--branches", "--remotes", f"--since=@{since}",
+              "--grep=This reverts commit", "--format=%ct%n%B%x00")
+    if not clone.readable or log is None or branches is None or rv is None:
+        return _Repo()
+    tip_t, on_default = _landings(log)
+    off = [f for f in off_default if f not in on_default]
+    twin = _twins(path, d, since, off) if d and off else {}
+    if twin is None:
+        return _Repo()
+    reverted: dict[str, int] = {}
+    for chunk in rv.split("\0"):
+        head, _, body = chunk.strip().partition("\n")
+        for x in _REVERTS.findall(body) if head.isdigit() else ():
+            reverted[x] = min(reverted.get(x, int(head)), int(head))
+    return _Repo(True, tip_t, on_default, set(branches.split()), twin, reverted)
+
+
+class _GitFailed(Exception):
+    """A git read failed, so survival was not measured (which is not the same as 0 lines alive)."""
+
+
 def _survival(clone: Clone, target: str, merge_t: float) -> float | None:
     """Share of target's added lines still attributed to it on the default branch 14 days after
-    the merge (first BLAME_FILES files). None for a merge commit or a commit adding no lines."""
+    the merge (first BLAME_FILES files). None for a merge or root commit or a commit adding no
+    lines. Raises _GitFailed when git could not answer."""
     path = clone.path
-    parents = (_git(path, "rev-list", "--parents", "-n", "1", target) or "").split()
-    if len(parents) != 2:
+    parents = _git(path, "rev-list", "--parents", "-n", "1", target)
+    if parents is None:
+        raise _GitFailed
+    if len(parents.split()) != 2:
         return None
-    base = (_git(path, "rev-list", "-1", "--first-parent", f"--before=@{int(merge_t + DECIDE_S)}",
-                 clone.default) or "").strip()
+    base = _git(path, "rev-list", "-1", "--first-parent", f"--before=@{int(merge_t + DECIDE_S)}",
+                clone.default)
     raw = _git(path, "show", "--numstat", "-z", "--no-renames", "--format=", target)
-    if not base or raw is None:
+    if base is None or raw is None:
+        raise _GitFailed
+    base = base.strip()
+    if not base:
         return None
     files = []
     for item in raw.split("\0"):
@@ -275,7 +328,13 @@ def _survival(clone: Clone, target: str, merge_t: float) -> float | None:
     alive = 0
     for _, f in files:
         bl = _git(path, "blame", "--porcelain", base, "--", f, timeout=120)
-        alive += sum(1 for line in (bl or "").splitlines() if line.startswith(target + " "))
+        if bl is None:
+            # blame also fails on a path that is no file at base: that one really has 0 lines alive
+            tree = _git(path, "ls-tree", base, "--", f)
+            if tree is None or " blob " in tree.partition("\t")[0]:
+                raise _GitFailed
+            continue
+        alive += sum(1 for line in bl.splitlines() if line.startswith(target + " "))
     return round(min(1.0, alive / added), 4)
 
 
@@ -292,139 +351,205 @@ def _gh_merged(repo: str, sha: str) -> bool | None:
         return None
 
 
-def evaluate(rows: list[dict], clones: list[Clone], now: float, cache: dict,
-             gh: bool = False) -> tuple[list[dict], Counter]:
-    """One outcome per (sha, repo_key) of the commit rows. rows: sha, repo_key, ts (epoch),
-    session_id, amend. cache: full sha -> survival (filled in place); gh answers sit under 'gh:'."""
-    stats: Counter = Counter(rows=len(rows))
-    anchors: dict[tuple[str, str | None], dict] = {}
+class _Pick(NamedTuple):
+    clone: Clone
+    repo: _Repo
+    full: str
+
+
+@dataclass(slots=True)
+class _Anchor:
+    """One (sha, repo_key) of the commit rows."""
+    sha: str
+    key: str | None
+    ts: float
+    amended: bool = False
+    pick: _Pick | None = None     # the clone that knows most of it
+    unread: bool = False          # a clone that might know more could not be read
+
+
+class _SurvivalJob(NamedTuple):
+    o: Outcome
+    clone: Clone
+    target: str
+    merge_t: float
+
+
+class _GhJob(NamedTuple):
+    o: Outcome
+    clone: Clone
+    full: str
+    ts: float
+    on_branch: bool
+
+
+def _anchors(rows: list[dict], stats: Counter) -> list[_Anchor]:
+    """The distinct commits of the rows, a pre-amend one marked as amended."""
+    anchors: dict[tuple[str, str | None], _Anchor] = {}
     by_session = defaultdict(list)
     for r in rows:
         sha = (r["sha"] or "").lower()
         if not _SHA.match(sha):
             stats["junk_sha"] += 1
             continue
-        a = anchors.setdefault((sha, r["repo_key"]), {"ts": r["ts"], "amended": False})
-        a["ts"] = min(a["ts"], r["ts"])
-        by_session[r["session_id"]].append((r["ts"], r["amend"], (sha, r["repo_key"])))
+        a = anchors.setdefault((sha, r["repo_key"]), _Anchor(sha, r["repo_key"], r["ts"]))
+        a.ts = min(a.ts, r["ts"])
+        by_session[r["session_id"]].append((r["ts"], r["amend"], a))
     for seq in by_session.values():
-        seq.sort(key=lambda x: (x[0], bool(x[1]), x[2][0]))   # an amend sorts after a tie
-        for (_, _, k), (_, amend, _) in zip(seq, seq[1:]):
-            anchors[k]["amended"] |= bool(amend)
+        seq.sort(key=lambda x: (x[0], bool(x[1]), x[2].sha))   # an amend sorts after a tie
+        for (_, _, a), (_, amend, _) in zip(seq, seq[1:]):
+            a.amended |= bool(amend)
     stats["anchors"] = len(anchors)
+    return list(anchors.values())
 
-    shas = sorted({s for s, _ in anchors})
+
+def _resolve(anchors: list[_Anchor], clones: list[Clone], stats: Counter) -> None:
+    """Point each anchor at the clone where it is furthest along, and mark the ones a failed git
+    read could change."""
+    shas = sorted({a.sha for a in anchors})
     held = {i: _lookup(c, shas) for i, c in enumerate(clones)} if shas else {}
-    found: dict[tuple, list[tuple[int, str]]] = {}      # anchor -> [(clone index, full sha)]
-    for (sha, key), a in anchors.items():
-        cands = [(i, held[i][sha][0]) for i in held
-                 if sha in held[i] and abs(held[i][sha][1] - a["ts"]) <= DAY]
-        own = [c for c in cands if key and clones[c[0]].key == key]
+    failed = [i for i, h in held.items() if h is None]
+    found: list[tuple[_Anchor, list[tuple[int, str]]]] = []       # [(anchor, [(clone index, full sha)])]
+    per_clone: dict[int, list[tuple[str, int]]] = defaultdict(list)
+    for a in anchors:
+        cands = [(i, h[a.sha][0]) for i, h in held.items()
+                 if h and a.sha in h and abs(h[a.sha][1] - a.ts) <= DAY]
+        own = [c for c in cands if a.key and clones[c[0]].key == a.key]
         cands = own or sorted(cands, key=lambda c: clones[c[0]].key is None)
+        a.unread = any(not own or clones[i].key == a.key for i in failed)
         if cands:
-            found[(sha, key)] = cands
+            found.append((a, cands))
+            for i, full in cands:
+                per_clone[i].append((full, held[i][a.sha][1]))
         else:
             stats["not_found"] += 1
-    per_clone: dict[int, list[str]] = defaultdict(list)
-    for cands in found.values():
-        for i, full in cands:
-            per_clone[i].append(full)
-    repos = {}
-    for i, fulls in per_clone.items():
-        cts = [held[i][s][1] for (s, _), cands in found.items() for j, _ in cands if j == i]
-        repos[i] = _Repo(clones[i], int(min(cts)) - 2 * DAY, fulls)
+    repos = {i: _read_repo(clones[i], int(min(t for _, t in got)) - 2 * DAY, [f for f, _ in got])
+             for i, got in per_clone.items()}
 
     def advance(c: tuple[int, str]) -> int:       # merged < open < unreachable, per clone
         rp, full = repos[c[0]], c[1]
         return 0 if full in rp.on_default or full in rp.twin else 1 if full in rp.on_branch else 2
-    picked = {}                                   # anchor -> the clone that knows most of it
-    for k, cands in found.items():
-        picked[k] = min(cands, key=advance)
+    for a, cands in found:
+        i, full = min(cands, key=advance)
+        a.pick = _Pick(clones[i], repos[i], full)
+        a.unread |= not all(repos[j].ok for j, _ in cands)
         stats["found"] += 1
-        stats["null_key_resolved"] += k[1] is None and clones[picked[k][0]].key is not None
+        stats["null_key_resolved"] += a.key is None and clones[i].key is not None
 
-    outs, jobs, gh_jobs = [], [], []
-    for (sha, key), a in anchors.items():
-        o = {"sha": sha, "repo_key": key or "", "state": "undecided", "survival": None}
-        outs.append(o)
-        young = now - a["ts"] < DECIDE_S
-        if (sha, key) not in picked:
-            # shortcut: a commit no local clone holds counts as abandoned after day 14; right for
-            # work never pushed, wrong for a repo not cloned on this machine. Upgrade with an
-            # 'unknown' state in commit_outcome (and the linker) if that share grows. sticky:
-            # a commit that later goes missing (clone moved, pre-amend SHA pruned) keeps its state.
-            o["state"], o["sticky"] = ("undecided" if young else "abandoned"), True
-            stats["abandoned_not_found"] += not young
-            continue
-        i, full = picked[(sha, key)]
-        c, rp = clones[i], repos[i]
-        o["repo_key"] = key or c.key or ""
-        target = full if full in rp.on_default else rp.twin.get(full)
-        if target:
-            merge_t = rp.on_default[target]            # when it landed on the default branch
-            rv = rp.revert_time(full) or rp.revert_time(target)
-            if now - merge_t < DECIDE_S:
-                pass
-            elif rv is not None and rv - merge_t <= DECIDE_S:
-                o["state"] = "reverted"
-            elif target in cache or max(rp.tip_t, c.fetched_at) >= merge_t + DECIDE_S:
-                o["state"] = "merged"
-                jobs.append((o, c, target, merge_t))
-            else:
-                # shortcut: the default ref was last updated before merge + 14 d, so survival
-                # cannot be measured yet; a repo nobody fetches stays undecided. Upgrade with a
-                # per-repo "inactive" signal if that holds months back.
-                o["sticky"] = True
-                stats["stale_default"] += 1
-        elif full not in rp.on_branch and a["amended"]:
-            o["state"] = "superseded"
-        elif young:
-            pass
-        elif gh and c.gh:        # a squash-merged PR leaves its commits off the default branch
-            gh_jobs.append((o, c, full, a["ts"], full in rp.on_branch))
-        else:
-            o["state"] = "open" if full in rp.on_branch else "abandoned"
 
-    def gh_one(job) -> tuple[int, int]:
-        o, c, full, ts, on_branch = job
-        k = f"gh:{full}"
-        looked = failed = 0
-        if k not in cache:
-            ans = _gh_merged(c.gh, full)
-            looked, failed = 1, ans is None
-            if ans is None:             # gh could not answer: decide nothing, keep what is stored
-                o["sticky"] = True
-                return looked, 1
-            if ans or now - ts >= _GH_STABLE_S:
-                cache[k] = ans          # a merge never undoes itself; an old "no" stays no
-            merged = ans
-        else:
-            merged = bool(cache[k])
-        o["state"] = "merged" if merged else "open" if on_branch else "abandoned"
-        return looked, int(failed)
+def _decide(a: _Anchor, now: float, cache: dict, gh: bool,
+            stats: Counter) -> tuple[Outcome, _SurvivalJob | _GhJob | None]:
+    """The anchor's outcome, and the job that finishes it if one is needed. Returning with the
+    state untouched means undecided."""
+    o: Outcome = {"sha": a.sha, "repo_key": a.key or "", "state": "undecided", "survival": None}
+    if a.pick:
+        o["repo_key"] = a.key or a.pick.clone.key or ""
+    if a.unread:                  # git could not answer: decide nothing, keep what is stored
+        o["sticky"] = True
+        stats["repo_unreadable"] += 1
+        return o, None
+    young = now - a.ts < DECIDE_S
+    if a.pick is None:
+        # shortcut: a commit no local clone holds counts as abandoned after day 14; right for
+        # work never pushed, wrong for a repo not cloned on this machine. Upgrade with an
+        # 'unknown' state in commit_outcome (and the linker) if that share grows. sticky:
+        # a commit that later goes missing (clone moved, pre-amend SHA pruned) keeps its state.
+        o["state"], o["sticky"] = ("undecided" if young else "abandoned"), True
+        stats["abandoned_not_found"] += not young
+        return o, None
+    c, rp, full = a.pick
+    target = full if full in rp.on_default else rp.twin.get(full)
+    if target:
+        merge_t = rp.on_default[target]            # when it landed on the default branch
+        rv = rp.revert_time(full) or rp.revert_time(target)
+        if now - merge_t < DECIDE_S:
+            return o, None
+        if rv is not None and rv - merge_t <= DECIDE_S:
+            o["state"] = "reverted"
+            return o, None
+        if target in cache or max(rp.tip_t, c.fetched_at) >= merge_t + DECIDE_S:
+            o["state"] = "merged"
+            return o, _SurvivalJob(o, c, target, merge_t)
+        # shortcut: the default ref was last updated before merge + 14 d, so survival
+        # cannot be measured yet; a repo nobody fetches stays undecided. Upgrade with a
+        # per-repo "inactive" signal if that holds months back.
+        o["sticky"] = True
+        stats["stale_default"] += 1
+        return o, None
+    on_branch = full in rp.on_branch
+    if not on_branch and a.amended:
+        o["state"] = "superseded"
+    elif young:
+        pass
+    elif gh and c.gh:            # a squash-merged PR leaves its commits off the default branch
+        return o, _GhJob(o, c, full, a.ts, on_branch)
+    else:
+        o["state"] = "open" if on_branch else "abandoned"
+    return o, None
 
-    def surv_one(job) -> bool:
-        o, c, target, merge_t = job
-        fresh = target not in cache
-        if fresh:
+
+def _ask_gh(job: _GhJob, now: float, cache: dict) -> tuple[int, int]:
+    """Settle a commit off the default branch by its PR; (gh lookups, gh failures)."""
+    o, c, full, ts, on_branch = job
+    k = f"gh:{full}"
+    looked = 0
+    if k in cache:
+        merged = bool(cache[k])
+    else:
+        merged = _gh_merged(c.gh, full)
+        looked = 1
+        if merged is None:          # gh could not answer: decide nothing, keep what is stored
+            o["sticky"] = True
+            return 1, 1
+        if merged or now - ts >= _GH_STABLE_S:
+            cache[k] = merged       # a merge never undoes itself; an old "no" stays no
+    o["state"] = "merged" if merged else "open" if on_branch else "abandoned"
+    return looked, 0
+
+
+def _measure(job: _SurvivalJob, cache: dict) -> str:
+    """Fill in a merged commit's survival; the stat to count."""
+    o, c, target, merge_t = job
+    fresh = target not in cache
+    if fresh:
+        try:
             cache[target] = _survival(c, target, merge_t)
-        o["survival"] = cache[target]
-        if o["survival"] is not None and o["survival"] < 0.5:
-            o["state"] = "reworked"
-        return fresh
+        except _GitFailed:          # not cached: the next run measures it again
+            o["state"], o["sticky"] = "undecided", True
+            return "survival_failed"
+    o["survival"] = cache[target]
+    if o["survival"] is not None and o["survival"] < 0.5:
+        o["state"] = "reworked"
+    return "survival_computed" if fresh else "survival_cached"
 
+
+def evaluate(rows: list[dict], clones: list[Clone], now: float, cache: dict,
+             gh: bool = False) -> tuple[list[Outcome], Counter]:
+    """One outcome per (sha, repo_key) of the commit rows. rows: sha, repo_key, ts (epoch),
+    session_id, amend. cache: full sha -> survival (filled in place); gh answers sit under 'gh:'."""
+    stats: Counter = Counter(rows=len(rows))
+    anchors = _anchors(rows, stats)
+    _resolve(anchors, clones, stats)
+    outs, jobs, gh_jobs = [], [], []
+    for a in anchors:
+        o, job = _decide(a, now, cache, gh, stats)
+        outs.append(o)
+        if isinstance(job, _GhJob):
+            gh_jobs.append(job)
+        elif job:
+            jobs.append(job)
     with ThreadPoolExecutor(_WORKERS) as pool:     # tallies stay on this thread
-        for looked, failed in pool.map(gh_one, gh_jobs):
+        for looked, failed in pool.map(lambda j: _ask_gh(j, now, cache), gh_jobs):
             stats["gh_lookups"] += looked
             stats["gh_failed"] += failed
-        for fresh in pool.map(surv_one, jobs):
-            stats["survival_computed" if fresh else "survival_cached"] += 1
+        for stat in pool.map(lambda j: _measure(j, cache), jobs):
+            stats[stat] += 1
     # a NULL-key row resolved to a clone can repeat a keyed row of the same commit: keep one
     outs = list({(o["sha"], o["repo_key"]): o for o in reversed(outs)}.values())[::-1]
     return outs, stats
 
 
-def pending(outs: list[dict], stored: dict[tuple[str, str], tuple]) -> list[dict]:
+def pending(outs: list[Outcome], stored: dict[tuple[str, str], tuple]) -> list[Outcome]:
     """The outcomes whose (state, survival) differs from the latest stored row. A sticky outcome
     (this run could not see the commit or decide it) never replaces a stored row of its sha,
     under any repo_key: readers match on the sha alone."""
@@ -465,7 +590,8 @@ def _insert(dsn: str, rows: list[dict]) -> None:
 
 def run_outcomes(cfg: Config, fetch: bool, dry_run: bool, now: float | None = None) -> Counter:
     """Score every commit row and write the changed states. --fetch also turns on gh. A dry run
-    reads the sink and the clones and writes nothing: no rows, no cache, no heartbeat."""
+    reads the sink and the clones as they are and changes nothing: no rows, no cache, no heartbeat,
+    no fetch, no gh, even with --fetch or outcome_fetch."""
     dsn = cfg.require_pg("outcomes (it reads the commit rows)")
     started = datetime.now(timezone.utc)
     now = now if now is not None else started.timestamp()
@@ -474,6 +600,9 @@ def run_outcomes(cfg: Config, fetch: bool, dry_run: bool, now: float | None = No
         rows = _load_rows(dsn)
         clones = find_clones(list(cfg.outcome_repo_roots), RepoKeys(cfg.repo_key_salt))
         stats: Counter = Counter(clones=len(clones))
+        if fetch and dry_run:
+            stats["fetch_skipped_dry_run"] = 1
+        fetch = fetch and not dry_run
         if fetch:
             # only repos the agents committed to: fetch talks to the remote, so a clone that
             # merely sits under a root (and holds a matching short SHA) is never fetched

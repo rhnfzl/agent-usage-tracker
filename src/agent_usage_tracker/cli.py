@@ -259,7 +259,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p_outs = sub.add_parser("outcomes", help="score commit rows against the local clones")
     p_outs.add_argument("--fetch", action="store_true",
                         help="git fetch the clones and ask gh first (config: outcome_fetch)")
-    p_outs.add_argument("--dry-run", action="store_true", help="count states, write nothing")
+    p_outs.add_argument("--dry-run", action="store_true", help="count states, write nothing, no fetch or gh")
     p_out = sub.add_parser("outcome", help="mark this project's newest session's outcome")
     p_out.add_argument("outcome", choices=["shipped", "ruled-out", "open"])
     p_out.add_argument("--session", help="the session id (default: newest interactive here)")

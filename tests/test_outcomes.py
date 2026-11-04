@@ -9,10 +9,12 @@ Locks the rules:
   - a row with no repo_key takes the key of the clone that holds the SHA, but only when the
     committer time is within a day of the row;
   - survival is computed once and cached, a fetch that fails or times out is skipped and counted;
-  - only changed states are written, a dry run writes nothing, a real run sends the heartbeat;
+  - only changed states are written, a dry run writes nothing and never fetches or asks gh, a
+    real run sends the heartbeat;
   - the merge time is when the commit landed (first parent), survival waits for a default ref
     newer than merge + 14 days, the furthest-along clone wins, a commit gone missing or a failed
-    gh lookup never replaces a stored state, fetch never runs gc and is terminated on timeout;
+    gh lookup or git read never replaces a stored state, a failed git read is never scored or
+    cached as survival, fetch never runs gc and is terminated on timeout;
   - the manual outcome picks the newest interactive session of the current project;
   - a clone's own config, attributes and hooks never make git run a command (diff.external, a
     textconv driver, core.fsmonitor, a hook, remote uploadpack), and --fetch only fetches clones
@@ -692,21 +694,189 @@ def test_fetch_only_clones_with_a_row_key():
     with tempfile.TemporaryDirectory() as d:
         work, s = _world(Path(d))
         fetched: list = []
-        saved = (oc._load_rows, oc.load_json_dict, oc._load_stored, oc.fetch_clones)
+        os.environ["AUT_STATE"] = str(Path(d) / "state" / "state.json")
+        saved = (oc._load_rows, oc.load_json_dict, oc._load_stored, oc.fetch_clones, oc._insert,
+                 push.send_scan_rows)
         oc._load_rows = lambda dsn: [_row(s["A"], None, 30)]       # the SHA is there, no key
         oc.load_json_dict, oc._load_stored = (lambda p: {}), lambda dsn: {}
         oc.fetch_clones = lambda cs: (fetched.extend(cs), (len(cs), 0))[1]
+        oc._insert, push.send_scan_rows = (lambda dsn, rows: None), lambda dsn, rows: None
         try:
             oc.run_outcomes(_cfg(Path(d), (str(Path(d) / "projects"),)), fetch=True,
-                            dry_run=True, now=NOW)
+                            dry_run=False, now=NOW)
             assert fetched == [], fetched
             oc._load_rows = lambda dsn: [_row(s["A"], _key(str(Path(d) / "origin.git")), 30)]
             oc.run_outcomes(_cfg(Path(d), (str(Path(d) / "projects"),)), fetch=True,
-                            dry_run=True, now=NOW)
+                            dry_run=False, now=NOW)
             assert [c.path for c in fetched] == [str(work)], fetched
         finally:
-            oc._load_rows, oc.load_json_dict, oc._load_stored, oc.fetch_clones = saved
+            (oc._load_rows, oc.load_json_dict, oc._load_stored, oc.fetch_clones, oc._insert,
+             push.send_scan_rows) = saved
+            os.environ.pop("AUT_STATE")
     print("ok fetch_only_clones_with_a_row_key")
+
+
+def test_dry_run_never_fetches_or_asks_gh():
+    with tempfile.TemporaryDirectory() as d:
+        work, s = _world(Path(d))
+        key = _key(str(Path(d) / "origin.git"))
+        saved = (oc._load_rows, oc._load_stored, oc.fetch_clones, oc._gh_merged)
+        oc._load_rows = lambda dsn: [_row(s["F"], key, 25)]
+        oc._load_stored = lambda dsn: {}
+        oc.fetch_clones = lambda cs: (_ for _ in ()).throw(AssertionError("fetched"))
+        oc._gh_merged = lambda *a: (_ for _ in ()).throw(AssertionError("asked gh"))
+        try:
+            stats = oc.run_outcomes(_cfg(Path(d), (str(Path(d) / "projects"),)), fetch=True,
+                                    dry_run=True, now=NOW)
+        finally:
+            oc._load_rows, oc._load_stored, oc.fetch_clones, oc._gh_merged = saved
+        assert stats["fetch_skipped_dry_run"] == 1 and "fetch_ok" not in stats, stats
+    print("ok dry_run_never_fetches_or_asks_gh")
+
+
+def _failing_git(match):
+    """oc._git, except that a call whose arguments satisfy match fails as a timeout would."""
+    real = oc._git
+
+    def fake(path, *args, **kw):
+        return None if match(args) else real(path, *args, **kw)
+    return fake
+
+
+def _with_git(match, fn):
+    real = oc._git
+    oc._git = _failing_git(match)
+    try:
+        return fn()
+    finally:
+        oc._git = real
+
+
+def test_a_git_failure_never_replaces_a_stored_state():
+    reads = {"default log": lambda a: a[0] == "log" and "--format=%H %ct %P" in a,
+             "branches": lambda a: a[0] == "rev-list" and "--branches" in a,
+             "reverts": lambda a: a[0] == "log" and "--grep=This reverts commit" in a,
+             "lookup": lambda a: a[0] == "cat-file"}
+    with tempfile.TemporaryDirectory() as d:
+        work, s = _world(Path(d))
+        key = _key(str(Path(d) / "origin.git"))
+        clones = oc.find_clones([str(Path(d) / "projects")], RepoKeys(SALT))
+        rows = [_row(s["A"], key, 30)]
+        for name, match in reads.items():
+            cache: dict = {}
+            outs, stats = _with_git(match, lambda: oc.evaluate(rows, clones, NOW, cache=cache))
+            assert (outs[0]["state"], outs[0]["sticky"]) == ("undecided", True), (name, outs)
+            assert stats["repo_unreadable"] == 1 and cache == {}, (name, stats, cache)
+            assert oc.pending(outs, {(s["A"][:9], key): ("merged", 1.0)}) == [], name
+        outs, _ = oc.evaluate(rows, clones, NOW, cache={})
+        assert outs[0]["state"] == "merged" and "sticky" not in outs[0], outs   # healthy again
+    print("ok a_git_failure_never_replaces_a_stored_state")
+
+
+def test_a_clone_that_cannot_answer_may_know_more():
+    """The stale clone says open; the current one fails: do not take the stale answer."""
+    with tempfile.TemporaryDirectory() as d:
+        work, s = _world(Path(d))
+        stale = Path(d) / "projects" / "stale"
+        subprocess.run(["git", "clone", "-q", str(Path(d) / "origin.git"), str(stale)], check=True)
+        _g(stale, "update-ref", "refs/remotes/origin/main", s["D"])
+        _g(stale, "branch", "-q", "topic", s["A"])
+        clones = oc.find_clones([str(Path(d) / "projects")], RepoKeys(SALT))
+        rows = [_row(s["A"], _key(str(Path(d) / "origin.git")), 30)]
+        real = oc._lookup
+        oc._lookup = lambda c, shas: None if c.path == str(work) else real(c, shas)
+        try:
+            outs, stats = oc.evaluate(rows, clones, NOW, cache={})
+        finally:
+            oc._lookup = real
+        assert (outs[0]["state"], outs[0]["sticky"]) == ("undecided", True), outs
+        assert stats["repo_unreadable"] == 1, stats
+    print("ok a_clone_that_cannot_answer_may_know_more")
+
+
+def test_patch_id_failure_is_not_an_empty_answer():
+    with tempfile.TemporaryDirectory() as d:
+        work, s = _world(Path(d))
+        assert s["A"] in oc._patch_ids(str(work), ["-1", s["A"]])
+        assert oc._patch_ids(str(work), ["refs/heads/no-such-ref"]) is None
+    print("ok patch_id_failure_is_not_an_empty_answer")
+
+
+def test_default_ref_failure_is_not_no_default():
+    with tempfile.TemporaryDirectory() as d:
+        work, s = _world(Path(d))
+        assert oc._default_ref(str(work)) == ("refs/remotes/origin/main", True)
+        _g(work, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/gone")
+        assert oc._default_ref(str(work)) == ("refs/remotes/origin/main", True)   # dangling HEAD
+        _g(work, "update-ref", "-d", "refs/remotes/origin/main")
+        assert oc._default_ref(str(work)) == (None, True)            # no default: a real answer
+        clones = _with_git(lambda a: a[0] == "for-each-ref",
+                           lambda: oc.find_clones([str(Path(d) / "projects")], RepoKeys(SALT)))
+        assert clones[0].default is None and not clones[0].readable, clones
+        outs, _ = oc.evaluate([_row(s["A"], None, 30)], clones, NOW, cache={})
+        assert (outs[0]["state"], outs[0]["sticky"]) == ("undecided", True), outs
+    print("ok default_ref_failure_is_not_no_default")
+
+
+def test_failed_survival_is_neither_scored_nor_cached():
+    reads = {"blame": lambda a: a[0] == "blame" or a[0] == "ls-tree",
+             "blame only": lambda a: a[0] == "blame",          # the file is there: a real failure
+             "numstat": lambda a: a[0] == "show",
+             "parents": lambda a: a[0] == "rev-list" and "--parents" in a,
+             "base": lambda a: a[0] == "rev-list" and "--first-parent" in a}
+    with tempfile.TemporaryDirectory() as d:
+        work, s = _world(Path(d))
+        key = _key(str(Path(d) / "origin.git"))
+        clones = oc.find_clones([str(Path(d) / "projects")], RepoKeys(SALT))
+        rows = [_row(s["A"], key, 30)]
+        cache: dict = {}
+        for name, match in reads.items():
+            outs, stats = _with_git(match, lambda: oc.evaluate(rows, clones, NOW, cache=cache))
+            assert (outs[0]["state"], outs[0]["survival"], outs[0]["sticky"]) == \
+                ("undecided", None, True), (name, outs)
+            assert cache == {} and stats["survival_failed"] == 1, (name, cache, stats)
+            assert oc.pending(outs, {(s["A"][:9], key): ("merged", 1.0)}) == [], name
+        outs, stats = oc.evaluate(rows, clones, NOW, cache=cache)       # measured on the next run
+        assert (outs[0]["state"], outs[0]["survival"]) == ("merged", 1.0), outs
+        assert cache == {s["A"]: 1.0} and stats["survival_computed"] == 1, (cache, stats)
+    print("ok failed_survival_is_neither_scored_nor_cached")
+
+
+def test_file_deleted_by_the_base_counts_as_zero_alive():
+    with tempfile.TemporaryDirectory() as d:
+        origin, work = Path(d) / "origin.git", Path(d) / "projects" / "work"
+        subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(origin)], check=True)
+        work.mkdir(parents=True)
+        _g(work, "init", "-q", "-b", "main")
+        _g(work, "remote", "add", "origin", str(origin))
+        _commit(work, "base.txt", "base\n", 60)
+        x = _commit(work, "x.txt", _lines("x"), 40)
+        _g(work, "rm", "-q", "x.txt")
+        _g(work, "commit", "-q", "-m", "drop x", age=35)
+        _commit(work, "later.txt", "later\n", 1)
+        _g(work, "push", "-q", "origin", "main")
+        _g(work, "remote", "set-head", "origin", "main")
+        clones = oc.find_clones([str(Path(d) / "projects")], RepoKeys(SALT))
+        cache: dict = {}
+        outs, _ = oc.evaluate([_row(x, _key(str(origin)), 40)], clones, NOW, cache=cache)
+        assert (outs[0]["state"], outs[0]["survival"]) == ("reworked", 0.0), outs
+        assert cache == {x: 0.0}, cache
+    print("ok file_deleted_by_the_base_counts_as_zero_alive")
+
+
+def test_a_clone_with_no_branches_still_answers():
+    """No branch or remote ref at all: git exits 0 with nothing, which is not a failure."""
+    with tempfile.TemporaryDirectory() as d:
+        work = Path(d) / "projects" / "solo"
+        work.mkdir(parents=True)
+        _g(work, "init", "-q", "-b", "main")
+        a = _commit(work, "a.txt", _lines("a"), 30)
+        _g(work, "checkout", "-q", "--detach")
+        _g(work, "branch", "-q", "-D", "main")
+        clones = oc.find_clones([str(Path(d) / "projects")], RepoKeys(SALT))
+        outs, stats = oc.evaluate([_row(a, None, 30)], clones, NOW, cache={})
+        assert outs[0]["state"] == "abandoned" and not stats["repo_unreadable"], (outs, stats)
+    print("ok a_clone_with_no_branches_still_answers")
 
 
 def test_ctrl_c_sends_no_heartbeat():
