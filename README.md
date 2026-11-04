@@ -22,7 +22,8 @@ It records:
 - **Outcomes**: what became of each agent commit (merged, reverted, reworked, open, abandoned),
   and your own verdict per session or episode.
 - **Labels** (optional extra): a local model answers closed questions such as "what kind of
-  steer was this", and only the answer is sent.
+  steer was this", and only the answer is sent. The one exception is the `daily_note` task,
+  which sends a short note the model writes.
 
 aut itself publishes nothing. The numbers live in your sink's database views.
 
@@ -39,19 +40,26 @@ Every USD figure is **estimated and API-equivalent**, since subscriptions are fl
 **What leaves the machine** (only to the sink you configure):
 
 - token counts, model, provider, timestamps, the `machine` label, and the project directory's
-  basename (never a full path);
+  basename in plain text (never a full path). That basename is usually the repository name;
 - session and turn ids;
-- activity rows: counts, flags, short enums, ids and HMAC keys only;
-- commit SHAs and outcome states, label answers (an enum and a probability);
-- ActivityWatch window titles, only if you enable that collector. They are redacted on this
-  machine first (see [Collectors](#collectors)) and can be turned off with
-  `activitywatch_titles = false`;
+- activity rows: counts, flags, short enums, ids and HMAC keys. Two fields carry names as they
+  are: the skill name on `invoke` rows, and the tool names in a turn's `by_tool` counts. MCP
+  tools all count as `mcp`, but a skill or plugin you named after a client is sent as named;
+- raw commit SHAs on commit rows and in `agents.commit_outcome`, and outcome states. For a
+  public repo a SHA can be looked up;
+- label answers (an enum and a probability). The `daily_note` task also sends a 3 to 5
+  sentence note the local model writes from counts, into `agents.daily_note`;
+- ActivityWatch intervals, only if you enable that collector: the app name (never redacted,
+  and sent even with titles off), its category, the work flag and the rule that matched;
+- ActivityWatch window titles, with that collector on. They are redacted on this machine first
+  (see [Collectors](#collectors)) and can be turned off with `activitywatch_titles = false`;
 - scan heartbeats, whose `error` field holds the exception type only.
 
 **What never leaves**: prompt text, tool output, file paths, commit messages, branch names,
-ticket ids, URLs, repository names, error messages, and the Cursor session token. Repositories,
-branches, tickets, PRs and quoted SHAs are sent only as HMAC-SHA256 keys under a per-install
-salt, so they cannot be matched against a list of candidate names. The local review and
+ticket ids, URLs, remote URLs, error messages, and the Cursor session token. The repository
+identity (its origin remote), branches, tickets, PRs and SHAs quoted in text are sent only as
+HMAC-SHA256 keys under a per-install salt, so they cannot be matched against a list of
+candidate names. The project basename and commit SHAs above are the exceptions. The local review and
 inspect pages read titles from this machine's logs and keep them in the page.
 
 **Network calls aut makes, besides the sink**:
@@ -61,6 +69,7 @@ inspect pages read titles from this machine's logs and keep them in the page.
 | `cursor_api = true` | Cursor's dashboard API, with your local session token, scoped to your own user |
 | `aut sync-prices` | the LiteLLM and models.dev price lists |
 | `aut outcomes --fetch` or `outcome_fetch = true` | `git fetch` in your clones and `gh pr list` |
+| `activitywatch` in `agents` | the ActivityWatch server at `activitywatch_url` (default `http://localhost:5600`). With `activitywatch_title_days` above 0, every real scan also sends `DELETE` requests there for its window events older than that |
 | `aut label teach` | Claude Sonnet through your local `claude -p`, for Claude Code text only (that text already lives with Anthropic); capped by `--budget-usd` |
 
 `aut label` runs the model on this machine. aut never downloads the model.
@@ -160,15 +169,18 @@ matter:
 | Key | Default | Meaning |
 |---|---|---|
 | `machine` | short hostname | role-based label for this machine, e.g. `laptop` |
-| `agents` | every collector except `activitywatch` | which collectors run (see below) |
+| `agents` | every collector except `activitywatch` | which collectors run (see below). The default turns on `cursor`, `cursor_sdk` and `cursor_api` together, so set `agents` yourself before `cursor_api = true`, or Cursor tokens count twice |
 | `[transport] webhook_url` | unset | n8n ingest webhook. `https://` only (or `http://` to localhost) |
 | `[transport] webhook_secret` | unset | sent as `X-AUT-Secret`; a webhook without it is refused |
 | `[transport] cf_access_client_id`, `cf_access_client_secret` | unset | Cloudflare Access service token, to push from any network without a VPN |
-| `[transport] pg_dsn` | unset | direct Postgres. The webhook carries usage only, so this is also how session, activity, time, outcome, label and heartbeat rows arrive |
+| `[transport] pg_dsn` | unset | direct Postgres. The webhook carries usage only, so this is also how activity, time, outcome, label and heartbeat rows arrive. Session rows are the exception: with both transports set and the webhook working, `aut scan` does not send them. Run `aut backfill --sessions-only` from time to time to fill them. A scan sends them only when `pg_dsn` is the only transport or the webhook fails |
 | `repo_key_salt` | random `repo_key.salt` next to the state file | HMAC key for repo, branch, ticket, PR and SHA keys. Set the same value on every machine so keys match |
 | `cursor_api` | `false` | opt-in accurate Cursor usage from the dashboard API |
+| `cursor_api_lookback_days` | `90` | how far back the first `cursor_api` scan reaches. Older history is never fetched |
 | `cursor_human_only` | `false` | the local `cursor` collector sends prompts only, so it can run beside `cursor_api` |
 | `cursor_sdk_manifests` | unset | glob of Cursor SDK run `manifest.json` files |
+| `cursor_db_path` | found per OS | path to Cursor's `state.vscdb` |
+| `home` | the running user's home | the home directory the collectors read |
 | `activitywatch_*` | see the example | URL, title retention (`0` keeps titles), titles on or off, deny lists, work title patterns, categories |
 | `outcome_repo_roots` | `["~/projects"]` | where `aut outcomes` looks for clones (6 levels deep) |
 | `outcome_fetch` | `false` | fetch and ask `gh` before scoring. Turn it on where the nightly job runs, or squash-merged PRs count as abandoned |
@@ -185,9 +197,11 @@ Files aut keeps on this machine:
 |---|---|
 | watermarks | `~/.local/state/agent-usage-tracker/state.json` (`$XDG_STATE_HOME`, `AUT_STATE` overrides) |
 | `repo_key.salt`, `outcomes_cache.json` | next to the state file |
-| `model_prices.json`, `label.json` | next to `config.toml` |
-| label gold, silver and eval files; the trained encoder | `~/.local/share/aut/eval/`, `~/.local/share/aut/label/encoder/` (`$XDG_DATA_HOME`) |
-| `scan.env`, `scan.log`, `retry-pending`, `outcomes-day`, `label-day` | the config dir, used by the timer wrapper |
+| `state.corrupt` | next to the state file: a copy of an unreadable `state.json`, kept before aut starts clean |
+| `model_prices.json`, `label.json` | next to `config.toml`. Nothing in aut reads `model_prices.json` today |
+| label gold, silver and eval files; the trained encoder; the label run cache | `~/.local/share/aut/eval/`, `~/.local/share/aut/label/encoder/`, `~/.local/share/aut/label/cache.json` (`$XDG_DATA_HOME`) |
+| `scan.env`, `scan.log`, `retry-pending`, `outcomes-day`, `label-day` | `~/.config/agent-usage-tracker/`, used by the timer wrapper. The wrapper hard-codes this path, so it ignores `$XDG_CONFIG_HOME` and `AUT_CONFIG` |
+| `/tmp/aut.log`, `/tmp/aut.err` | scan output from the shipped launchd plists. `/tmp` can be read by other users; change the paths in the plists if that matters |
 
 ## Collectors
 
@@ -209,7 +223,10 @@ overlaps none of them.
 
 **ActivityWatch** needs `pg_dsn`. Before anything is sent it drops login window and screen
 saver rows, password managers, private browsing and anything in `activitywatch_deny_apps` or
-`activitywatch_deny_titles`. It redacts credentials, tokens, keys, emails and long base64 runs
+`activitywatch_deny_titles`. Private browsing is found only by its title ("Private Browsing",
+"Incognito", "InPrivate") or the watcher's `incognito` flag. A Chromium private window (Brave,
+Chrome and similar) shows neither, so its title is sent after redaction. Add such browsers to
+`activitywatch_deny_apps`, or set `activitywatch_titles = false`. It redacts credentials, tokens, keys, emails and long base64 runs
 from titles and cuts them to 300 characters. Browser URLs are matched locally and never sent.
 Put the names of private apps or banks in the config, never in code. Titles are kept for good
 unless you set `activitywatch_title_days`, which also deletes ActivityWatch's own older window
@@ -222,12 +239,13 @@ minutes (systemd). Setup steps are in [packaging/README.md](packaging/README.md)
 
 For more than the bare scan, run the wrapper `packaging/launchd/aut-scan.sh` instead (macOS
 and Linux; on systemd set `ExecStart=/bin/bash %h/.config/agent-usage-tracker/aut-scan.sh`).
-Copy it to `~/.config/agent-usage-tracker/`. Each run it:
+Copy it to `~/.config/agent-usage-tracker/`. It needs `nc` and `ssh` on `PATH` when a tunnel is
+set. Each run it:
 
 1. opens an SSH tunnel to the sink if one is configured, reusing one already up;
-2. runs `aut scan`, and on a failed push leaves `retry-pending`. On macOS
-   `packaging/launchd/dev.aut.retry.plist` watches it to retry as soon as the network is back;
-   the systemd unit retries on its own (`Restart=on-failure`);
+2. runs `aut scan`, and on a failed push leaves `retry-pending` and exits non-zero. On macOS
+   `packaging/launchd/dev.aut.retry.plist` watches the marker to retry as soon as the network
+   is back. The systemd unit retries a failed push on its own (`Restart=on-failure`);
 3. once a day after a delivered scan, runs `aut outcomes`;
 4. once a day after that, where `AUT_LABEL=1`, runs `aut label run`;
 5. logs every step with timestamps to `scan.log`.
@@ -255,6 +273,7 @@ fails to send prints a warning and never fails the scan.
 ## Local labels (`aut label`)
 
 Optional, Apple silicon. The model reads the text on this machine and only the label is sent.
+`daily_note` is the exception: it sends the short note the model writes from a day's counts.
 
 1. Fetch the model into the local Hugging Face cache once (see
    [Troubleshooting](#troubleshooting)).
@@ -277,8 +296,8 @@ self-calibration (`time_params`, `app_learned`) all live there, not in aut. It n
 - for `pg_dsn`: a role that can `INSERT` and `SELECT` on `agents.usage_event`,
   `event_session`, `activity_event`, `time_interval`, `collector_scan`, `commit_outcome`,
   `manual_outcome`, `episode_correction` and `daily_note`, and `SELECT` on the sink-built
-  `agents.episode`, `episode_member` and `label_latest`, which the review, inspect and label
-  commands read.
+  `agents.episode` and `episode_member`, which the review and inspect commands read. Labels are
+  read from `activity_event` rows with `kind = 'label'`.
 
 Every table, column and key is in [CONTRACT.md](CONTRACT.md). A deploy walkthrough is in
 [DEPLOY.md](DEPLOY.md).
@@ -316,15 +335,25 @@ set `pg_dsn` but installed aut without the extra. Reinstall with the `[postgres]
 only. Set `pg_dsn` as well, then fill history with
 `aut backfill --sessions-only --activity-only`. Time rows have no backfill.
 
+**Session rows are missing although `pg_dsn` is set** (`note: session rows not sent over the
+webhook`). With both transports set and the webhook working, a scan sends activity and time rows
+over `pg_dsn` but not session rows. Run `aut backfill --sessions-only` to fill them, for example
+from the same timer.
+
 **The tunnel.** `AUT_TUNNEL_HOST` without `AUT_TUNNEL_SPEC` makes the wrapper refuse to scan
 (exit 2, logged in `scan.log`). An unreachable host is not a failure: the wrapper arms
-`retry-pending` and exits 0, and the retry job tries again. Only the wrapper opens the tunnel:
+`retry-pending` and exits 0. On macOS the retry job then tries again. On systemd exit 0 does not
+trigger `Restart=on-failure`, so the next try waits for the next timer run. Only the wrapper opens the tunnel:
 before running `aut outcomes`, `aut inspect` or another `pg_dsn` command by hand, open it
 yourself (`ssh -f -N -L <spec> <host>`).
 
 **`transport.webhook_url is set but webhook_secret is missing`.** launchd and systemd do not
 see your shell's environment, so an `env:` value is empty there. Put the secret in
-`config.toml` (mode 600) or in the unit's environment.
+`config.toml` (mode 600) or in the unit's environment. The same goes for every `env:` value,
+and most fail without an error: an empty `pg_dsn` quietly stops session, activity, time and
+heartbeat rows, empty `cf_access_client_*` values drop the Cloudflare Access headers, and an
+empty `repo_key_salt` falls back to this machine's random `repo_key.salt`, so repo, branch,
+ticket, PR and SHA keys stop matching other machines.
 
 **`aut label run` labels nothing.** `label_tasks` is empty by default. List the tasks there or
 pass `--task`.

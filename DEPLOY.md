@@ -36,7 +36,9 @@ CREATE ROLE agents_ro     LOGIN PASSWORD 'REDACTED';   -- Grafana
    so machines can push from any network.
 
 Everything that is not a usage row (sessions, activity, links, time, heartbeats, outcomes,
-labels) goes over `pg_dsn`. A machine that should send those needs a route to Postgres:
+labels) goes over `pg_dsn`. With both transports set and the webhook working, `aut scan` sends
+activity, links and time over `pg_dsn` but not session rows; run `aut backfill --sessions-only`
+from time to time to fill them. A machine that should send those rows needs a route to Postgres:
 Tailscale, a VPN, or the wrapper's SSH tunnel (`AUT_TUNNEL_HOST`, `AUT_TUNNEL_SPEC`).
 
 ### 3. Grafana
