@@ -88,7 +88,8 @@ def fetch(dsn: str, episode: str | None = None, day: str | None = None,
         where = ("e.episode_id::text = %s OR e.episode_id IN (SELECT m.episode_id FROM "
                  "agents.episode_member m JOIN agents.activity_event a ON a.session_id = "
                  "m.session_id WHERE a.kind = 'steer' AND a.event_id = %s)")
-        assert label is not None        # _check_one_selector
+        if label is None:       # _check_one_selector rules this out
+            raise ValueError("inspect: exactly one of episode, day and label")
         params = (label.split(":")[0], label)
     with connect(dsn) as conn:
         def q(sql: str, p: tuple) -> list:

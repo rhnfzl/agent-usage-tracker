@@ -194,7 +194,8 @@ def run_label(cfg: Config, tasks: list[str] | None = None, since: datetime | Non
             try:
                 backend = backend_for(name, choice)
                 if name == NOTE:     # `aut label choose` never picks a note's backend: no encoder
-                    assert u is not None        # a note's window is whole days
+                    if u is None:               # a note's window is whole days
+                        raise ValueError(f"label {name}: a day window has no end")
                     report[name] = _run_notes(run, cast(NoteBackend, backend), s, u)
                 else:
                     report[name] = _run_task(run, TASKS[name], choice, backend, s, u)

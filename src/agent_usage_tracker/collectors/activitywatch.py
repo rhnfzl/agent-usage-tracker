@@ -25,7 +25,7 @@ import json
 import os
 import plistlib
 import re
-import subprocess
+import subprocess  # nosec B404 # one mdfind argv below, no shell
 import sys
 import time
 import urllib.error
@@ -122,7 +122,7 @@ def _http(cfg: Config, method: str, path: str, body: Any = None) -> Any:
     req = urllib.request.Request(url, method=method,
                                  data=None if body is None else json.dumps(body).encode(),
                                  headers={"Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=_TIMEOUT) as resp:
+    with urllib.request.urlopen(req, timeout=_TIMEOUT) as resp:  # nosec B310 # http(s) only
         raw = resp.read()
     return json.loads(raw) if raw else None
 
@@ -190,8 +190,9 @@ class _MacCategories:
                  f"kMDItemDisplayName == '{app}'")
         dirs = (*_MAC_APP_DIRS, os.path.expanduser("~/Applications/"))
         try:
-            out = subprocess.run(["mdfind", query], capture_output=True, text=True, check=True,
-                                 timeout=_MAC_TIMEOUT).stdout.splitlines()
+            out = subprocess.run(  # nosec B603, B607 # one query argument, quotes refused, no shell
+                ["mdfind", query], capture_output=True, text=True, check=True,
+                timeout=_MAC_TIMEOUT).stdout.splitlines()
             hit = next((p for p in out if p.startswith(dirs)), None)
             if hit is None:
                 return None

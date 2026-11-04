@@ -29,7 +29,7 @@ import os
 import re
 import shutil
 import signal
-import subprocess
+import subprocess  # nosec B404 # argv lists only, no shell in this module
 import time
 from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor
@@ -77,8 +77,9 @@ class Outcome(TypedDict):
 def _git(path: str, *args: str, inp: str | None = None, timeout: float = 300) -> str | None:
     """stdout of a git command, or None when it fails or times out."""
     try:
-        r = subprocess.run(git_argv(path, *args), input=inp, capture_output=True, text=True,
-                           errors="replace", timeout=timeout, env=git_env())
+        r = subprocess.run(  # nosec B603 # no shell; refs and paths are vetted by the callers
+            git_argv(path, *args), input=inp, capture_output=True, text=True,
+            errors="replace", timeout=timeout, env=git_env())
     except (OSError, subprocess.SubprocessError):
         return None
     return r.stdout if r.returncode == 0 else None
@@ -96,23 +97,29 @@ class Clone:
 
 def _default_ref(path: str) -> tuple[str | None, bool]:
     """(origin's default branch, whether git answered); never a local branch, so unpushed work is
-    never merged. for-each-ref exits 0 for an absent ref, so a None from it is a real failure."""
+    never merged. for-each-ref exits 0 for an absent ref, so a None from it is a real failure.
+    A clone's origin/HEAD can name anything: `ref: --ext-diff` would reach git log as a flag and run
+    a repo-defined diff driver, so a target outside origin's refs is ignored."""
     head, *fallbacks = ("refs/remotes/origin/HEAD", "refs/remotes/origin/main",
                         "refs/remotes/origin/master", "refs/remotes/origin/develop")
     out = _git(path, "for-each-ref", "--format=%(refname) %(symref)", head, *fallbacks)
     if out is None:
         return None, False
     refs = dict(line.partition(" ")[::2] for line in out.splitlines())
-    return refs.get(head) or next((r for r in fallbacks if r in refs), None), True
+    target = refs.get(head, "")
+    if target.startswith("refs/remotes/origin/"):
+        return target, True
+    return next((r for r in fallbacks if r in refs), None), True
 
 
 def _common_dir(path: str) -> str | None:
     """The git common dir of the .git at path; "" when git says no repository is there (a stale
     .git holds nothing), None when git failed, so a repository there may hold commits."""
     try:
-        r = subprocess.run(git_argv(path, "rev-parse", "--path-format=absolute", "--git-common-dir"),
-                           capture_output=True, text=True, errors="replace", timeout=10,
-                           env={**git_env(), "LC_ALL": "C"})    # the message below is translated
+        r = subprocess.run(  # nosec B603 # constant args after -C path, no shell
+            git_argv(path, "rev-parse", "--path-format=absolute", "--git-common-dir"),
+            capture_output=True, text=True, errors="replace", timeout=10,
+            env={**git_env(), "LC_ALL": "C"})    # the message below is translated
     except (OSError, subprocess.SubprocessError):
         return None
     if r.returncode == 0:
@@ -163,9 +170,9 @@ def _fetch(path: str) -> bool:
     cmd = git_argv(path, "fetch", "--quiet", "--no-tags", "--no-auto-maintenance",
                    "--no-write-fetch-head", "--no-recurse-submodules", "origin")
     try:
-        p = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                             stderr=subprocess.DEVNULL, start_new_session=True,
-                             env=git_env())
+        p = subprocess.Popen(  # nosec B603 # constant args after -C path, no shell
+            cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, start_new_session=True, env=git_env())
     except OSError:
         return False
     try:
@@ -220,12 +227,13 @@ def _lookup(clone: Clone, shas: list[str]) -> dict[str, _Hit] | None:
 def _patch_ids(path: str, args: list[str], inp: str | None = None) -> dict[str, str] | None:
     """full sha -> stable patch id for the commits `git log -p <args>` prints; None when git failed."""
     try:
-        log = subprocess.Popen(git_argv(path, "log", "-p", "--format=commit %H", *args),
-                               stdin=subprocess.PIPE if inp is not None else subprocess.DEVNULL,
-                               stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=git_env())
-        pid = subprocess.Popen(git_argv(path, "patch-id", "--stable"), stdin=log.stdout,
-                               stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
-                               env=git_env())
+        log = subprocess.Popen(  # nosec B603 # no shell; args are flags and a vetted default ref
+            git_argv(path, "log", "-p", "--format=commit %H", *args),
+            stdin=subprocess.PIPE if inp is not None else subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=git_env())
+        pid = subprocess.Popen(  # nosec B603 # constant args after -C path, no shell
+            git_argv(path, "patch-id", "--stable"), stdin=log.stdout,
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, env=git_env())
         if log.stdout:
             log.stdout.close()
         if inp is not None and log.stdin:
@@ -364,9 +372,10 @@ def _gh_merged(repo: str, sha: str) -> bool | None:
     if not shutil.which("gh"):
         return None
     try:
-        r = subprocess.run(["gh", "pr", "list", "--repo", repo, "--state", "merged", "--search",
-                            sha, "--json", "number", "--limit", "1"], capture_output=True,
-                           text=True, timeout=FETCH_TIMEOUT_S)
+        r = subprocess.run(  # nosec B603, B607 # no shell; repo and sha are values of their flags
+            ["gh", "pr", "list", "--repo", repo, "--state", "merged", "--search",
+             sha, "--json", "number", "--limit", "1"], capture_output=True,
+            text=True, timeout=FETCH_TIMEOUT_S)
         return bool(json.loads(r.stdout)) if r.returncode == 0 else None
     except (OSError, subprocess.SubprocessError, ValueError):
         return None

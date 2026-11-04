@@ -49,7 +49,7 @@ def sample(episodes: list[dict], n: int = SAMPLE) -> list[int]:
     for i, ep in enumerate(episodes):
         k = ep["n_sessions"] or 0
         groups.setdefault((str(ep["outcome"]), 0 if k <= 1 else 1 if k <= 3 else 2), []).append(i)
-    rng = random.Random(0)
+    rng = random.Random(0)  # nosec B311 # a repeatable review sample, not security
     queues = [rng.sample(g, len(g)) for _k, g in sorted(groups.items())]
     picked: list[int] = []
     while len(picked) < n and any(queues):

@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 import re
 import shutil
-import subprocess
+import subprocess  # nosec B404 # one fixed argv in ask_claude, no shell
 import tempfile
 from collections import Counter
 from datetime import date
@@ -65,8 +65,9 @@ def ask_claude(prompt: str, timeout: int = 180) -> tuple[str, float]:
     if not exe:
         raise AutError("label teach: the claude CLI is not on PATH")
     with tempfile.TemporaryDirectory() as d:
-        p = subprocess.run([exe, *CLAUDE_ARGS], input=prompt, capture_output=True, text=True,
-                           encoding="utf-8", timeout=timeout, cwd=d)
+        p = subprocess.run(  # nosec B603 # constant args, no shell; the prompt goes over stdin
+            [exe, *CLAUDE_ARGS], input=prompt, capture_output=True, text=True,
+            encoding="utf-8", timeout=timeout, cwd=d)
     if p.returncode:
         raise RuntimeError(f"claude exited {p.returncode}")
     o = json.loads(p.stdout)

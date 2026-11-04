@@ -79,6 +79,15 @@ def test_sync_prices_writes_the_mode_a_plain_write_would() -> None:
     print("ok sync_prices_writes_the_mode_a_plain_write_would")
 
 
+def test_fetch_refuses_a_url_that_is_not_http() -> None:
+    raised = False
+    try:
+        pricing._fetch_json("file:///etc/passwd")
+    except AutError:
+        raised = True
+    assert raised
+
+
 def test_sync_prices_refuses_empty() -> None:
     raised = False
     try:

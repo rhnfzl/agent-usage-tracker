@@ -854,6 +854,18 @@ def test_a_cache_from_before_the_failed_read_rule_is_measured_again(monkeypatch)
     print("ok a_cache_from_before_the_failed_read_rule_is_measured_again")
 
 
+def test_default_ref_ignores_an_origin_head_outside_origin():
+    with tempfile.TemporaryDirectory() as d:
+        work, _s = _world(Path(d))
+        tip = _g(work, "rev-parse", "refs/remotes/origin/main").strip()
+        (work / ".git" / "--ext-diff").write_text(tip + "\n")   # would reach git log as a flag
+        (work / ".git" / "refs" / "remotes" / "origin" / "HEAD").write_text("ref: --ext-diff\n")
+        assert oc._default_ref(str(work)) == ("refs/remotes/origin/main", True)
+        _g(work, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/heads/main")
+        assert oc._default_ref(str(work)) == ("refs/remotes/origin/main", True)
+    print("ok default_ref_ignores_an_origin_head_outside_origin")
+
+
 def test_default_ref_failure_is_not_no_default():
     with tempfile.TemporaryDirectory() as d:
         work, s = _world(Path(d))

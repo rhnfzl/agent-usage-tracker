@@ -161,8 +161,9 @@ def messages(con: sqlite3.Connection, ids: set[str]) -> dict[str, dict]:
     q = sorted(ids)
     for j in range(0, len(q), _BATCH):
         part = q[j:j + _BATCH]
-        take(con.execute(f"SELECT id, data FROM blobs WHERE id IN ({','.join('?' * len(part))})",
-                         part))
+        marks = ",".join("?" * len(part))
+        sql = f"SELECT id, data FROM blobs WHERE id IN ({marks})"  # nosec B608 # marks is only ?s
+        take(con.execute(sql, part))
     take(con.execute("SELECT id, data FROM blobs WHERE substr(data, 1, 1) = X'7B' "
                      "AND instr(data, '\"requestId\"') > 0"))
     return out

@@ -122,7 +122,9 @@ def _fetch_json(
     url: str, timeout: int = 30
 ) -> dict[str, Any] | None:
     """GET a JSON dict via stdlib urllib (no third-party HTTP client).
-    None on any failure."""
+    None on any failure. Raises AutError for a URL that is not http(s): urllib would read file:."""
+    if not url.lower().startswith(("http://", "https://")):
+        raise AutError("sync-prices: a price source URL must be http(s)")
     req = urllib.request.Request(
         url,
         headers={
@@ -131,7 +133,7 @@ def _fetch_json(
         },
     )
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:  # nosec B310 # http(s) only
             data = json.loads(resp.read().decode("utf-8"))
     except (*HTTP_ERRORS, ValueError):
         return None

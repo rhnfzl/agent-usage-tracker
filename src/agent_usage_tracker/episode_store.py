@@ -21,7 +21,7 @@ def load_episodes(conn: Any, where: str, params: tuple) -> list[dict]:
         "e.n_commits, e.n_prs, e.outcome, m.session_id, m.role, m.repo_keys, e.n_steers, "
         "e.outcome_source, e.confirmed "
         "FROM agents.episode e JOIN agents.episode_member m USING (episode_id) "
-        f"WHERE {where} "
+        f"WHERE {where} "  # nosec B608 # both callers pass constant SQL with %s params
         "ORDER BY e.first_ts, e.episode_id, m.role DESC, m.session_id", params).fetchall()
     eps: dict[str, dict] = {}
     for eid, f, last, ns, nseed, nc, npr, out, sid, role, keys, nst, src, conf in rows:

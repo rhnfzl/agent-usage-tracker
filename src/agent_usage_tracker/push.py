@@ -81,7 +81,7 @@ def _post_webhook(url: str, secret: str, batch: list[UsageEvent],
 
 
 def _insert_sql(table: str, columns: tuple[str, ...], conflict: str) -> str:
-    return (f"INSERT INTO {table} ({', '.join(columns)}) VALUES "
+    return (f"INSERT INTO {table} ({', '.join(columns)}) VALUES "  # nosec B608 # constants only
             f"({', '.join(['%s'] * len(columns))}) ON CONFLICT ({conflict}) DO NOTHING")
 
 

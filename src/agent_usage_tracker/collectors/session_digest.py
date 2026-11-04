@@ -302,7 +302,7 @@ def local_info(home: Path, sessions: set[str]) -> dict[str, dict]:
         try:
             fn(*args, d)
             info[sid] = d.view()
-        except Exception:       # noqa: BLE001  (a traceback could print local text)
+        except Exception:  # noqa: BLE001  # nosec B110 # a traceback could print local text
             pass
 
     for f in _cc.main_session_files(home):

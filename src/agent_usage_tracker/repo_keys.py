@@ -7,7 +7,7 @@ import hmac
 import os
 import re
 import secrets
-import subprocess
+import subprocess  # nosec B404 # one git_argv call below, no shell
 import sys
 from urllib.parse import urlparse
 
@@ -84,8 +84,9 @@ class RepoKeys:
             self._cwd[cwd] = None
             if os.path.isdir(cwd):
                 try:
-                    r = subprocess.run(git_argv(cwd, "remote", "get-url", "origin"),
-                                       capture_output=True, timeout=2, env=git_env())
+                    r = subprocess.run(  # nosec B603 # constant args after -C cwd, no shell
+                        git_argv(cwd, "remote", "get-url", "origin"),
+                        capture_output=True, timeout=2, env=git_env())
                     url = r.stdout.decode("utf-8", "replace").strip()
                     if r.returncode == 0 and url:
                         self._cwd[cwd] = self.of(repo_identity(url))

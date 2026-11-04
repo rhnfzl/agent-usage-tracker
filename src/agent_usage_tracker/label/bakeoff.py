@@ -227,7 +227,7 @@ def _fit(data: list[tuple[list[int], list[float], float]], k: int, epochs: int =
          lr: float = 0.3, l2: float = 1e-4, seed: int = 0) -> dict[int, list[float]]:
     """Multinomial logistic regression by SGD on (features, target distribution, weight)."""
     w: dict[int, list[float]] = {}
-    rng, data = random.Random(seed), list(data)
+    rng, data = random.Random(seed), list(data)  # nosec B311 # SGD shuffle order, not security
     # a small gold set gets more passes: 12 passes over 20 items underfit even a separable set
     epochs = max(epochs, -(-MIN_UPDATES // max(1, len(data))))
     for ep in range(epochs):

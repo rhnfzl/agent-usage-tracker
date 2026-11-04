@@ -90,7 +90,7 @@ def stratum(teachers: dict | None) -> str:
 def stratified(items: list[T], key: Callable[[T], object], seed: str) -> list[T]:
     """Round-robin over the strata of `key`, each stratum shuffled: rare strata come up as often
     as common ones. Deterministic for a seed, so a resumed session sees the same order."""
-    rng = random.Random(seed)
+    rng = random.Random(seed)  # nosec B311 # a repeatable sample order, not security
     groups: dict[object, list[T]] = defaultdict(list)
     for x in items:
         groups[key(x)].append(x)
