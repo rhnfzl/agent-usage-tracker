@@ -650,7 +650,8 @@ gold, both re-weighted from the stratified sample to the silver label mix.
 
 `aut label choose --task T` takes each model's newest record and writes the smallest (`size_mb`)
 that passes the bar into `label.json`: a held-out report, `coverage` at least `label_coverage`
-(default 0.75), and no `share_error_pp` above 5. Labels without a tau stay unknown. `aut label
+(default 0.75), every label's `precision_at_tau` at least `label_precision`, and no
+`share_error_pp` above 5. Labels without a tau stay unknown. `aut label
 train-encoder --task T` fits the `encoder` backend (logistic regression over hashed word and fact
 features, stdlib only) on gold (three times the weight) and silver, never on a held-out gold unit,
 and reports its held-out accuracy; its file (`~/.local/share/aut/label/encoder/<task>.json`) holds
