@@ -44,6 +44,8 @@ agents = ["claude_code", "codex", "cursor_api", "cursor_cli", "pi"]
 # local ActivityWatch server and sends it to agents.time_interval with the window title, which is
 # private: redacted on this machine and never in a public view. Needs pg_dsn.
 # activitywatch_url = "http://localhost:5600"
+# Use https:// for another host. Plain http there still works, with a warning, for a private link:
+# titles and purge deletes then travel unencrypted.
 # Titles are kept for good by default (0). A number of days turns a limit on: older titles are not
 # sent, and ActivityWatch's own window events older than that are deleted.
 # activitywatch_title_days = 180
