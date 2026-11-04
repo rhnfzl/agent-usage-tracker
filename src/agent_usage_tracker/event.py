@@ -69,7 +69,7 @@ class UsageEvent:
 
     def to_dict(self) -> dict:
         d = asdict(self)
-        del d["session"]                # the usage payload and columns stay exactly as before
+        del d["session"]                # session rows go out separately, never in the usage payload
         return d
 
     def session_row(self) -> dict | None:

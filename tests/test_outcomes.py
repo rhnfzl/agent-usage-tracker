@@ -162,7 +162,7 @@ def test_null_key_resolution_needs_matching_time():
         outs, stats = oc.evaluate(rows, clones, NOW, cache={})
         got = _states(outs)
         assert got[s["A"][:7]] == ("merged", 1.0, key), got
-        assert len(outs) == 3 and stats["state_merged"] == 1, outs  # written once
+        assert len(outs) == 3 and oc.Counter(o["state"] for o in outs)["merged"] == 1, outs  # written once
         assert got[s["F"][:9]] == ("abandoned", None, ""), got      # unresolved: no key
         assert got["abcdef1234"] == ("abandoned", None, ""), got
         assert stats["null_key_resolved"] == 1 and stats["not_found"] == 2, stats
@@ -523,17 +523,17 @@ def test_cli_outcome_and_outcomes():
         conf.chmod(0o600)
         os.environ["AUT_CONFIG"] = str(conf)
         got: dict = {}
-        saved = (oc.insert_manual, oc.run_outcomes)
-        oc.insert_manual = lambda dsn, row: got.update(row=row)
+        saved = (oc.insert_manual_outcome, oc.run_outcomes)
+        oc.insert_manual_outcome = lambda dsn, row: got.update(row=row)
         oc.run_outcomes = lambda cfg, fetch, dry_run: (got.update(fetch=fetch, dry=dry_run)
-                                                       or oc.Counter(state_merged=2, rows=3))
+                                                       or oc.Counter(rows=3, states=oc.Counter(merged=2)))
         out = io.StringIO()
         try:
             with contextlib.redirect_stdout(out):
                 assert cli.main(["outcome", "ruled-out", "--session", "abc"]) == 0
                 assert cli.main(["outcomes", "--dry-run"]) == 0
         finally:
-            oc.insert_manual, oc.run_outcomes = saved
+            oc.insert_manual_outcome, oc.run_outcomes = saved
             os.environ.pop("AUT_CONFIG")
         assert got["row"]["session_id"] == "abc" and got["row"]["outcome"] == "ruled_out"
         assert got["fetch"] is True and got["dry"] is True            # config turns fetch on

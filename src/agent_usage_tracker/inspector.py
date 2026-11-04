@@ -310,8 +310,10 @@ def run_inspect(cfg: Config, episode: str | None = None, day: str | None = None,
     info = local_info(cfg.home, {s["session_id"] for ep in view["episodes"]
                                         for s in ep["sessions"][:4 * _SHOW]
                                         if s["role"] == "seed"})   # children have no title
-    summary = serve_fn(view["episodes"], lambda rows: episode_store.insert_corrections(dsn, rows),
-                       pages(view, info, title, label))
+    return serve_fn(view["episodes"], lambda rows: episode_store.insert_corrections(dsn, rows),
+                    pages(view, info, title, label))
+
+
+def print_inspect(summary: dict) -> None:
     if summary["reviewed"]:
         print(f"inspect: {summary['reviewed']} corrections saved")
-    return summary

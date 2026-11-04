@@ -22,7 +22,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from agent_usage_tracker import __version__, cli, push  # noqa: E402
+from agent_usage_tracker import __version__, push, scan  # noqa: E402
+from agent_usage_tracker.collectors import Collector  # noqa: E402
 from agent_usage_tracker.config import Config  # noqa: E402
 from agent_usage_tracker.event import CollectorUnavailable, UsageEvent  # noqa: E402
 
@@ -64,16 +65,16 @@ def _bad_collector(cfg, wm):
 def _patched(registry: dict, send_scan_rows):
     """Swap in fake collectors, a recording usage sender and a scan-row sink; isolate state."""
     sent: list[list[str]] = []
-    saved = (cli.REGISTRY, cli.make_sender, push.send_scan_rows, os.environ.get("AUT_STATE"))
+    saved = (scan.REGISTRY, scan.make_sender, push.send_scan_rows, os.environ.get("AUT_STATE"))
     with tempfile.TemporaryDirectory() as d:
         os.environ["AUT_STATE"] = str(Path(d) / "state.json")
-        cli.REGISTRY = registry
-        cli.make_sender = lambda cfg: (lambda batch: sent.append([e.event_id for e in batch]))
+        scan.REGISTRY = {name: Collector(fn) for name, fn in registry.items()}
+        scan.make_sender = lambda cfg: (lambda batch: sent.append([e.event_id for e in batch]))
         push.send_scan_rows = send_scan_rows
         try:
             yield sent, Path(d) / "state.json"
         finally:
-            cli.REGISTRY, cli.make_sender, push.send_scan_rows, prev = saved
+            scan.REGISTRY, scan.make_sender, push.send_scan_rows, prev = saved
             if prev is None:
                 os.environ.pop("AUT_STATE", None)
             else:
@@ -85,7 +86,7 @@ def test_scan_rows_ok_and_error() -> None:
     reg = {"good": _ok_collector, "quiet": _empty_collector, "bad": _bad_collector}
     with _patched(reg, lambda cfg, rows: calls.append(list(rows))):
         try:
-            cli.run_scan(_cfg(pg_dsn="postgresql://x"), ["good", "quiet", "bad"], dry_run=False)
+            scan.run_scan(_cfg(pg_dsn="postgresql://x"), ["good", "quiet", "bad"], dry_run=False)
             raise AssertionError("the collector error must still propagate")
         except RuntimeError as exc:
             assert "boom" in str(exc)
@@ -124,7 +125,7 @@ def test_degraded_collector_keeps_its_rows_and_the_scan_goes_on() -> None:
     reg = {"partly": partly, "unreadable": unreadable, "good": _ok_collector}
     with _patched(reg, lambda cfg, rows: calls.append(list(rows))) as (sent, _state), \
             contextlib.redirect_stderr(io.StringIO()) as err:
-        cli.run_scan(_cfg(pg_dsn="postgresql://x"), list(reg), dry_run=False)
+        scan.run_scan(_cfg(pg_dsn="postgresql://x"), list(reg), dry_run=False)
     rows = {r["collector"]: r for r in calls[0]}
     assert (rows["partly"]["status"], rows["partly"]["error"]) == ("degraded", "OSError"), rows
     assert rows["partly"]["events"] == 1 and sent[0] == ["a"] and advanced  # read rows went out
@@ -150,7 +151,7 @@ def test_delivery_failure_is_swallowed() -> None:
         err = io.StringIO()
         with _patched({"good": _ok_collector}, sink) as (sent, state_path):
             with contextlib.redirect_stderr(err):
-                report = cli.run_scan(_cfg(pg_dsn="postgresql://x"), ["good"], dry_run=False)
+                report = scan.run_scan(_cfg(pg_dsn="postgresql://x"), ["good"], dry_run=False)
             results.append((report, sent, state_path.read_text(), err.getvalue()))
     rep_ok, sent_ok, state_ok, _ = results[0]
     for rep_bad, sent_bad, state_bad, err_bad in results[1:]:
@@ -163,8 +164,8 @@ def test_delivery_failure_is_swallowed() -> None:
 def test_dry_run_sends_nothing() -> None:
     calls: list = []
     with _patched({"good": _ok_collector}, lambda cfg, rows: calls.append(rows)) as (sent, _):
-        cli.make_sender = lambda cfg: (_ for _ in ()).throw(AssertionError("no sender in dry-run"))
-        report = cli.run_scan(_cfg(pg_dsn="postgresql://x"), ["good"], dry_run=True)
+        scan.make_sender = lambda cfg: (_ for _ in ()).throw(AssertionError("no sender in dry-run"))
+        report = scan.run_scan(_cfg(pg_dsn="postgresql://x"), ["good"], dry_run=True)
     assert report["good"]["events"] == 3
     assert calls == [] and sent == [], (calls, sent)
     print("ok dry_run_sends_nothing")
@@ -190,7 +191,7 @@ def test_interrupt_is_not_delivered() -> None:
     calls: list = []
     with _patched({"stop": _interrupted}, lambda cfg, rows: calls.append(rows)):
         try:
-            cli.run_scan(_cfg(pg_dsn="postgresql://x"), ["stop"], dry_run=False)
+            scan.run_scan(_cfg(pg_dsn="postgresql://x"), ["stop"], dry_run=False)
             raise AssertionError("KeyboardInterrupt must propagate")
         except KeyboardInterrupt:
             pass

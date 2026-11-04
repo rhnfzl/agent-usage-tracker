@@ -274,3 +274,20 @@ def train_encoder(cfg: Config, task: str, days: int = DAYS, src: Source | None =
             "held_out": len(pairs),
             "accuracy": _round4(sum(a == b for a, b in pairs) / len(pairs)) if pairs else None,
             "macro_f1": _round4(sum(f1s) / len(f1s)) if f1s else None}
+
+
+def print_eval(task: str, records: list[dict]) -> None:
+    for r in records:
+        print(f"label eval {task} {r['model_id']}: macro-F1 {r['macro_f1']}, kappa "
+              f"{r['kappa']}, ECE {r['ece_raw']} -> {r['ece_cal']}, coverage "
+              f"{r['coverage']}, n {r['n']} (held out {r['n_held']}), "
+              f"{r['s_per_decision']} s per decision")
+
+
+def print_choose(task: str, c: dict) -> None:
+    print(f"label choose {task}: {c['backend']} {c['model_id']} (T "
+          f"{c['temperature']}, tau {json.dumps(c['tau'])})")
+
+
+def print_train_encoder(task: str, r: dict) -> None:
+    print(f"label train-encoder {task}: {json.dumps(r)}")

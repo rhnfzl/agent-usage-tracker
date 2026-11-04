@@ -251,6 +251,10 @@ def classify(cfg: Config, app: str, title: str, url: str = "",
     return cat, cat in _RELEVANT, rule
 
 
+def describe(cfg: Config, wm: dict) -> str:
+    return f"read until {wm['end']}" if "end" in wm else "never scanned"
+
+
 def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[TimeInterval], Callable[[], None]]]:
     try:
         found = _buckets(cfg)

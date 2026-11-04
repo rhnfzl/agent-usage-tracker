@@ -36,7 +36,7 @@ from ..repo_keys import RepoKeys
 from .activity_common import (Link, TurnAgg, add_call, blank_agg, commit_rows, ms_between, text_of,
                               turn_attrs)
 from .commits import commit_call, commit_dir, commit_shas
-from ._util import epoch_ms_to_iso, warn_skipped
+from ._util import describe_files, epoch_ms_to_iso, warn_skipped
 from .cursor import connect_ro
 
 NAME = "cursor_cli"
@@ -390,6 +390,12 @@ def _sdk(path: str, have: set[str]) -> list[ActivityEvent] | None:
             attrs={"status": st, "duration_ms": ms_between(started, finished),
                    "run_origin": "automated"}))
     return out
+
+
+def describe(cfg: Config, wm: dict) -> str:
+    if "chats" in wm:
+        return f"{len(wm['chats'])} chats, {len(wm.get('sdk', {}))} SDK stores tracked"
+    return describe_files(cfg, wm)
 
 
 def collect(cfg: Config, wm: dict) -> Iterator[Batch]:

@@ -302,7 +302,7 @@ def test_run_batches_watermark_dry_run_and_heartbeat(tmp_path, sink):
         rep = run.run_label(cfg, ["steer_intent"], src=FakeSource(cfg, steers),
                             backend_for=lambda t, c: b, now=NOW)
         assert [len(x) for x in sink.rows] == [2, 2, 1]
-        assert rep["steer_intent"]["label_instruction"] == 5
+        assert rep["steer_intent"]["labels"]["instruction"] == 5
         assert rep["steer_intent"]["below_tau"] == 5          # uncalibrated: nothing passes
         sent = [e for batch in sink.rows for e in batch]
         assert all(e.machine == "test" and e.kind == "label" for e in sent)
@@ -535,6 +535,9 @@ def test_config_and_evalset_stay_below_their_callers():
     assert not {m for m in loaded("agent_usage_tracker.config")
                 if ".collectors" in m or m.endswith((".tasks", ".core"))}
     assert "agent_usage_tracker.push" not in loaded("agent_usage_tracker.label.evalset")
+    # building the parser reads only the names: every `aut` command would pay for the rest
+    assert not {m for m in loaded("agent_usage_tracker.cli")
+                if ".label." in m and not m.endswith(".names")}
 
 
 def test_cli_and_config(tmp_path, monkeypatch):

@@ -77,7 +77,7 @@ def test_duplicate_session_paths_counted_once() -> None:
     # report and the CSV export have to agree with the sink, not with the raw emit count.
     import io
 
-    from agent_usage_tracker.cli import run_export, run_scan
+    from agent_usage_tracker.scan import run_export, run_scan
     records = [
         {"type": "user", "uuid": "h1", "timestamp": "2026-07-18T10:00:00Z",
          "entrypoint": "cli", "message": {"role": "user", "content": "do the thing"}},
@@ -581,7 +581,7 @@ def test_export_drains_past_cap() -> None:
     # exceeds the per-scan _MAX_LINES cap (regression guard for the drain loop).
     import io
 
-    from agent_usage_tracker import cli
+    from agent_usage_tracker import scan
     from agent_usage_tracker.collectors import _util
     orig = _util._MAX_LINES
     _util._MAX_LINES = 2                      # tiny cap: 5 turns -> multiple passes
@@ -593,7 +593,7 @@ def test_export_drains_past_cap() -> None:
                  "message": {"model": "m", "usage": {"input_tokens": 1, "output_tokens": 1,
                              "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}}}
                 for i in range(5)])
-            n, skipped = cli.run_export(_cfg(home), ["claude_code"], io.StringIO())
+            n, skipped = scan.run_export(_cfg(home), ["claude_code"], io.StringIO())
             assert n == 5, (n, skipped)       # all 5 drained despite cap=2
     finally:
         _util._MAX_LINES = orig
@@ -776,6 +776,44 @@ def test_cursor_api_token_gone_is_unavailable_not_silent() -> None:
         except CollectorUnavailable as exc:
             assert "token" in str(exc)
     print("ok cursor_api_token_gone_is_unavailable_not_silent")
+
+
+def test_status_line_comes_from_each_collector() -> None:
+    from agent_usage_tracker.collectors import REGISTRY
+    cfg = _cfg(Path("/tmp"))
+    for name, wm, want in (("claude_code", {"files": {"a": {}}}, "1 files tracked"),
+                           ("codex", {}, "never scanned"),
+                           ("cursor", {}, "full-scan each run (no watermark)"),
+                           ("cursor_api", {"since_ms": 5}, "since_ms=5"),
+                           ("cursor_cli", {"chats": {"a": 1}}, "1 chats, 0 SDK stores tracked"),
+                           ("cursor_cli", {"files": {}}, "0 files tracked"),
+                           ("activitywatch", {"end": "x"}, "read until x"),
+                           ("activitywatch", {}, "never scanned")):
+        assert REGISTRY[name].describe(cfg, wm) == want, name
+    print("ok status_line_comes_from_each_collector")
+
+
+def test_one_shot_commands_warn_at_the_drain_cap() -> None:
+    # a collector that never settles used to stop export and backfill silently, unlike scan
+    import io
+
+    from agent_usage_tracker import collectors, scan
+
+    def endless(cfg, wm):
+        yield [], lambda: wm.update(n=wm.get("n", 0) + 1)
+
+    saved = (collectors.MAX_DRAIN_PASSES, scan.REGISTRY)
+    collectors.MAX_DRAIN_PASSES, scan.REGISTRY = 3, {"endless": collectors.Collector(endless)}
+    try:
+        for run in (lambda c: scan.run_export(c, ["endless"], io.StringIO()),
+                    lambda c: scan.run_history_backfill(c, ["endless"], dry_run=True)):
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                run(_cfg(Path("/tmp")))
+            assert "drain-pass cap (3)" in err.getvalue(), err.getvalue()
+    finally:
+        collectors.MAX_DRAIN_PASSES, scan.REGISTRY = saved
+    print("ok one_shot_commands_warn_at_the_drain_cap")
 
 
 def test_cursor_counts_malformed_bubbles() -> None:
@@ -990,6 +1028,8 @@ def main() -> int:
     test_cursor_cookie_not_sent_through_a_redirect()
     test_cursor_api_token_gone_is_unavailable_not_silent()
     test_cursor_counts_malformed_bubbles()
+    test_status_line_comes_from_each_collector()
+    test_one_shot_commands_warn_at_the_drain_cap()
     print("\nALL PASS")
     return 0
 

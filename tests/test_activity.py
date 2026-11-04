@@ -29,7 +29,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from agent_usage_tracker import cli, push  # noqa: E402
+from agent_usage_tracker import push, scan  # noqa: E402
 from agent_usage_tracker.collectors import claude_code  # noqa: E402
 from agent_usage_tracker.collectors import claude_code_activity as act  # noqa: E402
 from agent_usage_tracker.collectors.commits import GIT_COMMIT  # noqa: E402
@@ -468,30 +468,30 @@ def test_failed_delivery_rescan_matches_clean_pass() -> None:
         prev = os.environ.get("AUT_STATE")
         os.environ["AUT_STATE"] = str(home / "state" / "state.json")
 
-        def scan(fail: bool) -> None:
+        def scan_once(fail: bool) -> None:
             def sender(batch):
                 if fail:
                     raise RuntimeError("sink down")
                 sent.extend(batch)
-            saved = cli.make_sender
-            cli.make_sender = lambda c: sender
+            saved = scan.make_sender
+            scan.make_sender = lambda c: sender
             try:
                 with contextlib.redirect_stderr(io.StringIO()):
-                    cli.run_scan(_cfg(home), ["claude_code"], dry_run=False)
+                    scan.run_scan(_cfg(home), ["claude_code"], dry_run=False)
                 assert not fail
             except RuntimeError:
                 assert fail
             finally:
-                cli.make_sender = saved
+                scan.make_sender = saved
         try:
-            scan(False)
+            scan_once(False)
             with f.open("a") as fh:
                 for r in (_result("r1", "c1", "[main 1a2b3c4] x"),
                           _tools("m2", _use("x2", "Bash", command="ls")),
                           _result("r2", "x2", "fine"), _turn_end("td1", 9, 3)):
                     fh.write(json.dumps(r) + "\n")
-            scan(True)
-            scan(False)
+            scan_once(True)
+            scan_once(False)
         finally:
             if prev is None:
                 os.environ.pop("AUT_STATE", None)
@@ -754,16 +754,16 @@ def test_activity_backfill_sends_no_usage() -> None:
             before = (state.read_text(), state.stat().st_mtime_ns)
             os.environ["AUT_STATE"] = str(state)
             log: list = []
-            saved = cli.make_sender
-            cli.make_sender = lambda c: (_ for _ in ()).throw(AssertionError("no usage sender"))
+            saved = scan.make_sender
+            scan.make_sender = lambda c: (_ for _ in ()).throw(AssertionError("no usage sender"))
             try:
                 with _fake_psycopg(log), contextlib.redirect_stderr(io.StringIO()):
-                    counts = cli.run_session_backfill(cfg, ["claude_code"], dry_run=False,
+                    counts = scan.run_history_backfill(cfg, ["claude_code"], dry_run=False,
                                                       sessions=False, activity=True)
-                    dry = cli.run_session_backfill(cfg, ["claude_code"], dry_run=True,
+                    dry = scan.run_history_backfill(cfg, ["claude_code"], dry_run=True,
                                                    sessions=False, activity=True)
             finally:
-                cli.make_sender = saved
+                scan.make_sender = saved
                 if prev is None:
                     os.environ.pop("AUT_STATE", None)
                 else:

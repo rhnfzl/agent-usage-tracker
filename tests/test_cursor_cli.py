@@ -33,7 +33,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from test_activity import _git_repo, _key, _plain_value  # noqa: E402
 
-from agent_usage_tracker import cli  # noqa: E402
+from agent_usage_tracker import scan  # noqa: E402
 from agent_usage_tracker.collectors import REGISTRY, cursor_cli  # noqa: E402
 from agent_usage_tracker.config import ALL_AGENTS, Config  # noqa: E402
 from agent_usage_tracker.event import (ActivityEvent, CollectorUnavailable, UsageEvent,  # noqa: E402
@@ -466,7 +466,7 @@ def test_backfill_cursor_cli() -> None:
             before = (state.read_text(), state.stat().st_mtime_ns)
             try:
                 with contextlib.redirect_stderr(io.StringIO()):
-                    c = cli.run_session_backfill(_cfg(home), [NAME], dry_run=True,
+                    c = scan.run_history_backfill(_cfg(home), [NAME], dry_run=True,
                                                  sessions=True, activity=True)
             finally:
                 if prev is None:

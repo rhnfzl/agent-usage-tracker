@@ -377,7 +377,8 @@ def test_cli_wiring(tmp_path, monkeypatch):
     monkeypatch.setattr(cli, "load_config", lambda: _cfg(tmp_path))
     monkeypatch.setattr(teach, "run_teach", lambda cfg, t, n, b, d: seen.append(
         ("teach", t, n, b, d)) or Counter())
-    monkeypatch.setattr(gold, "run_review", lambda cfg, t, d: seen.append(("review", t, d)))
+    monkeypatch.setattr(gold, "run_review", lambda cfg, t, d: seen.append(("review", t, d)) or {
+        "task": TASK, "answered": 0, "skipped": 0, "gold": {}})
     monkeypatch.setattr(bakeoff, "run_eval", lambda cfg, t, d: seen.append(("eval", t, d)) or [])
     monkeypatch.setattr(bakeoff, "choose", lambda cfg, t: seen.append(("choose", t)) or {
         "backend": "encoder", "model_id": "m", "temperature": 1.0, "tau": {}})

@@ -141,6 +141,12 @@ def _map_event(e: dict, uid) -> UsageEvent | None:
     )
 
 
+def describe(cfg: Config, wm: dict) -> str:
+    if "since_ms" in wm:
+        return f"since_ms={wm['since_ms']}"
+    return "enabled, not yet scanned" if cfg.cursor_api else "disabled (cursor_api=false)"
+
+
 def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[UsageEvent], Callable[[], None]]]:
     if not cfg.cursor_api:            # opt-in: no network unless explicitly enabled
         return

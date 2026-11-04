@@ -173,11 +173,14 @@ def serve(task: str, reqs: dict[str, Request], open_browser: bool = True, on_rea
 
 
 def run_review(cfg: Config, task: str | None, days: int = DAYS, src: Source | None = None,
-               open_browser: bool = True, on_ready=None) -> Counter:
+               open_browser: bool = True, on_ready=None) -> dict:
     task = task or next((t for t in cfg.label_tasks if t in TASKS), "steer_intent")
     session = serve(task, window_units(cfg, task, days, src), open_browser, on_ready)
     n = Counter(gold_latest(task).values())
-    print(f"label review {task}: {session['answered']} answered, {session['skipped']} skipped; "
-          f"gold per label {json.dumps({c: n[c] for c, _d in TASKS[task].candidates})} "
-          f"(floor {FLOORS[task][0]})")
-    return session
+    return {**session, "task": task, "gold": {c: n[c] for c, _d in TASKS[task].candidates}}
+
+
+def print_review(report: dict) -> None:
+    task = report["task"]
+    print(f"label review {task}: {report['answered']} answered, {report['skipped']} skipped; "
+          f"gold per label {json.dumps(report['gold'])} (floor {FLOORS[task][0]})")

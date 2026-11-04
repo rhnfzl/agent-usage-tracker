@@ -227,8 +227,12 @@ def run_review(cfg: Config, month: str | None) -> dict:
     info = local_info(cfg.home, {m["session_id"] for ep in left for m in _seeds(ep)})
     summary = serve(left, lambda rows: episode_store.insert_corrections(dsn, rows),
                     month_pages(left, info, label, len(episodes) - len(left)))
-    share = summary["right"] / summary["reviewed"] if summary["reviewed"] else 0.0
-    print(f"episodes review {label}: {summary['reviewed']} of {len(left)} episodes reviewed "
-          f"({len(episodes) - len(left)} answered before), {summary['right']} marked right "
-          f"({share:.0%})")
-    return summary
+    return {**summary, "month": label, "open": len(left),
+            "answered_before": len(episodes) - len(left)}
+
+
+def print_review(report: dict) -> None:
+    share = report["right"] / report["reviewed"] if report["reviewed"] else 0.0
+    print(f"episodes review {report['month']}: {report['reviewed']} of {report['open']} episodes "
+          f"reviewed ({report['answered_before']} answered before), {report['right']} marked "
+          f"right ({share:.0%})")

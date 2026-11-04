@@ -97,6 +97,8 @@ def _run_notes(cfg, src, backend, since, until, dry_run, deadline, wm, state) ->
 def _run_task(cfg, task, src, choice, backend, since, until, dry_run, deadline, wm, state,
               cache, labelled_at) -> Counter:
     c: Counter = Counter()
+    labels: Counter = Counter()
+    c["labels"] = labels
     key = f"{task.name}@{task.ver}|{backend.model_id}|{choice.calib_ver}"
     done = set(cache.get(key, ())) if task.cached else set()
     reqs = [r for r in units(task.name, src, since, until) if r.unit_id not in done]
@@ -125,7 +127,7 @@ def _run_task(cfg, task, src, choice, backend, since, until, dry_run, deadline, 
         pending.append(ev)
         c["rows"] += 1
         c["below_tau"] += res.below_tau
-        c[f"label_{res.chosen}"] += 1
+        labels[res.chosen] += 1
         if len(pending) >= BATCH:
             flush(r.ts)
     if cut is not None:
@@ -191,7 +193,7 @@ def run_label(cfg: Config, tasks: list[str] | None = None, since: datetime | Non
 def print_report(report: dict[str, Counter], dry_run: bool) -> None:
     mode = "DRY-RUN (nothing written)" if dry_run else "written"
     for name, c in report.items():
-        labels = {k[6:]: v for k, v in sorted(c.items()) if k.startswith("label_")}
+        labels = dict(sorted(c.get("labels", {}).items()))
         what = f"{c['notes']} notes" if name == NOTE else \
             f"{c['rows']} rows ({c['below_tau']} below tau), by label {json.dumps(labels)}"
         print(f"label {name} {mode}: {what}")

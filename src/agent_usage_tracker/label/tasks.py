@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Callable
 
-from ..collectors import activitywatch as aw
+from ..collectors import activitywatch as aw, drain
 from ..collectors import claude_code
 from ..config import Config
 from ..event import CollectorUnavailable, make_event_id
@@ -148,16 +148,15 @@ class Source:
         if aw.NAME not in self.cfg.agents:
             return []
         out, wm = [], {"end": since.astimezone(timezone.utc).isoformat()}
-        while datetime.fromisoformat(wm["end"]) < until:
-            before = wm["end"]
+        for batches in drain(aw.collect, self.cfg, wm, aw.NAME):
+            if datetime.fromisoformat(wm["end"]) >= until:
+                break
             try:
-                for rows, advance_watermark in aw.collect(self.cfg, wm):
+                for rows, advance_watermark in batches:
                     out += rows
                     advance_watermark()
             except CollectorUnavailable as exc:
                 raise SourceUnavailable(str(exc)) from exc
-            if wm["end"] == before:
-                break
         res = []
         for t in out:
             s, e = datetime.fromisoformat(t.ts), min(datetime.fromisoformat(t.end_ts), until)

@@ -421,8 +421,6 @@ def evaluate(rows: list[dict], clones: list[Clone], now: float, cache: dict,
             stats["survival_computed" if fresh else "survival_cached"] += 1
     # a NULL-key row resolved to a clone can repeat a keyed row of the same commit: keep one
     outs = list({(o["sha"], o["repo_key"]): o for o in reversed(outs)}.values())[::-1]
-    for o in outs:
-        stats[f"state_{o['state']}"] += 1
     return outs, stats
 
 
@@ -485,6 +483,7 @@ def run_outcomes(cfg: Config, fetch: bool, dry_run: bool, now: float | None = No
         cache = load_json_dict(_cache_path())
         outs, ev = evaluate(rows, clones, now, cache, gh=fetch)
         stats.update(ev)
+        stats["states"] = Counter(o["state"] for o in outs)
         if not dry_run:
             atomic_write_text(_cache_path(), json.dumps(cache))     # before the sink: a failing write never redoes the blame
         todo = pending(outs, _load_stored(dsn))
@@ -503,6 +502,13 @@ def run_outcomes(cfg: Config, fetch: bool, dry_run: bool, now: float | None = No
         if not dry_run and not interrupted:
             deliver_scan_rows(cfg, [scan_row(cfg, "outcomes", started, status, error, written)],
                               "outcomes")
+
+
+def print_outcomes(report: Counter, dry_run: bool) -> None:
+    states = dict(sorted(report["states"].items()))
+    rest = {k: v for k, v in sorted(report.items()) if k != "states"}
+    print(f"outcomes {'DRY-RUN (nothing written)' if dry_run else 'written'}: "
+          f"states {json.dumps(states)}, {json.dumps(rest)}")
 
 
 def _project_paths(cwd: str) -> list[str]:
@@ -542,7 +548,7 @@ def build_manual_outcome(cfg: Config, outcome: str, cwd: str, session: str | Non
             "repo_key": RepoKeys(cfg.repo_key_salt).of_cwd(cwd)}
 
 
-def insert_manual(dsn: str, row: dict) -> None:
+def insert_manual_outcome(dsn: str, row: dict) -> None:
     with connect(dsn) as conn:
         conn.execute("INSERT INTO agents.manual_outcome (session_id, outcome, ts, repo_key) "
                      "VALUES (%s, %s, %s, %s)",

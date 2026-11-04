@@ -13,6 +13,16 @@ from datetime import datetime, timezone
 _MAX_LINES = 50000
 
 
+def describe_files(cfg, wm: dict) -> str:
+    """`aut status` line of a collector whose watermark tracks files."""
+    return f"{len(wm['files'])} files tracked" if "files" in wm else "never scanned"
+
+
+def describe_full_scan(cfg, wm: dict) -> str:
+    """`aut status` line of a collector that keeps no watermark."""
+    return "full-scan each run (no watermark)"
+
+
 def str_or_none(value: object) -> str | None:
     """A non-empty string as is; anything else is None."""
     return value if isinstance(value, str) and value else None

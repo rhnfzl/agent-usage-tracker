@@ -24,7 +24,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from agent_usage_tracker import cli, push  # noqa: E402
+from agent_usage_tracker import push, scan  # noqa: E402
 from agent_usage_tracker.collectors import claude_code  # noqa: E402
 from agent_usage_tracker.config import Config  # noqa: E402
 from agent_usage_tracker.event import ActivityEvent  # noqa: E402
@@ -277,17 +277,17 @@ def test_sessions_only_backfill() -> None:
         def run(state: Path):
             before = (state.read_text(), state.stat().st_mtime_ns)
             log: list = []
-            saved = cli.make_sender
-            cli.make_sender = lambda c: (_ for _ in ()).throw(AssertionError("no usage sender"))
+            saved = scan.make_sender
+            scan.make_sender = lambda c: (_ for _ in ()).throw(AssertionError("no usage sender"))
             err = io.StringIO()
             try:
                 with _fake_psycopg(log), contextlib.redirect_stderr(err):
-                    counts = cli.run_session_backfill(cfg, ["claude_code"], dry_run=False)
+                    counts = scan.run_history_backfill(cfg, ["claude_code"], dry_run=False)
                     dry_log: list = []
                 with _fake_psycopg(dry_log), contextlib.redirect_stderr(err):
-                    dry = cli.run_session_backfill(cfg, ["claude_code"], dry_run=True)
+                    dry = scan.run_history_backfill(cfg, ["claude_code"], dry_run=True)
             finally:
-                cli.make_sender = saved
+                scan.make_sender = saved
             assert (state.read_text(), state.stat().st_mtime_ns) == before, "state untouched"
             return counts, dry, log, dry_log, err.getvalue()
 
