@@ -13,15 +13,10 @@ from __future__ import annotations
 
 import html
 import json
-import secrets
-import sys
-import threading
-import webbrowser
 from collections import Counter
 from datetime import date
-from http.server import BaseHTTPRequestHandler, HTTPServer
-from urllib.parse import parse_qs
 
+from .. import local_page
 from ..config import Config
 from .core import Request
 from .evalset import (DAYS, FLOORS, append_jsonl, gold_latest, path, read_jsonl, silver_by_unit,
@@ -29,15 +24,8 @@ from .evalset import (DAYS, FLOORS, append_jsonl, gold_latest, path, read_jsonl,
 from .tasks import TASKS, Source
 
 LABELLER = "human"
-_MAX_BODY = 1 << 16
 _KEYS = "123456789"
-_CSS = """:root { color-scheme: light dark; --bg: #fafafa; --fg: #1a1a1a; --mut: #666;
-  --line: #ddd; --acc: #2b5fd9; }
-@media (prefers-color-scheme: dark) { :root { --bg: #161616; --fg: #eee; --mut: #aaa;
-  --line: #333; --acc: #7aa2ff; } }
-body { background: var(--bg); color: var(--fg); font: 15px/1.45 system-ui, sans-serif;
-  max-width: 52rem; margin: 0 auto; padding: 1rem; }
-pre { white-space: pre-wrap; word-break: break-word; background: transparent;
+_CSS = """pre { white-space: pre-wrap; word-break: break-word; background: transparent;
   border: 1px solid var(--line); border-radius: 6px; padding: .5rem; margin: .2rem 0 .6rem; }
 .mut { color: var(--mut); font-size: 13px; } dt { font-weight: 600; }
 button { font: inherit; display: block; width: 100%; text-align: left; margin: .25rem 0;
@@ -80,9 +68,7 @@ def _progress(task: str, gold: dict[str, str]) -> str:
 def render(task: str, token: str, item: Request | None, gold: dict, last: dict | None,
            left: int, session: Counter) -> str:
     e = html.escape
-    head = (f'<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" '
-            f'content="width=device-width, initial-scale=1"><title>Gold labels</title>'
-            f"<style>{_CSS}</style></head><body><h1>{e(task)}</h1>"
+    head = (local_page.head("Gold labels", "52rem", _CSS) + f"<h1>{e(task)}</h1>"
             "<p class=mut>Private page on this machine only. Only your answer (a label and the "
             f"unit id) is saved, on this machine. This session: {session['answered']} answered, "
             f"{session['skipped']} skipped; {left} left.</p>")
@@ -129,7 +115,7 @@ def _drop_last(task: str, unit_id: str) -> None:
 def serve(task: str, reqs: dict[str, Request], open_browser: bool = True, on_ready=None,
           today: date | None = None) -> Counter:
     """Serve the page until q (or Ctrl-C). Returns {answered, skipped} of this session."""
-    token = secrets.token_urlsafe(16)
+    token = local_page.new_token()
     silver, gold = silver_by_unit(task), gold_latest(task)
     queue = stratified([r for u, r in reqs.items() if u not in gold],
                        lambda r: stratum(silver.get(r.unit_id)), seed=task)
@@ -175,50 +161,14 @@ def serve(task: str, reqs: dict[str, Request], open_browser: bool = True, on_rea
             session["answered"] += 1
         return False
 
-    class Handler(BaseHTTPRequestHandler):
-        def log_message(self, *a):          # keep unit text out of the terminal
-            pass
+    def on_post(form: dict) -> bytes | None:
+        if act(form):
+            return f"<p>Saved {session['answered']} answers. You can close this tab.</p>".encode()
+        return None
 
-        def _reply(self, code: int, body: bytes, location: str | None = None) -> None:
-            self.send_response(code)
-            if location:
-                self.send_header("Location", location)
-            self.send_header("Content-Type", "text/html; charset=utf-8")
-            self.send_header("Content-Length", str(len(body)))
-            self.send_header("Cache-Control", "no-store")
-            self.end_headers()
-            self.wfile.write(body)
-
-        def do_GET(self):
-            ok = self.path == f"/{token}"
-            self._reply(200 if ok else 404, page() if ok else b"not found")
-
-        def do_POST(self):
-            n = int(self.headers.get("Content-Length") or 0)
-            if self.path != f"/{token}" or not 0 < n <= _MAX_BODY:
-                self._reply(404, b"not found")
-                return
-            if act(parse_qs(self.rfile.read(n).decode("utf-8", "replace"))):
-                self._reply(200, f"<p>Saved {session['answered']} answers. You can close this "
-                                 "tab.</p>".encode())
-                threading.Thread(target=self.server.shutdown).start()
-            else:
-                self._reply(303, b"", f"/{token}")      # post, redirect, get: reload is safe
-
-    srv = HTTPServer(("127.0.0.1", 0), Handler)
-    url = f"http://127.0.0.1:{srv.server_address[1]}/{token}"
-    if on_ready:
-        on_ready(url)
-    if open_browser:
-        print(f"aut: gold page at {url} (q on the page, or Ctrl-C, to stop; answers are already "
-              "saved)", file=sys.stderr)
-        webbrowser.open(url)
-    try:
-        srv.serve_forever()
-    except KeyboardInterrupt:
-        pass
-    finally:
-        srv.server_close()
+    local_page.serve(token, lambda tail: page() if tail == "" else None, on_post,
+                     "gold page at {url} (q on the page, or Ctrl-C, to stop; answers are already "
+                     "saved)", open_browser, on_ready)
     return session
 
 

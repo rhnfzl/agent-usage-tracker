@@ -130,8 +130,8 @@ def test_page_escapes_and_serves_read_only_with_correction_link():
         box["url"] = url
         ready.set()
     t = threading.Thread(target=lambda: box.update(s=review.serve(
-        view["episodes"], info, "episode x", written.extend, open_browser=False,
-        on_ready=on_ready, now=T0, front=lambda tok: inspector.render(view, info, tok, "E"))))
+        view["episodes"], written.extend, inspector.pages(view, info, "E"), open_browser=False,
+        on_ready=on_ready, now=T0)))
     t.start()
     assert ready.wait(10)
     url = box["url"]

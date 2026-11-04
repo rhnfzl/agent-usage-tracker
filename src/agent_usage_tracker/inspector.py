@@ -14,8 +14,9 @@ import html
 import re
 from collections import Counter
 from datetime import datetime, timedelta, timezone
+from typing import Callable
 
-from . import review
+from . import episode_store, local_page, review
 from .collectors.session_digest import local_info
 from .config import Config
 from .sink import connect
@@ -37,6 +38,13 @@ _SHA = re.compile(r"[0-9a-f]{7,40}")
 _EP_PREFIX = re.compile(r"[0-9a-f-]{4,36}")
 _EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 _SHOW = 25   # rows per list on the page; a giant episode would otherwise render megabytes
+_CSS = """section { border: 1px solid var(--line); border-radius: 6px; margin: 0 0 1rem;
+  padding: 0 1rem; overflow-x: auto; }
+table { border-collapse: collapse; font-size: 14px; }
+td, th { border-bottom: 1px solid var(--line); padding: .2rem .5rem; text-align: left;
+  vertical-align: top; }
+.meta { color: var(--mut); font-size: 13px; } code { font-size: 13px; }
+"""
 
 
 def _day_bounds(day: str) -> tuple[datetime, datetime]:
@@ -77,7 +85,7 @@ def fetch(dsn: str, episode: str | None = None, day: str | None = None,
     with connect(dsn) as conn:
         def q(sql, p):
             return conn.execute(sql, p).fetchall()
-        eps = review.load_episodes(conn, where, params)
+        eps = episode_store.load_episodes(conn, where, params)
         sids = sorted({m["session_id"] for ep in eps for m in ep["members"]})
         acts = q("SELECT session_id, kind, attrs FROM agents.activity_event "
                  "WHERE session_id = ANY(%s) AND kind IN ('link', 'commit')", (sids,))
@@ -184,21 +192,7 @@ def _short(x) -> str:
 
 def render(view: dict, info: dict, token: str, title: str, label: str | None = None) -> str:
     e = html.escape
-    parts = [f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Evidence inspector</title><style>
-:root {{ color-scheme: light dark; --bg: #fafafa; --fg: #1a1a1a; --mut: #666; --line: #ddd; }}
-@media (prefers-color-scheme: dark) {{ :root {{ --bg: #161616; --fg: #eee; --mut: #aaa;
-  --line: #333; }} }}
-body {{ background: var(--bg); color: var(--fg); font: 15px/1.45 system-ui, sans-serif;
-  max-width: 64rem; margin: 0 auto; padding: 1rem; }}
-section {{ border: 1px solid var(--line); border-radius: 6px; margin: 0 0 1rem; padding: 0 1rem;
-  overflow-x: auto; }}
-table {{ border-collapse: collapse; font-size: 14px; }}
-td, th {{ border-bottom: 1px solid var(--line); padding: .2rem .5rem; text-align: left;
-  vertical-align: top; }}
-.meta {{ color: var(--mut); font-size: 13px; }} code {{ font-size: 13px; }}
-</style></head><body><h1>{e(title)}</h1>
+    parts = [local_page.head("Evidence inspector", "64rem", _CSS) + f"""<h1>{e(title)}</h1>
 <p>Private page on this machine only; read-only. Titles and branch names come from this
 machine's logs and are never sent.</p>"""]
     if view["episodes"]:
@@ -290,6 +284,12 @@ machine's logs and are never sent.</p>"""]
     return "".join(parts)
 
 
+def pages(view: dict, info: dict, title: str, label: str | None = None) -> Callable[[str], dict]:
+    """The evidence at /<token> and the correction form for its episodes at /<token>/correct."""
+    return lambda token: {"": render(view, info, token, title, label),
+                          "/correct": review.render(view["episodes"], info, token, title.lower())}
+
+
 def run_inspect(cfg: Config, episode: str | None = None, day: str | None = None,
                 label: str | None = None, fetch_fn=fetch, serve_fn=review.serve) -> dict:
     dsn = cfg.require_pg("inspect")
@@ -303,9 +303,8 @@ def run_inspect(cfg: Config, episode: str | None = None, day: str | None = None,
     info = local_info(cfg.home, {s["session_id"] for ep in view["episodes"]
                                         for s in ep["sessions"][:4 * _SHOW]
                                         if s["role"] == "seed"})   # children have no title
-    summary = serve_fn(view["episodes"], info, title.lower(),
-                       lambda rows: review.insert_corrections(dsn, rows),
-                       front=lambda tok: render(view, info, tok, title, label))
+    summary = serve_fn(view["episodes"], lambda rows: episode_store.insert_corrections(dsn, rows),
+                       pages(view, info, title, label))
     if summary["reviewed"]:
         print(f"inspect: {summary['reviewed']} corrections saved")
     return summary

@@ -15,6 +15,7 @@ Locks the rules:
 
 from __future__ import annotations
 
+import http.client
 import json
 import sys
 import tempfile
@@ -28,7 +29,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from agent_usage_tracker import review  # noqa: E402
+from agent_usage_tracker import local_page, review  # noqa: E402
 from agent_usage_tracker.collectors import session_digest  # noqa: E402
 
 K1, K2 = "a1" * 32, "b2" * 32
@@ -112,8 +113,8 @@ def test_server_serves_under_token_and_stops_on_submit():
         box["url"] = url
         ready.set()
     t = threading.Thread(target=lambda: box.update(summary=review.serve(
-        _episodes(), {}, "2001-01", written.extend, open_browser=False, on_ready=on_ready,
-        now=T0)))
+        _episodes(), written.extend, review.month_pages(_episodes(), {}, "2001-01"),
+        open_browser=False, on_ready=on_ready, now=T0)))
     t.start()
     assert ready.wait(10)
     url = box["url"]
@@ -142,6 +143,48 @@ def test_server_serves_under_token_and_stops_on_submit():
     assert [w["action"] for w in written] == ["confirm", "reject"], written
     assert box["summary"] == {"reviewed": 2, "right": 1}
     print("ok server_serves_under_token_and_stops_on_submit")
+
+
+def test_post_with_a_bad_content_length_is_a_404_not_a_crash():
+    ready = threading.Event()
+    box: dict = {}
+
+    def on_ready(url):
+        box["url"] = url
+        ready.set()
+    t = threading.Thread(target=lambda: local_page.serve(
+        "tok", lambda tail: b"page" if tail == "" else None, lambda form: b"done", "{url}",
+        open_browser=False, on_ready=on_ready))
+    t.start()
+    assert ready.wait(10)
+    parsed = urllib.parse.urlsplit(box["url"])
+
+    def post(path, length):
+        c = http.client.HTTPConnection(parsed.hostname, parsed.port, timeout=5)
+        c.putrequest("POST", path)
+        c.putheader("Content-Length", length)
+        c.endheaders()
+        code = c.getresponse().status
+        c.close()
+        return code
+    assert post("/other", "nope") == 404
+    assert post("/tok", "nope") == 404
+    assert post("/tok", "-1") == 404
+    with urllib.request.urlopen(box["url"], timeout=5) as r:
+        assert r.read() == b"page"
+    with urllib.request.urlopen(urllib.request.Request(box["url"], data=b"a=1"), timeout=5) as r:
+        assert r.read() == b"done"
+    t.join(10)
+    assert not t.is_alive()
+    print("ok post_with_a_bad_content_length_is_a_404_not_a_crash")
+
+
+def test_ctrl_c_ends_the_page_quietly():
+    with patch("http.server.HTTPServer.serve_forever", side_effect=KeyboardInterrupt):
+        got = review.serve(_episodes(), [].extend, review.month_pages(_episodes(), {}, "2001-01"),
+                           open_browser=False)
+    assert got == {"reviewed": 0, "right": 0}
+    print("ok ctrl_c_ends_the_page_quietly")
 
 
 def test_month_bounds():
