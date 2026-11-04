@@ -7,7 +7,8 @@
 # Role-based label for this machine (avoid personal names). e.g. laptop, buildbox, workstation.
 machine = "laptop"
 
-# Which agents to collect. Omit to collect all installed ones except the opt-in activitywatch. IMPORTANT: the three Cursor sources
+# Which agents to collect. Omit to collect every collector except the opt-in activitywatch.
+# IMPORTANT: the three Cursor sources
 # OVERLAP - enabling more than one double-counts the same Cursor usage under different event ids:
 #   cursor      = local IDE state.vscdb (a lower bound; no CLI, no model/cache attribution)
 #   cursor_sdk  = SDK-app run manifests  (needs cursor_sdk_manifests below)
@@ -40,9 +41,11 @@ agents = ["claude_code", "codex", "cursor_api", "cursor_cli", "pi"]
 
 # activitywatch: OPT-IN (add "activitywatch" to agents above). Reads not-AFK window time from the
 # local ActivityWatch server and sends it to agents.time_interval with the window title, which is
-# private: redacted on this machine, never public, nulled at the sink after 180 days. Needs pg_dsn.
+# private: redacted on this machine and never in a public view. Needs pg_dsn.
 # activitywatch_url = "http://localhost:5600"
-# activitywatch_title_days = 180      # also deletes ActivityWatch's own window events older than this
+# Titles are kept for good by default (0). A number of days turns a limit on: older titles are not
+# sent, and ActivityWatch's own window events older than that are deleted.
+# activitywatch_title_days = 180
 # activitywatch_titles = false        # this machine sends intervals and categories, but no titles
 # Dropped entirely before sending (password managers and private browsing are built in). Put the
 # names of banks or other private apps HERE, never in code:
@@ -56,24 +59,6 @@ agents = ["claude_code", "codex", "cursor_api", "cursor_cli", "pi"]
 # on where the nightly job runs: without it squash-merged GitHub PRs count as abandoned).
 # outcome_repo_roots = ["~/projects"]
 # outcome_fetch = true
-
-[transport]
-# Default transport: POST batches to the n8n ingest webhook (behind Cloudflare Access).
-webhook_url    = "https://n8n.example.tld/webhook/llm-usage"
-webhook_secret = "env:AUT_WEBHOOK_SECRET"      # shared secret sent as the X-AUT-Secret header
-
-# Cloudflare Access service token (Zero Trust -> Access -> Service Auth). Set BOTH halves to push
-# through Cloudflare Access from ANYWHERE - no VPN needed (this is CF's "Pattern 2" for CLI/cron).
-# Sent as CF-Access-Client-Id / CF-Access-Client-Secret headers. Omit on-LAN/Tailscale if you point
-# webhook_url straight at the internal n8n (e.g. http://n8n.internal:5678/webhook/llm-usage).
-# cf_access_client_id     = "env:CF_ACCESS_CLIENT_ID"
-# cf_access_client_secret = "env:CF_ACCESS_CLIENT_SECRET"
-
-# pg_dsn is the optional direct-Postgres transport AND the read source of the local pages
-# (`aut episodes review`, `aut inspect`) and `aut outcomes` / `aut label`. Optional fallback
-# for webhook: only used if the webhook is unreachable. Requires the [postgres] extra
-# (uv tool install "agent-usage-tracker[postgres]").
-# pg_dsn = "env:AUT_PG_DSN"                     # e.g. postgresql://agents_writer@db.example:5432/agents
 
 # The home directory the collectors read from. Defaults to the RUNNING user's $HOME, so on a
 # SHARED machine it only ever sees YOUR logs, never other users' homes. Set it explicitly to
@@ -89,7 +74,7 @@ webhook_secret = "env:AUT_WEBHOOK_SECRET"      # shared secret sent as the X-AUT
 
 # cursor_sdk: usage from agents built on the Cursor Agent SDK, which don't write CLI/IDE logs -
 # the SDK hands usage back in-process and the app persists it. Point this at a glob of the run
-# manifest.json files those apps write (e.g. the tickets-orchestrator's per-ticket manifests).
+# manifest.json files those apps write (one per run).
 # Unset -> the cursor_sdk collector does nothing. Use a "**" recursive glob:
 # cursor_sdk_manifests = "/home/youruser/projects/**/.state/runs/*/manifest.json"
 
@@ -110,3 +95,25 @@ webhook_secret = "env:AUT_WEBHOOK_SECRET"      # shared secret sent as the X-AUT
 # label_precision = 0.90       # per-label tau is set for this precision on your gold labels
 # label_coverage = 0.75        # a module below this share of known labels is not exported
 # label_budget_s = 3600        # time budget of one run; the rest waits for the next night
+
+# Keep [transport] LAST: every key below a table header belongs to that table, so a top-level
+# key written after this line would be read as transport.<key> and ignored.
+[transport]
+# Default transport: POST batches to the n8n ingest webhook (behind Cloudflare Access).
+webhook_url    = "https://n8n.example.tld/webhook/llm-usage"
+webhook_secret = "env:AUT_WEBHOOK_SECRET"      # shared secret sent as the X-AUT-Secret header
+
+# Cloudflare Access service token (Zero Trust -> Access -> Service Auth). Set BOTH halves to push
+# through Cloudflare Access from ANYWHERE - no VPN needed (this is CF's "Pattern 2" for CLI/cron).
+# Sent as CF-Access-Client-Id / CF-Access-Client-Secret headers. Omit on-LAN/Tailscale if you point
+# webhook_url straight at the internal n8n. aut sends the secret over https only (plain http only
+# to localhost), so an internal URL needs TLS too (e.g. https://n8n.internal.example/webhook/llm-usage).
+# cf_access_client_id     = "env:CF_ACCESS_CLIENT_ID"
+# cf_access_client_secret = "env:CF_ACCESS_CLIENT_SECRET"
+
+# pg_dsn: direct Postgres. The webhook carries usage rows only, so pg_dsn is also how session,
+# activity, time, outcome, label and heartbeat rows arrive. `aut outcomes`, `aut outcome`,
+# `aut episodes review`, `aut inspect`, `aut time add` and `aut label` need it too. With both set, usage goes over the webhook and falls back to pg_dsn when the webhook
+# is unreachable. Requires the [postgres] (or [label]) extra:
+#   uv tool install "agent-usage-tracker[postgres] @ git+https://github.com/rhnfzl/agent-usage-tracker"
+# pg_dsn = "env:AUT_PG_DSN"                     # e.g. postgresql://agents_writer@db.example:5432/agents
