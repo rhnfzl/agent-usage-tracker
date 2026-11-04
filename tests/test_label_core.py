@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import json
 import sys
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
 import pytest
@@ -135,6 +135,128 @@ def test_choice_file_and_backend_slots(tmp_path, monkeypatch):
         backends.make_backend("x", core.Choice(model_id="pplx-decider-flash-v1.2"), "m")
     with pytest.raises(backends.BackendUnavailable):
         backends.Encoder("steer_intent").distribution(_req())
+
+
+def _two_options(**kw) -> core.Request:
+    base = dict(task="t", task_ver=2, unit="steer", unit_id="u", ts="2026-01-01T00:00:00+00:00",
+                state={"text": "go", "n": 3, "names": ["é"]}, question="Which?", decision="choice",
+                candidates=[{"id": "b", "desc": "desc b"}, {"id": "a", "desc": "desc a"}],
+                none_fits=None)
+    return core.Request(**{**base, **kw})
+
+
+def test_local_midnight_is_an_aware_start_of_that_day():
+    m = core.local_midnight(date(2026, 3, 29))
+    assert m.tzinfo is not None and (m.year, m.month, m.day, m.hour, m.minute) == (2026, 3, 29, 0, 0)
+
+
+def test_label_paths_follow_the_environment(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg"))
+    assert core.data_dir() == tmp_path / "xdg" / "aut"
+    monkeypatch.delenv("XDG_DATA_HOME")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    assert core.data_dir() == tmp_path / ".local" / "share" / "aut"
+    monkeypatch.setenv("AUT_CONFIG", str(tmp_path / "conf" / "config.toml"))
+    assert core.choice_path() == tmp_path / "conf" / "label.json"
+
+
+def test_read_choices_tells_missing_from_unusable(tmp_path, monkeypatch):
+    p = tmp_path / "label.json"
+    monkeypatch.setattr(core, "choice_path", lambda: p)
+    assert core.read_choices() == {}
+    p.write_text('{"tasks": {"t": {"temperature": 2.0}}}')
+    assert core.read_choices() == {"tasks": {"t": {"temperature": 2.0}}}
+    for bad in ("[]", '{"tasks": []}', "{cut"):
+        p.write_text(bad)
+        with pytest.raises(ValueError):
+            core.read_choices()
+
+
+def test_load_choice_keeps_known_fields_and_warns_on_a_bad_entry(tmp_path, monkeypatch, capsys):
+    p = tmp_path / "label.json"
+    monkeypatch.setattr(core, "choice_path", lambda: p)
+    p.write_text('{"tasks": {"t": {"temperature": 2.0, "junk": 1}, "bad": 5}}')
+    assert core.load_choice("t") == core.Choice(temperature=2.0)
+    assert core.load_choice("other") == core.Choice() and capsys.readouterr().err == ""
+    assert core.load_choice("bad") == core.Choice()
+    err = capsys.readouterr().err
+    assert "its entry for bad is not a table" in err and "uncalibrated" in err
+
+
+def test_render_shows_the_facts_the_options_in_order_and_the_letters():
+    assert core.render(_two_options(), ["a", "b"]) == (
+        'Which?\n\nFacts:\n- text: go\n- n: 3\n- names: ["é"]\n\n'
+        "Options:\nA. a: desc a\nB. b: desc b\n\nAnswer with one letter (A, B) and nothing else.")
+
+
+def test_softmax_sums_to_one_and_survives_huge_logits():
+    assert core.softmax([1000.0, 1000.0]) == [0.5, 0.5]
+    p = core.softmax([0.0, 1.0, 2.0])
+    assert abs(sum(p) - 1) < 1e-12 and p[0] < p[1] < p[2]
+
+
+def test_top_label_takes_the_first_of_a_tie():
+    assert core.top_label({"x": 0.1, "y": 0.45, "z": 0.45}) == "y"
+
+
+def test_letter_distribution_refuses_a_candidate_count_it_cannot_letter():
+    many = [{"id": f"c{i}", "desc": "d"} for i in range(len(core.LETTERS) + 1)]
+    for candidates in ([], many):
+        with pytest.raises(ValueError, match="candidates"):
+            core.letter_distribution(lambda p, ls: [0.0] * len(ls), _two_options(candidates=candidates))
+    one = _two_options(candidates=[{"id": "only", "desc": "d"}])
+    assert core.letter_distribution(lambda p, ls: [0.0] * len(ls), one) == {"only": 1.0}
+
+
+def test_letter_distribution_asks_both_orders_with_their_letters():
+    seen = []
+
+    def logits(prompt, letters):
+        seen.append((prompt.split("Options:\n")[1].split("\n")[0], letters))
+        return [1.0, 0.0]
+    d = core.letter_distribution(logits, _two_options())
+    assert seen == [("A. b: desc b", ["A", "B"]), ("A. a: desc a", ["A", "B"])]
+    assert abs(d["a"] - 0.5) < 1e-12 and abs(d["b"] - 0.5) < 1e-12     # pure position bias cancels
+
+
+def test_temper_never_takes_the_log_of_zero():
+    d = core.temper({"a": 1.0, "b": 0.0}, 1.0)
+    assert d["a"] > 0.999 and 0 < d["b"] < 1e-9
+
+
+def test_fit_temperature_reaches_its_bound_on_an_always_right_model():
+    assert abs(core.fit_temperature([{"a": 0.6, "b": 0.4}] * 10, ["a"] * 10) - 0.05) < 1e-3
+
+
+def test_fit_tau_cuts_only_between_distinct_probabilities():
+    # the 0.8 pair is one cut: 2 of 3 right, under the bar, so 0.9 stands
+    assert core.fit_tau([("a", 0.9, "a"), ("a", 0.8, "a"), ("a", 0.8, "b")]) == {"a": 0.9}
+    assert core.fit_tau([("a", 0.8, "a"), ("a", 0.8, "b")]) == {"a": None}
+    assert core.fit_tau([]) == {}
+
+
+def test_decide_tempers_first_and_a_label_without_tau_never_passes():
+    req = _two_options()
+    raw = {"a": 0.9, "b": 0.1}
+    res = core.decide(req, raw, core.Choice(temperature=2.0, tau={"a": 0.8}, calib_ver="c"), "m", "r")
+    assert res.chosen == "a" and abs(res.prob - res.dist["a"]) < 1e-12 and 0.7 < res.prob < 0.8
+    assert res.below_tau                        # 0.9 raw would pass 0.8; the calibrated p does not
+    assert (res.model_id, res.model_rev, res.calib_ver) == ("m", "r", "c")
+    assert res.prompt_ver == req.prompt_ver == f"t@2/p{core.PROMPT_VER}"
+    assert core.decide(req, raw, core.Choice(tau={"b": 0.1}), "m", "r").below_tau
+    assert core.decide(req, raw, core.Choice(tau={"a": None}), "m", "r").below_tau
+
+
+def test_label_event_rounds_its_numbers_and_keeps_the_given_time():
+    req = _two_options()
+    res = core.decide(req, {"a": 2 / 3, "b": 1 / 3}, core.Choice(), "m", "r")
+    ev = core.label_event(req, res, "2026-11-04T02:13:00.000+00:00")
+    assert ev.attrs["labelled_at"] == "2026-11-04T02:13:00.000+00:00"
+    assert ev.attrs["p"] == 0.6667 and ev.attrs["dist"] == {"a": 0.6667, "b": 0.3333}
+    assert (ev.session_id, ev.turn_id, ev.agent) == (None, None, "label")
+    other_calib = core.decide(req, {"a": 2 / 3, "b": 1 / 3}, core.Choice(calib_ver="c2"), "m", "r")
+    assert core.label_event(req, other_calib).event_id != ev.event_id
 
 
 if __name__ == "__main__":

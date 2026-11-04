@@ -15,7 +15,9 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from agent_usage_tracker.collectors import cursor_sdk  # noqa: E402
+from agent_usage_tracker.event import make_event_id  # noqa: E402
 from test_collectors import _cfg, _drain  # noqa: E402
+from agent_usage_tracker.config import Config  # noqa: E402
 
 
 def test_cursor_sdk() -> None:
@@ -115,6 +117,78 @@ def test_cursor_sdk_says_a_manifest_was_unreadable(capsys):
         cfg.cursor_sdk_manifests = str(Path(t) / "*.json")
         assert _drain(cursor_sdk.collect, cfg) == []
     assert "1 malformed record(s)" in capsys.readouterr().err
+
+
+def test_run_event_needs_a_dict_with_usage_and_tokens():
+    for bad in ("run", None, {"model": "m"}, {"usage": "x"}, {"usage": {}},
+                {"usage": {"input_tokens": 0, "total_tokens": 0}}):
+        assert cursor_sdk._run_event(bad, 0, "T", None) is None, bad
+
+
+def test_run_event_sums_every_class_when_no_total_is_given():
+    e = cursor_sdk._run_event({"usage": {"input_tokens": 1, "output_tokens": 2, "cache_read_tokens": 3,
+                                         "cache_write_tokens": 4}}, 0, "T", "repo")
+    assert e.total_tokens == 10 and e.cache_write_tokens == 4 and e.project == "repo"
+    assert (e.agent, e.provider, e.model) == ("cursor_sdk", "cursor", None)
+
+
+def test_run_event_turns_a_bad_count_to_zero():
+    e = cursor_sdk._run_event({"usage": {"input_tokens": "x", "output_tokens": -3, "total_tokens": 7}},
+                              0, "T", None)
+    assert (e.input_tokens, e.output_tokens, e.total_tokens) == (0, 0, 7)
+
+
+def test_run_event_time_is_the_finish_else_the_start():
+    usage = {"usage": {"input_tokens": 1}}
+    assert cursor_sdk._run_event({**usage, "started_at": "s", "finished_at": "f"}, 0, "T", None).ts == "f"
+    assert cursor_sdk._run_event({**usage, "started_at": "s"}, 0, "T", None).ts == "s"
+
+
+def test_run_event_id_is_stable_and_names_the_run():
+    run = {"usage": {"input_tokens": 1}, "run_id": "r"}
+    first = cursor_sdk._run_event(run, 0, "T", None).event_id
+    assert cursor_sdk._run_event(dict(run), 0, "T", None).event_id == first
+    assert cursor_sdk._run_event(run, 1, "T", None).event_id != first        # another position
+    assert cursor_sdk._run_event(run, 0, "U", None).event_id != first        # another ticket
+    assert cursor_sdk._run_event({**run, "run_id": "s"}, 0, "T", None).event_id != first
+    # a stored index wins over the position, so it does not matter where the run sits in the list
+    indexed = {**run, "index": 5}
+    assert cursor_sdk._run_event(indexed, 0, "T", None).event_id == \
+        cursor_sdk._run_event(indexed, 3, "T", None).event_id
+
+
+def _manifests(home: Path, **files) -> Config:
+    for name, body in files.items():
+        p = home / name / "manifest.json"
+        p.parent.mkdir(parents=True)
+        p.write_text(body if isinstance(body, str) else json.dumps(body))
+    cfg = _cfg(home)
+    cfg.cursor_sdk_manifests = str(home / "*" / "manifest.json")
+    return cfg
+
+
+def test_collect_falls_back_to_the_path_for_a_ticket_and_keeps_only_a_basename(tmp_path):
+    run = {"usage": {"input_tokens": 1}, "run_id": "r"}
+    cfg = _manifests(tmp_path, a={"project": "/secret/path/repo", "runs": [run]},
+                     b={"ticket": "B", "project": ["not", "a", "path"], "runs": [run]})
+    events = _drain(cursor_sdk.collect, cfg)
+    assert sorted(str(e.project) for e in events) == ["None", "repo"]
+    assert events[0].event_id != events[1].event_id
+    assert not any("secret" in str(e.project) for e in events)
+    assert make_event_id("cursor_sdk", str(tmp_path / "a" / "manifest.json"), "0", "r") in {
+        e.event_id for e in events}
+
+
+def test_collect_ignores_other_json_without_a_warning(tmp_path, capsys):
+    cfg = _manifests(tmp_path, a=[1, 2], b={"runs": "no"}, c={"runs": ["junk", None]})
+    assert _drain(cursor_sdk.collect, cfg) == []
+    assert capsys.readouterr().err == ""
+
+
+def test_collect_yields_one_batch_with_nothing_to_advance(tmp_path):
+    cfg = _manifests(tmp_path, a={"runs": [{"usage": {"input_tokens": 1}}]})
+    batches = list(cursor_sdk.collect(cfg, {}))
+    assert len(batches) == 1 and len(batches[0][0]) == 1 and batches[0][1]() is None
 
 
 if __name__ == "__main__":

@@ -10,6 +10,7 @@ Locks the rules:
 
 from __future__ import annotations
 
+import json
 import sys
 import tempfile
 from pathlib import Path
@@ -168,6 +169,141 @@ def test_pi_watermark_with_an_old_dev_is_not_read_again() -> None:
         assert [u.event_id for u in _usage(later)] == [make_event_id("pi", "a2")], later  # new only
         assert [h.session.turn_id for h in _usage(later, "human")] == ["u2"]
     print("ok pi_watermark_with_an_old_dev_is_not_read_again")
+
+
+UUID = "0f0e0d0c-0b0a-4909-8807-060504030201"
+
+
+def test_cost_total_keeps_only_a_finite_number():
+    assert pi._cost_total(0.5) == 0.5 and pi._cost_total({"total": 2}) == 2.0
+    for bad in (None, "1.5", True, {"total": None}, {"input": 1}, 10 ** 400, float("nan"),
+                float("inf"), {"total": -float("inf")}):
+        assert pi._cost_total(bad) is None, bad
+
+
+def test_uuid_in_reads_only_a_file_name_that_ends_in_one():
+    assert pi.uuid_in(f"/x/2026_{UUID}.jsonl") == UUID
+    assert pi.uuid_in(f"/x/{UUID}/session.jsonl") is None
+    assert pi.uuid_in(f"/x/2026_{UUID}.txt") is None
+
+
+def test_header_without_a_parent_falls_back_to_the_file_name():
+    hdr = pi.header({"timestamp": "t", "cwd": "/w/repo"}, f"/x/2026_{UUID}.jsonl")
+    assert hdr == {"id": UUID, "ts": "t", "cwd": "/w/repo", "parent": None, "fork": False}
+    assert pi.header({"id": "own", "cwd": 5}, "/x/plain.jsonl")["id"] == "own"
+    assert pi.header({"cwd": 5}, "/x/plain.jsonl") == {"id": "plain", "ts": None, "cwd": None,
+                                                       "parent": None, "fork": False}
+
+
+def test_header_finds_a_forks_parent_and_never_keeps_its_path(tmp_path):
+    parent = tmp_path / f"2026_{UUID}.jsonl"
+    parent.write_text(json.dumps({"type": "session", "id": "real-parent"}) + "\n")
+    hdr = pi.header({"id": "f", "parentSession": str(parent)}, "/x/f.jsonl")
+    assert hdr["parent"] == "real-parent" and hdr["fork"] is True
+    assert str(tmp_path) not in json.dumps(hdr)
+    # the parent's file is gone, or its first line is no header: the uuid in the name stands in
+    assert pi.header({"parentSession": f"/gone/2026_{UUID}.jsonl"}, "/x/f.jsonl")["parent"] == UUID
+    parent.write_text(json.dumps({"type": "message", "id": "not-a-header"}) + "\n")
+    assert pi.header({"parentSession": str(parent)}, "/x/f.jsonl")["parent"] == UUID
+    # no uuid to go on: still a fork, with no parent
+    hdr = pi.header({"parentSession": "/gone/plain"}, "/x/f.jsonl")
+    assert hdr["parent"] is None and hdr["fork"] is True
+
+
+def test_is_fork_copy_means_older_than_a_forks_header():
+    fork = {"fork": True, "ts": T(10)}
+    assert pi.is_fork_copy({"timestamp": T(5)}, fork)
+    assert not pi.is_fork_copy({"timestamp": T(10)}, fork)
+    assert not pi.is_fork_copy({"timestamp": T(15)}, fork)
+    assert not pi.is_fork_copy({}, fork)
+    assert not pi.is_fork_copy({"timestamp": T(5)}, {"fork": False, "ts": T(10)})
+
+
+def test_note_model_change_keeps_what_the_record_does_not_name():
+    cur = {"model": "old", "provider": "p"}
+    pi._note_model_change({"modelId": "new"}, cur)
+    assert cur == {"model": "new", "provider": "p"}
+    pi._note_model_change({"model": "other", "provider": "q"}, cur)
+    assert cur == {"model": "other", "provider": "q"}
+    pi._note_model_change({}, cur)
+    assert cur == {"model": "other", "provider": "q"}
+
+
+def test_record_id_falls_back_to_the_path_and_time():
+    assert pi._record_id({"id": "e"}, "/p") == "e"
+    assert pi._record_id({"timestamp": "t"}, "/p") == "/p:t"
+
+
+def _usage_of(o, msg=None, cur=None):
+    return pi._usage_event(o, msg or {}, cur or {"model": "fallback", "provider": "fb"}, "/p", "repo", None)
+
+
+def test_usage_event_reads_a_message_and_uses_the_streamed_model_when_it_has_none():
+    msg = {"usage": {"input": 1, "output": 2, "cacheRead": 3, "cacheWrite": 4, "reasoning": 1,
+                     "totalTokens": 10, "cost": {"total": 0.5}}, "model": "m", "provider": "p"}
+    e = _usage_of({"type": "message", "id": "e", "timestamp": "t"}, msg)
+    assert (e.input_tokens, e.output_tokens, e.cache_read_tokens, e.cache_write_tokens) == (1, 2, 3, 4)
+    assert (e.model, e.provider, e.est_cost_usd, e.project, e.ts) == ("m", "p", 0.5, "repo", "t")
+    assert (e.total_tokens, e.reasoning_tokens) == (10, 1)
+    plain = _usage_of({"type": "message", "id": "e"}, {"usage": {"input": 1, "output": 1}})
+    assert (plain.model, plain.provider, plain.total_tokens) == ("fallback", "fb", 2)
+    assert plain.reasoning_tokens is None and plain.est_cost_usd is None
+
+
+def test_usage_event_of_a_compaction_is_the_records_own_usage():
+    e = _usage_of({"type": "compaction", "id": "c", "usage": {"input": 5}, "model": "ignored"})
+    assert (e.input_tokens, e.total_tokens, e.model) == (5, 5, "fallback")
+
+
+def test_usage_event_is_none_without_tokens_and_raises_on_a_bad_count():
+    assert _usage_of({"type": "model_change", "usage": {"input": 1}}) is None
+    assert _usage_of({"type": "message"}, {"usage": "x"}) is None
+    assert _usage_of({"type": "message"}, {"usage": {"input": 0}}) is None
+    with pytest.raises(ValueError):
+        _usage_of({"type": "message"}, {"usage": {"input": "many"}})
+
+
+def test_session_of_opens_a_turn_on_a_prompt_and_skips_a_fork_copy():
+    hdr = {"id": "s", "parent": "p", "fork": True, "ts": T(10)}
+    cur = {}
+    assert pi._session_of({"timestamp": T(5), "id": "e0"}, hdr, cur, True) is None and cur == {}
+    s = pi._session_of({"timestamp": T(11), "id": "e1"}, hdr, cur, True)
+    assert (s.session_id, s.parent_session_id, s.turn_id) == ("s", "p", "e1")
+    assert pi._session_of({"timestamp": T(12), "id": "e2"}, hdr, cur, False).turn_id == "e1"
+    # a prompt with no usable id stays in the turn it is in
+    assert pi._session_of({"timestamp": T(13), "id": 5}, hdr, cur, True).turn_id == "e1"
+
+
+def test_upgrade_state_adds_the_header_once_and_pads_pending_calls(tmp_path):
+    f = tmp_path / f"2026_{UUID}.jsonl"
+    f.write_text(json.dumps({"type": "session", "id": "hdr-id", "cwd": "/w"}) + "\n")
+    wm = {"files": {str(f): {"off": 10, "act": {"pend": {"c": [False, None]}}},
+                    "/gone.jsonl": {"off": 10},
+                    "/fresh.jsonl": {"off": 0}}}
+    pi._upgrade_state(wm)
+    entry = wm["files"][str(f)]
+    assert entry["hdr"]["id"] == "hdr-id" and entry["act"]["pend"]["c"] == [False, None, None]
+    assert "hdr" not in wm["files"]["/gone.jsonl"] and "hdr" not in wm["files"]["/fresh.jsonl"]
+    assert wm["state_v"] == pi._STATE_V
+    f.unlink()
+    entry["hdr"]["id"] = "kept"
+    pi._upgrade_state(wm)                  # already this version: no step runs again
+    assert entry["hdr"]["id"] == "kept"
+    fresh = {}
+    pi._upgrade_state(fresh)
+    assert fresh == {"files": {}, "state_v": pi._STATE_V}
+
+
+def test_trim_state_keeps_only_what_carries_over():
+    cur = {"act": {"link": {}}}
+    pi._trim_state(cur)
+    assert "act" not in cur
+    cur = {"act": {"link": {}, "open": {"id": "e"}}}
+    pi._trim_state(cur)
+    assert cur == {"act": {"open": {"id": "e"}}}
+    cur = {"act": {"link": {"repo": 1}}}
+    pi._trim_state(cur)
+    assert cur == {"act": {"link": {"repo": 1}}}
 
 
 if __name__ == "__main__":

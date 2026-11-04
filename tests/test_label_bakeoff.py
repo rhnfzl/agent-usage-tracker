@@ -151,5 +151,151 @@ def test_corrupt_choice_file_warns_and_choose_keeps_it(tmp_path, monkeypatch, ca
     assert p.read_text() == "{not json", "another task's choice must survive"
 
 
+def _record(model="m", size=1.0, f1=0.9, coverage=1.0, **per) -> dict:
+    return {"task_ver": tasks.TASKS[TASK].ver, "model_id": model, "backend": "mlx_letter",
+            "model_rev": "r", "temperature": 1.5, "calib_ver": "c", "size_mb": size,
+            "macro_f1": f1, "coverage": coverage, "n_held": 9,
+            "per_label": {"stop": {"tau": 0.7, "precision_at_tau": 0.95, "share_error_pp": 1.0},
+                          "framing": {"tau": None, "precision_at_tau": None, "share_error_pp": 2.0},
+                          **per}}
+
+
+def test_wilson_lb_known_values():
+    assert abs(bakeoff.wilson_lb(0, 10)) < 1e-12
+    assert abs(bakeoff.wilson_lb(50, 100) - 0.4038) < 1e-3
+    assert bakeoff.wilson_lb(9, 10) < 0.9                     # a bound below the plain share
+
+
+def test_kappa_known_value_and_edges():
+    assert bakeoff.kappa([]) is None
+    assert bakeoff.kappa([("a", "a")] * 3) == 1.0              # one label only: chance agreement 1
+    # agreement 0.75, chance (3*2 + 1*2) / 16 = 0.5
+    assert bakeoff.kappa([("a", "a"), ("a", "a"), ("a", "b"), ("b", "b")]) == 0.5
+
+
+def test_ece_weighs_each_bin_by_its_items():
+    assert bakeoff.ece([]) is None
+    assert abs(bakeoff.ece([(0.95, True), (0.55, False)]) - 0.3) < 1e-9      # (0.05 + 0.55) / 2
+
+
+def test_label_metrics_of_a_label_with_items():
+    top, gold_ = ["a", "a", "b"], {0: "a", 1: "b", 2: "b"}
+    m = bakeoff._label_metrics("a", [0, 1, 2], top, gold_, [0, 2], {0: 1.0, 1: 1.0, 2: 1.0}, 0.6)
+    assert (m["n"], m["precision"], m["recall"], m["f1"]) == (1, 0.5, 1.0, 0.6667)
+    assert (m["tau"], m["coverage"], m["precision_at_tau"]) == (0.6, 0.5, 1.0)
+    assert m["precision_lb"] == 0.2065
+    assert m["share_error_pp"] == 16.6667       # 1 of 2 known items against 1 of 3 true ones
+
+
+def test_label_metrics_of_a_label_nobody_chose_or_passed():
+    m = bakeoff._label_metrics("c", [0], ["a"], {0: "a"}, [0], {0: 1.0}, None)
+    assert (m["n"], m["precision"], m["recall"], m["f1"], m["coverage"]) == (0, None, None, None, None)
+    assert (m["precision_at_tau"], m["precision_lb"], m["share_error_pp"]) == (None, None, 0.0)
+    wrong = bakeoff._label_metrics("a", [0], ["b"], {0: "a"}, [], {0: 1.0}, None)
+    assert wrong["f1"] == 0.0 and wrong["share_error_pp"] is None    # nothing passed: unknown share
+
+
+def test_passes_needs_every_part_of_the_bar():
+    assert bakeoff.passes(_record(), 0.75, 0.9)
+    assert not bakeoff.passes({**_record(), "n_held": 0}, 0.75, 0.9)
+    assert not bakeoff.passes(_record(coverage=0.7), 0.75, 0.9)
+    assert not bakeoff.passes({**_record(), "coverage": None}, 0.75, 0.9)
+    edge = {"tau": 0.7, "precision_at_tau": None, "share_error_pp": bakeoff.SHARE_ERROR_PP}
+    assert bakeoff.passes(_record(other=edge), 0.75, 0.9)
+    assert not bakeoff.passes(_record(other={**edge, "share_error_pp": 5.01}), 0.75, 0.9)
+    assert not bakeoff.passes(_record(other={**edge, "share_error_pp": None}), 0.75, 0.9)
+
+
+def _choices(tmp_path, monkeypatch, records):
+    monkeypatch.setattr(core, "choice_path", lambda: tmp_path / "label.json")
+    monkeypatch.setattr(bakeoff, "choice_path", lambda: tmp_path / "label.json")
+    for r in records:
+        evalset.append_jsonl(evalset.eval_path(TASK, "eval"), r)
+
+
+def test_choose_takes_the_smallest_then_the_best_and_keeps_other_tasks(tmp_path, monkeypatch):
+    with _env(tmp_path):
+        _choices(tmp_path, monkeypatch, [
+            _record("big", size=100), _record("small-worse", size=10, f1=0.8),
+            _record("small-better", size=10, f1=0.9), _record("unknown-size", size=None)])
+        (tmp_path / "label.json").write_text('{"tasks": {"other": {"backend": "x"}}}')
+        win = bakeoff.choose(_cfg(tmp_path), TASK)
+        assert win["model_id"] == "small-better" and win["tau"] == {"stop": 0.7}
+        saved = json.loads((tmp_path / "label.json").read_text())
+        assert saved["tasks"]["other"] == {"backend": "x"} and saved["tasks"][TASK] == win
+
+
+def test_choose_reads_only_the_newest_record_of_a_model(tmp_path, monkeypatch):
+    with _env(tmp_path):
+        _choices(tmp_path, monkeypatch, [_record("m"), _record("m", coverage=0.1)])
+        with pytest.raises(AutError, match="no backend passes") as exc:
+            bakeoff.choose(_cfg(tmp_path), TASK)
+        assert json.loads(str(exc.value).split(f"{TASK}: ", 1)[1]) == {
+            "m": {"coverage": 0.1, "n_held": 9}}
+        assert not (tmp_path / "label.json").exists()
+
+
+def test_macro_f1_averages_the_labels_that_occur():
+    assert bakeoff._macro_f1([], ["a"]) is None
+    # a: 2 * 1 / (2 + 1) = 0.6667, b: 2 * 1 / (1 + 2) = 0.6667, c never occurs
+    assert bakeoff._macro_f1([("a", "a"), ("a", "b"), ("b", "b")], ["a", "b", "c"]) == 0.6667
+
+
+def test_fit_learns_a_separable_set_and_leaves_its_input_alone():
+    data = [([1], [1.0, 0.0], 1.0), ([2], [0.0, 1.0], 1.0)]
+    w = bakeoff._fit(data, 2)
+    assert w[1][0] > w[1][1] and w[2][1] > w[2][0]
+    assert data == [([1], [1.0, 0.0], 1.0), ([2], [0.0, 1.0], 1.0)]
+    assert bakeoff._fit(data, 2) == w                        # a fixed seed: the same weights
+
+
+def test_training_data_keeps_held_out_and_eval_gold_away():
+    labels = ["stop", "framing"]
+    reqs = {f"u{i}": tasks.TASKS[TASK].request("steer", f"u{i}", BASE, {"text": f"t{i}"})
+            for i in range(30)}
+    train = [u for u, r in reqs.items() if evalset.in_encoder_train_split(r)]
+    eval_half = [u for u in reqs if u not in train]
+    gold_ = {train[0]: "stop", train[1]: "framing", eval_half[0]: "stop", "gone": "stop"}
+    silver = {eval_half[1]: {"x": {"stop": 1.0}, "y": {"stop": 0.5, "framing": 0.5}},
+              train[0]: {"x": {"framing": 1.0}},       # has gold: the gold row stands alone
+              eval_half[2]: {}}
+    data = bakeoff._training_data(gold_, silver, reqs, {train[1]}, labels)
+    assert [(t, w) for _f, t, w in data] == [([1.0, 0.0], bakeoff.GOLD_WEIGHT), ([0.75, 0.25], 1.0)]
+    assert data[0][0] == backends.features(reqs[train[0]].state)
+
+
+def test_gold_items_says_how_many_fell_out_of_the_window(tmp_path):
+    with _env(tmp_path):
+        cfg, src, reqs = _gold(tmp_path, ["stop", "framing"])
+        evalset.append_jsonl(evalset.eval_path(TASK, "gold"), {
+            "unit_id": "gone", "gold": "stop", "task_ver": tasks.TASKS[TASK].ver})
+        items, gone = bakeoff.gold_items(cfg, TASK, 30, src, TODAY)
+        assert gone == 1 and {r.unit_id for r, *_ in items} == set(reqs)
+        for r, g, held, weight in items:
+            assert g == r.state["text"].split()[0] and held == evalset.held_out(r) and weight == 1.0
+
+
+def test_default_backends_dedups_models_and_names_the_ones_left_out(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(bakeoff, "MODELS", {"one": "repo/one", "two": "repo/one", "none": None})
+    monkeypatch.setattr(bakeoff, "make_backend", lambda task, c, fallback: c.model_id)
+    with _env(tmp_path):
+        got = bakeoff.default_backends(_cfg(tmp_path, label_model="repo/own"), TASK)
+    assert got == ["repo/one", "repo/own"]
+    assert "none has no official MLX build" in capsys.readouterr().err
+
+
+def test_print_lines_carry_the_numbers(capsys):
+    rec = {"model_id": "m", "macro_f1": 0.9, "kappa": 0.8, "ece_raw": 0.2, "ece_cal": 0.1,
+           "coverage": 0.7, "n": 10, "n_held": 4, "s_per_decision": 0.5}
+    bakeoff.print_eval(TASK, [rec])
+    bakeoff.print_choose(TASK, {"backend": "b", "model_id": "m", "temperature": 1.5, "tau": {"a": 0.6}})
+    bakeoff.print_train_encoder(TASK, {"accuracy": 0.5})
+    out = capsys.readouterr().out.splitlines()
+    assert out[0] == (f"label eval {TASK} m: macro-F1 0.9, kappa 0.8, ECE 0.2 -> 0.1, coverage 0.7, "
+                      "n 10 (held out 4), 0.5 s per decision")
+    assert out[1] == f'label choose {TASK}: b m (T 1.5, tau {{"a": 0.6}})'
+    assert out[2] == f'label train-encoder {TASK}: {{"accuracy": 0.5}}'
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))

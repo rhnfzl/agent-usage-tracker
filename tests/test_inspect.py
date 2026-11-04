@@ -23,9 +23,12 @@ import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from agent_usage_tracker import cli, inspector, review  # noqa: E402
+from agent_usage_tracker import inspector  # noqa: E402
+from agent_usage_tracker import cli, review  # noqa: E402
 from agent_usage_tracker.config import AutError  # noqa: E402
 
 K1, K2 = "a1" * 32, "b2" * 32
@@ -254,6 +257,131 @@ def test_report_is_retired_and_writes_nothing(monkeypatch):
     print("ok report_is_retired_and_writes_nothing")
 
 
+def test_day_bounds_are_local_midnights_and_refuse_another_format():
+    start, end = inspector._day_bounds("2001-01-05")
+    assert start.tzinfo is not None and (start.day, start.hour) == (5, 0) and (end.day, end.hour) == (6, 0)
+    for bad in ("2001-1", "05-01-2001", ""):
+        with pytest.raises(AutError, match="--day is YYYY-MM-DD"):
+            inspector._day_bounds(bad)
+
+
+def test_episode_prefix_lets_no_like_wildcard_through():
+    assert inspector._episode_prefix("  0F0F-AB ") == "0f0f-ab"
+    for bad in ("abc", "abcd%", "ab_cd", "xyz1", "a" * 37):
+        with pytest.raises(AutError, match="--episode"):
+            inspector._episode_prefix(bad)
+
+
+def test_fetch_wants_exactly_one_selector_before_it_connects():
+    for kw in ({}, {"episode": "abcd", "day": "2001-01-05"}, {"day": "2001-01-05", "label": "x"}):
+        with pytest.raises(ValueError, match="exactly one"):
+            inspector.fetch("postgresql://never-used", **kw)
+
+
+def test_add_anchors_files_lists_and_scalars_under_their_type():
+    anchors = {name: {} for name, _f in inspector.ANCHORS}
+    inspector._add_anchors(anchors, "s1", {"commit_keys": ["k"], "sha_refs": ["k", "m"],
+                                           "branch_key": "b", "pr_keys": [], "ticket_keys": None})
+    assert anchors["commit key"] == {"k": {"s1"}, "m": {"s1"}}       # one type for both fields
+    assert anchors["branch key"] == {"b": {"s1"}}
+    assert anchors["pr key"] == {} and anchors["ticket key (a hint, never an edge)"] == {}
+
+
+def test_link_keys_read_only_members_of_this_repo():
+    members = {"s1": {"repo_keys": ["K"]}, "c1": {"repo_keys": ["K"]}, "n": {"repo_keys": [None]}}
+    acts = [("s1", "link", {"repo_key": "K", "branch_key": "here"}),
+            ("s1", "link", {"repo_key": "other", "branch_key": "there"}),
+            ("c1", "link", {"repo_key": "K", "branch_key": "child"}),
+            ("zz", "link", {"branch_key": "stranger"}),
+            ("n", "link", None),
+            ("s1", "commit", {"repo_key": "K", "sha": "ABCDEF12"}),
+            ("c1", "commit", {"sha": "abcdef1ff"}),
+            ("s1", "commit", {"sha": "short"}),
+            ("s1", "commit", {"repo_key": "other", "sha": "1234567"})]
+    anchors, commits = inspector._link_keys(members, {"s1"}, acts)
+    assert anchors["branch key"] == {"here": {"s1"}}
+    assert commits == {"abcdef1": {"s1", "c1"}}
+
+
+def test_rule_of_names_the_rule_and_the_seed_sessions_manual_outcome():
+    t = T0
+    assert inspector._rule_of({"outcome_source": "git", "outcome": "new-rule"}, [], set()) == "new-rule"
+    manual = {"outcome_source": "manual", "outcome": "shipped"}
+    assert inspector._rule_of(manual, [("other", "open", t)], {"s1"}) == inspector.RULES["manual"]
+    rows = [("s1", "shipped", t), ("s1", "open", t)]      # newest first, as fetch orders them
+    assert f"(shipped, {t.astimezone():%Y-%m-%d %H:%M})" in inspector._rule_of(manual, rows, {"s1"})
+
+
+def test_episode_labels_take_their_own_and_mark_what_they_took():
+    labs = [{"unit": "episode", "unit_id": EP, "task": "t", "below_tau": False, "label": "a"},
+            {"unit": "episode_day", "unit_id": f"{EP}:2001-01-05", "task": "t", "below_tau": False,
+             "label": "b"},
+            {"unit": "steer", "unit_id": "st", "task": "t", "below_tau": True, "label": "c"},
+            {"unit": "steer", "unit_id": "elsewhere", "task": "t", "below_tau": False, "label": "d"},
+            {"unit": "aw_block", "unit_id": None, "task": "t", "below_tau": False, "label": "e"}]
+    used: set = set()
+    own, mix = inspector._episode_labels({"id": EP}, {"s1": {}}, labs, {"st": "s1", "elsewhere": "zz"},
+                                         used)
+    assert [x["label"] for x in own] == ["a", "b"] and mix == {("t", "unknown"): 1}
+    assert used == {0, 1, 2}
+
+
+def test_table_escapes_each_cell():
+    assert inspector._table(["<h>"], [["<c>", 1]]) == (
+        "<table><tr><th>&lt;h&gt;</th></tr><tr><td>&lt;c&gt;</td><td>1</td></tr></table>")
+
+
+def test_labels_table_says_when_a_label_is_below_tau():
+    row = {"task": "t", "unit": "u", "unit_id": "i", "label": "a", "p": None, "model_id": "m",
+           "task_ver": 2, "below_tau": True}
+    page = inspector._labels_table([row, {**row, "below_tau": False, "p": 0.456}])
+    assert "unknown (below tau: a)" in page and "<td>0.46</td>" in page and "<td></td>" in page
+
+
+def test_member_table_caps_the_rows_and_says_so():
+    s = {"role": "seed", "session_id": "s" * 20, "repo_keys": [K1, None]}
+    page = inspector._member_table({"sessions": [s] * 101}, {})
+    assert page.count("<tr>") == 101 and "First 100 of 101." in page and "(no local title)" in page
+    info = {s["session_id"]: {"titles": ["t1", "t2", "t3", "t4"], "branches": ["b"]}}
+    page = inspector._member_table({"sessions": [{**s, "first": T0, "last": T0}]}, info)
+    assert "t2; t3; t4" in page and "t1" not in page and K1[:12] in page and K1[:13] not in page
+
+
+def test_anchor_items_count_every_key_and_list_only_the_shared():
+    page = inspector._anchor_items({"pr key": {"shared": {"s1", "s2"}, "alone": {"s1"}}})
+    assert "pr key: 2 keys, 1 shared" in page and "<code>shared</code> in s1, s2" in page
+    assert "alone" not in page
+
+
+def test_labels_part_without_labels_says_none_yet():
+    assert "No labels yet." in inspector._labels_part({"labels": [], "steer_labels": []})
+    page = inspector._labels_part({"labels": [], "steer_labels": [(("t", "<x>"), 2)]})
+    assert "Steer labels: t &lt;x&gt; 2" in page and "No labels yet." not in page
+
+
+def test_label_history_lists_that_unit_oldest_first():
+    def row(eid, ts, unit, label):
+        return (eid, ts, {"unit_id": unit, "task": "t", "label": label, "task_ver": 1})
+    view = {"history": [row("b", T0 + timedelta(days=1), "u<1>", "later"), row("a", T0, "u<1>", "first"),
+                        row("c", T0, "other", "not-this"), ("d", T0, None)]}
+    page = inspector._label_history(view, "u<1>")
+    assert "u&lt;1&gt;" in page and "not-this" not in page
+    assert page.index("first") < page.index("later")
+
+
+def test_pages_serve_the_evidence_and_the_correction_form():
+    view = inspector.build(_raw())
+    got = inspector.pages(view, {}, "Episode X")("tok")
+    assert set(got) == {"", "/correct"}
+    assert "<h1>Episode X</h1>" in got[""] and 'action="/tok' in got["/correct"]
+
+
+def test_print_inspect_is_quiet_when_nothing_was_saved(capsys):
+    inspector.print_inspect({"reviewed": 0})
+    assert capsys.readouterr().out == ""
+    inspector.print_inspect({"reviewed": 2})
+    assert capsys.readouterr().out == "inspect: 2 corrections saved\n"
+
+
 if __name__ == "__main__":
-    import pytest
     raise SystemExit(pytest.main([__file__, "-q"]))
