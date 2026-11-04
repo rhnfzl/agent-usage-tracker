@@ -32,7 +32,7 @@ SHARE_ERROR_PP = 5.0         # map.md 4.5: a label's share on known items may be
 GOLD_WEIGHT = 3.0            # train-encoder: one gold answer counts as three silver ones
 
 
-def _r(x: float | None) -> float | None:
+def _round4(x: float | None) -> float | None:
     return None if x is None else round(x, 4)
 
 
@@ -108,12 +108,12 @@ def evaluate(task: str, backend, items: list[tuple], precision: float,
         r = tp / true if true else None
         ok = [i for i in passed if top[i] == lab]
         hits = sum(gold[i] == lab for i in ok)
-        per[lab] = {"n": true, "precision": _r(p), "recall": _r(r),
-                    "f1": _r(2 * p * r / (p + r)) if p and r else (0.0 if pred or true else None),
-                    "tau": _r(tau.get(lab)), "coverage": _r(len(ok) / pred) if pred else None,
-                    "precision_at_tau": _r(hits / len(ok)) if ok else None,
-                    "precision_lb": _r(wilson_lb(hits, len(ok))),
-                    "share_error_pp": _r(abs(sum(w[i] for i in passed if top[i] == lab) / wk
+        per[lab] = {"n": true, "precision": _round4(p), "recall": _round4(r),
+                    "f1": _round4(2 * p * r / (p + r)) if p and r else (0.0 if pred or true else None),
+                    "tau": _round4(tau.get(lab)), "coverage": _round4(len(ok) / pred) if pred else None,
+                    "precision_at_tau": _round4(hits / len(ok)) if ok else None,
+                    "precision_lb": _round4(wilson_lb(hits, len(ok))),
+                    "share_error_pp": _round4(abs(sum(w[i] for i in passed if top[i] == lab) / wk
                                              - sum(w[i] for i in rep if gold[i] == lab) / wa)
                                          * 100) if wk else None}
     f1s = [v["f1"] for v in per.values() if v["f1"] is not None]
@@ -122,13 +122,13 @@ def evaluate(task: str, backend, items: list[tuple], precision: float,
             "size_mb": getattr(backend, "size_mb", None), "prompt_ver": items[0][0].prompt_ver,
             "calib_ver": f"{task}@{ver}/{today}", "temperature": t, "n": len(items),
             "n_cal": len(cal), "n_held": len(held),
-            "macro_f1": _r(sum(f1s) / len(f1s)) if f1s else None,
-            "kappa": _r(kappa([(top[i], gold[i]) for i in rep])),
-            "ece_raw": _r(ece([(max(raws[i].values()), max(raws[i], key=raws[i].get) == gold[i])
+            "macro_f1": _round4(sum(f1s) / len(f1s)) if f1s else None,
+            "kappa": _round4(kappa([(top[i], gold[i]) for i in rep])),
+            "ece_raw": _round4(ece([(max(raws[i].values()), max(raws[i], key=raws[i].get) == gold[i])
                                for i in rep])),
-            "ece_cal": _r(ece([(dists[i][top[i]], top[i] == gold[i]) for i in rep])),
-            "coverage": _r(len(passed) / len(rep)) if rep else None,
-            "s_per_decision": _r(secs), "per_label": per}
+            "ece_cal": _round4(ece([(dists[i][top[i]], top[i] == gold[i]) for i in rep])),
+            "coverage": _round4(len(passed) / len(rep)) if rep else None,
+            "s_per_decision": _round4(secs), "per_label": per}
 
 
 def gold_items(cfg: Config, task: str, days: int, src: Source | None) -> tuple[list[tuple], int]:
@@ -272,5 +272,5 @@ def train_encoder(cfg: Config, task: str, days: int = DAYS, src: Source | None =
             f1s.append(2 * tp / (pred + true))
     return {"model_id": enc.model_id, "model_rev": enc.model_rev, "trained_on": len(data),
             "held_out": len(pairs),
-            "accuracy": _r(sum(a == b for a, b in pairs) / len(pairs)) if pairs else None,
-            "macro_f1": _r(sum(f1s) / len(f1s)) if f1s else None}
+            "accuracy": _round4(sum(a == b for a, b in pairs) / len(pairs)) if pairs else None,
+            "macro_f1": _round4(sum(f1s) / len(f1s)) if f1s else None}
