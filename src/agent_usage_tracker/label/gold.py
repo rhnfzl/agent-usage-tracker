@@ -154,7 +154,7 @@ def serve(task: str, reqs: dict[str, Request], *, open_browser: bool = True,
             session["skipped"] += 1
         elif a in ids:
             append_jsonl(eval_path(task, "gold"), {"unit_id": u, "gold": a, "labeller": LABELLER,
-                                              "date": day, "task_ver": TASKS[task].ver})
+                                                     "date": day, "task_ver": TASKS[task].ver})
             gold[u] = a
             st["hist"].append(("gold", u))
             st["pos"] += 1

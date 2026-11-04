@@ -110,23 +110,23 @@ class FakeAW:
 
 @contextlib.contextmanager
 def _patched(fake: FakeAW, now: datetime):
-    saved = aw._http, aw._now, aw._MacCategories
-    aw._http, aw._now, aw._MacCategories = fake, (lambda: now), (lambda: lambda app: None)
+    saved = aw._http, aw._now, aw._MAC
+    aw._http, aw._now, aw._MAC = fake, (lambda: now), (lambda app: None)
     try:
         yield
     finally:
-        aw._http, aw._now, aw._MacCategories = saved
+        aw._http, aw._now, aw._MAC = saved
 
 
 @contextlib.contextmanager
 def _mac(table: dict):
     """Stub the macOS bundle lookup: app name -> LSApplicationCategoryType (missing: None)."""
-    saved, asked = aw._MacCategories, []
-    aw._MacCategories = lambda: lambda app: (asked.append(app), table.get(app))[1]
+    saved, asked = aw._MAC, []
+    aw._MAC = lambda app: (asked.append(app), table.get(app))[1]
     try:
         yield asked
     finally:
-        aw._MacCategories = saved
+        aw._MAC = saved
 
 
 def _wm() -> dict:
@@ -435,7 +435,7 @@ def test_macos_lookup_guards() -> None:
             mac = aw._MacCategories()
             assert mac("Some") == "public.app-category.developer-tools"
             assert mac("Some") == "public.app-category.developer-tools"
-            assert len(seen) == 1, "one lookup per app per scan (cached)"
+            assert len(seen) == 1, "one lookup per app (cached)"
             assert seen[0][0][0] == "mdfind" and seen[0][1] == 2
             assert "kMDItemDisplayName == 'Some'" in seen[0][0][1]
             assert "com.apple.application-bundle" in seen[0][0][1]
@@ -451,19 +451,54 @@ def test_macos_lookup_guards() -> None:
             aw.subprocess.run = lambda a, **k: subprocess.CompletedProcess(
                 a, 0, stdout=f"{d}/Missing.app\n", stderr="")
             assert mac("Missing") is None
-            # one timeout (Spotlight stalled) turns lookups off for the rest of the scan
+            # one timeout (Spotlight stalled) turns lookups off for the rest of the process
             aw.subprocess.run = boom
             assert mac("Slow") is None
             aw.subprocess.run = run
             n = len(seen)
             assert mac("Some Other") is None and len(seen) == n, "no more lookups"
-            # the off switch and the memo die with the collect() that set them
-            assert aw._MacCategories()("Some") and len(seen) == n + 1, "next scan looks again"
+            # the off switch and the memo die with the object: the process's, in real use
+            assert aw._MacCategories()("Some") and len(seen) == n + 1, "the next process looks again"
             aw._DARWIN = False
             assert aw._MacCategories()("Some") is None and len(seen) == n + 1, "macOS only"
         finally:
             aw.subprocess.run, aw._DARWIN, aw._MAC_APP_DIRS = real_run, real_darwin, real_dirs
     print("ok macos_lookup_guards")
+
+
+def test_macos_lookups_last_across_the_daily_passes() -> None:
+    """A catch-up runs collect() once per day: an app is looked up once, and a stalled Spotlight
+    costs one timeout in all."""
+    import subprocess
+    day2 = CREATED + timedelta(days=1)
+    now = CREATED + timedelta(days=3)
+    two_days = [_ev(1, CREATED + timedelta(hours=1), 60, "Known"),
+                _ev(2, CREATED + timedelta(hours=2), 60, "Slow"),
+                _ev(3, day2 + timedelta(hours=1), 60, "Known"),
+                _ev(4, day2 + timedelta(hours=2), 60, "Slow"),
+                _ev(5, day2 + timedelta(hours=3), 60, "Later")]
+    asked: list = []
+
+    def run(args, **kw):
+        name = args[1].rsplit("'", 2)[1]
+        asked.append(name)
+        if name == "Slow":
+            raise subprocess.TimeoutExpired(args, kw.get("timeout"))
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    real_run, real_darwin = aw.subprocess.run, aw._DARWIN
+    with _patched(FakeAW(two_days), now), contextlib.redirect_stderr(io.StringIO()):
+        aw._MAC = aw._MacCategories()
+        aw.subprocess.run, aw._DARWIN = run, True
+        try:
+            wm = _wm()
+            for _ in range(2):
+                for _rows_of_pass, advance in aw.collect(_cfg(), wm):
+                    advance()
+        finally:
+            aw.subprocess.run, aw._DARWIN = real_run, real_darwin
+    assert asked == ["Known", "Slow"], asked
+    print("ok macos_lookups_last_across_the_daily_passes")
 
 
 def test_macos_lookup_real() -> None:

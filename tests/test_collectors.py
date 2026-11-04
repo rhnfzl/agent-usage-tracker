@@ -24,7 +24,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from agent_usage_tracker.config import AutError, Config  # noqa: E402
-from agent_usage_tracker.event import CollectorUnavailable  # noqa: E402
+from agent_usage_tracker.event import CollectorUnavailable, UsageEvent  # noqa: E402
 from agent_usage_tracker.collectors import claude_code, codex, cursor, cursor_sdk, pi  # noqa: E402
 
 
@@ -598,6 +598,75 @@ def test_export_drains_past_cap() -> None:
     finally:
         _util._MAX_LINES = orig
     print("ok export_drains_past_cap")
+
+
+def test_claude_truncated_in_place_drops_its_carried_state() -> None:
+    from agent_usage_tracker.collectors import claude_code
+    user = {"type": "user", "uuid": "u1", "promptId": "p1", "sessionId": "s1", "cwd": "/x",
+            "timestamp": "2026-07-18T10:00:00Z", "message": {"role": "user", "content": "go"}}
+
+    def turn(uuid: str) -> dict:
+        return {"type": "assistant", "uuid": uuid, "sessionId": "s1", "requestId": uuid,
+                "timestamp": "2026-07-18T10:00:01Z", "cwd": "/x", "message": {
+                    "id": uuid, "model": "m", "usage": {"input_tokens": 1, "output_tokens": 1}}}
+
+    def scan(cfg: Config, wm: dict) -> list:
+        rows = []
+        for batch, advance in claude_code.collect(cfg, wm):
+            rows += [e for e in batch if isinstance(e, UsageEvent) and e.kind == "agent"]
+            advance()
+        return rows
+
+    with tempfile.TemporaryDirectory() as d:
+        home = Path(d)
+        path = home / ".claude" / "projects" / "-p" / "s1.jsonl"
+        _write_jsonl(path, [user, turn("a1")])
+        wm: dict = {}
+        scan(_cfg(home), wm)
+        with open(path, "a") as fh:      # an append resumes, and keeps the turn
+            fh.write(json.dumps(turn("a2")) + "\n")
+        assert [e.session.turn_id for e in scan(_cfg(home), wm)] == ["p1"]
+        with open(path, "w") as fh:      # the same inode, now shorter than the offset
+            fh.write(json.dumps(turn("a3")) + "\n")
+        assert [e.session.turn_id for e in scan(_cfg(home), wm)] == [None]
+    print("ok claude_truncated_in_place_drops_its_carried_state")
+
+
+def test_cursor_composer_read_failure_degrades_and_keeps_the_rows() -> None:
+    with tempfile.TemporaryDirectory() as d:
+        db = Path(d) / "state.vscdb"
+        real = sqlite3.connect(db)
+        real.execute("CREATE TABLE cursorDiskKV (key TEXT, value TEXT)")
+        real.execute("INSERT INTO cursorDiskKV VALUES (?, ?)", ("bubbleId:c1:b1", json.dumps(
+            {"bubbleId": "b1", "createdAt": "2026-01-02T09:30:07.621Z",
+             "tokenCount": {"inputTokens": 5, "outputTokens": 5}})))
+
+        class Failing:
+            def cursor(self):
+                return self
+
+            def execute(self, sql):
+                if "composerData" in sql:
+                    raise sqlite3.DatabaseError("malformed")
+                return real.execute(sql)
+
+            def close(self):
+                real.close()
+
+        cfg = _cfg(Path(d))
+        cfg.cursor_db_path = str(db)
+        saved, cursor.connect_ro = cursor.connect_ro, lambda path: Failing()
+        rows: list = []
+        try:
+            for batch, _advance in cursor.collect(cfg, {}):
+                rows += batch
+            raise AssertionError("the failed read stayed silent")
+        except CollectorUnavailable as exc:
+            assert "malformed" in str(exc), exc
+        finally:
+            cursor.connect_ro = saved
+        assert len(rows) == 1, rows
+    print("ok cursor_composer_read_failure_degrades_and_keeps_the_rows")
 
 
 def test_file_identity_reset() -> None:

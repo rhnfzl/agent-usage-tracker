@@ -188,8 +188,8 @@ def _digest_claude_log(f: str, d: Digest) -> None:
 
 def _digest_codex_log(f: str, title: str, d: Digest) -> None:
     d.titles.append(title)
-    with open(f, "rb") as fh:
-        recs = _cx.parsed_records(list(fh), 0, {}, Counter())
+    with open(f, encoding="utf-8", errors="replace") as fh:     # one bad byte keeps its record
+        recs = _cx.parsed_records([line.encode() for line in fh], 0, {}, Counter())
     if not recs:
         return
     meta = recs[0][2] if recs[0][1] == "session_meta" else {}

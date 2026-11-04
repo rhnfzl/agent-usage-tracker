@@ -53,6 +53,7 @@ DECIDE_S = 14 * DAY          # undecided until day 14; also the revert and survi
 FETCH_TIMEOUT_S = 30
 BLAME_FILES = 30             # survival blames at most this many files per commit
 CACHE_NAME = "outcomes_cache.json"
+_CACHE_V = 2                 # 2: a failed git read no longer counts as a survival score
 _GH_STABLE_S = 60 * DAY      # a "no merged PR" answer is cached once the commit is this old
 _SHA = re.compile(r"^[0-9a-f]{7,40}$")
 _REVERTS = re.compile(r"This reverts commit ([0-9a-f]{7,40})")
@@ -105,8 +106,23 @@ def _default_ref(path: str) -> tuple[str | None, bool]:
     return refs.get(head) or next((r for r in fallbacks if r in refs), None), True
 
 
+def _common_dir(path: str) -> str | None:
+    """The git common dir of the .git at path; "" when git says no repository is there (a stale
+    .git holds nothing), None when git failed, so a repository there may hold commits."""
+    try:
+        r = subprocess.run(git_argv(path, "rev-parse", "--path-format=absolute", "--git-common-dir"),
+                           capture_output=True, text=True, errors="replace", timeout=10,
+                           env={**git_env(), "LC_ALL": "C"})    # the message below is translated
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if r.returncode == 0:
+        return r.stdout.strip()
+    return "" if "not a git repository" in r.stderr else None
+
+
 def find_clones(roots: list[str], keys: RepoKeys) -> list[Clone]:
-    """One Clone per repository (worktrees of one repo share a git common dir)."""
+    """One Clone per repository (worktrees of one repo share a git common dir). A repository git
+    could not identify is an unreadable Clone: dropping it would make its commits look gone."""
     seen: set[str] = set()
     out: list[Clone] = []
     for root in roots:
@@ -114,9 +130,10 @@ def find_clones(roots: list[str], keys: RepoKeys) -> list[Clone]:
         for dirpath, dirnames, filenames in os.walk(base):
             depth = dirpath[len(base):].count(os.sep)
             if ".git" in dirnames or ".git" in filenames:
-                common = (_git(dirpath, "rev-parse", "--path-format=absolute",
-                               "--git-common-dir", timeout=10) or "").strip()
-                if common and os.path.realpath(common) not in seen:
+                common = _common_dir(dirpath)
+                if common is None:
+                    out.append(Clone(dirpath, None, None, None, readable=False))
+                elif common and os.path.realpath(common) not in seen:
                     seen.add(os.path.realpath(common))
                     url = (_git(dirpath, "remote", "get-url", "origin", timeout=10) or "").strip()
                     key = gh = None
@@ -178,9 +195,9 @@ def fetch_clones(clones: list[Clone]) -> tuple[int, int]:
     return ok, failed
 
 
-def _lookup(clone: Clone, shas: list[str]) -> dict[str, tuple[str, int]] | None:
-    """sha (as stored, possibly abbreviated) -> (full sha, committer time) for those it holds;
-    None when git failed."""
+def _lookup(clone: Clone, shas: list[str]) -> dict[str, _Hit] | None:
+    """sha (as stored, possibly abbreviated) -> its full sha and committer time, for those it
+    holds; None when git failed."""
     out = _git(clone.path, "cat-file", "--batch-check",
                inp="".join(f"{s}^{{commit}}\n" for s in shas))
     if out is None:
@@ -197,7 +214,7 @@ def _lookup(clone: Clone, shas: list[str]) -> dict[str, tuple[str, int]] | None:
     if log is None:
         return None
     ct = dict(line.split() for line in log.splitlines() if line.strip())
-    return {s: (f, int(ct[f])) for s, f in full.items() if f in ct}
+    return {s: _Hit(f, int(ct[f])) for s, f in full.items() if f in ct}
 
 
 def _patch_ids(path: str, args: list[str], inp: str | None = None) -> dict[str, str] | None:
@@ -355,6 +372,16 @@ def _gh_merged(repo: str, sha: str) -> bool | None:
         return None
 
 
+class _Hit(NamedTuple):
+    full: str
+    committed: int
+
+
+class _Candidate(NamedTuple):
+    clone: int                # index into the run's clones
+    full: str
+
+
 class _Pick(NamedTuple):
     clone: Clone
     repo: _Repo
@@ -414,29 +441,29 @@ def _resolve(anchors: list[_Anchor], clones: list[Clone], stats: Counter) -> Non
     held = {i: _lookup(c, shas) for i, c in enumerate(clones)} if shas else {}
     failed = [i for i, h in held.items() if h is None]
     readable = {i: h for i, h in held.items() if h is not None}
-    found: list[tuple[_Anchor, list[tuple[int, str]]]] = []       # [(anchor, [(clone index, full sha)])]
+    found: list[tuple[_Anchor, list[_Candidate]]] = []
     per_clone: dict[int, list[tuple[str, int]]] = defaultdict(list)
     for a in anchors:
-        cands = [(i, h[a.sha][0]) for i, h in readable.items()
-                 if a.sha in h and abs(h[a.sha][1] - a.ts) <= DAY]
-        own = [c for c in cands if a.key and clones[c[0]].key == a.key]
-        cands = own or sorted(cands, key=lambda c: clones[c[0]].key is None)
+        cands = [_Candidate(i, h[a.sha].full) for i, h in readable.items()
+                 if a.sha in h and abs(h[a.sha].committed - a.ts) <= DAY]
+        own = [c for c in cands if a.key and clones[c.clone].key == a.key]
+        cands = own or sorted(cands, key=lambda c: clones[c.clone].key is None)
         a.unread = any(not own or clones[i].key == a.key for i in failed)
         if cands:
             found.append((a, cands))
             for i, full in cands:
-                per_clone[i].append((full, readable[i][a.sha][1]))
+                per_clone[i].append((full, readable[i][a.sha].committed))
         else:
             stats["not_found"] += 1
     repos = {i: _read_repo(clones[i], int(min(t for _, t in got)) - 2 * DAY, [f for f, _ in got])
              for i, got in per_clone.items()}
 
-    def advance(c: tuple[int, str]) -> int:       # merged < open < unreachable, per clone
-        rp, full = repos[c[0]], c[1]
+    def advance(c: _Candidate) -> int:       # merged < open < unreachable, per clone
+        rp, full = repos[c.clone], c.full
         return 0 if full in rp.on_default or full in rp.twin else 1 if full in rp.on_branch else 2
     for a, cands in found:
-        i, full = min(cands, key=advance)
-        a.pick = _Pick(clones[i], repos[i], full)
+        best = min(cands, key=advance)
+        a.pick = _Pick(clones[best.clone], repos[best.clone], best.full)
         a.unread |= not all(repos[j].ok for j, _ in cands)
         stats["found"] += 1
         stats["null_key_resolved"] += a.key is None and clones[i].key is not None
@@ -484,11 +511,10 @@ def _decide(a: _Anchor, now_ts: float, cache: dict, gh: bool,
     on_branch = full in rp.on_branch
     if not on_branch and a.amended:
         o["state"] = "superseded"
-    elif young:
-        pass
-    elif gh and c.gh:            # a squash-merged PR leaves its commits off the default branch
-        return o, _GhJob(o, c.gh, full, a.ts, on_branch)
-    else:
+    elif not young:
+        # a squash-merged PR leaves its commits off the default branch; a cached answer needs no gh
+        if f"gh:{full}" in cache or (gh and c.gh):
+            return o, _GhJob(o, c.gh or "", full, a.ts, on_branch)
         o["state"] = "open" if on_branch else "abandoned"
     return o, None
 
@@ -532,7 +558,7 @@ def _measure(job: _SurvivalJob, cache: dict) -> str:
 def evaluate(rows: list[dict], clones: list[Clone], now_ts: float, cache: dict,
              gh: bool = False) -> tuple[list[Outcome], Counter]:
     """One outcome per (sha, repo_key) of the commit rows, as of the epoch now_ts. rows: sha, repo_key, ts (epoch),
-    session_id, amend. cache: full sha -> survival (filled in place); gh answers sit under 'gh:'."""
+    session_id, amend. cache: full sha -> survival (filled in place); gh answers sit under 'gh:', its version under 'v'."""
     stats: Counter = Counter(rows=len(rows))
     anchors = _anchors(rows, stats)
     _resolve(anchors, clones, stats)
@@ -566,6 +592,15 @@ def pending(outs: list[Outcome], stored: dict[tuple[str, str], tuple]) -> list[O
 
 def _cache_path() -> Path:
     return state_path().parent / CACHE_NAME
+
+
+def _load_cache() -> dict:
+    """The cache; survivals of an older version are dropped, so they are measured again."""
+    cache = load_json_dict(_cache_path())
+    if cache.get("v") != _CACHE_V:
+        cache = {k: v for k, v in cache.items() if k.startswith("gh:")}
+        cache["v"] = _CACHE_V
+    return cache
 
 
 def _load_rows(dsn: str) -> list[dict]:
@@ -616,7 +651,7 @@ def run_outcomes(cfg: Config, *, refresh: bool, dry_run: bool,
             keys = {r["repo_key"] for r in rows if r["repo_key"]}
             want = [c for c in clones if c.key in keys]
             stats["fetch_ok"], stats["fetch_failed"] = fetch_clones(want)
-        cache = load_json_dict(_cache_path())
+        cache = _load_cache()
         outs, ev = evaluate(rows, clones, decided.timestamp(), cache, gh=refresh)
         stats.update(ev)
         stats["states"] = Counter(o["state"] for o in outs)

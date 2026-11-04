@@ -9,13 +9,15 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from agent_usage_tracker import cli, push, scan  # noqa: E402
+from agent_usage_tracker import cli, episode_store, local_page, push, scan  # noqa: E402
 from agent_usage_tracker.config import load_config  # noqa: E402
 from agent_usage_tracker.state import load_state  # noqa: E402
 
@@ -73,6 +75,13 @@ def test_scan_sends_and_saves_the_watermark(world, monkeypatch):
 
 def test_backfill_drops_only_the_selected_agents_watermark(world, monkeypatch):
     sent = _recording_sender(monkeypatch)
+    log = world / ".claude" / "projects" / "-p" / "s1.jsonl"
+    state = json.loads((world / "state.json").read_text())
+    state["collectors"]["claude_code"]["files"][str(log)] = {"ino": log.stat().st_ino,
+                                                             "off": log.stat().st_size}
+    (world / "state.json").write_text(json.dumps(state))
+    assert cli.main(["--agents", "claude_code", "scan"]) == 0
+    assert not sent, "the watermark holds: a scan has nothing new"
     assert cli.main(["--agents", "claude_code", "backfill"]) == 0
     assert sent, "the log is read again from the start"
     assert load_state()["collectors"]["codex"] == {"files": {"keep": {"off": 7}}}
@@ -92,6 +101,27 @@ def test_plain_backfill_refuses_dry_run_and_an_unknown_agent(world):
             cli.main(argv)
         assert exc.value.code == 2
     assert (world / "state.json").read_text() == before
+
+
+def test_episodes_review_runs_the_real_page(world, monkeypatch, capsys):
+    t0 = datetime(2026, 7, 2, tzinfo=timezone.utc)
+    ep = {"id": "e1", "first_ts": t0, "last_ts": t0, "n_sessions": 1, "n_seed_sessions": 1,
+          "n_commits": 1, "n_prs": 0, "outcome": "shipped",
+          "members": [{"session_id": "s1", "role": "seed", "repo_keys": []}]}
+    monkeypatch.setattr(episode_store, "load_month", lambda dsn, start, end: [ep])
+    monkeypatch.setattr(episode_store, "answered_sessions", lambda dsn, sessions: set())
+    monkeypatch.setattr(local_page.webbrowser, "open", lambda url: True)
+    with patch("http.server.HTTPServer.serve_forever", side_effect=KeyboardInterrupt):
+        assert cli.main(["episodes", "review", "--month", "2026-07"]) == 0
+    assert "episodes review 2026-07: 0 of 1 episodes" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("line", ['transport = 5', 'activitywatch_title_days = "x"',
+                                  'label_precision = "x"'])
+def test_a_config_value_of_the_wrong_type_is_an_operator_error(world, capsys, line):
+    (world / "config.toml").write_text(line + "\n")
+    assert cli.main(["status"]) == 1
+    assert "wrong type" in capsys.readouterr().err
 
 
 def test_export_writes_the_csv(world, capsys):

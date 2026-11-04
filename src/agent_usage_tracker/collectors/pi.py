@@ -112,7 +112,7 @@ class _Activity:
             self.errors += 1
 
     def _record(self, o: dict, sess: EventSession) -> None:
-        a, ts, eid = self.carried, o.get("timestamp"), o.get("id")
+        carried, ts, eid = self.carried, o.get("timestamp"), o.get("id")
         if o.get("type") == "compaction":
             tb = o.get("tokensBefore")
             self._emit("compaction", ts, str(eid), sess.turn_id,
@@ -122,8 +122,8 @@ class _Activity:
         if o.get("type") != "message" or not isinstance(m, dict):
             return
         role, content = m.get("role"), m.get("content")
-        open_ = a.get("open")
-        link = Link(self.keys, a.setdefault("link", {}))
+        open_ = carried.get("open")
+        link = Link(self.keys, carried.setdefault("link", {}))
         if role != "user":           # a prompt's text belongs to the turn it opens, below
             link.text(text_of(content))
         if role == "user":
@@ -132,20 +132,20 @@ class _Activity:
             text = text_of(content)
             skill = SKILL.match(text)
             via = "skill" if text.lstrip().startswith('<skill name="') else \
-                "queued" if a.get("prev") == "toolResult" else "typed"
+                "queued" if carried.get("prev") == "toolResult" else "typed"
             self._emit("steer", ts, str(eid), sess.turn_id, {
                 "via": via, "words": len(text.split()), "chars": len(text),
-                "after_interrupt": bool(a.pop("intr", False))})
+                "after_interrupt": bool(carried.pop("intr", False))})
             if skill:
                 self._emit("invoke", ts, str(eid), sess.turn_id, {"skill": tool_key(skill[1])})
-            a["open"] = {"id": eid, "ts": ts, "n": 1, "last": ts}
-            Link(self.keys, a.setdefault("link", {})).text(text)
-            a["agg"] = blank_tool_tally()
+            carried["open"] = {"id": eid, "ts": ts, "n": 1, "last": ts}
+            Link(self.keys, carried.setdefault("link", {})).text(text)
+            carried["agg"] = blank_tool_tally()
         elif role in ("assistant", "toolResult"):
             if open_:
                 open_["n"] += 1
                 open_["last"] = ts
-            agg = a.setdefault("agg", blank_tool_tally())
+            agg = carried.setdefault("agg", blank_tool_tally())
             blocks = [b for b in content if isinstance(b, dict)] if isinstance(content, list) else []
             if role == "assistant":
                 for b in blocks:
@@ -155,26 +155,26 @@ class _Activity:
                         cmd = args.get("command") if isinstance(args, dict) else None
                         if b["name"] == "bash" and isinstance(cmd, str) \
                                 and isinstance(b.get("id"), str) and (call := commit_call(cmd)):
-                            a.setdefault("pend", {})[b["id"]] = [*call, commit_dir(cmd)]
+                            carried.setdefault("pend", {})[b["id"]] = [*call, commit_dir(cmd)]
                 stop = m.get("stopReason")
-                a["intr"] = stop == "aborted"
+                carried["intr"] = stop == "aborted"
                 if stop == "aborted":
                     self._emit("interrupt", ts, str(eid), sess.turn_id,
-                               {"during_tool": a.get("prev") == "toolResult"})
+                               {"during_tool": carried.get("prev") == "toolResult"})
                 if stop in _ENDS and open_:
                     self._close(ts)
             else:
                 err = m.get("isError") is True
                 agg["errors"] += err
                 tid = m.get("toolCallId")
-                pend = a.get("pend") or {}
+                pend = carried.get("pend") or {}
                 if isinstance(tid, str) and tid in pend:
                     amend, before, target = pend.pop(tid)
                     text = text_of(content)
                     found = commit_shas(text, err, bool(before))
                     for sha, attrs in commit_rows(link, self.cwd, target, text, found, bool(amend)):
                         self._emit("commit", ts, f"{tid}|{sha}", sess.turn_id, attrs)
-        a["prev"] = role
+        carried["prev"] = role
 
 
 def _upgrade_state(wm: dict) -> None:

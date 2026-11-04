@@ -78,6 +78,7 @@ def test_connect_warns_only_when_tls_is_not_required() -> None:
         "postgresql://127.0.0.1/agents": False,
         "dbname=agents": False,                                     # the local socket
         "postgresql:///agents?host=/var/run/postgresql": False,
+        "postgresql://u:hunter2@%2Fvar%2Frun%2Fpostgresql/agents": False,    # libpq's other socket form
     }
     try:
         for dsn, warns in cases.items():

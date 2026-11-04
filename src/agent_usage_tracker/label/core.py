@@ -112,13 +112,14 @@ def read_choices() -> dict:
 
 def load_choice(task: str) -> Choice:
     try:
-        obj = read_choices()
+        c = read_choices().get("tasks", {}).get(task)
+        if c is not None and not isinstance(c, dict):
+            raise ValueError(f"its entry for {task} is not a table")
     except (OSError, ValueError) as exc:
         print(f"aut: warning: {choice_path()} is unusable ({exc}); {task} runs uncalibrated, so "
               "none of its labels pass tau. Fix it or move it aside and re-run `aut label choose`.", file=sys.stderr)
         return Choice()
-    c = (obj.get("tasks") or {}).get(task)
-    if not isinstance(c, dict):
+    if c is None:
         return Choice()
     return Choice(**{k: c[k] for k in Choice.__slots__ if k in c})
 

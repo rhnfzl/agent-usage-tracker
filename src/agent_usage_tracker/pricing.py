@@ -162,8 +162,10 @@ def sync_prices(
             "sync-prices: built an empty rate map; keeping the existing "
             "price file."
         )
-    # Atomic, so a concurrent reader never sees a half-written file.
-    atomic_write_text(Path(out).expanduser(), json.dumps(rates, indent=2, sort_keys=True))
+    # Atomic, so a concurrent reader never sees a half-written file. Shared: no secret in it, and
+    # --out can point at a path another user or service reads.
+    atomic_write_text(Path(out).expanduser(), json.dumps(rates, indent=2, sort_keys=True),
+                      shared=True)
     return len(rates)
 
 

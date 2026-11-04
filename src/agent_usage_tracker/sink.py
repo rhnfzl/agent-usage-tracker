@@ -9,7 +9,7 @@ import os
 import re
 import sys
 from typing import Any
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 from .config import AutError
 
@@ -27,7 +27,7 @@ def _warn_if_plaintext(dsn: str) -> None:
         except ValueError:
             return                          # let libpq report a DSN it cannot parse either
         query = parse_qs(uri.query)
-        host = query.get("host", [uri.hostname])[0]
+        host = query.get("host", [unquote(uri.hostname or "")])[0]
         mode = query.get("sslmode", [None])[0]
     else:
         keys = dict(re.findall(r"(\w+)\s*=\s*('[^']*'|\S+)", dsn))

@@ -404,6 +404,21 @@ def test_codex_fork_skips_the_copied_history():
     print("ok codex_fork_skips_the_copied_history")
 
 
+def test_codex_digest_keeps_a_record_with_an_invalid_byte():
+    with tempfile.TemporaryDirectory() as t:
+        path = Path(t) / ".codex" / "sessions" / "rollout-2001-cx1.jsonl"
+        path.parent.mkdir(parents=True)
+        lines = [json.dumps(r).encode() for r in (
+            {"type": "session_meta", "payload": {"id": "cx1"}},
+            {"type": "event_msg", "payload": {"type": "user_message", "message": "first @@"}},
+            {"type": "event_msg", "payload": {"type": "user_message", "message": "second"}})]
+        path.write_bytes(b"\n".join(lines).replace(b"@@", b"\xff") + b"\n")
+        v = session_digest.local_info(Path(t), {"cx1"})["cx1"]
+    assert (v["n_prompts"], v["last"]) == (2, "second"), v
+    assert v["first"].startswith("first "), v
+    print("ok codex_digest_keeps_a_record_with_an_invalid_byte")
+
+
 def test_digest_lists_hold_only_text():
     d = session_digest.Digest("x")
     d.shell("git commit --no-edit", "", False)

@@ -169,8 +169,8 @@ def _lookup(table: dict[str, Any], name: str) -> Any:
 
 
 class _MacCategories:
-    """One collect()'s macOS lookups: once per app, and the first timeout (a stalled Spotlight)
-    ends them. Each returns 'browser' when the app bundle opens http(s) links (browsers declare
+    """macOS lookups: once per app, and the first timeout (a stalled Spotlight) ends them. Each
+    returns 'browser' when the app bundle opens http(s) links (browsers declare
     productivity), else its declared LSApplicationCategoryType, or None: off macOS, no local
     bundle, no key, or any error or timeout. The app name only goes to the local Spotlight index."""
 
@@ -209,6 +209,10 @@ class _MacCategories:
         return cat if isinstance(cat, str) and cat else None
 
 
+# One per process, not per collect(): a pass covers one day, and a catch-up runs many.
+_MAC = _MacCategories()
+
+
 def _category_from_declared(declared: str) -> str:
     kind = declared.removeprefix("public.app-category.")
     return "media" if kind.endswith("games") else _MAC_CATEGORIES.get(kind, "other")
@@ -236,14 +240,13 @@ def browser_category(cfg: Config, title: str, url: str = "") -> tuple[str, str]:
     return "web", "browser_other"
 
 
-def classify(cfg: Config, app: str, title: str, url: str = "",
-             mac: Callable[[str], str | None] | None = None) -> tuple[str, bool, str]:
+def classify(cfg: Config, app: str, title: str, url: str = "") -> tuple[str, bool, str]:
     """(category, work_relevant, rule) for one window row."""
     name = _norm(app)
     cat, rule = _lookup(cfg.activitywatch_categories, name), "config_app"
     if cat is None:
         cat, rule = _lookup(_DEFAULT_APPS, name), "default_app"
-    if cat is None and (declared := (mac or _MacCategories())(app.strip())):
+    if cat is None and (declared := _MAC(app.strip())):
         cat, rule = _category_from_declared(declared), "macos_category"
     if cat is None:
         cat, rule = "other", "unknown"
@@ -279,7 +282,6 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[TimeInterval], Callabl
     days = cfg.activitywatch_title_days
     title_from = _now() - timedelta(days=days) if days else None
     denied_n, denied_s, idle_s = 0, 0.0, 0.0
-    mac = _MacCategories()
     for ev in raw:
         try:
             s = _parse(ev["timestamp"])
@@ -299,7 +301,7 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[TimeInterval], Callabl
         if denied(cfg, app, title, data):
             denied_n, denied_s = denied_n + 1, denied_s + secs
             continue
-        category, relevant, rule = classify(cfg, app, title, str(data.get("url") or ""), mac)
+        category, relevant, rule = classify(cfg, app, title, str(data.get("url") or ""))
         keep = cfg.activitywatch_titles and (title_from is None or s >= title_from)
         sent = (clean_text(title) or None) if keep else None
         s_iso, e_iso = s.astimezone(timezone.utc).isoformat(), e.astimezone(timezone.utc).isoformat()

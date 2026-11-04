@@ -16,6 +16,8 @@ from typing import Any
 from .label.names import TASK_NAMES
 from .state import warn_if_group_readable
 
+# Must name what collectors.REGISTRY names (a test asserts it): collectors import this module, so
+# it cannot derive the list from the registry.
 ALL_AGENTS = ("claude_code", "codex", "cursor", "cursor_sdk", "cursor_api", "cursor_cli", "pi",
               "activitywatch")
 # activitywatch reads window titles, so it is opt-in: a config without `agents` never enables it.
@@ -122,7 +124,14 @@ def load_config() -> Config:
                 data = tomllib.load(fh)
         except (tomllib.TOMLDecodeError, UnicodeDecodeError, OSError) as exc:
             raise AutError(f"config: {path} is not readable TOML ({exc})") from None
+    try:
+        return _config_from(data, path)
+    except (AttributeError, OverflowError, TypeError, ValueError) as exc:
+        # Safe to print: only int() and float() echo a value, and no secret goes through them.
+        raise AutError(f"config: {path} has a value of the wrong type ({exc})") from None
 
+
+def _config_from(data: dict, path: Path) -> Config:
     transport = data.get("transport", {})
     machine = data.get("machine") or socket.gethostname().split(".")[0]
     agents = tuple(data.get("agents") or DEFAULT_AGENTS)

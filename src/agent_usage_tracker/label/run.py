@@ -182,8 +182,9 @@ def run_label(cfg: Config, tasks: list[str] | None = None, since: datetime | Non
     backend_for = backend_for or default_backend
     state = load_state()
     wm = collector_wm(state, NAME)
-    run = _Run(cfg, dsn, src, dry_run, time.monotonic() + cfg.label_budget_s, wm, state,
-               load_json_dict(_cache_path()), labelled_at)
+    run = _Run(cfg=cfg, dsn=dsn, src=src, dry_run=dry_run,
+               deadline=time.monotonic() + cfg.label_budget_s, wm=wm, state=state,
+               cache=load_json_dict(_cache_path()), labelled_at=labelled_at)
     report: dict[str, TaskReport] = {}
     status, error, interrupted = "ok", None, False
     try:

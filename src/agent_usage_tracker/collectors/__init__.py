@@ -4,7 +4,8 @@
 
 where each yield is (events for one source unit, a callback that advances that unit's
 watermark). The runner pushes `events`, and only on a successful push calls the callback.
-`wm` belongs to the collector: only its `describe` reads the keys, for `aut status`.
+`wm` belongs to the collector: only its `describe` reads the keys, for `aut status`. One exception:
+label's Source.windows seeds and reads ActivityWatch's `end` to read a bounded range.
 """
 
 from __future__ import annotations

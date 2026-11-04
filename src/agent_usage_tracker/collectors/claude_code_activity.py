@@ -42,7 +42,7 @@ class Activity:
         # Turn aggregates and unanswered commit calls are carried across scans in the watermark,
         # so a turn split by a scan boundary still gets one complete row.
         self.agg: TurnAgg = s.get("agg") or blank_tool_tally()
-        self.pend: dict = s.get("pend") or {}  # commit tool_use_id -> [is_amend, printed_before]
+        self.pend: dict = s.get("pend") or {}  # commit tool_use_id -> [is_amend, printed_before, target]
         # Tool block ids already counted. Within a chunk the set spans turns (Claude Code re-logs
         # history after a turn ends). Across scans only the open turn's newest _SEEN_MAX ids are
         # carried, which is where a re-log split by a scan boundary lands; this keeps the state small.

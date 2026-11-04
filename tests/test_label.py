@@ -340,10 +340,20 @@ def test_time_budget_and_error_heartbeat(tmp_path, sink):
         run.run_label(_cfg(tmp_path, pg_dsn=None), ["steer_intent"])
 
 
+def test_per_task_entry_that_is_not_a_table_warns(tmp_path, capsys):
+    with _env(tmp_path):
+        core.choice_path().parent.mkdir(parents=True, exist_ok=True)
+        core.choice_path().write_text(json.dumps({"tasks": {"steer_intent": 5}}))
+        assert core.load_choice("steer_intent") == core.Choice()
+        assert "steer_intent" in capsys.readouterr().err
+        assert core.load_choice("work_category") == core.Choice()     # no entry yet: quiet
+        assert capsys.readouterr().err == ""
+
+
 def test_ctrl_c_sends_no_heartbeat_but_another_exit_does(tmp_path, sink):
     cfg = _cfg(tmp_path)
     src = FakeSource(cfg, [])
-    for exc, sent in ((KeyboardInterrupt, 0), (SystemExit("no mlx"), 1)):
+    for exc, sent in ((KeyboardInterrupt, 0), (SystemExit("stopped"), 1)):
         def stop(task, choice, exc=exc):
             raise exc
         sink.scans.clear()
@@ -542,7 +552,7 @@ def test_windows_go_through_the_collector(tmp_path, monkeypatch):
         return [[x for x in evs if s <= aw._parse(x["timestamp"]) < e]]
     monkeypatch.setattr(aw, "_http", http)
     monkeypatch.setattr(aw, "_now", lambda: NOW)
-    monkeypatch.setattr(aw, "_MacCategories", lambda: lambda app: None)
+    monkeypatch.setattr(aw, "_MAC", lambda app: None)
     cfg = _cfg(tmp_path, agents=("activitywatch",))
     w = tasks.Source(cfg).windows(t0 - timedelta(hours=1), t0 + timedelta(minutes=2))
     assert [x["title"] for x in w] == ["page 0 password=[redacted]", "page 1 password=[redacted]"]

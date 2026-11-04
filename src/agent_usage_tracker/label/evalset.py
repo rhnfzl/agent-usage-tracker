@@ -24,8 +24,8 @@ from .core import Request, data_dir, local_midnight, top_label
 from .names import DAYS
 from .tasks import TASKS, Source, units
 
-# Gold per label, (floor, target), as the gold page shows them. AW titles: 150 per class.
 T = TypeVar("T")
+# Gold per label, (floor, target), as the gold page shows them. AW titles: 150 per class.
 FLOORS = {"work_category": (30, 50), "steer_intent": (30, 50), "soft_outcome": (30, 30),
           "aw_title_relevance": (150, 150)}
 

@@ -284,13 +284,15 @@ def _chunk_rows(path: str, base: Path, lines: list[bytes], fstate: dict, new_fst
     # turn_id: promptId of the latest user record (tool_results carry it too); a subagent keeps
     # its first one, the parent turn that spawned it.
     # Carried across chunks in the file's watermark entry, so a turn that began in an earlier
-    # scan is not lost. Dropped when the path now holds a different file (rotated/replaced).
+    # scan is not lost. Dropped when scan_file restarted: same_file said the path now holds a
+    # different file (rotated/replaced) or was truncated, so the offset did not carry on.
     # shortcut: files first read before this existed start at NULL until their next user record.
-    same_inode = fstate.get("ino") == new_fstate.get("ino")
-    turn: str | None = str_or_none(fstate.get("turn")) if same_inode else None
-    # activity state rides in the same watermark entry and is dropped with it on a new file
-    act = Activity(NAME, path, ident[0], fstate.get("act") if same_inode else None, keys)
-    fresh = not same_inode or safe_int(fstate.get("off")) == 0     # read from byte 0
+    resumed = (fstate.get("ino") == new_fstate.get("ino")
+               and safe_int(new_fstate.get("off")) >= safe_int(fstate.get("off")))
+    turn: str | None = str_or_none(fstate.get("turn")) if resumed else None
+    # activity state rides in the same watermark entry and is dropped with it on a restart
+    act = Activity(NAME, path, ident[0], fstate.get("act") if resumed else None, keys)
+    fresh = not resumed or safe_int(fstate.get("off")) == 0     # read from byte 0
     steers: list = []
     for raw in lines:
         o = parse_record(raw)

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 import sys
 import tempfile
 from pathlib import Path
@@ -69,14 +70,28 @@ def warn_if_group_readable(path: Path) -> None:
               f"run: chmod 600 {path}", file=sys.stderr)
 
 
-def atomic_write_text(path: Path, text: str) -> None:
+def _plain_write_mode(path: Path) -> int:
+    """The mode a plain open() leaves: an existing file's own, else the umask's."""
+    try:
+        return stat.S_IMODE(path.stat().st_mode)
+    except FileNotFoundError:
+        umask = os.umask(0)     # the only way to read it
+        os.umask(umask)
+        return 0o666 & ~umask
+
+
+def atomic_write_text(path: Path, text: str, *, shared: bool = False) -> None:
     """Write through a unique temp file and a rename, so a crash or a second process never leaves
-    a half-written file. Creates the parent directory."""
+    a half-written file. Creates the parent directory. The file is private to this user unless
+    `shared`, for a file other users or services may read: then it gets the mode a plain write
+    would."""
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             fh.write(text)
+        if shared:
+            os.chmod(tmp, _plain_write_mode(path))
         os.replace(tmp, path)
     finally:
         if os.path.exists(tmp):

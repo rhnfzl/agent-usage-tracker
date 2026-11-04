@@ -145,21 +145,21 @@ def script_of(cmd: object) -> str | None:
     return None
 
 
-def prompt_of(t: object, p: dict, has_um: bool) -> tuple[str, int] | None:
+def prompt_of(rtype: object, payload: dict, has_um: bool) -> tuple[str, int] | None:
     """(text, images) when the record is a prompt: a user_message, or a UserMessage item in a
     file that has no user_message (older files carry both for one prompt)."""
-    if t != "event_msg":
+    if rtype != "event_msg":
         return None
-    if p.get("type") == "user_message":
-        imgs = p.get("local_images")
-        msg = p.get("message")
+    if payload.get("type") == "user_message":
+        imgs = payload.get("local_images")
+        msg = payload.get("message")
         return (msg if isinstance(msg, str) else ""), len(imgs) if isinstance(imgs, list) else 0
-    it = p.get("item")
-    if p.get("type") == "item_completed" and isinstance(it, dict) \
+    it = payload.get("item")
+    if payload.get("type") == "item_completed" and isinstance(it, dict) \
             and it.get("type") == "UserMessage" and not has_um:
-        c = it.get("content")
-        blocks = [b for b in c if isinstance(b, dict)] if isinstance(c, list) else []
-        return text_of(c), sum(b.get("type") != "text" for b in blocks)
+        content = it.get("content")
+        blocks = [b for b in content if isinstance(b, dict)] if isinstance(content, list) else []
+        return text_of(content), sum(b.get("type") != "text" for b in blocks)
     return None
 
 
@@ -308,27 +308,27 @@ def parsed_records(lines: list[bytes], off: int, cur: dict, skipped: Counter) ->
     return recs
 
 
-def _note_context(t: object, p: dict, copied: bool, cur: dict, keys: RepoKeys) -> None:
+def _note_context(rtype: object, payload: dict, copied: bool, cur: dict, keys: RepoKeys) -> None:
     """Streaming state from a record: session identity, model, cwd, the current turn."""
-    if t == "session_meta":
+    if rtype == "session_meta":
         # the usage event_id seed keeps its old rule (payload.session_id, any meta line),
         # so stored usage rows never change id; session rows use the thread id instead
-        cur["session_id"] = p.get("session_id") or p.get("id") or cur["session_id"]
-        cur["provider"] = p.get("model_provider") or cur["provider"]
+        cur["session_id"] = payload.get("session_id") or payload.get("id") or cur["session_id"]
+        cur["provider"] = payload.get("model_provider") or cur["provider"]
         if "meta" not in cur:
-            _set_meta(cur, p, keys)
-    elif t == "turn_context":
-        if p.get("model"):
-            cur["model"] = p.get("model")
-        if p.get("cwd"):
-            cur["cwd"] = p.get("cwd")
-    elif t == "event_msg" and p.get("type") == "task_started" and not copied:
-        cur["turn"] = str_or_none(p.get("turn_id")) or cur.get("turn")
+            _set_meta(cur, payload, keys)
+    elif rtype == "turn_context":
+        if payload.get("model"):
+            cur["model"] = payload.get("model")
+        if payload.get("cwd"):
+            cur["cwd"] = payload.get("cwd")
+    elif rtype == "event_msg" and payload.get("type") == "task_started" and not copied:
+        cur["turn"] = str_or_none(payload.get("turn_id")) or cur.get("turn")
 
 
-def _token_event(o: dict, p: dict, cur: dict, path: str) -> UsageEvent | None:
+def _token_event(record: dict, payload: dict, cur: dict, path: str) -> UsageEvent | None:
     """The usage row of a token_count record, None if it has no tokens. Raises on malformed counts."""
-    info = p.get("info")
+    info = payload.get("info")
     last = info.get("last_token_usage") if isinstance(info, dict) else None
     if not isinstance(last, dict):
         return None
@@ -342,7 +342,7 @@ def _token_event(o: dict, p: dict, cur: dict, path: str) -> UsageEvent | None:
     # no model; they are dropped here. See CONTRACT.md.
     if inp + out + rea == 0:
         return None
-    ts = o.get("timestamp")
+    ts = record.get("timestamp")
     sid = cur["session_id"] or os.path.basename(path)
     # content hash, not position; only fall back to the ordinal if ts is absent.
     tiebreak = "" if ts else cur["tc_ord"]

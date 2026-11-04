@@ -285,7 +285,7 @@ def test_run_outcomes_dry_run_writes_nothing(monkeypatch):
             assert [(r["collector"], r["status"], r["events"]) for r in sent["scan"]] == \
                 [("outcomes", "ok", 2)]
             cache = json.loads((Path(d) / "state" / oc.CACHE_NAME).read_text())
-            assert cache == {s["A"]: 1.0, s["D"]: 0.0}, cache
+            assert cache == {"v": oc._CACHE_V, s["A"]: 1.0, s["D"]: 0.0}, cache
         finally:
             (oc._load_rows, oc._load_stored, oc._insert, push.send_scan_rows) = saved
         print("ok run_outcomes_dry_run_writes_nothing")
@@ -469,7 +469,7 @@ def test_cache_is_saved_before_the_sink_is_written(monkeypatch):
             except RuntimeError:
                 pass
             cache = json.loads((Path(d) / "state" / oc.CACHE_NAME).read_text())
-            assert cache == {s["D"]: 0.0}, cache
+            assert cache == {"v": oc._CACHE_V, s["D"]: 0.0}, cache
         finally:
             (oc._load_rows, oc._load_stored, push.send_scan_rows) = saved
         print("ok cache_is_saved_before_the_sink_is_written")
@@ -794,6 +794,48 @@ def test_patch_id_failure_is_not_an_empty_answer():
         assert s["A"] in oc._patch_ids(str(work), ["-1", s["A"]])
         assert oc._patch_ids(str(work), ["refs/heads/no-such-ref"]) is None
     print("ok patch_id_failure_is_not_an_empty_answer")
+
+
+def test_a_clone_git_cannot_identify_is_unreadable_not_gone():
+    with tempfile.TemporaryDirectory() as d:
+        _work, s = _world(Path(d))
+        real = oc._common_dir
+        oc._common_dir = lambda path: None      # rev-parse timed out
+        try:
+            clones = oc.find_clones([str(Path(d) / "projects")], RepoKeys(SALT))
+        finally:
+            oc._common_dir = real
+        assert not clones[0].readable, clones
+        outs, stats = oc.evaluate([_row(s["A"], None, 30)], clones, NOW, cache={})
+        assert (outs[0]["state"], outs[0]["sticky"]) == ("undecided", True), outs
+        assert stats["repo_unreadable"] == 1 and not stats["abandoned_not_found"], stats
+        # a .git that holds no repository is simply no clone
+        stale = Path(d) / "stale" / "x"
+        (stale / ".git").mkdir(parents=True)
+        assert oc._common_dir(str(stale)) == ""
+        assert oc.find_clones([str(stale.parent)], RepoKeys(SALT)) == []
+    print("ok a_clone_git_cannot_identify_is_unreadable_not_gone")
+
+
+def test_a_cached_gh_answer_counts_without_gh():
+    with tempfile.TemporaryDirectory() as d:
+        _work, s = _world(Path(d))
+        clones = oc.find_clones([str(Path(d) / "projects")], RepoKeys(SALT))
+        outs, stats = oc.evaluate([_row(s["F"], None, 25)], clones, NOW,
+                                  cache={f"gh:{s['F']}": True}, gh=False)
+        assert outs[0]["state"] == "merged" and stats["gh_lookups"] == 0, (outs, stats)
+    print("ok a_cached_gh_answer_counts_without_gh")
+
+
+def test_a_cache_from_before_the_failed_read_rule_is_measured_again(monkeypatch):
+    with tempfile.TemporaryDirectory() as d:
+        monkeypatch.setenv("AUT_STATE", str(Path(d) / "state.json"))
+        (Path(d) / oc.CACHE_NAME).write_text(json.dumps({"abc": 0.1, "gh:def": True}))
+        cache = oc._load_cache()
+        assert "abc" not in cache and cache["gh:def"] is True, cache
+        (Path(d) / oc.CACHE_NAME).write_text(json.dumps({**cache, "abc": 0.1}))
+        assert oc._load_cache()["abc"] == 0.1
+    print("ok a_cache_from_before_the_failed_read_rule_is_measured_again")
 
 
 def test_default_ref_failure_is_not_no_default():

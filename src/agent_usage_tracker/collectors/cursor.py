@@ -90,6 +90,7 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[UsageEvent], Callable[
 
         # composerId -> {ts_ms, model}: recovers a timestamp for bubbles that lack one.
         comp: dict[str, dict] = {}
+        read_failure: sqlite3.DatabaseError | None = None
         try:
             for key, val in cur.execute(
                 "SELECT key, value FROM cursorDiskKV WHERE key LIKE 'composerData:%'"
@@ -106,8 +107,8 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[UsageEvent], Callable[
                     "ts": o.get("createdAt"),
                     "model": _model(o),
                 }
-        except sqlite3.DatabaseError:
-            pass
+        except sqlite3.DatabaseError as exc:   # bubbles still go out, some lose ts or model
+            read_failure = exc
 
         try:
             rows = cur.execute(
@@ -119,7 +120,6 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[UsageEvent], Callable[
 
         events: list[UsageEvent] = []
         skipped: Counter = Counter()
-        read_failure: sqlite3.DatabaseError | None = None
         try:
             for key, val in rows:
                 try:

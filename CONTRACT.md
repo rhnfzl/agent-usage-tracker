@@ -426,22 +426,25 @@ commit's `(state, survival)` differs from its latest stored row.
   is newer, its FETCH_HEAD is newer, or this run fetched it). It is computed once and cached by
   full SHA in `outcomes_cache.json` next to the state file (saved before the sink is written),
   with gh answers (a "no" only once the commit is 60 days old). A failed git read is never
-  cached or scored; the next run measures again. A file gone from the base commit counts as 0
+  cached or scored; the next run measures again. A cache from before that rule is measured
+  again once, keeping its gh answers. A file gone from the base commit counts as 0
   lines alive.
 - When several clones hold a commit, the one where it is furthest along wins (on the default
   branch, then on a branch, then unreachable).
 - A commit this run cannot see or decide (no clone holds it any more, gh failed, a stale default
   ref, a failed or timed-out git read of a clone that holds or might hold it) never replaces a
-  stored row of its sha: decided states stay decided. Such a git failure is counted as
+  stored row of its sha: decided states stay decided. A clone git cannot identify counts as a
+  failed read, unless git says no repository is there at all. Such a git failure is counted as
   `repo_unreadable` or `survival_failed` in the run's report.
 - `--fetch` (or `outcome_fetch = true`) runs `git fetch --upload-pack=git-upload-pack --quiet
   --no-tags --no-auto-maintenance --no-write-fetch-head --no-recurse-submodules origin` only in
   a clone whose origin's repo_key a commit row carries (30 s
   each, then SIGTERM so git removes its locks; failures are skipped and counted) and turns on the
-  gh lookup. Without it, a commit whose GitHub PR was squash-merged ends `abandoned`, so set
+  gh lookup. A gh answer already cached still counts without it, needing no network. Without it,
+  any other commit whose GitHub PR was squash-merged ends `abandoned`, so set
   `outcome_fetch = true` on the machine that runs the nightly job. A dry run reads the sink and the clones as they are and changes nothing: no
   rows, no cache, no heartbeat, no fetch and no gh even with `--fetch` or `outcome_fetch` (so a
-  squash-merged commit gh would settle previews as `abandoned`). A real run sends one `agents.collector_scan` row, collector `outcomes`.
+  squash-merged commit with no cached gh answer previews as `abandoned`). A real run sends one `agents.collector_scan` row, collector `outcomes`.
 
 - Every git command aut runs (here, and `git remote get-url origin` for repo keys) goes through
   `git_safe`: `-c core.fsmonitor= -c core.hooksPath=/dev/null -c protocol.ext.allow=never
@@ -515,7 +518,8 @@ aw-server's query API (`filter_keyvals(afk, "status", ["not-afk"])`, then
 `filter_period_intersect`) over `[watermark, now - 5 min]`, at most one day per pass; the first
 scan starts a day before the window bucket's `created` (aw-server-rust writes it in local time
 labelled UTC, so it can be hours late; empty days cost one query each). The watermark is the range end, saved only after
-delivery. aw-server closed or no buckets for this host: no rows, no error.
+delivery. aw-server closed or no buckets for this host: no rows, and a `degraded` heartbeat
+naming the reason. The scan itself does not fail.
 
 Guards, all on the machine before anything is sent:
 
@@ -544,8 +548,9 @@ seam a model replaces later.
 An app in neither mapping gets the category its macOS bundle declares (rule `macos_category`):
 the collector finds the bundle with `mdfind` (`kMDItemContentType ==
 'com.apple.application-bundle' && kMDItemDisplayName == '<app>'`), reads
-`LSApplicationCategoryType` from its `Contents/Info.plist`, once per app per scan, with a 2 s
-timeout. `developer-tools` is `dev`, `business` is `comms`, `productivity` is `docs`,
+`LSApplicationCategoryType` from its `Contents/Info.plist`, once per app per process, with a
+2 s timeout; the first timeout (a stalled Spotlight) ends the lookups for that process.
+`developer-tools` is `dev`, `business` is `comms`, `productivity` is `docs`,
 `graphics-design` is `design` (all relevant); `music`, `video`, `entertainment`, every games
 category, `social-networking`, `sports`, `lifestyle`, `news` and `photography` are `media`; any
 other declared category is `other` (both not relevant). Off macOS, with no bundle, no declared

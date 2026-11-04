@@ -3,6 +3,8 @@ models.dev per-1M scaling, and the write/load roundtrip."""
 
 from __future__ import annotations
 
+import os
+import stat
 import sys
 import tempfile
 from pathlib import Path
@@ -56,6 +58,25 @@ def test_sync_and_load_roundtrip() -> None:
         loaded = pricing.load_prices(out)
         assert loaded["claude-opus-4"]["output_cost"] == 7.5e-05
         assert pricing.load_prices(Path(d) / "gone.json") == {}
+
+
+def test_sync_prices_writes_the_mode_a_plain_write_would() -> None:
+    if os.name == "nt":          # no POSIX modes
+        return
+    sample = {"claude-opus-4": {"litellm_provider": "anthropic", "input_cost_per_token": 1.5e-05,
+                                "output_cost_per_token": 7.5e-05}}
+    with tempfile.TemporaryDirectory() as d:
+        out = Path(d) / "prices.json"
+        umask = os.umask(0o027)
+        try:
+            pricing.sync_prices(out, fetch=lambda url: sample)
+        finally:
+            os.umask(umask)
+        assert stat.S_IMODE(out.stat().st_mode) == 0o640, "a new file follows the umask"
+        out.chmod(0o644)
+        pricing.sync_prices(out, fetch=lambda url: sample)
+        assert stat.S_IMODE(out.stat().st_mode) == 0o644, "an existing file keeps its mode"
+    print("ok sync_prices_writes_the_mode_a_plain_write_would")
 
 
 def test_sync_prices_refuses_empty() -> None:
