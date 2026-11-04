@@ -38,7 +38,7 @@ from glob import escape as glob_escape
 from glob import glob
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Literal, NamedTuple, NotRequired, TypedDict
+from typing import Any, Literal, NamedTuple, NotRequired, TypedDict
 
 from .collectors import claude_code
 from .config import AutError, Config
@@ -209,8 +209,9 @@ def _patch_ids(path: str, args: list[str], inp: str | None = None) -> dict[str, 
         pid = subprocess.Popen(git_argv(path, "patch-id", "--stable"), stdin=log.stdout,
                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
                                env=git_env())
-        log.stdout.close()
-        if inp is not None:
+        if log.stdout:
+            log.stdout.close()
+        if inp is not None and log.stdin:
             log.stdin.write(inp.encode())
             log.stdin.close()
         out, _ = pid.communicate(timeout=600)
@@ -247,10 +248,11 @@ def _landings(log: str) -> tuple[int, dict[str, int]]:
         h, t, *ps = line.split()
         par[h], ct[h] = ps, int(t)
     tip = log.split(None, 1)[0] if log else None
-    fp, h = [], tip
-    while h in par:
-        fp.append(h)
-        h = par[h][0] if par[h] else None
+    fp: list[str] = []
+    at = tip
+    while at in par:
+        fp.append(at)
+        at = par[at][0] if par[at] else None
     on_default: dict[str, int] = {}
     for f in reversed(fp):
         stack = [f]
@@ -301,14 +303,16 @@ def _survival(clone: Clone, target: str, merge_t: float) -> float | None:
     """Share of target's added lines still attributed to it on the default branch 14 days after
     the merge (first BLAME_FILES files). None for a merge or root commit or a commit adding no
     lines. Raises _GitFailed when git could not answer."""
-    path = clone.path
+    path, default = clone.path, clone.default
+    if not default:
+        raise _GitFailed
     parents = _git(path, "rev-list", "--parents", "-n", "1", target)
     if parents is None:
         raise _GitFailed
     if len(parents.split()) != 2:
         return None
     base = _git(path, "rev-list", "-1", "--first-parent", f"--before=@{int(merge_t + DECIDE_S)}",
-                clone.default)
+                default)
     raw = _git(path, "show", "--numstat", "-z", "--no-renames", "--format=", target)
     if base is None or raw is None:
         raise _GitFailed
@@ -377,7 +381,7 @@ class _SurvivalJob(NamedTuple):
 
 class _GhJob(NamedTuple):
     o: Outcome
-    clone: Clone
+    repo: str
     full: str
     ts: float
     on_branch: bool
@@ -409,18 +413,19 @@ def _resolve(anchors: list[_Anchor], clones: list[Clone], stats: Counter) -> Non
     shas = sorted({a.sha for a in anchors})
     held = {i: _lookup(c, shas) for i, c in enumerate(clones)} if shas else {}
     failed = [i for i, h in held.items() if h is None]
+    readable = {i: h for i, h in held.items() if h is not None}
     found: list[tuple[_Anchor, list[tuple[int, str]]]] = []       # [(anchor, [(clone index, full sha)])]
     per_clone: dict[int, list[tuple[str, int]]] = defaultdict(list)
     for a in anchors:
-        cands = [(i, h[a.sha][0]) for i, h in held.items()
-                 if h and a.sha in h and abs(h[a.sha][1] - a.ts) <= DAY]
+        cands = [(i, h[a.sha][0]) for i, h in readable.items()
+                 if a.sha in h and abs(h[a.sha][1] - a.ts) <= DAY]
         own = [c for c in cands if a.key and clones[c[0]].key == a.key]
         cands = own or sorted(cands, key=lambda c: clones[c[0]].key is None)
         a.unread = any(not own or clones[i].key == a.key for i in failed)
         if cands:
             found.append((a, cands))
             for i, full in cands:
-                per_clone[i].append((full, held[i][a.sha][1]))
+                per_clone[i].append((full, readable[i][a.sha][1]))
         else:
             stats["not_found"] += 1
     repos = {i: _read_repo(clones[i], int(min(t for _, t in got)) - 2 * DAY, [f for f, _ in got])
@@ -437,7 +442,7 @@ def _resolve(anchors: list[_Anchor], clones: list[Clone], stats: Counter) -> Non
         stats["null_key_resolved"] += a.key is None and clones[i].key is not None
 
 
-def _decide(a: _Anchor, now: float, cache: dict, gh: bool,
+def _decide(a: _Anchor, now_ts: float, cache: dict, gh: bool,
             stats: Counter) -> tuple[Outcome, _SurvivalJob | _GhJob | None]:
     """The anchor's outcome, and the job that finishes it if one is needed. Returning with the
     state untouched means undecided."""
@@ -448,7 +453,7 @@ def _decide(a: _Anchor, now: float, cache: dict, gh: bool,
         o["sticky"] = True
         stats["repo_unreadable"] += 1
         return o, None
-    young = now - a.ts < DECIDE_S
+    young = now_ts - a.ts < DECIDE_S
     if a.pick is None:
         # shortcut: a commit no local clone holds counts as abandoned after day 14; right for
         # work never pushed, wrong for a repo not cloned on this machine. Upgrade with an
@@ -462,7 +467,7 @@ def _decide(a: _Anchor, now: float, cache: dict, gh: bool,
     if target:
         merge_t = rp.on_default[target]            # when it landed on the default branch
         rv = rp.revert_time(full) or rp.revert_time(target)
-        if now - merge_t < DECIDE_S:
+        if now_ts - merge_t < DECIDE_S:
             return o, None
         if rv is not None and rv - merge_t <= DECIDE_S:
             o["state"] = "reverted"
@@ -482,26 +487,27 @@ def _decide(a: _Anchor, now: float, cache: dict, gh: bool,
     elif young:
         pass
     elif gh and c.gh:            # a squash-merged PR leaves its commits off the default branch
-        return o, _GhJob(o, c, full, a.ts, on_branch)
+        return o, _GhJob(o, c.gh, full, a.ts, on_branch)
     else:
         o["state"] = "open" if on_branch else "abandoned"
     return o, None
 
 
-def _ask_gh(job: _GhJob, now: float, cache: dict) -> tuple[int, int]:
+def _ask_gh(job: _GhJob, now_ts: float, cache: dict) -> tuple[int, int]:
     """Settle a commit off the default branch by its PR; (gh lookups, gh failures)."""
-    o, c, full, ts, on_branch = job
+    o, repo, full, ts, on_branch = job
     k = f"gh:{full}"
     looked = 0
+    merged: bool | None
     if k in cache:
         merged = bool(cache[k])
     else:
-        merged = _gh_merged(c.gh, full)
+        merged = _gh_merged(repo, full)
         looked = 1
         if merged is None:          # gh could not answer: decide nothing, keep what is stored
             o["sticky"] = True
             return 1, 1
-        if merged or now - ts >= _GH_STABLE_S:
+        if merged or now_ts - ts >= _GH_STABLE_S:
             cache[k] = merged       # a merge never undoes itself; an old "no" stays no
     o["state"] = "merged" if merged else "open" if on_branch else "abandoned"
     return looked, 0
@@ -523,23 +529,23 @@ def _measure(job: _SurvivalJob, cache: dict) -> str:
     return "survival_computed" if fresh else "survival_cached"
 
 
-def evaluate(rows: list[dict], clones: list[Clone], now: float, cache: dict,
+def evaluate(rows: list[dict], clones: list[Clone], now_ts: float, cache: dict,
              gh: bool = False) -> tuple[list[Outcome], Counter]:
-    """One outcome per (sha, repo_key) of the commit rows. rows: sha, repo_key, ts (epoch),
+    """One outcome per (sha, repo_key) of the commit rows, as of the epoch now_ts. rows: sha, repo_key, ts (epoch),
     session_id, amend. cache: full sha -> survival (filled in place); gh answers sit under 'gh:'."""
     stats: Counter = Counter(rows=len(rows))
     anchors = _anchors(rows, stats)
     _resolve(anchors, clones, stats)
     outs, jobs, gh_jobs = [], [], []
     for a in anchors:
-        o, job = _decide(a, now, cache, gh, stats)
+        o, job = _decide(a, now_ts, cache, gh, stats)
         outs.append(o)
         if isinstance(job, _GhJob):
             gh_jobs.append(job)
         elif job:
             jobs.append(job)
     with ThreadPoolExecutor(_WORKERS) as pool:     # tallies stay on this thread
-        for looked, failed in pool.map(lambda j: _ask_gh(j, now, cache), gh_jobs):
+        for looked, failed in pool.map(lambda j: _ask_gh(j, now_ts, cache), gh_jobs):
             stats["gh_lookups"] += looked
             stats["gh_failed"] += failed
         for stat in pool.map(lambda j: _measure(j, cache), jobs):
@@ -588,29 +594,30 @@ def _insert(dsn: str, rows: list[dict]) -> None:
                 for r in rows])
 
 
-def run_outcomes(cfg: Config, fetch: bool, dry_run: bool, now: float | None = None) -> Counter:
-    """Score every commit row and write the changed states. --fetch also turns on gh. A dry run
-    reads the sink and the clones as they are and changes nothing: no rows, no cache, no heartbeat,
-    no fetch, no gh, even with --fetch or outcome_fetch."""
+def run_outcomes(cfg: Config, *, refresh: bool, dry_run: bool,
+                 now: datetime | None = None) -> dict[str, Any]:
+    """Score every commit row and write the changed states. refresh (--fetch, outcome_fetch) git
+    fetches the clones and turns on gh. A dry run reads the sink and the clones as they are and
+    changes nothing: no rows, no cache, no heartbeat, no fetch, no gh, even with refresh."""
     dsn = cfg.require_pg("outcomes (it reads the commit rows)")
     started = datetime.now(timezone.utc)
-    now = now if now is not None else started.timestamp()
+    decided = (now or started).astimezone(timezone.utc)
     written, status, error, interrupted = 0, "ok", None, False
     try:
         rows = _load_rows(dsn)
         clones = find_clones(list(cfg.outcome_repo_roots), RepoKeys(cfg.repo_key_salt))
-        stats: Counter = Counter(clones=len(clones))
-        if fetch and dry_run:
+        stats: dict[str, Any] = {"clones": len(clones)}
+        if refresh and dry_run:
             stats["fetch_skipped_dry_run"] = 1
-        fetch = fetch and not dry_run
-        if fetch:
+        refresh = refresh and not dry_run
+        if refresh:
             # only repos the agents committed to: fetch talks to the remote, so a clone that
             # merely sits under a root (and holds a matching short SHA) is never fetched
             keys = {r["repo_key"] for r in rows if r["repo_key"]}
             want = [c for c in clones if c.key in keys]
             stats["fetch_ok"], stats["fetch_failed"] = fetch_clones(want)
         cache = load_json_dict(_cache_path())
-        outs, ev = evaluate(rows, clones, now, cache, gh=fetch)
+        outs, ev = evaluate(rows, clones, decided.timestamp(), cache, gh=refresh)
         stats.update(ev)
         stats["states"] = Counter(o["state"] for o in outs)
         if not dry_run:
@@ -618,7 +625,6 @@ def run_outcomes(cfg: Config, fetch: bool, dry_run: bool, now: float | None = No
         todo = pending(outs, _load_stored(dsn))
         stats["to_write"] = len(todo)
         if not dry_run:
-            decided = datetime.fromtimestamp(now, timezone.utc)
             _insert(dsn, [{"sha": o["sha"], "repo_key": o["repo_key"], "state": o["state"],
                            "survival": o["survival"], "decided_at": decided} for o in todo])
             written = len(todo)
@@ -633,7 +639,7 @@ def run_outcomes(cfg: Config, fetch: bool, dry_run: bool, now: float | None = No
                               "outcomes")
 
 
-def print_outcomes(report: Counter, dry_run: bool) -> None:
+def print_outcomes(report: dict[str, Any], dry_run: bool) -> None:
     states = dict(sorted(report["states"].items()))
     rest = {k: v for k, v in sorted(report.items()) if k != "states"}
     print(f"outcomes {'DRY-RUN (nothing written)' if dry_run else 'written'}: "
@@ -643,14 +649,14 @@ def print_outcomes(report: Counter, dry_run: bool) -> None:
 def _project_paths(cwd: str) -> list[str]:
     """cwd and its parents up to the repo's top level (only cwd outside a repo)."""
     top = (_git(cwd, "rev-parse", "--show-toplevel", timeout=10) or "").strip()
-    top = os.path.realpath(top) if top else None
+    root = os.path.realpath(top) if top else None
     out, p = [], Path(cwd)
     while True:
         out.append(str(p))
-        if not top or os.path.realpath(p) == top or p.parent == p:
+        if not root or os.path.realpath(p) == root or p.parent == p:
             break
         p = p.parent
-    return out + ([top] if top and top not in out else [])
+    return out + ([root] if root and root not in out else [])
 
 
 def latest_session(home: Path, cwd: str) -> str | None:
@@ -662,8 +668,8 @@ def latest_session(home: Path, cwd: str) -> str | None:
     return None
 
 
-def build_manual_outcome(cfg: Config, outcome: str, cwd: str, session: str | None = None,
-                         now: float | None = None) -> dict:
+def build_manual_outcome(cfg: Config, outcome: str, cwd: str, session: str | None = None, *,
+                         now: datetime | None = None) -> dict:
     """One agents.manual_outcome row, or AutError with the reason it was refused."""
     if outcome not in MANUAL:
         raise AutError(f"outcome: one of {', '.join(MANUAL)}")
@@ -671,8 +677,7 @@ def build_manual_outcome(cfg: Config, outcome: str, cwd: str, session: str | Non
     if not sid:
         raise AutError("outcome: no interactive session found for this directory; "
                        "pass --session ID")
-    ts = datetime.fromtimestamp(now if now is not None else datetime.now().timestamp(),
-                                timezone.utc)
+    ts = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
     return {"session_id": sid, "outcome": MANUAL[outcome], "ts": ts,
             "repo_key": RepoKeys(cfg.repo_key_salt).of_cwd(cwd)}
 

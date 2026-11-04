@@ -11,6 +11,7 @@ import secrets
 import sys
 import threading
 import webbrowser
+from email.message import Message
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Callable
 from urllib.parse import parse_qs
@@ -36,7 +37,7 @@ def new_token() -> str:
     return secrets.token_urlsafe(16)
 
 
-def _body_length(headers) -> int:
+def _body_length(headers: Message) -> int:
     try:
         return int(headers.get("Content-Length") or 0)
     except ValueError:
@@ -44,7 +45,7 @@ def _body_length(headers) -> int:
 
 
 def serve(token: str, on_get: Callable[[str], bytes | None],
-          on_post: Callable[[dict[str, list[str]]], bytes | None], notice: str,
+          on_post: Callable[[dict[str, list[str]]], bytes | None], notice: str, *,
           open_browser: bool = True, on_ready: Callable[[str], None] | None = None) -> None:
     """Serve until a post ends it or Ctrl-C. on_get gets what follows /<token> in the path (query
     included) and returns the page, None for a 404; only an exact match of that tail may answer.
@@ -53,7 +54,7 @@ def serve(token: str, on_get: Callable[[str], bytes | None],
     root = f"/{token}"
 
     class Handler(BaseHTTPRequestHandler):
-        def log_message(self, *a):          # keep titles, paths and unit text out of the terminal
+        def log_message(self, *a: object) -> None:  # keep titles, paths and unit text out of it
             pass
 
         def _reply(self, code: int, body: bytes, location: str | None = None) -> None:
@@ -66,11 +67,11 @@ def serve(token: str, on_get: Callable[[str], bytes | None],
             self.end_headers()
             self.wfile.write(body)
 
-        def do_GET(self):
+        def do_GET(self) -> None:
             page = on_get(self.path[len(root):]) if self.path.startswith(root) else None
             self._reply(200 if page is not None else 404, b"not found" if page is None else page)
 
-        def do_POST(self):
+        def do_POST(self) -> None:
             # the token first: nothing the request says is read until it has shown the token
             if self.path != root or not 0 < _body_length(self.headers) <= _MAX_BODY:
                 self._reply(404, b"not found")

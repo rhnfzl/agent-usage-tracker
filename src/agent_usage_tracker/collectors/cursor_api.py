@@ -53,7 +53,7 @@ def _auth(cfg: Config) -> tuple[str, int] | None:
     if con is None:
         return None
     try:
-        def item(k: str):
+        def item(k: str) -> Any:
             row = con.execute("SELECT value FROM ItemTable WHERE key=?", (k,)).fetchone()
             return row[0] if row else None
         token = item("cursorAuth/accessToken")
@@ -94,7 +94,7 @@ def _post(cookie: str, name: str, body: dict) -> Any:
         return json.loads(resp.read())
 
 
-def _same_user(owner, uid) -> bool:
+def _same_user(owner: object, uid: object) -> bool:
     """True only when BOTH ids are present, non-empty SCALARS and equal. Guards the privacy
     boundary: a missing/empty owningUser must never match an empty/'None' uid, and a container
     (list/dict) must never match another equal container via str() coercion."""
@@ -106,7 +106,7 @@ def _same_user(owner, uid) -> bool:
     return o != "" and u != "" and o.lower() != "none" and o == u
 
 
-def _map_event(e: dict, uid) -> UsageEvent | None:
+def _map_event(e: dict, uid: object) -> UsageEvent | None:
     """One Cursor usage event -> UsageEvent, or None if it is not this user's or has no tokens."""
     if not isinstance(e, dict) or not _same_user(e.get("owningUser"), uid):
         return None                       # SAFETY: never emit another team member's event

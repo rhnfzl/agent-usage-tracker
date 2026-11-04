@@ -16,14 +16,16 @@ import random
 from collections import defaultdict
 from datetime import date, datetime, timedelta
 from pathlib import Path
+from typing import Callable, TypeVar
 
 from ..config import AutError, Config
 from ..state import atomic_write_text
-from .core import Request, data_dir, local_midnight
+from .core import Request, data_dir, local_midnight, top_label
 from .names import DAYS
 from .tasks import TASKS, Source, units
 
-# map.md section 6: gold per label, (floor, target). AW titles: 150 per class.
+# Gold per label, (floor, target), as the gold page shows them. AW titles: 150 per class.
+T = TypeVar("T")
 FLOORS = {"work_category": (30, 50), "steer_intent": (30, 50), "soft_outcome": (30, 30),
           "aw_title_relevance": (150, 150)}
 
@@ -81,15 +83,15 @@ def silver_by_unit(task: str) -> dict[str, dict[str, dict[str, float]]]:
 def stratum(teachers: dict | None) -> str:
     """The silver stratum of a unit: the teachers' common top label, `disagree`, or
     `unlabelled`."""
-    tops = {max(d, key=d.get) for d in (teachers or {}).values() if d}
+    tops = {top_label(d) for d in (teachers or {}).values() if d}
     return "unlabelled" if not tops else tops.pop() if len(tops) == 1 else "disagree"
 
 
-def stratified(items: list, key, seed: str) -> list:
+def stratified(items: list[T], key: Callable[[T], object], seed: str) -> list[T]:
     """Round-robin over the strata of `key`, each stratum shuffled: rare strata come up as often
     as common ones. Deterministic for a seed, so a resumed session sees the same order."""
     rng = random.Random(seed)
-    groups: dict = defaultdict(list)
+    groups: dict[object, list[T]] = defaultdict(list)
     for x in items:
         groups[key(x)].append(x)
     keys = sorted(groups, key=str)

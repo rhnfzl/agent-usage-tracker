@@ -1,7 +1,7 @@
 [project]
 name = "agent-usage-tracker"
 version = "0.1.0"
-description = "Passive, subscription-safe token/model usage tracker for coding agents (Claude Code, Codex, Cursor, Pi). Reads local logs, normalizes, pushes to a self-hosted sink."
+description = "Passive, subscription-safe tracker of coding-agent work (Claude Code, Codex, Cursor, Pi): usage, sessions, activity, active time, outcomes and local labels. Reads local logs, normalizes, pushes to a self-hosted sink."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
@@ -20,6 +20,9 @@ label = [
     "huggingface_hub>=0.24; sys_platform == 'darwin' and platform_machine == 'arm64'",
 ]
 
+# Run the suite: pip install -e '.[test]' && pytest -q
+test = ["pytest"]
+
 [project.scripts]
 aut = "agent_usage_tracker.cli:main"
 
@@ -33,3 +36,16 @@ packages = ["src/agent_usage_tracker"]
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+
+[tool.pytest.ini_options]
+pythonpath = ["src", "tests"]
+
+[tool.mypy]
+python_version = "3.11"
+files = ["src"]
+disallow_untyped_defs = true
+
+# Optional extras: the base install, and CI's lint job, have none of them.
+[[tool.mypy.overrides]]
+module = ["psycopg.*", "mlx.*", "mlx_lm.*", "huggingface_hub.*"]
+ignore_missing_imports = true

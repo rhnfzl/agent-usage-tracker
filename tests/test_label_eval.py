@@ -24,7 +24,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections import Counter
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -42,7 +42,10 @@ from agent_usage_tracker.label import (backends, bakeoff, core, evalset, gold, t
 TASK = "steer_intent"
 LABELS = [c for c, _d in tasks.TASKS[TASK].candidates]
 WORD = "zanzibarquill"
-BASE = datetime.now(timezone.utc).replace(hour=12, minute=0, second=0, microsecond=0)
+# Fixed local noon: held_out hashes a unit's local day, so a moving clock would change the split
+# and every number that follows from it. Every run below gets this clock.
+BASE = datetime(2026, 6, 15, 12).astimezone()
+TODAY = BASE.date()
 
 
 class Oracle(backends.LetterBackend):
@@ -117,7 +120,8 @@ def test_teach_sonnet_only_for_claude_units_resumable_and_capped(tmp_path):
         asked.append(prompt)
         return '{"stop": 0.9, "framing": 0.1}', 1.0
     with _env(tmp_path):
-        c = teach.run_teach(cfg, TASK, 3, budget_usd=2.0, src=src, local=Oracle(), ask=ask)
+        c = teach.run_teach(cfg, TASK, 3, budget_usd=2.0, src=src, today=TODAY, local=Oracle(),
+                            ask=ask)
         assert c["units"] == 3 and c["local"] == 3 and c["sonnet"] == 2
         assert c["sonnet_skipped"] == 1 and c["spent_usd_milli"] == 2000
         rows = evalset.read_jsonl(evalset.eval_path(TASK, "silver"))
@@ -127,7 +131,8 @@ def test_teach_sonnet_only_for_claude_units_resumable_and_capped(tmp_path):
         assert WORD in asked[0]                         # Sonnet saw the (Claude Code) text
         # a rerun adds only what is missing: Sonnet for the skipped unit, then the fourth unit
         asked.clear()
-        c = teach.run_teach(cfg, TASK, 10, budget_usd=5.0, src=src, local=Oracle(), ask=ask)
+        c = teach.run_teach(cfg, TASK, 10, budget_usd=5.0, src=src, today=TODAY, local=Oracle(),
+                            ask=ask)
         assert c["units"] == 2 and c["local"] == 1 and c["sonnet"] == 2
         per = Counter((r["unit_id"], r["teacher"]) for r in
                       evalset.read_jsonl(evalset.eval_path(TASK, "silver")))
@@ -137,10 +142,11 @@ def test_teach_sonnet_only_for_claude_units_resumable_and_capped(tmp_path):
 
         def broken(prompt):
             raise RuntimeError("down")
-        c = teach.run_teach(cfg, TASK, 4, src=src, local=Oracle(), ask=broken)
+        c = teach.run_teach(cfg, TASK, 4, src=src, today=TODAY, local=Oracle(), ask=broken)
         assert c["sonnet_failed"] == teach.MAX_FAILS and c["sonnet_skipped"] == 1
         evalset.eval_path(TASK, "silver").unlink()
-        c = teach.run_teach(cfg, TASK, 1, src=src, local=Oracle(), ask=lambda p: ("no", 0.0))
+        c = teach.run_teach(cfg, TASK, 1, src=src, today=TODAY, local=Oracle(),
+                            ask=lambda p: ("no", 0.0))
         assert c["sonnet_unusable"] == 1 and c["local"] == 1
 
 
@@ -150,7 +156,7 @@ def test_teach_never_sends_window_units(tmp_path):
     src = FakeSource(cfg, wins=[_win(t0, 6, title="Private bank - statement")])
     asked = []
     with _env(tmp_path):
-        c = teach.run_teach(cfg, "aw_title_relevance", 5, src=src, local=Oracle("relevant"),
+        c = teach.run_teach(cfg, "aw_title_relevance", 5, src=src, today=TODAY, local=Oracle("relevant"),
                             ask=lambda p: asked.append(p) or ("{}", 0.0))
         assert c["local"] == 1 and c["sonnet"] == 0 and asked == []
         assert "bank" not in evalset.eval_path("aw_title_relevance", "silver").read_text()
@@ -213,7 +219,7 @@ def _get(url):
 def test_gold_page_hides_silver_until_answered_and_writes_no_text(tmp_path):
     cfg, src = _src(tmp_path, ["framing", "stop", "review"])
     with _env(tmp_path):
-        reqs = evalset.window_units(cfg, TASK, src=src)
+        reqs = evalset.window_units(cfg, TASK, src=src, today=TODAY)
         for u in reqs:
             evalset.append_jsonl(evalset.eval_path(TASK, "silver"), {
                 "unit_id": u, "teacher": "fake/teacher", "task_ver": 1, "date": "d",
@@ -258,7 +264,7 @@ def test_gold_page_hides_silver_until_answered_and_writes_no_text(tmp_path):
 
 def _gold(tmp: Path, golds: list[str]):
     cfg, src = _src(tmp, golds)
-    reqs = evalset.window_units(cfg, TASK, src=src)
+    reqs = evalset.window_units(cfg, TASK, src=src, today=TODAY)
     for u, r in reqs.items():
         evalset.append_jsonl(evalset.eval_path(TASK, "gold"), {
             "unit_id": u, "gold": r.state["text"].split()[0], "labeller": "human", "date": "d",
@@ -280,7 +286,7 @@ def test_eval_record_choose_and_event(tmp_path, monkeypatch):
     monkeypatch.setattr(bakeoff, "send_activity_rows", lambda dsn, rows: sent.extend(rows))
     with _env(tmp_path):
         cfg, src, reqs = _gold(tmp_path, golds)
-        recs = bakeoff.run_eval(cfg, TASK, src=src,
+        recs = bakeoff.run_eval(cfg, TASK, src=src, now=BASE,
                                 backends=[Oracle(size_mb=4000), Oracle("stop", size_mb=10)])
         good, bad = recs
         assert good["n"] == 48 and good["n_cal"] + good["n_held"] == 48 and good["n_held"]
@@ -312,13 +318,13 @@ def test_eval_record_choose_and_event(tmp_path, monkeypatch):
         assert not bakeoff.passes(rec, 0.75, 0.9)
         # nothing passes -> no choice is written over the old one
         evalset.eval_path(TASK, "eval").unlink()
-        bakeoff.run_eval(cfg, TASK, src=src, backends=[Oracle("stop")])
+        bakeoff.run_eval(cfg, TASK, src=src, now=BASE, backends=[Oracle("stop")])
         with pytest.raises(AutError):
             bakeoff.choose(cfg, TASK)
         assert core.load_choice(TASK).model_rev == "r1"
         evalset.eval_path(TASK, "gold").unlink()
         with pytest.raises(AutError):
-            bakeoff.run_eval(cfg, TASK, src=src, backends=[Oracle()])
+            bakeoff.run_eval(cfg, TASK, src=src, now=BASE, backends=[Oracle()])
 
 
 def test_share_error_is_reweighted_to_natural_frequency(tmp_path):
@@ -344,17 +350,16 @@ def test_train_encoder_and_backend(tmp_path):
         cfg, src, reqs = _gold(tmp_path, golds)
         with pytest.raises(backends.BackendUnavailable):
             backends.Encoder(TASK).distribution(next(iter(reqs.values())))
-        r = bakeoff.train_encoder(cfg, TASK, src=src)
-        # the held-out split follows today's date, and each steer also carries its neighbour's
-        # text, so a small fit is not always perfect: it must clearly beat chance (1/3); over
-        # 14 dates checked it scored 0.89 to 1.0
-        assert r["held_out"] > 0 and r["accuracy"] >= 0.8 and r["macro_f1"] >= 0.8
+        r = bakeoff.train_encoder(cfg, TASK, src=src, today=TODAY)
+        # each steer also carries its neighbour's text, so a small fit is not perfect
+        assert (r["trained_on"], r["held_out"]) == (16, 38)
+        assert (r["accuracy"], r["macro_f1"]) == (0.8947, 0.8916)
         held = {u for u, q in reqs.items() if evalset.held_out(q)}
         fit = {u for u, q in reqs.items() if u not in held and evalset.in_encoder_train_split(q)}
         assert 0 < len(fit) < len(reqs) - len(held) and r["trained_on"] == len(fit)
         # eval calibrates the encoder only on the gold it never trained on
         rec = bakeoff.evaluate(TASK, backends.Encoder(TASK), [
-            (q, q.state["text"].split()[0], u in held, 1.0) for u, q in reqs.items()], 0.9, "d")
+            (q, q.state["text"].split()[0], u in held, 1.0) for u, q in reqs.items()], 0.9, TODAY)
         assert rec["n_cal"] == len(reqs) - len(held) - len(fit) and rec["n_held"] == len(held)
         raw = backends.encoder_path(TASK).read_text()
         assert WORD not in raw and json.loads(raw)["labels"] == LABELS
@@ -378,7 +383,7 @@ def test_cli_wiring(tmp_path, monkeypatch):
     monkeypatch.setattr(cli, "load_config", lambda: _cfg(tmp_path))
     monkeypatch.setattr(teach, "run_teach", lambda cfg, t, n, b, d: seen.append(
         ("teach", t, n, b, d)) or Counter())
-    monkeypatch.setattr(gold, "run_review", lambda cfg, t, d: seen.append(("review", t, d)) or {
+    monkeypatch.setattr(gold, "run_gold_review", lambda cfg, t, d: seen.append(("review", t, d)) or {
         "task": TASK, "answered": 0, "skipped": 0, "gold": {}})
     monkeypatch.setattr(bakeoff, "run_eval", lambda cfg, t, d: seen.append(("eval", t, d)) or [])
     monkeypatch.setattr(bakeoff, "choose", lambda cfg, t: seen.append(("choose", t)) or {
@@ -395,10 +400,6 @@ def test_cli_wiring(tmp_path, monkeypatch):
                     ("eval", TASK, 30), ("choose", TASK), ("train", TASK)]
     with pytest.raises(SystemExit):
         cli.main(["label", "teach", "--task", "daily_note", "--n", "1"])
-
-
-if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-q"]))
 
 
 def test_corrupt_choice_file_warns_and_choose_keeps_it(tmp_path, monkeypatch, capsys):
@@ -424,3 +425,7 @@ def test_unreadable_jsonl_is_not_an_empty_one(tmp_path):
     assert evalset.read_jsonl(tmp_path / "gone.jsonl") == []
     with pytest.raises(AutError, match="cannot read"):
         evalset.read_jsonl(tmp_path)        # a directory: OSError that is not "missing"
+
+
+if __name__ == "__main__":
+    raise SystemExit(pytest.main([__file__, "-q"]))

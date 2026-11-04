@@ -16,10 +16,11 @@ import subprocess
 import tempfile
 from collections import Counter
 from datetime import date
+from typing import Callable
 
 from ..config import AutError, Config
 from .backends import make_backend
-from .core import Choice, Request, render
+from .core import Backend, Choice, Request, render
 from .evalset import DAYS, append_jsonl, eval_path, read_jsonl, stratified, unit_day, window_units
 from .tasks import TASKS, Source
 
@@ -48,11 +49,12 @@ def parse_dist(text: str, ids: list[str]) -> dict[str, float] | None:
     m = re.search(r"\{.*\}", text or "", re.S)
     try:
         obj = json.loads(m.group(0)) if m else None
-        vals = {i: max(float(obj.get(i) or 0), 0.0) for i in ids} if isinstance(obj, dict) \
-            else None
+        if not isinstance(obj, dict):
+            return None
+        vals = {i: max(float(obj.get(i) or 0), 0.0) for i in ids}
     except (ValueError, TypeError):
         return None
-    s = sum(vals.values()) if vals else 0
+    s = sum(vals.values())
     return {i: v / s for i, v in vals.items()} if s > 0 else None
 
 
@@ -73,8 +75,9 @@ def ask_claude(prompt: str, timeout: int = 180) -> tuple[str, float]:
     return str(o.get("result") or ""), float(o.get("total_cost_usd") or 0)
 
 
-def run_teach(cfg: Config, task: str, n: int, budget_usd: float = 5.0, days: int = DAYS,
-              src: Source | None = None, local=None, ask=None,
+def run_teach(cfg: Config, task: str, n: int, budget_usd: float = 5.0, days: int = DAYS, *,
+              src: Source | None = None, local: Backend | None = None,
+              ask: Callable[[str], tuple[str, float]] | None = None,
               today: date | None = None) -> Counter:
     """Silver labels for up to n units not yet labelled by every teacher that applies to them.
     local: the local backend (default the config's label_model, uncalibrated); ask(prompt) ->

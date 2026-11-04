@@ -1,6 +1,6 @@
-"""aut CLI: scan | backfill | status.
+"""aut CLI.
 
-  aut scan              incremental: read new usage since the watermark, push, advance
+  aut scan              incremental: read new rows since the watermark, push, advance
   aut scan --dry-run    parse + normalize + AGGREGATE, print a report, send/commit nothing
   aut backfill          reset the watermark for the selected agents, then scan everything
   aut backfill --sessions-only [--dry-run]
@@ -8,6 +8,10 @@
   aut backfill --activity-only [--dry-run]
                         the same for activity rows (steers, commits, turns, ...); never usage
   aut status            show config + watermark state
+  aut export [--out F]  write all usage as CSV (bulk load, offline bridge); never the watermark
+  aut sync-prices [--out F]
+                        refresh the API-equivalent model price map
+  aut report            retired: warns and writes nothing
   aut time add --start <local> --end <local> | --minutes N [--at <local end>] [--not-relevant]
                         record a manual active-time interval (needs transport.pg_dsn)
   aut outcomes [--fetch] [--dry-run]
@@ -39,6 +43,7 @@ import argparse
 import os
 import sys
 from datetime import date, datetime, timedelta, timezone
+from typing import Sequence
 
 from . import pricing, scan
 from .collectors import REGISTRY
@@ -49,33 +54,34 @@ from .push import insert_pg
 from .state import load_state
 
 
-def cmd_scan(cfg: Config, agents: tuple[str, ...], args) -> None:
-    report = scan.run_scan(cfg, list(agents), args.dry_run)
+def cmd_scan(cfg: Config, agents: Sequence[str], args: argparse.Namespace) -> None:
+    report = scan.run_scan(cfg, agents, dry_run=args.dry_run)
     scan.print_scan(cfg, report, args.dry_run)
 
 
-def cmd_backfill(cfg: Config, agents: tuple[str, ...], args) -> None:
+def cmd_backfill(cfg: Config, agents: Sequence[str], args: argparse.Namespace) -> None:
     if args.sessions_only or args.activity_only:
-        counts = scan.run_history_backfill(cfg, list(agents), args.dry_run,
+        counts = scan.run_history_backfill(cfg, agents, dry_run=args.dry_run,
                                            sessions=args.sessions_only, activity=args.activity_only)
-        scan.print_history_backfill(counts, args.dry_run, args.sessions_only, args.activity_only)
+        scan.print_history_backfill(counts, dry_run=args.dry_run, sessions=args.sessions_only,
+                                    activity=args.activity_only)
         return
     scan.reset_watermarks(agents)
     print(f"watermark reset for: {', '.join(agents)}")
     cmd_scan(cfg, agents, args)
 
 
-def cmd_export(cfg: Config, agents: tuple[str, ...], args) -> None:
+def cmd_export(cfg: Config, agents: Sequence[str], args: argparse.Namespace) -> None:
     out = open(args.out, "w", newline="", encoding="utf-8") if args.out else sys.stdout
     try:
-        written, skipped = scan.run_export(cfg, list(agents), out)
+        written, skipped = scan.run_export(cfg, agents, out)
     finally:
         if args.out:
             out.close()
     scan.print_export(written, skipped, args.out)
 
 
-def cmd_status(cfg: Config, agents: tuple[str, ...], args) -> None:
+def cmd_status(cfg: Config, agents: Sequence[str], args: argparse.Namespace) -> None:
     state = load_state()
     print(f"machine       : {cfg.machine}")
     print(f"agents        : {', '.join(agents)}")
@@ -105,7 +111,7 @@ def _local(value: str) -> datetime:
 
 
 def build_manual_interval(cfg: Config, start: str | None = None, end: str | None = None,
-                          minutes: int | None = None, at: str | None = None,
+                          minutes: int | None = None, at: str | None = None, *,
                           not_relevant: bool = False, now: datetime | None = None) -> TimeInterval:
     """One manual agents.time_interval row, or SystemExit with the reason it was refused."""
     now = now or datetime.now(timezone.utc)
@@ -131,8 +137,9 @@ def build_manual_interval(cfg: Config, start: str | None = None, end: str | None
                         work_relevant=not not_relevant, attrs={}, machine=cfg.machine)
 
 
-def cmd_time_add(cfg: Config, agents: tuple[str, ...], args) -> None:
-    row = build_manual_interval(cfg, args.start, args.end, args.minutes, args.at, args.not_relevant)
+def cmd_time_add(cfg: Config, agents: Sequence[str], args: argparse.Namespace) -> None:
+    row = build_manual_interval(cfg, args.start, args.end, args.minutes, args.at,
+                                not_relevant=args.not_relevant)
     insert_pg(cfg.require_pg("time add"), [row])
     s, e = (datetime.fromisoformat(x).astimezone() for x in (row.ts, row.end_ts))
     mins = (e - s).total_seconds() / 60
@@ -140,13 +147,14 @@ def cmd_time_add(cfg: Config, agents: tuple[str, ...], args) -> None:
           f"{'relevant' if row.work_relevant else 'not relevant'})")
 
 
-def cmd_outcomes(cfg: Config, agents: tuple[str, ...], args) -> None:
+def cmd_outcomes(cfg: Config, agents: Sequence[str], args: argparse.Namespace) -> None:
     from . import outcomes
-    report = outcomes.run_outcomes(cfg, args.fetch or cfg.outcome_fetch, args.dry_run)
+    report = outcomes.run_outcomes(cfg, refresh=args.fetch or cfg.outcome_fetch,
+                                   dry_run=args.dry_run)
     outcomes.print_outcomes(report, args.dry_run)
 
 
-def cmd_outcome(cfg: Config, agents: tuple[str, ...], args) -> None:
+def cmd_outcome(cfg: Config, agents: Sequence[str], args: argparse.Namespace) -> None:
     from . import outcomes
     dsn = cfg.require_pg("outcome")
     row = outcomes.build_manual_outcome(cfg, args.outcome, os.getcwd(), args.session)
@@ -154,34 +162,36 @@ def cmd_outcome(cfg: Config, agents: tuple[str, ...], args) -> None:
     print(f"marked session {row['session_id'][:8]} {row['outcome']}")
 
 
-def cmd_inspect(cfg: Config, agents: tuple[str, ...], args) -> None:
+def cmd_inspect(cfg: Config, agents: Sequence[str], args: argparse.Namespace) -> None:
     from . import inspector
     inspector.print_inspect(inspector.run_inspect(cfg, episode=args.episode, day=args.day,
                                                   label=args.label))
 
 
-def cmd_episodes(cfg: Config, agents: tuple[str, ...], args) -> None:
+def cmd_episodes(cfg: Config, agents: Sequence[str], args: argparse.Namespace) -> None:
     from . import review
-    review.print_review(review.run_review(cfg, args.month))
+    review.print_review(review.run_episode_review(cfg, args.month))
 
 
-def _label_run(cfg: Config, args) -> None:
+def _label_run(cfg: Config, args: argparse.Namespace) -> None:
     """run | backfill: label new units, or one task over the last N days."""
     from .label import run as label_run
     from .label.core import local_midnight
+    tasks: list[str] | None
     if args.label_cmd == "backfill":
         since = date.today() - timedelta(days=args.days)
         tasks, dry = [args.task], False
     else:
         since, tasks, dry = args.since, [args.task] if args.task else None, args.dry_run
-    report = label_run.run_label(cfg, tasks, local_midnight(since) if since else None, dry)
+    report = label_run.run_label(cfg, tasks, local_midnight(since) if since else None,
+                                 dry_run=dry)
     label_run.print_report(report, dry)
     failed = [name for name, c in report.items() if c["failed"]]
     if failed:
         raise AutError(f"label: could not run {', '.join(failed)} (reasons above)")
 
 
-def _label_bakeoff(cfg: Config, args) -> None:
+def _label_bakeoff(cfg: Config, args: argparse.Namespace) -> None:
     """eval | choose | train-encoder: the bake-off on the gold labels."""
     from .label import bakeoff
     if args.label_cmd == "eval":
@@ -192,7 +202,7 @@ def _label_bakeoff(cfg: Config, args) -> None:
         bakeoff.print_train_encoder(args.task, bakeoff.train_encoder(cfg, args.task, args.days))
 
 
-def cmd_label(cfg: Config, agents: tuple[str, ...], args) -> None:
+def cmd_label(cfg: Config, agents: Sequence[str], args: argparse.Namespace) -> None:
     if args.label_cmd in ("run", "backfill"):
         _label_run(cfg, args)
     elif args.label_cmd == "teach":
@@ -201,18 +211,18 @@ def cmd_label(cfg: Config, agents: tuple[str, ...], args) -> None:
                                                      args.days), args.budget_usd)
     elif args.label_cmd == "review":
         from .label import gold
-        gold.print_review(gold.run_review(cfg, args.task, args.days))
+        gold.print_review(gold.run_gold_review(cfg, args.task, args.days))
     else:
         _label_bakeoff(cfg, args)
 
 
-def cmd_sync_prices(args) -> None:
+def cmd_sync_prices(args: argparse.Namespace) -> None:
     out = args.out or str(config_path().parent / "model_prices.json")
     n = pricing.sync_prices(out, litellm_url=args.litellm_url, models_dev_url=args.models_dev_url)
     print(f"synced {n} model prices -> {out}", file=sys.stderr)
 
 
-def cmd_report(args) -> None:
+def cmd_report(args: argparse.Namespace) -> None:
     # shortcut: kept one release so old crons only warn; delete the subcommand after that
     print("aut report is retired: metrics.json is replaced by the agents database views "
           "(Grafana on the LAN). Nothing was written.", file=sys.stderr)
@@ -226,7 +236,7 @@ _COMMANDS = {"scan": cmd_scan, "backfill": cmd_backfill, "export": cmd_export,
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="aut", description="coding-agent token usage tracker")
+    parser = argparse.ArgumentParser(prog="aut", description="passive coding-agent usage, activity, active-time and outcome tracker")
     parser.add_argument("--agents", help="comma-separated subset override (default: config)")
     sub = parser.add_subparsers(dest="cmd", required=True)
     p_scan = sub.add_parser("scan", help="push new usage since the watermark")

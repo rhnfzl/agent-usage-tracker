@@ -2,7 +2,7 @@
 
 Follows the usual price-registry sync pattern, EXTENDED to also extract the two cache-cost
 fields such syncs normally skip (cache_read_input_token_cost /
-cache_creation_input_token_cost), which the tracker needs for its cache-savings metric.
+cache_creation_input_token_cost). Nothing in aut reads the file today (see the README).
 Zero runtime deps: the fetch uses stdlib urllib. Prices are NOTIONAL / API-equivalent.
 
 Map shape: {normalized_key: {output_cost, input_cost?, cache_read_cost?, cache_write_cost?}}
@@ -168,8 +168,7 @@ def sync_prices(
 
 
 def load_prices(path: str | Path) -> dict[str, dict[str, float]]:
-    """Load a price file; {} if absent (the report then degrades to
-    token-only metrics)."""
+    """Load a price file; {} if absent."""
     p = Path(path).expanduser()
     if not p.exists():
         return {}

@@ -64,7 +64,9 @@ class RepoKeys:
     tested against stored keys without the salt. Cached per cwd for one collect() pass."""
 
     def __init__(self, salt: str | None) -> None:
-        self._configured, self._salt, self._cwd = salt, None, {}
+        self._configured = salt
+        self._salt: bytes | None = None
+        self._cwd: dict[object, str | None] = {}
 
     def of(self, identity: str) -> str | None:
         if self._salt is None:

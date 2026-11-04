@@ -214,7 +214,7 @@ class TurnAgg(TypedDict):
     mcp_ids: NotRequired[list]   # codex: MCP call ids, to match the item Desktop logs again
 
 
-def blank_agg() -> TurnAgg:
+def blank_tool_tally() -> TurnAgg:
     return {"calls": 0, "errors": 0, "hooks": 0, "by": {}, "last": None, "run": 0, "max": 0}
 
 

@@ -1,6 +1,6 @@
-"""The canonical usage event: the one contract every collector emits and the sink stores.
+"""The rows collectors emit and the sink stores: usage, activity and active time.
 
-Deliberately close to what the agents already log, but normalized so counts add up
+The usage event is deliberately close to what the agents already log, but normalized so counts add up
 uniformly across tools. Key normalization rule for cached input:
 
   input_tokens      = FRESH (non-cached) prompt tokens
@@ -16,19 +16,28 @@ from __future__ import annotations
 import hashlib
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
-from typing import Callable, Sequence
+from typing import Callable, Literal, Sequence
+
+RunOrigin = Literal["interactive", "automated", "subagent", "unknown"]
+UsageKind = Literal["agent", "human"]    # agent: an assistant turn with tokens; human: a user prompt
+TimeSource = Literal["aw", "manual"]
+ActivityKind = Literal["steer", "interrupt", "rejection", "commit", "pr", "turn", "compaction",
+                       "invoke", "link", "label", "eval"]
+
+
+def parse_ts(ts: object) -> datetime | None:
+    """The datetime of a non-empty ISO-8601 string the sink can cast to timestamptz, else None:
+    None, "", numbers and malformed strings, so a bad ts can't wedge the batch."""
+    if not isinstance(ts, str) or not ts.strip():
+        return None
+    try:
+        return datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    except ValueError:
+        return None
 
 
 def valid_ts(ts: object) -> bool:
-    """True only for a non-empty ISO-8601 string the sink can cast to timestamptz.
-    Rejects None, "", numbers, and malformed strings so a bad ts can't wedge the batch."""
-    if not isinstance(ts, str) or not ts.strip():
-        return False
-    try:
-        datetime.fromisoformat(ts.replace("Z", "+00:00"))
-        return True
-    except ValueError:
-        return False
+    return parse_ts(ts) is not None
 
 
 def make_event_id(agent: str, *parts: object) -> str:
@@ -44,7 +53,7 @@ class EventSession:
     agent come from the owning UsageEvent, because the runner stamps machine after collect()."""
     session_id: str
     parent_session_id: str | None    # the spawning session, subagents only
-    run_origin: str                  # interactive | automated | subagent | unknown
+    run_origin: RunOrigin
     turn_id: str | None              # the user turn (promptId) this event answers
 
 
@@ -55,7 +64,7 @@ class UsageEvent:
     agent: str               # claude_code | codex | cursor | cursor_cli | pi | ...
     model: str | None
     provider: str | None
-    kind: str = "agent"      # 'agent' = an assistant turn (has tokens); 'human' = a user prompt (no tokens)
+    kind: UsageKind = "agent"
     input_tokens: int = 0
     output_tokens: int = 0
     cache_read_tokens: int = 0
@@ -92,7 +101,7 @@ class ActivityEvent:
     event_id: str
     ts: str | None
     agent: str
-    kind: str                        # steer | interrupt | rejection | commit | pr | turn | ...
+    kind: ActivityKind
     session_id: str | None
     turn_id: str | None
     attrs: dict
@@ -106,7 +115,7 @@ class TimeInterval:
     event_id: str
     ts: str                          # start, ISO-8601
     end_ts: str
-    source: str                      # aw | manual
+    source: TimeSource
     app: str | None
     title: str | None
     category: str | None

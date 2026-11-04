@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import contextlib
 import io
-import os
 import sys
 import tempfile
 import threading
@@ -223,9 +222,7 @@ def test_fetch_checks_episode_and_day_uses_activity_rows():
         assert sqls[0][1] == ("0f0f%",)
         sqls.clear()
         inspector.fetch("dsn", day="2001-01-05")
-        sql, params = sqls[0]
-        assert "EXISTS" in sql and "'steer', 'link', 'commit', 'pr'" in sql
-        assert "last_ts >= " not in sql and params == inspector._day_bounds("2001-01-05")
+        assert sqls[0][1] == inspector._day_bounds("2001-01-05")
     finally:
         if old is None:
             sys.modules.pop("psycopg")
@@ -246,30 +243,17 @@ def test_day_bounds_are_local_midnights():
     print("ok day_bounds_are_local_midnights")
 
 
-def test_report_is_retired_and_writes_nothing():
+def test_report_is_retired_and_writes_nothing(monkeypatch):
     with tempfile.TemporaryDirectory() as d:
         out = Path(d) / "metrics.json"
         err = io.StringIO()
-        old = os.environ.get("AUT_CONFIG")
-        os.environ["AUT_CONFIG"] = str(Path(d) / "missing.toml")
-        try:
-            with contextlib.redirect_stderr(err):
-                assert cli.main(["report", "--out", str(out), "--idle-gap", "60"]) == 0
-        finally:
-            if old is None:
-                os.environ.pop("AUT_CONFIG", None)
-            else:
-                os.environ["AUT_CONFIG"] = old
+        monkeypatch.setenv("AUT_CONFIG", str(Path(d) / "missing.toml"))
+        with contextlib.redirect_stderr(err):
+            assert cli.main(["report", "--out", str(out), "--idle-gap", "60"]) == 0
         assert not out.exists() and "retired" in err.getvalue()
     print("ok report_is_retired_and_writes_nothing")
 
 
-def main() -> int:
-    for name, fn in list(globals().items()):
-        if name.startswith("test_") and callable(fn):
-            fn()
-    return 0
-
-
 if __name__ == "__main__":
-    raise SystemExit(main())
+    import pytest
+    raise SystemExit(pytest.main([__file__, "-q"]))

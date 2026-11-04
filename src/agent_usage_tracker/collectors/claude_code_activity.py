@@ -14,12 +14,12 @@ from __future__ import annotations
 import copy
 from urllib.parse import urlparse
 
-from ..event import ActivityEvent, EventSession, make_event_id
+from ..event import ActivityKind, ActivityEvent, EventSession, make_event_id
 from ..repo_keys import RepoKeys
-from .activity_common import (IDLE_S, Link, TurnAgg, add_call, blank_agg, commit_rows, ms_between,
+from .activity_common import (IDLE_S, Link, TurnAgg, add_call, blank_tool_tally, commit_rows, ms_between,
                               text_of, text_sha256, tool_key, turn_attrs)
 from .commits import commit_call, commit_dir, commit_shas
-from ._util import str_or_none
+from ._util import dict_or_empty, str_or_none
 
 _INTERRUPT = "[Request interrupted"
 _REJECTED = "The user doesn't want to proceed"
@@ -41,7 +41,7 @@ class Activity:
         self.after_intr = False
         # Turn aggregates and unanswered commit calls are carried across scans in the watermark,
         # so a turn split by a scan boundary still gets one complete row.
-        self.agg: TurnAgg = s.get("agg") or blank_agg()
+        self.agg: TurnAgg = s.get("agg") or blank_tool_tally()
         self.pend: dict = s.get("pend") or {}  # commit tool_use_id -> [is_amend, printed_before]
         # Tool block ids already counted. Within a chunk the set spans turns (Claude Code re-logs
         # history after a turn ends). Across scans only the open turn's newest _SEEN_MAX ids are
@@ -75,7 +75,7 @@ class Activity:
                 s[k] = v
         return s
 
-    def _emit(self, kind: str, o: dict, seed: object, sess: EventSession, attrs: dict) -> None:
+    def _emit(self, kind: ActivityKind, o: dict, seed: object, sess: EventSession, attrs: dict) -> None:
         self.events.append(ActivityEvent(
             event_id=make_event_id(self.agent, kind, seed), ts=str_or_none(o.get("timestamp")),
             agent=self.agent, kind=kind, session_id=sess.session_id, turn_id=sess.turn_id,
@@ -218,13 +218,12 @@ class Activity:
             return                       # a re-logged block counts once
         self.seen["u" + tid] = None
         self.open_ids.append("u" + tid)
-        inp = b.get("input") if isinstance(b.get("input"), dict) else {}
+        inp = dict_or_empty(b.get("input"))
         add_call(self.agg, name, inp)
         if name == "Skill" and isinstance(inp.get("skill"), str):
             self._emit("invoke", o, tid, sess, {"skill": tool_key(inp["skill"])})
         cmd = inp.get("command")
-        call = commit_call(cmd) if name == "Bash" and isinstance(cmd, str) else None
-        if call:
+        if name == "Bash" and isinstance(cmd, str) and (call := commit_call(cmd)):
             self.pend[tid] = [*call, commit_dir(cmd)]
 
     def _tool_result(self, o: dict, b: dict, sess: EventSession) -> None:
@@ -282,7 +281,7 @@ class Activity:
             else None,
             "hook_blocks": self.agg["hooks"], **turn_attrs(self.agg),
         })
-        self.agg = blank_agg()
+        self.agg = blank_tool_tally()
         self.pend.clear()                # a commit call still unanswered at turn end never will be
         self.open_ids = []
         self._close_link(self._uid(o), o.get("timestamp"), sess.session_id, sess.turn_id,

@@ -8,6 +8,7 @@ import functools
 import os
 import re
 import sys
+from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from .config import AutError
@@ -42,7 +43,7 @@ def _warn_if_plaintext(dsn: str) -> None:
               "private link such as Tailscale).", file=sys.stderr)
 
 
-def connect(dsn: str, timeout: int = 15):
+def connect(dsn: str, timeout: int = 15) -> Any:
     """A Postgres connection, or the operator's error naming the extra that installs the driver."""
     try:
         import psycopg

@@ -15,6 +15,7 @@ import re
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path, PurePath
+from typing import Callable
 
 from ..redact import clean_text
 from . import claude_code as _cc
@@ -22,7 +23,7 @@ from . import codex as _cx
 from . import cursor as _cursor
 from . import cursor_cli as _cu
 from . import pi as _pi
-from ._util import epoch_ms_to_iso
+from ._util import dict_or_empty, epoch_ms_to_iso
 from .activity_common import first_record, ms_between, text_of
 from .commits import COMMIT_LINE, commit_call
 
@@ -64,7 +65,8 @@ def clip(text: str, n: int = _TEXT_MAX) -> str:
 def _quoted(rx: re.Pattern, cmd: str, at: int) -> str | None:
     """First line of the quoted argument rx finds after `at`; for -m "$(cat <<EOF ...)" the
     heredoc's first line. Only the command segment at `at` is searched."""
-    m = rx.search(cmd[:_SEGMENT.match(cmd, at).end()], at)
+    seg = _SEGMENT.match(cmd, at)
+    m = rx.search(cmd[:seg.end() if seg else len(cmd)], at)
     if not m:
         return None
     v = next(g for g in m.groups() if g is not None)
@@ -133,7 +135,8 @@ class Digest:
         return "/".join(PurePath(p).parts[-2:])
 
     def view(self) -> dict:
-        mins = int((self.last - self.first).total_seconds() // 60) if self.first else None
+        mins = int((self.last - self.first).total_seconds() // 60) \
+            if self.first and self.last else None
         return {"agent": self.agent,
                 "folder": "/".join(PurePath(self.cwd).parts[-2:]) if self.cwd else "",
                 "start": self.first.astimezone() if self.first else None, "minutes": mins,
@@ -147,7 +150,7 @@ class Digest:
                 "branches": [clean_text(b) for b in _uniq(self.branches)]}
 
 
-def _claude(f: str, d: Digest) -> None:
+def _digest_claude_log(f: str, d: Digest) -> None:
     pend: dict = {}
     seen: set = set()
     loops = 0
@@ -183,14 +186,14 @@ def _claude(f: str, d: Digest) -> None:
                             b.get("is_error") is True)
 
 
-def _codex(f: str, title: str, d: Digest) -> None:
+def _digest_codex_log(f: str, title: str, d: Digest) -> None:
     d.titles.append(title)
     with open(f, "rb") as fh:
         recs = _cx.parsed_records(list(fh), 0, {}, Counter())
     if not recs:
         return
     meta = recs[0][2] if recs[0][1] == "session_meta" else {}
-    git = meta.get("git") if isinstance(meta.get("git"), dict) else {}
+    git = dict_or_empty(meta.get("git"))
     if isinstance(git.get("branch"), str):
         d.branches.append(git["branch"])
     human = _cx.run_origin(meta) not in ("subagent", "automated")
@@ -215,7 +218,7 @@ def _codex(f: str, title: str, d: Digest) -> None:
             d.files.update(k for k in it["changes"] if isinstance(k, str))
 
 
-def _pi_log(f: str, hdr: dict, d: Digest) -> None:
+def _digest_pi_log(f: str, hdr: dict, d: Digest) -> None:
     d.at(hdr["ts"], hdr["cwd"])
     pend: dict = {}
     with open(f, encoding="utf-8", errors="replace") as fh:
@@ -246,7 +249,7 @@ def _pi_log(f: str, hdr: dict, d: Digest) -> None:
                 d.shell(pend.pop(m["toolCallId"]), text_of(content), m.get("isError") is True)
 
 
-def _cursor_chat(f: str, d: Digest) -> None:
+def _digest_cursor_chat(f: str, d: Digest) -> None:
     con = _cursor.connect_ro(f)
     if con is None:
         return
@@ -268,7 +271,8 @@ def _cursor_chat(f: str, d: Digest) -> None:
             d.at(ts)
             prompts[r] = (_when(ts) or datetime.min.replace(tzinfo=timezone.utc),
                           q[1] if q else _BLOCK.sub(" ", text))
-        for b in m.get("content") if isinstance(m.get("content"), list) else ():
+        content = m.get("content")
+        for b in content if isinstance(content, list) else ():
             if isinstance(b, dict) and b.get("type") == "tool-call":
                 calls[b.get("toolCallId")] = b.get("args")
                 d.edit(b.get("toolName"), b.get("args"))
@@ -293,7 +297,7 @@ def local_info(home: Path, sessions: set[str]) -> dict[str, dict]:
     text."""
     info: dict[str, dict] = {}
 
-    def read(sid: str, agent: str, fn, *args) -> None:
+    def read(sid: str, agent: str, fn: Callable[..., None], *args: object) -> None:
         d = Digest(agent)
         try:
             fn(*args, d)
@@ -303,12 +307,12 @@ def local_info(home: Path, sessions: set[str]) -> dict[str, dict]:
 
     for f in _cc.main_session_files(home):
         if Path(f).stem in sessions:
-            read(Path(f).stem, "Claude Code", _claude, f)
+            read(Path(f).stem, "Claude Code", _digest_claude_log, f)
     names = _cx.thread_names(home)
     for f in _cx.session_files(home):
         sid = next((s for s in sessions if f.endswith(f"-{s}.jsonl")), None)
         if sid:
-            read(sid, "Codex", _codex, f, names.get(sid, ""))
+            read(sid, "Codex", _digest_codex_log, f, names.get(sid, ""))
     for f in _pi.session_files(home):
         u = _pi.uuid_in(f)
         if u and u not in sessions:
@@ -316,10 +320,10 @@ def local_info(home: Path, sessions: set[str]) -> dict[str, dict]:
         first = first_record(f) or {}
         hdr = _pi.header(first if first.get("type") == "session" else {}, f)
         if hdr["id"] in sessions:
-            read(hdr["id"], "Pi", _pi_log, f, hdr)
+            read(hdr["id"], "Pi", _digest_pi_log, f, hdr)
     # shortcut: a chat is found by its directory name, which is its agentId in every store seen
     for f in _cu.chat_stores(home):
         sid = os.path.basename(os.path.dirname(f))
         if sid in sessions:
-            read(sid, "Cursor", _cursor_chat, f)
+            read(sid, "Cursor", _digest_cursor_chat, f)
     return info

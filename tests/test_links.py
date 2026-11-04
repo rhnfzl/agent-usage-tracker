@@ -572,12 +572,6 @@ def test_cursor_link() -> None:
     print("ok cursor_link")
 
 
-def main() -> int:
-    for name, fn in list(globals().items()):
-        if name.startswith("test_") and callable(fn):
-            fn()
-    return 0
-
-
 if __name__ == "__main__":
-    raise SystemExit(main())
+    import pytest
+    raise SystemExit(pytest.main([__file__, "-q"]))

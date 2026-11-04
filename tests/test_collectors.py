@@ -1,4 +1,4 @@
-"""Hermetic collector tests on synthetic fixtures (no real logs, no PII, no framework).
+"""Hermetic collector tests on synthetic fixtures (no real logs, no PII).
 
 Run: `python tests/test_collectors.py`  (or `pytest`).
 Locks the normalization rules that are easy to get wrong:
@@ -1005,34 +1005,6 @@ def test_cf_access_headers() -> None:
     print("ok cf_access_headers")
 
 
-def main() -> int:
-    test_claude_code()
-    test_claude_code_multiblock_dedup()
-    test_duplicate_session_paths_counted_once()
-    test_claude_code_human_turn_classification()
-    test_claude_code_old_loop_repeats()
-    test_codex_human_turn_classification()
-    test_codex()
-    test_pi()
-    test_cursor()
-    test_cursor_sdk()
-    test_cursor_api()
-    test_hardening_edges()
-    test_export_drains_past_cap()
-    test_file_identity_reset()
-    test_cursor_db_path()
-    test_non_object_lines()
-    test_valid_ts()
-    test_sender_config()
-    test_cf_access_headers()
-    test_cursor_cookie_not_sent_through_a_redirect()
-    test_cursor_api_token_gone_is_unavailable_not_silent()
-    test_cursor_counts_malformed_bubbles()
-    test_status_line_comes_from_each_collector()
-    test_one_shot_commands_warn_at_the_drain_cap()
-    print("\nALL PASS")
-    return 0
-
-
 if __name__ == "__main__":
-    raise SystemExit(main())
+    import pytest
+    raise SystemExit(pytest.main([__file__, "-q"]))

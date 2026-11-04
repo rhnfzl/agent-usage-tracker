@@ -456,23 +456,16 @@ def test_unreadable_store_is_reported_after_the_rest() -> None:
     print("ok unreadable_store_is_reported_after_the_rest")
 
 
-def test_backfill_cursor_cli() -> None:
+def test_backfill_cursor_cli(monkeypatch) -> None:
     def check(home, repo):
-        prev = os.environ.get("AUT_STATE")
         with tempfile.TemporaryDirectory() as sd:
             state = Path(sd) / "state.json"
             state.write_text('{"collectors": {"cursor_cli": {"chats": {}}}}')
-            os.environ["AUT_STATE"] = str(state)
+            monkeypatch.setenv("AUT_STATE", str(state))
             before = (state.read_text(), state.stat().st_mtime_ns)
-            try:
-                with contextlib.redirect_stderr(io.StringIO()):
-                    c = scan.run_history_backfill(_cfg(home), [NAME], dry_run=True,
-                                                 sessions=True, activity=True)
-            finally:
-                if prev is None:
-                    os.environ.pop("AUT_STATE", None)
-                else:
-                    os.environ["AUT_STATE"] = prev
+            with contextlib.redirect_stderr(io.StringIO()):
+                c = scan.run_history_backfill(_cfg(home), [NAME], dry_run=True,
+                                             sessions=True, activity=True)
             assert (state.read_text(), state.stat().st_mtime_ns) == before, "state untouched"
         assert c["by_origin"] == {"interactive": 4}, c
         assert c["turn_null"] == 0, c
@@ -481,22 +474,6 @@ def test_backfill_cursor_cli() -> None:
     print("ok backfill_cursor_cli")
 
 
-def main() -> int:
-    test_registered()
-    test_cli_human_and_sessions()
-    test_cli_activity()
-    test_open_turn_waits_and_counts_once()
-    test_rewritten_call_counts_once()
-    test_follow_up_prompt_in_running_turn()
-    test_unlisted_prompt_waits_while_active()
-    test_sdk_runs()
-    test_attrs_carry_no_text()
-    test_activity_errors_never_block_human_rows()
-    test_backfill_cursor_cli()
-    test_unreadable_store_is_reported_after_the_rest()
-    print("\nALL PASS")
-    return 0
-
-
 if __name__ == "__main__":
-    raise SystemExit(main())
+    import pytest
+    raise SystemExit(pytest.main([__file__, "-q"]))

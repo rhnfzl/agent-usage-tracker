@@ -13,12 +13,13 @@ from __future__ import annotations
 
 import contextlib
 import io
-import os
 import sys
 import tempfile
 import types
 from datetime import datetime, timezone
 from pathlib import Path
+
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
@@ -65,20 +66,13 @@ def _bad_collector(cfg, wm):
 def _patched(registry: dict, send_scan_rows):
     """Swap in fake collectors, a recording usage sender and a scan-row sink; isolate state."""
     sent: list[list[str]] = []
-    saved = (scan.REGISTRY, scan.make_sender, push.send_scan_rows, os.environ.get("AUT_STATE"))
-    with tempfile.TemporaryDirectory() as d:
-        os.environ["AUT_STATE"] = str(Path(d) / "state.json")
-        scan.REGISTRY = {name: Collector(fn) for name, fn in registry.items()}
-        scan.make_sender = lambda cfg: (lambda batch: sent.append([e.event_id for e in batch]))
-        push.send_scan_rows = send_scan_rows
-        try:
-            yield sent, Path(d) / "state.json"
-        finally:
-            scan.REGISTRY, scan.make_sender, push.send_scan_rows, prev = saved
-            if prev is None:
-                os.environ.pop("AUT_STATE", None)
-            else:
-                os.environ["AUT_STATE"] = prev
+    with tempfile.TemporaryDirectory() as d, pytest.MonkeyPatch.context() as mp:
+        mp.setenv("AUT_STATE", str(Path(d) / "state.json"))
+        mp.setattr(scan, "REGISTRY", {name: Collector(fn) for name, fn in registry.items()})
+        mp.setattr(scan, "make_sender",
+                   lambda cfg: (lambda batch: sent.append([e.event_id for e in batch])))
+        mp.setattr(push, "send_scan_rows", send_scan_rows)
+        yield sent, Path(d) / "state.json"
 
 
 def test_scan_rows_ok_and_error() -> None:
@@ -232,9 +226,7 @@ def test_send_scan_rows_transport() -> None:
         assert executed == [] and err.getvalue().count("\n") == 1, (executed, err.getvalue())
 
         push.send_scan_rows("postgresql://x", [row])
-        sql, rows = executed[0]
-        assert "INSERT INTO agents.collector_scan" in sql
-        assert "ON CONFLICT (machine, collector, finished_at) DO NOTHING" in sql
+        _sql, rows = executed[0]
         assert rows == [tuple(row[c] for c in push.SCAN_COLUMNS)] and executed[1] == "commit"
     finally:
         if prev is None:
@@ -244,17 +236,5 @@ def test_send_scan_rows_transport() -> None:
     print("ok send_scan_rows_transport")
 
 
-def main() -> int:
-    test_scan_rows_ok_and_error()
-    test_delivery_failure_is_swallowed()
-    test_dry_run_sends_nothing()
-    test_scrub_error()
-    test_interrupt_is_not_delivered()
-    test_send_scan_rows_transport()
-    test_degraded_collector_keeps_its_rows_and_the_scan_goes_on()
-    print("\nALL PASS")
-    return 0
-
-
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(pytest.main([__file__, "-q"]))

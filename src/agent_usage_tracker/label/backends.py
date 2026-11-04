@@ -12,6 +12,7 @@ import json
 import math
 import re
 from pathlib import Path
+from typing import Any, Callable
 
 from ..config import AutError
 from .core import Backend, Choice, Request, data_dir, letter_distribution, softmax
@@ -46,7 +47,7 @@ class LetterBackend:
         return letter_distribution(self.letter_logits, req)
 
 
-def cached_snapshot(lookup, repo: str, revision: str | None) -> Path | None:
+def cached_snapshot(lookup: Callable[..., object], repo: str, revision: str | None) -> Path | None:
     """The cached snapshot directory when its config and every weight file are on disk, else
     None. Not snapshot_download(local_files_only=True): it refuses a snapshot that lacks files the
     model never needs (LICENSE, .gitattributes), which partial downloads routinely skip."""
@@ -69,9 +70,10 @@ class MlxLetter(LetterBackend):
     after the first distribution or generate call, which loads the model."""
 
     def __init__(self, model_id: str, revision: str | None = None) -> None:
-        self.model_id, self.model_rev, self._rev, self._m = model_id, revision or "", revision, None
+        self.model_id, self.model_rev, self._rev = model_id, revision or "", revision
+        self._m: Any = None                 # (model, tokenizer) once loaded
 
-    def _load(self):
+    def _load(self) -> tuple[Any, Any]:
         if self._m is None:
             try:
                 from huggingface_hub import try_to_load_from_cache
@@ -88,10 +90,10 @@ class MlxLetter(LetterBackend):
             self.model_rev = path.name
             self.size_mb = round(sum(f.stat().st_size for f in Path(path).rglob("*")
                                      if f.is_file()) / 1e6)
-            self._m = load(path)
+            self._m = load(str(path))
         return self._m
 
-    def _chat(self, tok, prompt: str) -> str:
+    def _chat(self, tok: Any, prompt: str) -> str:
         return tok.apply_chat_template([{"role": "user", "content": prompt}],
                                        add_generation_prompt=True, tokenize=False)
 
@@ -144,7 +146,8 @@ class Encoder:
     Until one is trained, choosing it fails loudly instead of guessing."""
 
     def __init__(self, task: str, model_id: str | None = None, model_rev: str | None = None):
-        self.task, self.model_id, self._m = task, model_id or f"encoder/{task}", None
+        self.task, self.model_id = task, model_id or f"encoder/{task}"
+        self._m: dict | None = None
         p = encoder_path(task)
         rev = hashlib.sha256(p.read_bytes()).hexdigest()[:12] if p.exists() else ""
         if model_rev and rev and model_rev != rev:

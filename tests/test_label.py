@@ -384,7 +384,7 @@ def test_a_task_whose_backend_cannot_run_leaves_the_others_running(tmp_path, sin
 
 def test_main_exits_1_with_the_message_for_an_operator_error(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(cli, "load_config", lambda: _cfg(tmp_path))
-    monkeypatch.setattr(run, "run_label", lambda *a: {"steer_intent": Counter(failed=1)})
+    monkeypatch.setattr(run, "run_label", lambda *a, **k: {"steer_intent": Counter(failed=1)})
     assert cli.main(["label", "run"]) == 1
     assert "could not run steer_intent" in capsys.readouterr().err
 
@@ -597,8 +597,8 @@ def test_config_and_evalset_stay_below_their_callers():
 def test_cli_and_config(tmp_path, monkeypatch):
     seen = {}
     monkeypatch.setattr(cli, "load_config", lambda: _cfg(tmp_path))
-    monkeypatch.setattr(run, "run_label", lambda cfg, t, since, dry: seen.update(
-        t=t, since=since, dry=dry) or {})
+    monkeypatch.setattr(run, "run_label", lambda cfg, t, since, dry_run: seen.update(
+        t=t, since=since, dry=dry_run) or {})
     assert cli.main(["label", "run", "--task", "steer_intent", "--since", "2026-10-01",
                      "--dry-run"]) == 0
     assert seen["t"] == ["steer_intent"] and seen["dry"] is True
@@ -647,10 +647,6 @@ def test_scan_script_runs_label_once_a_day_where_enabled():
         assert "outcomes done (exit 3)" in log and "label done (exit 3)" in log
 
 
-if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-q"]))
-
-
 def test_cached_snapshot_needs_config_and_every_weight():
     from agent_usage_tracker.label.backends import cached_snapshot
     with tempfile.TemporaryDirectory() as d:
@@ -666,3 +662,7 @@ def test_cached_snapshot_needs_config_and_every_weight():
         assert cached_snapshot(look, "r", None) == snap               # no LICENSE needed
         assert cached_snapshot(lambda *a, **k: None, "r", None) is None
     print("ok cached_snapshot")
+
+
+if __name__ == "__main__":
+    raise SystemExit(pytest.main([__file__, "-q"]))

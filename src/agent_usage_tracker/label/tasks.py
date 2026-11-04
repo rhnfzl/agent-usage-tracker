@@ -10,13 +10,13 @@ from __future__ import annotations
 
 from collections import Counter, defaultdict
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
-from typing import Callable
+from datetime import date, datetime, timedelta, timezone
+from typing import Callable, Iterator
 
 from ..collectors import activitywatch as aw, drain
 from ..collectors import claude_code
 from ..config import AutError, Config
-from ..event import CollectorUnavailable, make_event_id
+from ..event import CollectorUnavailable, TimeInterval, make_event_id
 from ..redact import redact
 from ..repo_keys import RepoKeys
 from ..sink import connect
@@ -144,17 +144,18 @@ class Source:
 
     def windows(self, since: datetime, until: datetime) -> list[dict]:
         """This machine's ActivityWatch window rows in [since, until), through the collector's own
-        guards (idle, deny-list, redaction, title settings), one day per query. None where
+        guards (idle, deny-list, redaction, title settings), one day per query. No rows where
         activitywatch is not enabled; SourceUnavailable when it is but aw-server cannot be read."""
         if aw.NAME not in self.cfg.agents:
             return []
-        out, wm = [], {"end": since.astimezone(timezone.utc).isoformat()}
+        out: list[TimeInterval] = []
+        wm = {"end": since.astimezone(timezone.utc).isoformat()}
         for batches in drain(aw.collect, self.cfg, wm, aw.NAME):
             if datetime.fromisoformat(wm["end"]) >= until:
                 break
             try:
                 for rows, advance_watermark in batches:
-                    out += rows
+                    out += [r for r in rows if isinstance(r, TimeInterval)]
                     advance_watermark()
             except CollectorUnavailable as exc:
                 raise SourceUnavailable(str(exc)) from exc
@@ -167,7 +168,7 @@ class Source:
         return sorted(res, key=lambda w: w["start"])
 
 
-def _days(since: datetime, until: datetime):
+def _days(since: datetime, until: datetime) -> Iterator[tuple[date, datetime, datetime]]:
     d, end = since.astimezone().date(), until.astimezone().date()
     while d < end:
         start = local_midnight(d)
@@ -225,7 +226,7 @@ def _aw_blocks(task: Task, wins: list[dict], steer_ts: list[datetime]) -> list:
     return out
 
 
-def _claude(steers: list[dict]) -> list[dict]:
+def _claude_steers(steers: list[dict]) -> list[dict]:
     """Claude Code steers only: an episode unit's facts may reach Sonnet (teach), and Sonnet
     inputs are built only from Claude Code fields."""
     return [r for r in steers if r["agent"] == "claude_code"]
@@ -235,13 +236,13 @@ def _category_units(task: Task, src: Source, since: datetime, until: datetime | 
     until = until or datetime.now(timezone.utc)
     steers = [r for r in src.steers(since) if r["ts"] < until]
     text = src.texts(steers)
-    mine = _claude(steers)
+    mine = _claude_steers(steers)
     claude_sessions = {r["session_id"] for r in mine}
     eps = src.episodes(since)
     of_session: dict[str, list[str]] = defaultdict(list)
-    for ep in eps:
-        for sid in ep["sessions"]:
-            of_session[sid].append(ep["episode_id"])
+    for episode in eps:
+        for sid in episode["sessions"]:
+            of_session[sid].append(episode["episode_id"])
     sids = sorted(claude_sessions & set(of_session))
     acts = src.activity(sids, since, until) if sids else []
     day_of = {d for d, _s, _e in _days(since, until)}
@@ -286,7 +287,7 @@ def _outcome_units(task: Task, src: Source, since: datetime, until: datetime | N
     """Episodes without commits (git outcome no_code) touched in the last OUTCOME_DAYS."""
     now = until or datetime.now(timezone.utc)
     eps = [e for e in src.episodes(since) if e["outcome"] == "no_code"]
-    steers = _claude(src.steers(since)) if eps else []
+    steers = _claude_steers(src.steers(since)) if eps else []
     text = src.texts(steers)
     out = []
     for ep in eps:

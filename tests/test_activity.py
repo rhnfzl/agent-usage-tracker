@@ -453,7 +453,7 @@ def test_commit_detection() -> None:
     print("ok commit_detection")
 
 
-def test_failed_delivery_rescan_matches_clean_pass() -> None:
+def test_failed_delivery_rescan_matches_clean_pass(monkeypatch) -> None:
     # The sink is down for one scan; the state saved after it must not already hold that scan's
     # turn counts or popped commit calls.
     with tempfile.TemporaryDirectory() as d:
@@ -465,8 +465,7 @@ def test_failed_delivery_rescan_matches_clean_pass() -> None:
             _result("r0", "x1", "nope", err=True),
         ])
         sent: list = []
-        prev = os.environ.get("AUT_STATE")
-        os.environ["AUT_STATE"] = str(home / "state" / "state.json")
+        monkeypatch.setenv("AUT_STATE", str(home / "state" / "state.json"))
 
         def scan_once(fail: bool) -> None:
             def sender(batch):
@@ -483,20 +482,14 @@ def test_failed_delivery_rescan_matches_clean_pass() -> None:
                 assert fail
             finally:
                 scan.make_sender = saved
-        try:
-            scan_once(False)
-            with f.open("a") as fh:
-                for r in (_result("r1", "c1", "[main 1a2b3c4] x"),
-                          _tools("m2", _use("x2", "Bash", command="ls")),
-                          _result("r2", "x2", "fine"), _turn_end("td1", 9, 3)):
-                    fh.write(json.dumps(r) + "\n")
-            scan_once(True)
-            scan_once(False)
-        finally:
-            if prev is None:
-                os.environ.pop("AUT_STATE", None)
-            else:
-                os.environ["AUT_STATE"] = prev
+        scan_once(False)
+        with f.open("a") as fh:
+            for r in (_result("r1", "c1", "[main 1a2b3c4] x"),
+                      _tools("m2", _use("x2", "Bash", command="ls")),
+                      _result("r2", "x2", "fine"), _turn_end("td1", 9, 3)):
+                fh.write(json.dumps(r) + "\n")
+        scan_once(True)
+        scan_once(False)
         clean = _collect(home)
 
         def view(evs):
@@ -542,33 +535,26 @@ def test_activity_errors_never_block_usage() -> None:
     print("ok activity_errors_never_block_usage")
 
 
-def test_repo_key_salt() -> None:
+def test_repo_key_salt(monkeypatch) -> None:
     with tempfile.TemporaryDirectory() as d:
-        prev = {k: os.environ.get(k) for k in ("AUT_STATE", "AUT_CONFIG", "AUT_TEST_SALT")}
-        os.environ["AUT_STATE"] = str(Path(d) / "st" / "state.json")
-        try:
-            k1 = RepoKeys(None).of("example.com/owner/repo")
-            salt = Path(d) / "st" / "repo_key.salt"
-            assert salt.exists(), salt
-            if os.name != "nt":                                 # Windows has no POSIX modes
-                assert (salt.stat().st_mode & 0o777) == 0o600, oct(salt.stat().st_mode)
-            assert RepoKeys(None).of("example.com/owner/repo") == k1      # reused
-            assert k1 != hashlib.sha256(b"example.com/owner/repo").hexdigest()
-            assert k1 != _key("example.com/owner/repo")
-            cfgf = Path(d) / "config.toml"
-            cfgf.write_text('repo_key_salt = "env:AUT_TEST_SALT"\n')
-            cfgf.chmod(0o600)
-            os.environ.update(AUT_CONFIG=str(cfgf), AUT_TEST_SALT="from-env")
-            from agent_usage_tracker.config import load_config
-            assert load_config().repo_key_salt == "from-env"
-        finally:
-            for k, v in prev.items():
-                if v is None:
-                    os.environ.pop(k, None)
-                else:
-                    os.environ[k] = v
+        monkeypatch.setenv("AUT_STATE", str(Path(d) / "st" / "state.json"))
+        k1 = RepoKeys(None).of("example.com/owner/repo")
+        salt = Path(d) / "st" / "repo_key.salt"
+        assert salt.exists(), salt
+        if os.name != "nt":                                 # Windows has no POSIX modes
+            assert (salt.stat().st_mode & 0o777) == 0o600, oct(salt.stat().st_mode)
+        assert RepoKeys(None).of("example.com/owner/repo") == k1      # reused
+        assert k1 != hashlib.sha256(b"example.com/owner/repo").hexdigest()
+        assert k1 != _key("example.com/owner/repo")
+        cfgf = Path(d) / "config.toml"
+        cfgf.write_text('repo_key_salt = "env:AUT_TEST_SALT"\n')
+        cfgf.chmod(0o600)
+        monkeypatch.setenv("AUT_CONFIG", str(cfgf))
+        monkeypatch.setenv("AUT_TEST_SALT", "from-env")
+        from agent_usage_tracker.config import load_config
+        assert load_config().repo_key_salt == "from-env"
         with tempfile.TemporaryDirectory() as d2:
-            os.environ["AUT_STATE"] = str(Path(d2) / "state.json")
+            monkeypatch.setenv("AUT_STATE", str(Path(d2) / "state.json"))
             (Path(d2) / "repo_key.salt").write_text("")        # a broken salt: NULL, not unsalted
             err = io.StringIO()
             with contextlib.redirect_stderr(err):
@@ -743,16 +729,15 @@ def test_pg_one_transaction() -> None:
     print("ok pg_one_transaction")
 
 
-def test_activity_backfill_sends_no_usage() -> None:
+def test_activity_backfill_sends_no_usage(monkeypatch) -> None:
     def check(home, repo):
         n_acts = len({e.event_id for e in _acts(_collect(home))})
         cfg = _cfg(home, pg_dsn="postgresql://x")
-        prev = os.environ.get("AUT_STATE")
         with tempfile.TemporaryDirectory() as sd:
             state = Path(sd) / "state.json"
             state.write_text('{"collectors": {"claude_code": {"files": {"keep": {"off": 7}}}}}')
             before = (state.read_text(), state.stat().st_mtime_ns)
-            os.environ["AUT_STATE"] = str(state)
+            monkeypatch.setenv("AUT_STATE", str(state))
             log: list = []
             saved = scan.make_sender
             scan.make_sender = lambda c: (_ for _ in ()).throw(AssertionError("no usage sender"))
@@ -764,10 +749,6 @@ def test_activity_backfill_sends_no_usage() -> None:
                                                    sessions=False, activity=True)
             finally:
                 scan.make_sender = saved
-                if prev is None:
-                    os.environ.pop("AUT_STATE", None)
-                else:
-                    os.environ["AUT_STATE"] = prev
             assert (state.read_text(), state.stat().st_mtime_ns) == before, "state untouched"
         inserts = [x for x in log if x != "commit"]
         assert inserts and all("agents.activity_event" in sql for sql, _ in inserts), log
@@ -778,30 +759,6 @@ def test_activity_backfill_sends_no_usage() -> None:
     print("ok activity_backfill_sends_no_usage")
 
 
-def main() -> int:
-    test_steer_and_filters()
-    test_interrupt_rejection_hook()
-    test_commits()
-    test_repo_key_normalisation()
-    test_pr_rows()
-    test_turn_aggregates()
-    test_compaction_and_invoke()
-    test_attrs_carry_no_text()
-    test_turn_and_commit_carry_across_scans()
-    test_commit_detection()
-    test_failed_delivery_rescan_matches_clean_pass()
-    test_activity_errors_never_block_usage()
-    test_repo_key_salt()
-    test_usage_filter_only_on_fresh_read()
-    test_relogged_blocks_across_scans()
-    test_relog_after_turn_end_counts_once()
-    test_commit_regex_is_linear()
-    test_subagent_keeps_no_agg()
-    test_pg_one_transaction()
-    test_activity_backfill_sends_no_usage()
-    print("\nALL PASS")
-    return 0
-
-
 if __name__ == "__main__":
-    raise SystemExit(main())
+    import pytest
+    raise SystemExit(pytest.main([__file__, "-q"]))

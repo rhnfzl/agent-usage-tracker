@@ -145,7 +145,7 @@ def corrections(form: dict[str, list[str]], episodes: list[dict],
     rows: list[dict] = []
     reviewed = right = 0
 
-    def row(action, a, b=None):
+    def row(action: str, a: dict, b: dict | None = None) -> dict:
         attrs = {"repo_keys": a["repo_keys"]}
         if b:
             attrs["b_repo_keys"] = b["repo_keys"]
@@ -180,8 +180,9 @@ def month_pages(episodes: list[dict], info: dict, heading: str,
         "?all=1": render(episodes, info, token, heading, None, answered)}
 
 
-def serve(episodes: list[dict], write, pages: Callable[[str], dict[str, str]],
-          open_browser: bool = True, on_ready=None, now: datetime | None = None) -> dict:
+def serve(episodes: list[dict], write: Callable[[list[dict]], None],
+          pages: Callable[[str], dict[str, str]], *, open_browser: bool = True,
+          on_ready: Callable[[str], None] | None = None, now: datetime | None = None) -> dict:
     """Serve pages(token) (what follows /<token> in the path -> html) until the answers are posted;
     write(rows) stores them. Returns {reviewed, right}."""
     token = local_page.new_token()
@@ -196,7 +197,7 @@ def serve(episodes: list[dict], write, pages: Callable[[str], dict[str, str]],
                 "You can close this tab.</p>").encode()
 
     local_page.serve(token, built.get, on_post, "local page at {url} (Ctrl-C to stop without saving)",
-                     open_browser, on_ready)
+                     open_browser=open_browser, on_ready=on_ready)
     return result
 
 
@@ -214,7 +215,7 @@ def _month_bounds(month: str | None) -> tuple[str, datetime, datetime]:
     return f"{start:%Y-%m}", start.astimezone(), end.astimezone()
 
 
-def run_review(cfg: Config, month: str | None) -> dict:
+def run_episode_review(cfg: Config, month: str | None) -> dict:
     dsn = cfg.require_pg("episodes review")
     label, start, end = _month_bounds(month)
     episodes = episode_store.load_month(dsn, start, end)

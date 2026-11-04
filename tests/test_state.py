@@ -1,4 +1,4 @@
-"""Watermark store tests, in the same framework-free style as the collector suite.
+"""Watermark store tests.
 
 Run: `python tests/test_state.py`  (or `pytest`).
 
@@ -16,6 +16,11 @@ import os
 import sys
 import tempfile
 from pathlib import Path
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
 from agent_usage_tracker import push  # noqa: E402
 from agent_usage_tracker.config import AutError, Config, load_config  # noqa: E402
 from agent_usage_tracker.state import atomic_write_text, load_json_dict, load_state  # noqa: E402
@@ -24,19 +29,12 @@ from agent_usage_tracker.state import atomic_write_text, load_json_dict, load_st
 @contextlib.contextmanager
 def _state_file(content: str | None):
     """Point AUT_STATE at a temp state.json holding `content` (None = no file at all)."""
-    prev = os.environ.get("AUT_STATE")
-    with tempfile.TemporaryDirectory() as d:
+    with tempfile.TemporaryDirectory() as d, pytest.MonkeyPatch.context() as mp:
         p = Path(d) / "state.json"
         if content is not None:
             p.write_text(content)
-        os.environ["AUT_STATE"] = str(p)
-        try:
-            yield p
-        finally:
-            if prev is None:
-                os.environ.pop("AUT_STATE", None)
-            else:
-                os.environ["AUT_STATE"] = prev
+        mp.setenv("AUT_STATE", str(p))
+        yield p
 
 
 def _load_capturing_stderr() -> tuple[dict, str]:
@@ -107,30 +105,26 @@ def test_atomic_write_keeps_the_old_file_on_failure() -> None:
     print("ok atomic_write_keeps_the_old_file_on_failure")
 
 
-def test_config_errors_and_permission_warning() -> None:
-    prev = os.environ.get("AUT_CONFIG")
+def test_config_errors_and_permission_warning(monkeypatch) -> None:
     with tempfile.TemporaryDirectory() as d:
         p = Path(d) / "config.toml"
-        os.environ["AUT_CONFIG"] = str(p)
+        monkeypatch.setenv("AUT_CONFIG", str(p))
+        p.write_text("not = [valid")
         try:
-            p.write_text("not = [valid")
-            try:
+            load_config()
+            raise AssertionError("bad TOML must be an operator error")
+        except AutError as exc:
+            assert str(p) in str(exc) and "TOML" in str(exc), exc
+        if os.name != "nt":
+            p.write_text('[transport]\nwebhook_secret = "env:AUT_TEST_UNSET"\n')
+            p.chmod(0o644)
+            with contextlib.redirect_stderr(io.StringIO()) as err:
                 load_config()
-                raise AssertionError("bad TOML must be an operator error")
-            except AutError as exc:
-                assert str(p) in str(exc) and "TOML" in str(exc), exc
-            if os.name != "nt":
-                p.write_text('[transport]\nwebhook_secret = "env:AUT_TEST_UNSET"\n')
-                p.chmod(0o644)
-                with contextlib.redirect_stderr(io.StringIO()) as err:
-                    load_config()
-                assert err.getvalue() == "", "an env: reference holds no secret"
-                p.write_text('[transport]\nwebhook_secret = "plain"\n')
-                with contextlib.redirect_stderr(io.StringIO()) as err:
-                    load_config()
-                assert "holds a secret" in err.getvalue(), err.getvalue()
-        finally:
-            os.environ.pop("AUT_CONFIG") if prev is None else os.environ.update(AUT_CONFIG=prev)
+            assert err.getvalue() == "", "an env: reference holds no secret"
+            p.write_text('[transport]\nwebhook_secret = "plain"\n')
+            with contextlib.redirect_stderr(io.StringIO()) as err:
+                load_config()
+            assert "holds a secret" in err.getvalue(), err.getvalue()
     print("ok config_errors_and_permission_warning")
 
 
@@ -155,17 +149,5 @@ def test_missing_psycopg_names_the_extra_and_spares_the_heartbeat() -> None:
     print("ok missing_psycopg_names_the_extra_and_spares_the_heartbeat")
 
 
-def main() -> int:
-    test_missing_state_is_silent()
-    test_valid_state_round_trips()
-    test_corrupt_json_warns_and_preserves()
-    test_wrong_shape_warns()
-    test_atomic_write_keeps_the_old_file_on_failure()
-    test_config_errors_and_permission_warning()
-    test_missing_psycopg_names_the_extra_and_spares_the_heartbeat()
-    print("\nALL PASS")
-    return 0
-
-
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(pytest.main([__file__, "-q"]))

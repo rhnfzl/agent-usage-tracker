@@ -22,12 +22,12 @@ from pathlib import Path
 from typing import Iterator
 
 from ..config import Config
-from ..event import Batch, ActivityEvent, EventSession, UsageEvent, make_event_id
+from ..event import ActivityKind, Batch, ActivityEvent, EventSession, UsageEvent, make_event_id
 from ..repo_keys import RepoKeys
-from .activity_common import (Link, add_call, blank_agg, commit_rows, first_record, ms_between,
+from .activity_common import (Link, add_call, blank_tool_tally, commit_rows, first_record, ms_between,
                               pad_pending, text_of, tool_key, turn_attrs)
 from .commits import commit_call, commit_dir, commit_shas
-from ._util import (parse_record, project_name, read_new_lines, safe_int, same_file, str_or_none,
+from ._util import (dict_or_empty, parse_record, project_name, read_new_lines, safe_int, same_file, str_or_none,
                     warn_skipped)
 
 NAME = "pi"
@@ -47,7 +47,7 @@ def session_files(home: Path) -> list[str]:
     return glob.glob(str(sessions_dir(home) / "**" / "*.jsonl"), recursive=True)
 
 
-def _cost_total(cost) -> float | None:
+def _cost_total(cost: object) -> float | None:
     v = cost.get("total") if isinstance(cost, dict) else cost
     if isinstance(v, bool) or not isinstance(v, (int, float)):   # bool is an int subclass
         return None
@@ -88,7 +88,7 @@ class _Activity:
         self.events: list[ActivityEvent] = []
         self.errors = 0                       # records whose extraction raised (skipped)
 
-    def _emit(self, kind: str, ts: object, seed: str, turn: str | None, attrs: dict) -> None:
+    def _emit(self, kind: ActivityKind, ts: object, seed: str, turn: str | None, attrs: dict) -> None:
         self.events.append(ActivityEvent(
             event_id=make_event_id(NAME, kind, f"{self.sid}|{seed}"), ts=str_or_none(ts), agent=NAME,
             kind=kind, session_id=self.sid, turn_id=turn, attrs=attrs))
@@ -97,7 +97,7 @@ class _Activity:
         turn = self.carried.pop("open")
         self._emit("turn", end, turn["id"], turn["id"], {
             "duration_ms": ms_between(turn["ts"], end), "message_count": turn["n"],
-            **turn_attrs(self.carried.get("agg") or blank_agg())})
+            **turn_attrs(self.carried.get("agg") or blank_tool_tally())})
         link = Link(self.keys, self.carried.pop("link", {}))
         link.place(3, self.keys.of_cwd(self.cwd))
         self._emit("link", end, turn["id"], turn["id"], link.attrs("interactive"))
@@ -140,12 +140,12 @@ class _Activity:
                 self._emit("invoke", ts, str(eid), sess.turn_id, {"skill": tool_key(skill[1])})
             a["open"] = {"id": eid, "ts": ts, "n": 1, "last": ts}
             Link(self.keys, a.setdefault("link", {})).text(text)
-            a["agg"] = blank_agg()
+            a["agg"] = blank_tool_tally()
         elif role in ("assistant", "toolResult"):
             if open_:
                 open_["n"] += 1
                 open_["last"] = ts
-            agg = a.setdefault("agg", blank_agg())
+            agg = a.setdefault("agg", blank_tool_tally())
             blocks = [b for b in content if isinstance(b, dict)] if isinstance(content, list) else []
             if role == "assistant":
                 for b in blocks:
@@ -153,9 +153,8 @@ class _Activity:
                         args = b.get("arguments")
                         add_call(agg, b["name"], args)
                         cmd = args.get("command") if isinstance(args, dict) else None
-                        call = commit_call(cmd) if b["name"] == "bash" and isinstance(cmd, str) \
-                            else None
-                        if call and isinstance(b.get("id"), str):
+                        if b["name"] == "bash" and isinstance(cmd, str) \
+                                and isinstance(b.get("id"), str) and (call := commit_call(cmd)):
                             a.setdefault("pend", {})[b["id"]] = [*call, commit_dir(cmd)]
                 stop = m.get("stopReason")
                 a["intr"] = stop == "aborted"
@@ -262,7 +261,7 @@ def _chunk_rows(path: str, lines: list[bytes], cur: dict, keys: RepoKeys,
         if t == "model_change":
             _note_model_change(o, cur)
             continue
-        msg = o.get("message") if isinstance(o.get("message"), dict) else {}
+        msg = dict_or_empty(o.get("message"))
         # A fork copies the parent's entries (same ids and timestamps, all before its own
         # header): their usage ids dedupe, but session and activity rows belong to the parent.
         gap = ms_between(o.get("timestamp"), hdr["ts"]) if hdr["fork"] else None
@@ -271,7 +270,7 @@ def _chunk_rows(path: str, lines: list[bytes], cur: dict, keys: RepoKeys,
         if is_prompt and not copied:
             cur["turn"] = str_or_none(o.get("id")) or cur.get("turn")
         sess = None if copied else EventSession(hdr["id"], hdr["parent"], "unknown", cur.get("turn"))
-        if not copied:
+        if sess is not None:
             act.record(o, sess)
         project = project_name(hdr["cwd"])
         if is_prompt:

@@ -27,8 +27,29 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
-      - run: pip install pytest
+      - run: pip install -e ".[test]"
       - run: pytest -q
+
+  # The sink layer's SQL against a real server; every other job skips these tests.
+  sink-sql:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: aut
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      AUT_TEST_PG_DSN: postgresql://postgres:aut@localhost:5432/postgres
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -e ".[test,postgres]"
+      - run: pytest -q tests/test_sink_sql.py
 
   lint:
     runs-on: ubuntu-latest
@@ -39,5 +60,6 @@ jobs:
           python-version: "3.11"
       # Pinned: an unpinned linter silently changes the repo's standard when a new
       # release adds rules, turning a green build red with no code change.
-      - run: pip install ruff==0.15.11
+      - run: pip install ruff==0.15.11 mypy==2.4.1
       - run: ruff check .
+      - run: mypy

@@ -23,12 +23,13 @@ from pathlib import Path
 from typing import Iterator
 
 from ..config import Config
-from ..event import Batch, ActivityEvent, EventSession, UsageEvent, make_event_id
+from ..event import ActivityKind, Batch, ActivityEvent, EventSession, RunOrigin, UsageEvent, make_event_id
 from ..repo_keys import RepoKeys, repo_identity
-from .activity_common import (Link, TurnAgg, add_call, blank_agg, commit_rows, first_record,
+from .activity_common import (Link, TurnAgg, add_call, blank_tool_tally, commit_rows, first_record,
                               ms_between, text_of, turn_attrs)
 from .commits import commit_call, commit_dir, commit_shas
-from ._util import (parse_record, project_name, read_new_lines, safe_int, same_file, str_or_none,
+from ._util import (dict_or_empty, parse_record, project_name, read_new_lines, safe_int, same_file,
+                    str_or_none,
                     warn_skipped)
 
 NAME = "codex"
@@ -75,7 +76,7 @@ def _fresh_state(dev: int | None = None, ino: int | None = None) -> dict:
 _PROGRAM_SOURCES = {"exec", "mcp"}
 
 
-def run_origin(p: dict) -> str:
+def run_origin(p: dict) -> RunOrigin:
     """run_origin from the thread's FIRST session_meta. Structural signals only: originator,
     source and thread_source are recorded by codex itself.
 
@@ -115,7 +116,7 @@ def _set_meta(cur: dict, p: dict, keys: RepoKeys) -> None:
 
 
 def _meta_link(p: dict, keys: RepoKeys) -> dict:
-    g = p.get("git") if isinstance(p.get("git"), dict) else {}
+    g = dict_or_empty(p.get("git"))
     rk = keys.of_cwd(p.get("cwd"))
     if not rk and isinstance(g.get("repository_url"), str):
         try:
@@ -171,7 +172,7 @@ class _Activity:
         self.events: list[ActivityEvent] = []
         self.errors = 0                       # records whose extraction raised (skipped)
 
-    def _emit(self, kind: str, ts: object, seed: str, sess: EventSession, attrs: dict) -> None:
+    def _emit(self, kind: ActivityKind, ts: object, seed: str, sess: EventSession, attrs: dict) -> None:
         self.events.append(ActivityEvent(
             event_id=make_event_id(NAME, kind, f"{sess.session_id}|{seed}"), ts=str_or_none(ts),
             agent=NAME, kind=kind, session_id=sess.session_id, turn_id=sess.turn_id, attrs=attrs))
@@ -187,11 +188,11 @@ class _Activity:
     def _record(self, record: dict) -> None:
         """Non-prompt activity of one record: tool aggregates, interrupt, turn, commit, compaction,
         link."""
-        record_type, payload = record.get("type"), record.get("payload")
+        record_type, payload = record.get("type"), dict_or_empty(record.get("payload"))
         ts = record.get("timestamp")
         sess = _session(self.cur, self.path)
         link = Link(self.keys, self.carried.setdefault("link", {}))
-        agg: TurnAgg = self.carried.setdefault("agg", blank_agg())
+        agg: TurnAgg = self.carried.setdefault("agg", blank_tool_tally())
         if record_type == "response_item":
             link.text(payload.get("output"))           # a tool call's output
             self._tool_call(payload, agg)
@@ -207,7 +208,7 @@ class _Activity:
         if kind == "agent_message":
             link.text(payload.get("message"))
         elif kind == "task_started":
-            self.carried["agg"], self.carried["start"] = blank_agg(), ts
+            self.carried["agg"], self.carried["start"] = blank_tool_tally(), ts
         elif kind == "turn_aborted" and payload.get("reason") == "interrupted":
             self.carried["intr"] = True
             self._emit("interrupt", ts, turn_seed, sess, {})
@@ -216,7 +217,7 @@ class _Activity:
             dur = d if isinstance(d, int) and not isinstance(d, bool) \
                 else ms_between(self.carried.get("start"), ts)
             self._emit("turn", ts, turn_seed, sess, {"duration_ms": dur, **turn_attrs(agg)})
-            self.carried["agg"] = blank_agg()
+            self.carried["agg"] = blank_tool_tally()
             self.carried.pop("start", None)
         elif kind == "item_completed" and isinstance(item, dict):
             self._item(item, ts, sess, link, agg)
@@ -245,7 +246,7 @@ class _Activity:
             out_text = item.get("aggregated_output")
             out_text = out_text if isinstance(out_text, str) else ""
             link.text(out_text)
-            if call:
+            if call and script:
                 found = commit_shas(out_text, err, call[1])
                 for sha, attrs in commit_rows(link, item.get("cwd"), commit_dir(script), out_text,
                                               found, call[0]):

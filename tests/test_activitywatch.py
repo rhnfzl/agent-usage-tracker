@@ -152,43 +152,36 @@ def test_plaintext_url_to_another_host_warns_but_works() -> None:
     print("ok plaintext_url_to_another_host_warns_but_works")
 
 
-def test_default_agents_exclude_activitywatch() -> None:
+def test_default_agents_exclude_activitywatch(monkeypatch) -> None:
     assert "activitywatch" in ALL_AGENTS and "activitywatch" in REGISTRY
     assert "activitywatch" not in DEFAULT_AGENTS
     assert set(DEFAULT_AGENTS) == set(ALL_AGENTS) - {"activitywatch"}
-    prev = os.environ.get("AUT_CONFIG")
     with tempfile.TemporaryDirectory() as d:
         path = Path(d) / "config.toml"
+        monkeypatch.setenv("AUT_CONFIG", str(path))
+        path.write_text('machine = "m"\n')
+        assert "activitywatch" not in load_config().agents
+        path.write_text('machine = "m"\nagents = ["activitywatch"]\n'
+                        'activitywatch_deny_apps = ["Example Vault"]\n'
+                        'activitywatch_categories = { "My Editor" = "editor" }\n')
+        cfg = load_config()
+        assert cfg.agents == ("activitywatch",)
+        assert cfg.activitywatch_url == "http://localhost:5600"
+        assert cfg.activitywatch_title_days == 0 and cfg.activitywatch_titles is True
+        assert cfg.activitywatch_deny_apps == ("example vault",)
+        assert cfg.activitywatch_categories == {"my editor": "editor"}
+        path.write_text('activitywatch_categories = { "X" = "games" }\n')
         try:
-            os.environ["AUT_CONFIG"] = str(path)
-            path.write_text('machine = "m"\n')
-            assert "activitywatch" not in load_config().agents
-            path.write_text('machine = "m"\nagents = ["activitywatch"]\n'
-                            'activitywatch_deny_apps = ["Example Vault"]\n'
-                            'activitywatch_categories = { "My Editor" = "editor" }\n')
-            cfg = load_config()
-            assert cfg.agents == ("activitywatch",)
-            assert cfg.activitywatch_url == "http://localhost:5600"
-            assert cfg.activitywatch_title_days == 0 and cfg.activitywatch_titles is True
-            assert cfg.activitywatch_deny_apps == ("example vault",)
-            assert cfg.activitywatch_categories == {"my editor": "editor"}
-            path.write_text('activitywatch_categories = { "X" = "games" }\n')
-            try:
-                load_config()
-                raise AssertionError("an unknown category must be refused")
-            except AutError:
-                pass
-            path.write_text('activitywatch_deny_titles = ["("]\n')
-            try:
-                load_config()
-                raise AssertionError("a bad regex must be refused")
-            except AutError:
-                pass
-        finally:
-            if prev is None:
-                os.environ.pop("AUT_CONFIG", None)
-            else:
-                os.environ["AUT_CONFIG"] = prev
+            load_config()
+            raise AssertionError("an unknown category must be refused")
+        except AutError:
+            pass
+        path.write_text('activitywatch_deny_titles = ["("]\n')
+        try:
+            load_config()
+            raise AssertionError("a bad regex must be refused")
+        except AutError:
+            pass
     print("ok default_agents_exclude_activitywatch")
 
 
@@ -487,7 +480,7 @@ def test_macos_lookup_real() -> None:
     print("ok macos_lookup_real")
 
 
-def test_purge_bounded_and_not_on_dry_run() -> None:
+def test_purge_bounded_and_not_on_dry_run(monkeypatch) -> None:
     now = datetime(2026, 11, 1, tzinfo=timezone.utc)
     cutoff = now - timedelta(days=180)
     old = [_ev(i, cutoff - timedelta(days=1, minutes=i), 30, "Code", "x")
@@ -521,25 +514,18 @@ def test_purge_bounded_and_not_on_dry_run() -> None:
         assert aw.purge(_cfg()) == 0, "a failing purge never raises"
 
     fake2 = FakeAW(events=[_ev(1, now - timedelta(hours=1), 60, "Code", "x")], old=old)
-    prev = os.environ.get("AUT_STATE")
     with tempfile.TemporaryDirectory() as d, _patched(fake2, now), \
             contextlib.redirect_stderr(io.StringIO()):
-        os.environ["AUT_STATE"] = str(Path(d) / "state.json")
-        try:
-            report = scan.run_scan(_cfg(), ["activitywatch"], dry_run=True)
-            assert not (Path(d) / "state.json").exists(), "a dry run writes no state"
-        finally:
-            if prev is None:
-                os.environ.pop("AUT_STATE", None)
-            else:
-                os.environ["AUT_STATE"] = prev
+        monkeypatch.setenv("AUT_STATE", str(Path(d) / "state.json"))
+        report = scan.run_scan(_cfg(), ["activitywatch"], dry_run=True)
+        assert not (Path(d) / "state.json").exists(), "a dry run writes no state"
     assert fake2.deleted == [] and not any(m == "DELETE" for m, _ in fake2.calls)
     agg = report["activitywatch"]
     assert agg["intervals"] == 1 and agg["time"] == {"editor": 60.0} and agg["relevant_s"] == 60.0
     print("ok purge_bounded_and_not_on_dry_run")
 
 
-def test_time_add_validation() -> None:
+def test_time_add_validation(monkeypatch) -> None:
     cfg = _cfg(pg_dsn="postgresql://x")
     now = datetime(2026, 11, 3, 12, 0, tzinfo=timezone.utc)
     row = cli.build_manual_interval(cfg, minutes=30, now=now)
@@ -569,20 +555,13 @@ def test_time_add_validation() -> None:
             pass
 
     log: list = []
-    prev = os.environ.get("AUT_CONFIG")
     with tempfile.TemporaryDirectory() as d:
         path = Path(d) / "config.toml"
         path.write_text('machine = "m"\n[transport]\npg_dsn = "postgresql://x"\n')
         path.chmod(0o600)
-        os.environ["AUT_CONFIG"] = str(path)
-        try:
-            with _fake_psycopg(log), contextlib.redirect_stdout(io.StringIO()) as out:
-                assert cli.main(["time", "add", "--minutes", "45", "--not-relevant"]) == 0
-        finally:
-            if prev is None:
-                os.environ.pop("AUT_CONFIG", None)
-            else:
-                os.environ["AUT_CONFIG"] = prev
+        monkeypatch.setenv("AUT_CONFIG", str(path))
+        with _fake_psycopg(log), contextlib.redirect_stdout(io.StringIO()) as out:
+            assert cli.main(["time", "add", "--minutes", "45", "--not-relevant"]) == 0
     assert "45 min" in out.getvalue() and "not relevant" in out.getvalue()
     (sql, rows), commit = log
     assert sql.startswith("INSERT INTO agents.time_interval") and commit == "commit"
@@ -659,25 +638,6 @@ def test_titles_kept_for_good_by_default() -> None:
     print("ok titles_kept_for_good_by_default")
 
 
-def main() -> int:
-    test_default_agents_exclude_activitywatch()
-    test_range_and_watermark()
-    test_aw_down_or_no_buckets()
-    test_deny_list_and_idle_dropped()
-    test_redaction_each_pattern()
-    test_titles_switch_and_redacted_title_sent()
-    test_mapping()
-    test_macos_category()
-    test_macos_lookup_guards()
-    test_macos_lookup_real()
-    test_purge_bounded_and_not_on_dry_run()
-    test_titles_kept_for_good_by_default()
-    test_time_add_validation()
-    test_delivery_one_transaction_and_webhook_note()
-    test_plaintext_url_to_another_host_warns_but_works()
-    print("\nALL PASS")
-    return 0
-
-
 if __name__ == "__main__":
-    raise SystemExit(main())
+    import pytest
+    raise SystemExit(pytest.main([__file__, "-q"]))

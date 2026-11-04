@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Iterator
 
 from ..config import Config
-from ..event import Batch, EventSession, UsageEvent, make_event_id
+from ..event import Batch, EventSession, RunOrigin, UsageEvent, make_event_id
 from ..repo_keys import RepoKeys
 from .activity_common import IDLE_S, pad_pending, text_of
 from ._util import parse_record, project_name, safe_int, scan_file, str_or_none, warn_skipped
@@ -165,7 +165,7 @@ def _session_of(o: dict, ident: tuple[bool, str, str | None], turn: str | None) 
                             str_or_none(o.get("sessionId")) or parent,
                             "subagent", turn)
     ep = o.get("entrypoint")
-    origin = ("automated" if ep in _PROGRAM_ENTRYPOINTS
+    origin: RunOrigin = ("automated" if ep in _PROGRAM_ENTRYPOINTS
               else "interactive" if ep == "cli" else "unknown")
     return EventSession(str_or_none(o.get("sessionId")) or sid, None, origin, turn)
 
@@ -189,7 +189,7 @@ def _upgrade_state(wm: dict) -> None:
     wm["state_v"] = _STATE_V
 
 
-def _record_uid(o: dict, path: str) -> object:
+def _record_uid(o: dict, path: str) -> str:
     return o.get("uuid") or f"{path}:{o.get('timestamp')}"
 
 

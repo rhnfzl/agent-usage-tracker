@@ -13,12 +13,12 @@ from datetime import datetime, timezone
 _MAX_LINES = 50000
 
 
-def describe_files(cfg, wm: dict) -> str:
+def describe_files(cfg: object, wm: dict) -> str:
     """`aut status` line of a collector whose watermark tracks files."""
     return f"{len(wm['files'])} files tracked" if "files" in wm else "never scanned"
 
 
-def describe_full_scan(cfg, wm: dict) -> str:
+def describe_full_scan(cfg: object, wm: dict) -> str:
     """`aut status` line of a collector that keeps no watermark."""
     return "full-scan each run (no watermark)"
 
@@ -28,14 +28,21 @@ def str_or_none(value: object) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
-def safe_int(value, default: int = 0) -> int:
+def dict_or_empty(value: object) -> dict:
+    """A dict as is; anything else is {}, for an untrusted nested object in a log record."""
+    return value if isinstance(value, dict) else {}
+
+
+def safe_int(value: object, default: int = 0) -> int:
     """Non-negative int() that never raises, for untrusted counts, offsets and timestamps from
     logs and state. A negative or unparseable value becomes `default`: a corrupt state offset
     (1e400 -> inf -> OverflowError, or a negative one, which would make fh.seek() raise) must not
     wedge the scan."""
+    if not isinstance(value, (int, float, str)):
+        return default
     try:
         parsed = int(value)
-    except (TypeError, ValueError, OverflowError):
+    except (ValueError, OverflowError):
         return default
     return parsed if parsed >= 0 else default
 
@@ -169,7 +176,7 @@ def _strip_worktree(parts: list[str]) -> list[str] | None:
     return None
 
 
-def project_name(path) -> str | None:
+def project_name(path: object) -> str | None:
     """Last path segment only (never a full path -> safe for a public-later repo), after
     collapsing a git worktree back onto its main checkout (see _strip_worktree). Handles BOTH
     '/' and '\\' so a Windows path is reduced on POSIX too; rejects non-strings (returns None)
@@ -183,8 +190,10 @@ def project_name(path) -> str | None:
     return seg.rsplit("/", 1)[-1] or None
 
 
-def epoch_ms_to_iso(ms) -> str | None:
+def epoch_ms_to_iso(ms: object) -> str | None:
+    if not isinstance(ms, (int, float, str)):
+        return None
     try:
         return datetime.fromtimestamp(float(ms) / 1000.0, tz=timezone.utc).isoformat()
-    except (TypeError, ValueError, OSError, OverflowError):
+    except (ValueError, OSError, OverflowError):
         return None

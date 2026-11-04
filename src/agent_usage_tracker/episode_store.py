@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime
+from typing import Any
 
 from .sink import connect, write_many
 
@@ -13,7 +14,7 @@ def load_month(dsn: str, start: datetime, end: datetime) -> list[dict]:
         return load_episodes(conn, "e.first_ts >= %s AND e.first_ts < %s", (start, end))
 
 
-def load_episodes(conn, where: str, params: tuple) -> list[dict]:
+def load_episodes(conn: Any, where: str, params: tuple) -> list[dict]:
     """Episodes matching `where` (over agents.episode e), each with its members."""
     rows = conn.execute(
         "SELECT e.episode_id::text, e.first_ts, e.last_ts, e.n_sessions, e.n_seed_sessions, "

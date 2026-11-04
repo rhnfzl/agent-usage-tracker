@@ -46,6 +46,7 @@ os.environ["GIT_CONFIG_NOSYSTEM"] = "1"
 SALT = "test-salt-for-outcomes"
 DAY = 86400
 NOW = time.time()
+NOW_DT = datetime.fromtimestamp(NOW, timezone.utc)
 
 
 def _cfg(home: Path, roots: tuple[str, ...] = (), pg: str | None = "postgresql://x") -> Config:
@@ -261,11 +262,11 @@ def test_pending_writes_only_changes():
     print("ok pending_writes_only_changes")
 
 
-def test_run_outcomes_dry_run_writes_nothing():
+def test_run_outcomes_dry_run_writes_nothing(monkeypatch):
     with tempfile.TemporaryDirectory() as d:
         work, s = _world(Path(d))
         key = _key(str(Path(d) / "origin.git"))
-        os.environ["AUT_STATE"] = str(Path(d) / "state" / "state.json")
+        monkeypatch.setenv("AUT_STATE", str(Path(d) / "state" / "state.json"))
         sent: dict = {"rows": [], "scan": []}
         saved = (oc._load_rows, oc._load_stored, oc._insert, push.send_scan_rows)
         oc._load_rows = lambda dsn: [_row(s["A"], key, 30), _row(s["D"], key, 40)]
@@ -274,10 +275,10 @@ def test_run_outcomes_dry_run_writes_nothing():
         push.send_scan_rows = lambda dsn, rows: sent["scan"].extend(rows)
         try:
             cfg = _cfg(Path(d), (str(Path(d) / "projects"),))
-            stats = oc.run_outcomes(cfg, fetch=False, dry_run=True, now=NOW)
+            stats = oc.run_outcomes(cfg, refresh=False, dry_run=True, now=NOW_DT)
             assert sent == {"rows": [], "scan": []} and stats["to_write"] == 2, (sent, stats)
             assert not (Path(d) / "state").exists()                # no cache file either
-            stats = oc.run_outcomes(cfg, fetch=False, dry_run=False, now=NOW)
+            stats = oc.run_outcomes(cfg, refresh=False, dry_run=False, now=NOW_DT)
             assert {r["state"] for r in sent["rows"]} == {"merged", "reworked"}, sent
             assert all(set(r) == {"sha", "repo_key", "state", "survival", "decided_at"}
                        for r in sent["rows"])
@@ -287,7 +288,6 @@ def test_run_outcomes_dry_run_writes_nothing():
             assert cache == {s["A"]: 1.0, s["D"]: 0.0}, cache
         finally:
             (oc._load_rows, oc._load_stored, oc._insert, push.send_scan_rows) = saved
-            os.environ.pop("AUT_STATE")
         print("ok run_outcomes_dry_run_writes_nothing")
 
 
@@ -411,23 +411,20 @@ def test_amend_with_the_same_ts_is_ordered_after_the_commit():
         print("ok amend_with_the_same_ts_is_ordered_after_the_commit")
 
 
-def test_outcome_repo_roots_must_be_a_list_of_strings():
+def test_outcome_repo_roots_must_be_a_list_of_strings(monkeypatch):
     from agent_usage_tracker import config
     with tempfile.TemporaryDirectory() as d:
         conf = Path(d) / "config.toml"
-        os.environ["AUT_CONFIG"] = str(conf)
+        monkeypatch.setenv("AUT_CONFIG", str(conf))
+        conf.write_text('machine = "t"\noutcome_repo_roots = "~/code"\n')
+        assert config.load_config().outcome_repo_roots == ("~/code",)
+        conf.write_text('machine = "t"\noutcome_repo_roots = 3\n')
         try:
-            conf.write_text('machine = "t"\noutcome_repo_roots = "~/code"\n')
-            assert config.load_config().outcome_repo_roots == ("~/code",)
-            conf.write_text('machine = "t"\noutcome_repo_roots = 3\n')
-            try:
-                config.load_config()
-            except AutError as exc:
-                assert "outcome_repo_roots" in str(exc)
-            else:
-                raise AssertionError("a non-list must refuse")
-        finally:
-            os.environ.pop("AUT_CONFIG")
+            config.load_config()
+        except AutError as exc:
+            assert "outcome_repo_roots" in str(exc)
+        else:
+            raise AssertionError("a non-list must refuse")
         print("ok outcome_repo_roots_must_be_a_list_of_strings")
 
 
@@ -456,26 +453,25 @@ def test_fetch_leaves_the_repo_alone_and_terminates_on_timeout():
     print("ok fetch_leaves_the_repo_alone_and_terminates_on_timeout")
 
 
-def test_cache_is_saved_before_the_sink_is_written():
+def test_cache_is_saved_before_the_sink_is_written(monkeypatch):
     with tempfile.TemporaryDirectory() as d:
         work, s = _world(Path(d))
         key = _key(str(Path(d) / "origin.git"))
-        os.environ["AUT_STATE"] = str(Path(d) / "state" / "state.json")
+        monkeypatch.setenv("AUT_STATE", str(Path(d) / "state" / "state.json"))
         saved = (oc._load_rows, oc._load_stored, push.send_scan_rows)
         oc._load_rows = lambda dsn: [_row(s["D"], key, 40)]
         oc._load_stored = lambda dsn: (_ for _ in ()).throw(RuntimeError("no table"))
         push.send_scan_rows = lambda dsn, rows: None
         try:
             try:
-                oc.run_outcomes(_cfg(Path(d), (str(Path(d) / "projects"),)), fetch=False,
-                                dry_run=False, now=NOW)
+                oc.run_outcomes(_cfg(Path(d), (str(Path(d) / "projects"),)), refresh=False,
+                                dry_run=False, now=NOW_DT)
             except RuntimeError:
                 pass
             cache = json.loads((Path(d) / "state" / oc.CACHE_NAME).read_text())
             assert cache == {s["D"]: 0.0}, cache
         finally:
             (oc._load_rows, oc._load_stored, push.send_scan_rows) = saved
-            os.environ.pop("AUT_STATE")
         print("ok cache_is_saved_before_the_sink_is_written")
 
 
@@ -498,14 +494,14 @@ def test_manual_outcome_picks_newest_interactive_session():
         cfg = _cfg(home)
         sub = work / "sub"
         sub.mkdir()
-        row = oc.build_manual_outcome(cfg, "ruled-out", cwd=str(sub), now=NOW)
+        row = oc.build_manual_outcome(cfg, "ruled-out", cwd=str(sub), now=NOW_DT)
         assert row == {"session_id": "new-cli", "outcome": "ruled_out",
-                       "ts": datetime.fromtimestamp(NOW, timezone.utc),
+                       "ts": NOW_DT,
                        "repo_key": _key(str(home / "origin.git"))}, row
-        row = oc.build_manual_outcome(cfg, "shipped", cwd=str(sub), session="given", now=NOW)
+        row = oc.build_manual_outcome(cfg, "shipped", cwd=str(sub), session="given", now=NOW_DT)
         assert row["session_id"] == "given" and row["outcome"] == "shipped"
         try:
-            oc.build_manual_outcome(cfg, "open", cwd=str(home / "nowhere"), now=NOW)
+            oc.build_manual_outcome(cfg, "open", cwd=str(home / "nowhere"), now=NOW_DT)
         except AutError as exc:
             assert "--session" in str(exc)
         else:
@@ -513,7 +509,7 @@ def test_manual_outcome_picks_newest_interactive_session():
         print("ok manual_outcome_picks_newest_interactive_session")
 
 
-def test_cli_outcome_and_outcomes():
+def test_cli_outcome_and_outcomes(monkeypatch):
     import contextlib
     import io
 
@@ -523,11 +519,11 @@ def test_cli_outcome_and_outcomes():
         conf.write_text('machine = "t"\nrepo_key_salt = "x"\noutcome_fetch = true\n'
                         '[transport]\npg_dsn = "postgresql://x"\n')
         conf.chmod(0o600)
-        os.environ["AUT_CONFIG"] = str(conf)
+        monkeypatch.setenv("AUT_CONFIG", str(conf))
         got: dict = {}
         saved = (oc.insert_manual_outcome, oc.run_outcomes)
         oc.insert_manual_outcome = lambda dsn, row: got.update(row=row)
-        oc.run_outcomes = lambda cfg, fetch, dry_run: (got.update(fetch=fetch, dry=dry_run)
+        oc.run_outcomes = lambda cfg, refresh, dry_run: (got.update(fetch=refresh, dry=dry_run)
                                                        or oc.Counter(rows=3, states=oc.Counter(merged=2)))
         out = io.StringIO()
         try:
@@ -536,7 +532,6 @@ def test_cli_outcome_and_outcomes():
                 assert cli.main(["outcomes", "--dry-run"]) == 0
         finally:
             oc.insert_manual_outcome, oc.run_outcomes = saved
-            os.environ.pop("AUT_CONFIG")
         assert got["row"]["session_id"] == "abc" and got["row"]["outcome"] == "ruled_out"
         assert got["fetch"] is True and got["dry"] is True            # config turns fetch on
         assert '"merged": 2' in out.getvalue() and "DRY-RUN" in out.getvalue(), out.getvalue()
@@ -690,11 +685,11 @@ def test_signing_proxy_alternates_and_helpers_never_run():
     print("ok signing_proxy_alternates_and_helpers_never_run")
 
 
-def test_fetch_only_clones_with_a_row_key():
+def test_fetch_only_clones_with_a_row_key(monkeypatch):
     with tempfile.TemporaryDirectory() as d:
         work, s = _world(Path(d))
         fetched: list = []
-        os.environ["AUT_STATE"] = str(Path(d) / "state" / "state.json")
+        monkeypatch.setenv("AUT_STATE", str(Path(d) / "state" / "state.json"))
         saved = (oc._load_rows, oc.load_json_dict, oc._load_stored, oc.fetch_clones, oc._insert,
                  push.send_scan_rows)
         oc._load_rows = lambda dsn: [_row(s["A"], None, 30)]       # the SHA is there, no key
@@ -702,17 +697,16 @@ def test_fetch_only_clones_with_a_row_key():
         oc.fetch_clones = lambda cs: (fetched.extend(cs), (len(cs), 0))[1]
         oc._insert, push.send_scan_rows = (lambda dsn, rows: None), lambda dsn, rows: None
         try:
-            oc.run_outcomes(_cfg(Path(d), (str(Path(d) / "projects"),)), fetch=True,
-                            dry_run=False, now=NOW)
+            oc.run_outcomes(_cfg(Path(d), (str(Path(d) / "projects"),)), refresh=True,
+                            dry_run=False, now=NOW_DT)
             assert fetched == [], fetched
             oc._load_rows = lambda dsn: [_row(s["A"], _key(str(Path(d) / "origin.git")), 30)]
-            oc.run_outcomes(_cfg(Path(d), (str(Path(d) / "projects"),)), fetch=True,
-                            dry_run=False, now=NOW)
+            oc.run_outcomes(_cfg(Path(d), (str(Path(d) / "projects"),)), refresh=True,
+                            dry_run=False, now=NOW_DT)
             assert [c.path for c in fetched] == [str(work)], fetched
         finally:
             (oc._load_rows, oc.load_json_dict, oc._load_stored, oc.fetch_clones, oc._insert,
              push.send_scan_rows) = saved
-            os.environ.pop("AUT_STATE")
     print("ok fetch_only_clones_with_a_row_key")
 
 
@@ -726,8 +720,8 @@ def test_dry_run_never_fetches_or_asks_gh():
         oc.fetch_clones = lambda cs: (_ for _ in ()).throw(AssertionError("fetched"))
         oc._gh_merged = lambda *a: (_ for _ in ()).throw(AssertionError("asked gh"))
         try:
-            stats = oc.run_outcomes(_cfg(Path(d), (str(Path(d) / "projects"),)), fetch=True,
-                                    dry_run=True, now=NOW)
+            stats = oc.run_outcomes(_cfg(Path(d), (str(Path(d) / "projects"),)), refresh=True,
+                                    dry_run=True, now=NOW_DT)
         finally:
             oc._load_rows, oc._load_stored, oc.fetch_clones, oc._gh_merged = saved
         assert stats["fetch_skipped_dry_run"] == 1 and "fetch_ok" not in stats, stats
@@ -887,7 +881,7 @@ def test_ctrl_c_sends_no_heartbeat():
     oc._load_rows, push.send_scan_rows = stop, lambda dsn, rows: sent.extend(rows)
     try:
         try:
-            oc.run_outcomes(_cfg(Path(tempfile.gettempdir())), fetch=False, dry_run=False, now=NOW)
+            oc.run_outcomes(_cfg(Path(tempfile.gettempdir())), refresh=False, dry_run=False, now=NOW_DT)
             raise AssertionError("KeyboardInterrupt must propagate")
         except KeyboardInterrupt:
             pass
@@ -895,17 +889,6 @@ def test_ctrl_c_sends_no_heartbeat():
         oc._load_rows, push.send_scan_rows = saved
     assert sent == [], sent
     print("ok ctrl_c_sends_no_heartbeat")
-
-
-def main() -> int:
-    for name, fn in list(globals().items()):
-        if name.startswith("test_") and callable(fn):
-            fn()
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
 
 
 def test_repo_cannot_switch_a_protocol_back_on():
@@ -927,3 +910,8 @@ def test_repo_cannot_switch_a_protocol_back_on():
         r = subprocess.run(git_argv(str(work), "fetch", "-q", "gp"), capture_output=True,
                            timeout=60, env=git_env())
         assert r.returncode != 0 and not mark.exists(), r.stderr
+
+
+if __name__ == "__main__":
+    import pytest
+    raise SystemExit(pytest.main([__file__, "-q"]))

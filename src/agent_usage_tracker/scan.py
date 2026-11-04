@@ -10,11 +10,12 @@ import csv
 import json
 import sys
 from datetime import datetime, timezone
-from typing import Iterator
+from typing import Iterator, Sequence, TextIO
 
 from .collectors import REGISTRY, drain
 from .config import Config
-from .event import ActivityEvent, Batch, CollectorUnavailable, Row, TimeInterval, UsageEvent, valid_ts
+from .event import (ActivityEvent, Batch, CollectorUnavailable, Row, TimeInterval, UsageEvent,
+                    parse_ts, valid_ts)
 from .push import (COLUMNS, deliver_scan_rows, make_sender, scan_row, scrub_error,
                    send_activity_rows, send_session_rows)
 from .state import collector_wm, load_state, save_state
@@ -22,14 +23,14 @@ from .state import collector_wm, load_state, save_state
 BATCH = 500
 
 
-def _blank_agg() -> dict:
+def _blank_agent_tally() -> dict:
     return {"events": 0, "human": 0, "input": 0, "output": 0, "cache_read": 0,
             "cache_write": 0, "reasoning": 0, "total": 0, "skipped_no_ts": 0,
             "duplicates": 0, "by_model": {}, "activity": {},
             "intervals": 0, "time": {}, "relevant_s": 0.0}    # time: category -> seconds
 
 
-def _add(agg: dict, e: Row) -> None:
+def _tally_event(agg: dict, e: Row) -> None:
     if isinstance(e, TimeInterval):      # active time; no tokens, kept out of events/human
         secs = (datetime.fromisoformat(e.end_ts) - datetime.fromisoformat(e.ts)).total_seconds()
         agg["intervals"] += 1
@@ -54,7 +55,7 @@ def _add(agg: dict, e: Row) -> None:
     m["total"] += e.total_tokens
 
 
-def run_scan(cfg: Config, agents: list[str], dry_run: bool) -> dict:
+def run_scan(cfg: Config, agents: Sequence[str], *, dry_run: bool) -> dict:
     state = load_state()
     sender = None if dry_run else make_sender(cfg)
     report: dict = {}
@@ -63,7 +64,7 @@ def run_scan(cfg: Config, agents: list[str], dry_run: bool) -> dict:
     for name in agents:
         collector = REGISTRY[name]
         wm = collector_wm(state, name)
-        agg = report.setdefault(name, _blank_agg())
+        agg = report.setdefault(name, _blank_agent_tally())
         # The same session can sit at two paths -- Claude Code re-encodes a project directory
         # (e.g. '-Users-me-proj' and 'prefix---Users-me-proj'), so one session file is globbed
         # twice and every turn in it is emitted twice. Both copies produce the same event_id, so
@@ -88,17 +89,17 @@ def run_scan(cfg: Config, agents: list[str], dry_run: bool) -> dict:
                 try:
                     for events, advance_watermark in batches:
                         for e in events:
-                            if not valid_ts(e.ts):
+                            ts = parse_ts(e.ts)
+                            if ts is None:
                                 agg["skipped_no_ts"] += 1
                                 continue
-                            ts = datetime.fromisoformat(e.ts.replace("Z", "+00:00"))    # valid_ts: parses
                             ts = ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
                             newest_ts = ts if newest_ts is None or ts > newest_ts else newest_ts
                             if e.event_id in seen:
                                 agg["duplicates"] += 1      # counted once, above
                             else:
                                 seen.add(e.event_id)
-                                _add(agg, e)
+                                _tally_event(agg, e)
                             # Still queued for the sink either way: deduping the PUSH would mean a
                             # copy whose batch failed could not be re-sent from the other path, and
                             # ON CONFLICT already makes the repeat free.
@@ -167,7 +168,7 @@ def print_scan(cfg: Config, report: dict, dry_run: bool) -> None:
     print(f"{'TOTAL':<12} {grand:>32,} tokens")
 
 
-def reset_watermarks(agents: tuple[str, ...]) -> None:
+def reset_watermarks(agents: Sequence[str]) -> None:
     """Forget the selected collectors' watermarks, so the next scan reads all their history."""
     state = load_state()
     for name in agents:
@@ -185,7 +186,7 @@ def _one_shot_batches(name: str, cfg: Config, wm: dict) -> Iterator[Batch]:
             print(f"aut: {exc}", file=sys.stderr)
 
 
-def run_export(cfg: Config, agents: list[str], out) -> tuple[int, int]:
+def run_export(cfg: Config, agents: Sequence[str], out: TextIO) -> tuple[int, int]:
     """Write all normalized events (from scratch, ignoring the watermark) as CSV to `out`.
     Column order matches push.COLUMNS / the sink table, so it loads via COPY. Useful for
     an offline bulk backfill or a bridged load where the live transport is not wired yet.
@@ -243,8 +244,8 @@ def _tally_session(counts: dict, row: dict) -> None:
     counts["subagent_no_parent"] += origin == "subagent" and row["parent_session_id"] is None
 
 
-def run_history_backfill(cfg: Config, agents: list[str], dry_run: bool, sessions: bool = True,
-                         activity: bool = False) -> dict:
+def run_history_backfill(cfg: Config, agents: Sequence[str], *, dry_run: bool,
+                         sessions: bool = True, activity: bool = False) -> dict:
     """Send agents.event_session rows (sessions) and/or agents.activity_event rows (activity) for
     ALL history, never usage rows: re-reading files from byte 0 re-emits (event_id, ts) pairs that
     can differ from the stored ones (see the ts note in collectors/claude_code.py), and those would
@@ -300,7 +301,7 @@ def run_history_backfill(cfg: Config, agents: list[str], dry_run: bool, sessions
     return counts
 
 
-def print_history_backfill(c: dict, dry_run: bool, sessions: bool, activity: bool) -> None:
+def print_history_backfill(c: dict, *, dry_run: bool, sessions: bool, activity: bool) -> None:
     mode = "DRY-RUN (nothing sent)" if dry_run else "sent"
     if sessions:
         print(f"sessions-only backfill {mode}: {c['rows']} rows, by run_origin "

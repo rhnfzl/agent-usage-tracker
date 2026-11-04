@@ -51,10 +51,14 @@ def commit_dir(cmd: str) -> str | None:
     d = None
     for x in [x for x in _SEGMENTS.split(_HEREDOC.sub(r"\3", cmd)) if x.strip()]:
         m, g = _CD.match(x), GIT_COMMIT.match(x)
-        if not (m or (g and "--dry-run" not in x.split())):
-            continue
         # a cd moves the shell for the segments after it; a -C only the commit itself
-        for arg in [m[1]] if m else [c[1] for c in _DASH_C.finditer(g[0])]:
+        if m:
+            args = [m[1]]
+        elif g and "--dry-run" not in x.split():
+            args = [c[1] for c in _DASH_C.finditer(g[0])]
+        else:
+            continue
+        for arg in args:
             if "$" in arg or "`" in arg:
                 return None
             d = os.path.join(d or "", os.path.expanduser(arg.strip("\"'")))

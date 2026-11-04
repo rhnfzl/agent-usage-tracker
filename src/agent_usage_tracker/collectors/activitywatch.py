@@ -39,6 +39,7 @@ from ..event import CollectorUnavailable, TimeInterval, make_event_id
 from ..net import HTTP_ERRORS
 from ..redact import clean_text
 from ..sink import LOCAL_HOSTS
+from ._util import dict_or_empty
 
 NAME = "activitywatch"
 _LAG = timedelta(minutes=5)          # aw-watcher-window extends its last event; leave it settle
@@ -160,7 +161,7 @@ def _norm(app: str) -> str:
     return app.strip().lower()
 
 
-def _lookup(table, name: str):
+def _lookup(table: dict[str, Any], name: str) -> Any:
     """Exact name, else a known name followed by a space ('pycharm professional')."""
     if name in table:
         return table[name]
@@ -283,7 +284,7 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[TimeInterval], Callabl
         try:
             s = _parse(ev["timestamp"])
             e = s + timedelta(seconds=float(ev.get("duration") or 0))
-            data = ev.get("data") if isinstance(ev.get("data"), dict) else {}
+            data = dict_or_empty(ev.get("data"))
         except (KeyError, TypeError, ValueError, AttributeError):
             continue
         s, e = max(s, start), min(e, end)

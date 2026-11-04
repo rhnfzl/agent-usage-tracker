@@ -51,7 +51,7 @@ def cursor_db(cfg: Config) -> Path:
     return home / ".config" / _CURSOR_SUBPATH  # linux + other
 
 
-def connect_ro(path) -> sqlite3.Connection | None:
+def connect_ro(path: object) -> sqlite3.Connection | None:
     """Read-only connect, safe alongside a running Cursor (WAL allows concurrent readers)."""
     try:
         con = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=5.0)

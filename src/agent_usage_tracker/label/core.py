@@ -15,7 +15,7 @@ import sys
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Protocol
+from typing import Callable, Protocol
 
 from ..config import config_path
 from ..event import ActivityEvent, make_event_id
@@ -141,7 +141,12 @@ def softmax(xs: list[float]) -> list[float]:
     return [v / s for v in e]
 
 
-def letter_distribution(letter_logits, req: Request) -> dict[str, float]:
+def top_label(dist: dict[str, float]) -> str:
+    return max(dist, key=lambda label: dist[label])
+
+
+def letter_distribution(letter_logits: Callable[[str, list[str]], list[float]],
+                        req: Request) -> dict[str, float]:
     """letter_logits(prompt, letters) -> one logit per letter at the answer position. Scores the
     original and the reversed candidate order and averages the two (letter position bias)."""
     ids = [c["id"] for c in req.candidates]

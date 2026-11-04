@@ -212,13 +212,6 @@ def test_truncated_body_is_a_handled_fetch_failure() -> None:
     print("ok truncated_body_is_a_handled_fetch_failure")
 
 
-def main() -> int:
-    for name, fn in list(globals().items()):
-        if name.startswith("test_") and callable(fn):
-            fn()
-    print("\nALL PASS")
-    return 0
-
-
 if __name__ == "__main__":
-    raise SystemExit(main())
+    import pytest
+    raise SystemExit(pytest.main([__file__, "-q"]))

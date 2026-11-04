@@ -16,11 +16,12 @@ from __future__ import annotations
 import contextlib
 import io
 import json
-import os
 import sys
 import tempfile
 import types
 from pathlib import Path
+
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
@@ -253,18 +254,11 @@ def test_webhook_skips_sessions_once() -> None:
 
 
 def _with_state(fn):
-    prev = os.environ.get("AUT_STATE")
-    with tempfile.TemporaryDirectory() as sd:
+    with tempfile.TemporaryDirectory() as sd, pytest.MonkeyPatch.context() as mp:
         state = Path(sd) / "state.json"
         state.write_text('{"collectors": {"claude_code": {"files": {"keep": {"off": 7}}}}}')
-        os.environ["AUT_STATE"] = str(state)
-        try:
-            return fn(state)
-        finally:
-            if prev is None:
-                os.environ.pop("AUT_STATE", None)
-            else:
-                os.environ["AUT_STATE"] = prev
+        mp.setenv("AUT_STATE", str(state))
+        return fn(state)
 
 
 def test_sessions_only_backfill() -> None:
@@ -327,15 +321,5 @@ def test_turn_carries_across_scans() -> None:
     print("ok turn_carries_across_scans")
 
 
-def main() -> int:
-    test_session_rules()
-    test_pg_one_transaction()
-    test_webhook_skips_sessions_once()
-    test_sessions_only_backfill()
-    test_turn_carries_across_scans()
-    print("\nALL PASS")
-    return 0
-
-
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(pytest.main([__file__, "-q"]))

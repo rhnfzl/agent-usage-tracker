@@ -11,6 +11,7 @@ import socket
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from .label.names import TASK_NAMES
 from .state import warn_if_group_readable
@@ -34,14 +35,14 @@ def config_path() -> Path:
     return Path(base) / "agent-usage-tracker" / "config.toml"
 
 
-def _resolve(value):
+def _resolve(value: Any) -> Any:
     """Resolve an "env:VAR" indirection to its environment value; pass through otherwise."""
     if isinstance(value, str) and value.startswith("env:"):
         return os.environ.get(value[4:])
     return value
 
 
-def _as_bool(value) -> bool:
+def _as_bool(value: object) -> bool:
     """Truthy parse that respects a quoted string. TOML `x = false` is already a native bool, but
     `x = "false"` (a quoted string) would be truthy under bool(); treat common false-y strings as
     False so a mistyped opt-in flag can't silently enable a network collector."""

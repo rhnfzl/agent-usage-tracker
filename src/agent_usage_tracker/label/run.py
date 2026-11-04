@@ -11,10 +11,11 @@ from __future__ import annotations
 import json
 import sys
 import time
-from collections import Counter
+from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
-from typing import Callable, cast
+from pathlib import Path
+from typing import Any, Callable, cast
 
 from ..config import Config
 from ..push import deliver_scan_rows, scan_row, scrub_error, send_activity_rows
@@ -26,10 +27,12 @@ from .names import NOTE
 from .tasks import OUTCOME_DAYS, TASKS, Source, SourceUnavailable, Task, units
 
 BATCH = 50
+# One task's counts, read as 0 when unset, plus `labels`: the rows per label.
+TaskReport = defaultdict[str, Any]
 NAME = "label"
 
 
-def _cache_path():
+def _cache_path() -> Path:
     return data_dir() / "label" / "cache.json"
 
 
@@ -37,6 +40,7 @@ def _cache_path():
 class _Run:
     """What stays fixed across the tasks of one label run. wm is state's label section."""
     cfg: Config
+    dsn: str
     src: Source
     dry_run: bool
     deadline: float
@@ -93,8 +97,8 @@ def _insert_note(dsn: str, day: date, text: str, model_id: str) -> None:
         conn.commit()
 
 
-def _run_notes(run: _Run, backend: NoteBackend, since: datetime, until: datetime) -> Counter:
-    c: Counter = Counter()
+def _run_notes(run: _Run, backend: NoteBackend, since: datetime, until: datetime) -> TaskReport:
+    c: TaskReport = defaultdict(int)
     d = since.astimezone().date()
     while d < until.astimezone().date():
         if time.monotonic() >= run.deadline:
@@ -105,15 +109,15 @@ def _run_notes(run: _Run, backend: NoteBackend, since: datetime, until: datetime
         text = backend.generate(_note_prompt(d, run.src.labels(start, end), eps))
         c["notes"] += 1
         if not run.dry_run:
-            _insert_note(run.cfg.pg_dsn, d, text, backend.model_id)
+            _insert_note(run.dsn, d, text, backend.model_id)
             run.advance(NOTE, end.isoformat())
         d += timedelta(1)
     return c
 
 
 def _run_task(run: _Run, task: Task, choice: Choice, backend: Backend, since: datetime,
-              until: datetime | None) -> Counter:
-    c: Counter = Counter()
+              until: datetime | None) -> TaskReport:
+    c: TaskReport = defaultdict(int)
     labels: Counter = Counter()
     c["labels"] = labels
     key = f"{task.name}@{task.ver}|{backend.model_id}|{choice.calib_ver}"
@@ -124,7 +128,7 @@ def _run_task(run: _Run, task: Task, choice: Choice, backend: Backend, since: da
     def flush(next_wm: str | None) -> None:
         if not run.dry_run:
             if pending:
-                send_activity_rows(run.cfg.pg_dsn, pending)      # raises: watermark stays
+                send_activity_rows(run.dsn, pending)      # raises: watermark stays
             if task.cached and pending:
                 run.cache.setdefault(key, []).extend(e.attrs["unit_id"] for e in pending)
                 atomic_write_text(_cache_path(), json.dumps(run.cache))
@@ -155,14 +159,14 @@ def _run_task(run: _Run, task: Task, choice: Choice, backend: Backend, since: da
     return c
 
 
-def run_label(cfg: Config, tasks: list[str] | None = None, since: datetime | None = None,
+def run_label(cfg: Config, tasks: list[str] | None = None, since: datetime | None = None, *,
               dry_run: bool = False, src: Source | None = None,
               backend_for: Callable[[str, Choice], Backend] | None = None,
-              now: datetime | None = None) -> dict[str, Counter]:
+              now: datetime | None = None) -> dict[str, TaskReport]:
     """Label each task (default: config label_tasks). backend_for(task, choice) -> backend
     (tests pass a fake). A dry run scores and counts, and writes nothing: no rows, watermark,
     cache or heartbeat. A task whose backend cannot run reports failed = 1 and the others go on."""
-    cfg.require_pg("label (it reads the steer and episode rows)")
+    dsn = cfg.require_pg("label (it reads the steer and episode rows)")
     started = datetime.now(timezone.utc)
     labelled_at = started.isoformat(timespec="milliseconds")
     now = now or started
@@ -178,9 +182,9 @@ def run_label(cfg: Config, tasks: list[str] | None = None, since: datetime | Non
     backend_for = backend_for or default_backend
     state = load_state()
     wm = collector_wm(state, NAME)
-    run = _Run(cfg, src, dry_run, time.monotonic() + cfg.label_budget_s, wm, state,
+    run = _Run(cfg, dsn, src, dry_run, time.monotonic() + cfg.label_budget_s, wm, state,
                load_json_dict(_cache_path()), labelled_at)
-    report: dict[str, Counter] = {}
+    report: dict[str, TaskReport] = {}
     status, error, interrupted = "ok", None, False
     try:
         for name in tasks if tasks is not None else cfg.label_tasks:
@@ -189,16 +193,17 @@ def run_label(cfg: Config, tasks: list[str] | None = None, since: datetime | Non
             try:
                 backend = backend_for(name, choice)
                 if name == NOTE:     # `aut label choose` never picks a note's backend: no encoder
+                    assert u is not None        # a note's window is whole days
                     report[name] = _run_notes(run, cast(NoteBackend, backend), s, u)
                 else:
                     report[name] = _run_task(run, TASKS[name], choice, backend, s, u)
             except SourceUnavailable as exc:      # its watermark stays; the others go on
                 print(f"aut: label {name}: {exc}; retried on the next run", file=sys.stderr)
-                report[name] = Counter(unavailable=1)
+                report[name] = defaultdict(int, unavailable=1)
                 status, error = "error", scrub_error(exc)
             except BackendUnavailable as exc:     # the same, and the exit status says so
                 print(f"aut: {exc}", file=sys.stderr)
-                report[name] = Counter(failed=1)
+                report[name] = defaultdict(int, failed=1)
                 status, error = "error", scrub_error(exc)
         return report
     except BaseException as exc:
@@ -211,7 +216,7 @@ def run_label(cfg: Config, tasks: list[str] | None = None, since: datetime | Non
             deliver_scan_rows(cfg, [scan_row(cfg, NAME, started, status, error, events)], NAME)
 
 
-def print_report(report: dict[str, Counter], dry_run: bool) -> None:
+def print_report(report: dict[str, TaskReport], dry_run: bool) -> None:
     mode = "DRY-RUN (nothing written)" if dry_run else "written"
     for name, c in report.items():
         if c["failed"]:      # its reason is already on stderr

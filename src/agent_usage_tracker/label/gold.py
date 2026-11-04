@@ -15,10 +15,11 @@ import html
 import json
 from collections import Counter
 from datetime import date
+from typing import Callable
 
 from .. import local_page
 from ..config import Config
-from .core import Request
+from .core import Request, top_label
 from .evalset import (DAYS, FLOORS, append_jsonl, eval_path, gold_latest, read_jsonl,
                       silver_by_unit, stratified, stratum, window_units, write_jsonl)
 from .tasks import TASKS, Source
@@ -97,7 +98,7 @@ def render(task: str, token: str, item: Request | None, gold: dict, last: dict |
 
 
 def _teachers(silver: dict | None) -> list[tuple[str, str, float]]:
-    return [(t, max(d, key=d.get), max(d.values())) for t, d in sorted((silver or {}).items())
+    return [(t, top_label(d), max(d.values())) for t, d in sorted((silver or {}).items())
             if d]
 
 
@@ -112,8 +113,8 @@ def _drop_last(task: str, unit_id: str) -> None:
     write_jsonl(p, rows)
 
 
-def serve(task: str, reqs: dict[str, Request], open_browser: bool = True, on_ready=None,
-          today: date | None = None) -> Counter:
+def serve(task: str, reqs: dict[str, Request], *, open_browser: bool = True,
+          on_ready: Callable[[str], None] | None = None, today: date | None = None) -> Counter:
     """Serve the page until q (or Ctrl-C). Returns {answered, skipped} of this session."""
     token = local_page.new_token()
     silver, gold = silver_by_unit(task), gold_latest(task)
@@ -168,14 +169,16 @@ def serve(task: str, reqs: dict[str, Request], open_browser: bool = True, on_rea
 
     local_page.serve(token, lambda tail: page() if tail == "" else None, on_post,
                      "gold page at {url} (q on the page, or Ctrl-C, to stop; answers are already "
-                     "saved)", open_browser, on_ready)
+                     "saved)", open_browser=open_browser, on_ready=on_ready)
     return session
 
 
-def run_review(cfg: Config, task: str | None, days: int = DAYS, src: Source | None = None,
-               open_browser: bool = True, on_ready=None) -> dict:
+def run_gold_review(cfg: Config, task: str | None, days: int = DAYS, *, src: Source | None = None,
+                    open_browser: bool = True,
+                    on_ready: Callable[[str], None] | None = None) -> dict:
     task = task or next((t for t in cfg.label_tasks if t in TASKS), "steer_intent")
-    session = serve(task, window_units(cfg, task, days, src), open_browser, on_ready)
+    session = serve(task, window_units(cfg, task, days, src), open_browser=open_browser,
+                    on_ready=on_ready)
     n = Counter(gold_latest(task).values())
     return {**session, "task": task, "gold": {c: n[c] for c, _d in TASKS[task].candidates}}
 

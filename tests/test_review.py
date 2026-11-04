@@ -412,12 +412,6 @@ def test_digest_lists_hold_only_text():
     print("ok digest_lists_hold_only_text")
 
 
-def main() -> int:
-    for name, fn in list(globals().items()):
-        if name.startswith("test_") and callable(fn):
-            fn()
-    return 0
-
-
 if __name__ == "__main__":
-    raise SystemExit(main())
+    import pytest
+    raise SystemExit(pytest.main([__file__, "-q"]))

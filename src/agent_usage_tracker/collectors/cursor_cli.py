@@ -27,16 +27,16 @@ from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Iterator
+from typing import Any, Iterable, Iterator
 
 from ..config import Config
-from ..event import (Batch, ActivityEvent, CollectorUnavailable, EventSession, UsageEvent,
+from ..event import (ActivityKind, Batch, ActivityEvent, CollectorUnavailable, EventSession, UsageEvent,
                      make_event_id)
 from ..repo_keys import RepoKeys
-from .activity_common import (Link, TurnAgg, add_call, blank_agg, commit_rows, ms_between, text_of,
+from .activity_common import (Link, TurnAgg, add_call, blank_tool_tally, commit_rows, ms_between, text_of,
                               turn_attrs)
 from .commits import commit_call, commit_dir, commit_shas
-from ._util import describe_files, epoch_ms_to_iso, warn_skipped
+from ._util import describe_files, epoch_ms_to_iso, str_or_none, warn_skipped
 from .cursor import connect_ro
 
 NAME = "cursor_cli"
@@ -150,7 +150,7 @@ def messages(con: sqlite3.Connection, ids: set[str]) -> dict[str, dict]:
     """The listed messages, plus every prompt (a prompt can be in no surviving root)."""
     out: dict[str, dict] = {}
 
-    def take(rows) -> None:
+    def take(rows: Iterable[tuple[str, Any]]) -> None:
         for k, v in rows:
             try:
                 m = json.loads(v)
@@ -175,7 +175,7 @@ class _Turn:
     msg: dict
     closed: bool = False
     listed: bool = True
-    agg: TurnAgg = field(default_factory=blank_agg)
+    agg: TurnAgg = field(default_factory=blank_tool_tally)
     acts: list = field(default_factory=list)         # (kind, seed, attrs) rows, emitted at close
     cids: set = field(default_factory=set)           # tool calls counted, by toolCallId
     more: dict = field(default_factory=dict)         # follow-up prompt text -> (blob id, message)
@@ -238,8 +238,7 @@ class _Activity:
         cmd = args.get("command") if isinstance(args, dict) else None
         wd = args.get("working_directory") if isinstance(args, dict) else None
         link.place(3, self.keys.of_cwd(wd))
-        hit = commit_call(cmd) if isinstance(cmd, str) else None
-        if not hit:
+        if not isinstance(cmd, str) or not (hit := commit_call(cmd)):
             return
         ex = EXIT_LINE.match(res)       # "Exit code: N\n\nCommand output:\n..." when it ran
         output = res[ex.end():] if ex else res
@@ -291,7 +290,7 @@ def _turn_rows(rid: str, turn: _Turn, sid: str, human: bool, origin: dict, creat
     rows: list = []
     ts = prompt_ts(text_of(turn.msg.get("content")), created)
 
-    def emit(kind: str, seed: str, attrs: dict, at: str | None = ts) -> None:
+    def emit(kind: ActivityKind, seed: str, attrs: dict, at: str | None = ts) -> None:
         rows.append(ActivityEvent(event_id=make_event_id(NAME, kind, f"{sid}|{seed}"), ts=at,
                                   agent=NAME, kind=kind, session_id=sid, turn_id=rid, attrs=attrs))
     # the first prompt keeps the (sid, rid) ids; a follow-up adds its blob id to them
@@ -323,8 +322,7 @@ def _turn_rows(rid: str, turn: _Turn, sid: str, human: bool, origin: dict, creat
 def _chat(path: str, con: sqlite3.Connection, meta: dict, cur: dict, idle: bool,
           keys: RepoKeys) -> tuple[list, int]:
     """Rows of every turn that closed since the last scan; updates `cur` (a copy) in place."""
-    sid = meta.get("agentId") if isinstance(meta.get("agentId"), str) and meta.get("agentId") \
-        else os.path.basename(os.path.dirname(path))
+    sid = str_or_none(meta.get("agentId")) or os.path.basename(os.path.dirname(path))
     # A subagent chat's prompts are its parent agent talking, not a person. Its parent is in
     # subagentInfo.parentAgentId, but it has no usage or human row to carry a session row.
     info = meta.get("subagentInfo")
@@ -436,18 +434,18 @@ def collect(cfg: Config, wm: dict) -> Iterator[Batch]:
     for path in sorted(glob.glob(str(cfg.home / ".cursor" / "projects" / "*" / "sdk-agent-store"
                                      / "*" / "index.db"))):
         have = set(sdk.get(path, {}).get("runs", ()))
-        events = _sdk(path, have)
-        if events is None:
+        runs = _sdk(path, have)
+        if runs is None:
             unreadable += 1
             continue
-        if not events:
+        if not runs:
             continue
 
-        def advance_sdk_watermark(p: str = path,
-                                  runs: list = sorted(have | {e.turn_id for e in events})) -> None:
-            sdk[p] = {"runs": runs}
+        def advance_sdk_watermark(p: str = path, seen: list = sorted(
+                have | {str(e.turn_id) for e in runs})) -> None:
+            sdk[p] = {"runs": seen}
 
-        yield events, advance_sdk_watermark
+        yield runs, advance_sdk_watermark
     warn_skipped(NAME, skipped, unaffected="human")
     if unreadable:
         raise CollectorUnavailable(f"{NAME}: {unreadable} store(s) locked or corrupt, left for the "

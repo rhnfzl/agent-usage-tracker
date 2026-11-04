@@ -73,6 +73,7 @@ def fetch(dsn: str, episode: str | None = None, day: str | None = None,
     """Raw rows for one view. Read-only; every SELECT is ids, keys, enums and numbers."""
     _check_one_selector(episode, day, label)
     start = end = _EPOCH
+    params: tuple
     if episode is not None:
         where, params = "e.episode_id::text LIKE %s", (_episode_prefix(episode) + "%",)
     elif day is not None:
@@ -87,9 +88,10 @@ def fetch(dsn: str, episode: str | None = None, day: str | None = None,
         where = ("e.episode_id::text = %s OR e.episode_id IN (SELECT m.episode_id FROM "
                  "agents.episode_member m JOIN agents.activity_event a ON a.session_id = "
                  "m.session_id WHERE a.kind = 'steer' AND a.event_id = %s)")
+        assert label is not None        # _check_one_selector
         params = (label.split(":")[0], label)
     with connect(dsn) as conn:
-        def q(sql, p):
+        def q(sql: str, p: tuple) -> list:
             return conn.execute(sql, p).fetchall()
         eps = episode_store.load_episodes(conn, where, params)
         sids = sorted({m["session_id"] for ep in eps for m in ep["members"]})
@@ -170,7 +172,8 @@ def build(raw: dict) -> dict:
             RULES.get(ep["outcome"], ep["outcome"])
         if ep["outcome_source"] == "manual" and man:
             rule += f" ({man[0][1]}, {man[0][2].astimezone():%Y-%m-%d %H:%M})"
-        own, steer_mix = [], Counter()
+        own: list[dict] = []
+        steer_mix: Counter = Counter()
         for i, lab in enumerate(labels):
             uid, unit = lab["unit_id"] or "", lab["unit"]
             if (unit == "episode" and uid == ep["id"]) or \
@@ -192,7 +195,7 @@ def build(raw: dict) -> dict:
     return {"episodes": out, "labels": rest, "history": raw["labels"]}
 
 
-def _short(x) -> str:
+def _short(x: object) -> str:
     return str(x)[:12]
 
 
@@ -297,7 +300,8 @@ def pages(view: dict, info: dict, title: str, label: str | None = None) -> Calla
 
 
 def run_inspect(cfg: Config, episode: str | None = None, day: str | None = None,
-                label: str | None = None, fetch_fn=fetch, serve_fn=review.serve) -> dict:
+                label: str | None = None, fetch_fn: Callable[..., dict] = fetch,
+                serve_fn: Callable[..., dict] = review.serve) -> dict:
     _check_one_selector(episode, day, label)
     dsn = cfg.require_pg("inspect")
     if episode is not None:

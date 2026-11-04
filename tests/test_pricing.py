@@ -107,8 +107,5 @@ def test_cli_sync_prices() -> None:
 
 
 if __name__ == "__main__":
-    for _name, _fn in sorted(list(globals().items())):
-        if _name.startswith("test_") and callable(_fn):
-            _fn()
-            print(f"ok {_name}")
-    print("all passed")
+    import pytest
+    raise SystemExit(pytest.main([__file__, "-q"]))

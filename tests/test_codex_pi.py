@@ -18,7 +18,6 @@ from __future__ import annotations
 import contextlib
 import io
 import json
-import os
 import sys
 import tempfile
 from pathlib import Path
@@ -537,23 +536,16 @@ def test_attrs_carry_no_text() -> None:
     print("ok attrs_carry_no_text (codex, pi)")
 
 
-def test_backfill_codex_pi() -> None:
+def test_backfill_codex_pi(monkeypatch) -> None:
     def check(home, repo):
-        prev = os.environ.get("AUT_STATE")
         with tempfile.TemporaryDirectory() as sd:
             state = Path(sd) / "state.json"
             state.write_text('{"collectors": {"codex": {"files": {"keep": {"off": 7}}}}}')
-            os.environ["AUT_STATE"] = str(state)
+            monkeypatch.setenv("AUT_STATE", str(state))
             before = (state.read_text(), state.stat().st_mtime_ns)
-            try:
-                with contextlib.redirect_stderr(io.StringIO()):
-                    c = scan.run_history_backfill(_cfg(home), ["codex", "pi"], dry_run=True,
-                                                 sessions=True, activity=True)
-            finally:
-                if prev is None:
-                    os.environ.pop("AUT_STATE", None)
-                else:
-                    os.environ["AUT_STATE"] = prev
+            with contextlib.redirect_stderr(io.StringIO()):
+                c = scan.run_history_backfill(_cfg(home), ["codex", "pi"], dry_run=True,
+                                             sessions=True, activity=True)
             assert (state.read_text(), state.stat().st_mtime_ns) == before, "state untouched"
         assert c["by_origin"] == {"interactive": 6, "automated": 2, "subagent": 1,
                                   "unknown": 11}, c
@@ -668,24 +660,6 @@ def test_malformed_usage_records_are_counted() -> None:
     print("ok malformed_usage_records_are_counted")
 
 
-def main() -> int:
-    test_codex_sessions()
-    test_codex_activity()
-    test_codex_carries_across_scans()
-    test_codex_fork_copy_is_not_activity()
-    test_codex_activity_errors_never_block_usage()
-    test_pi_usage_and_sessions()
-    test_pi_activity()
-    test_pi_carries_across_scans()
-    test_attrs_carry_no_text()
-    test_backfill_codex_pi()
-    test_pi_watermark_with_an_old_dev_is_not_read_again()
-    test_tailers_share_the_truncation_and_replacement_reset()
-    test_state_upgrades_run_once_at_load()
-    test_malformed_usage_records_are_counted()
-    print("\nALL PASS")
-    return 0
-
-
 if __name__ == "__main__":
-    raise SystemExit(main())
+    import pytest
+    raise SystemExit(pytest.main([__file__, "-q"]))
