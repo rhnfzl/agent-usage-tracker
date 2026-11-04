@@ -323,8 +323,8 @@ def _label_history(view: dict, label: str) -> str:
 def render(view: dict, info: dict, token: str, title: str, label: str | None = None) -> str:
     e = html.escape
     parts = [local_page.head("Evidence inspector", "64rem", _CSS) + f"""<h1>{e(title)}</h1>
-<p>Private page on this machine only; read-only. Titles and branch names come from this
-machine's logs and are never sent.</p>"""]
+<p>Private page on this machine only; its only write is the correction form it links to. Titles
+and branch names come from this machine's logs and are never sent.</p>"""]
     if view["episodes"]:
         parts.append(f'<p><a href="/{e(token)}/correct">Correct these episodes</a> (the '
                      "<code>aut episodes review</code> form)</p>")

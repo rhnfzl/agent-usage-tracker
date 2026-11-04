@@ -6,8 +6,8 @@ Locks the rules:
     share is shown as shared; commit outcomes are the latest per 7-digit prefix;
   - the outcome rule shown is the linker's, manual first;
   - the current label per unit is picked as agents.label_latest picks it, below tau is unknown;
-  - local text is escaped, the page is served only under its token, read-only, and its
-    correction link opens the existing review form;
+  - local text is escaped, the page is served only under its token, and its one write is its
+    correction link, which opens the existing review form;
   - `aut report` writes nothing and says it is retired.
 """
 
@@ -125,6 +125,7 @@ def test_page_escapes_and_serves_read_only_with_correction_link():
     assert "<script>x" not in page and "&lt;script&gt;x" in page and "a&amp;b" in page
     assert "<b>x" not in page and "&lt;b&gt;x" in page
     assert 'href="/tok/correct"' in page and "Every label row of" in page
+    assert "read-only" not in page
     assert "<form" not in page                                    # the inspector writes nothing
     written: list = []
     ready, box = threading.Event(), {}

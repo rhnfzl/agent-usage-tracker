@@ -293,12 +293,12 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _dispatch(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
+    if args.agents and args.cmd not in _AGENT_COMMANDS:     # it would run over everything
+        parser.error(f"--agents does not apply to {args.cmd}")
     if args.cmd in _NO_CONFIG_COMMANDS:
         _NO_CONFIG_COMMANDS[args.cmd](args)
         return
 
-    if args.agents and args.cmd not in _AGENT_COMMANDS:     # it would run over everything
-        parser.error(f"--agents does not apply to {args.cmd}")
     cfg = load_config()
     if args.cmd in _COMMANDS:
         _COMMANDS[args.cmd](cfg, args)

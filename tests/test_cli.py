@@ -9,6 +9,8 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+import urllib.error
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
@@ -162,6 +164,27 @@ def test_a_bug_keeps_its_traceback(world, monkeypatch):
         cli.main(["time", "add", "--minutes", "5"])
 
 
+@pytest.mark.parametrize("bug", [RecursionError(), NotImplementedError(),
+                                 RuntimeError("dictionary changed size during iteration")])
+def test_a_runtime_error_that_is_no_delivery_failure_keeps_its_traceback(world, monkeypatch, bug):
+    def fail(*a, **kw):
+        raise bug
+    monkeypatch.setattr(manual_time, "insert_pg", fail)
+    with pytest.raises(type(bug)):
+        cli.main(["time", "add", "--minutes", "5"])
+
+
+def test_a_webhook_with_no_fallback_is_one_line_and_exit_1(world, monkeypatch, capsys):
+    (world / "config.toml").write_text('machine = "t"\nagents = ["claude_code"]\n[transport]\n'
+                                       'webhook_url = "https://hook.example.test/x"\n'
+                                       'webhook_secret = "s"\n')
+    def down(*a, **kw):
+        raise urllib.error.URLError("refused")
+    monkeypatch.setattr(push, "_post_webhook", down)
+    assert cli.main(["scan"]) == 1
+    assert "aut: DeliveryError: webhook delivery failed" in capsys.readouterr().err
+
+
 def test_a_refused_time_add_returns_1_from_main(world, capsys):
     assert cli.main(["time", "add", "--minutes", "5", "--start", "2026-01-01 09:00"]) == 1
     assert "not both" in capsys.readouterr().err
@@ -186,8 +209,30 @@ def test_a_partial_export_exits_1_after_writing_the_csv(world, monkeypatch, caps
     assert cli.main(["--agents", "codex", "backfill", "--sessions-only", "--dry-run"]) == 1
 
 
+def test_a_stopped_activitywatch_does_not_fail_a_complete_csv(world, capsys):
+    (world / "config.toml").write_text('machine = "t"\nagents = ["activitywatch"]\n'
+                                       'activitywatch_url = "http://127.0.0.1:9"\n')
+    assert cli.main(["export", "--out", str(world / "usage.csv")]) == 0
+    assert "not usable" in capsys.readouterr().err      # the reason still shows
+    assert cli.main(["backfill", "--sessions-only", "--dry-run"]) == 0
+
+
+def test_a_failed_collector_counts_only_where_its_rows_are_kept(world, monkeypatch):
+    def unavailable(cfg, wm):
+        raise CollectorUnavailable("down")
+        yield
+    monkeypatch.setitem(scan.REGISTRY, "cursor_api",
+                        replace(scan.REGISTRY["cursor_api"], collect=unavailable))
+    monkeypatch.setitem(scan.REGISTRY, "codex", replace(scan.REGISTRY["codex"], collect=unavailable))
+    out = str(world / "usage.csv")
+    assert cli.main(["--agents", "cursor_api", "backfill", "--activity-only", "--dry-run"]) == 0
+    assert cli.main(["--agents", "cursor_api", "export", "--out", out]) == 1
+    assert cli.main(["--agents", "codex", "backfill", "--activity-only", "--dry-run"]) == 1
+
+
 def test_agents_is_refused_where_it_would_be_ignored_and_taken_on_both_sides(world, capsys):
-    for argv in (["--agents", "codex", "outcomes"], ["--agents", "codex", "label", "run"]):
+    for argv in (["--agents", "codex", "outcomes"], ["--agents", "codex", "label", "run"],
+                 ["--agents", "codex", "report"], ["--agents", "codex", "sync-prices"]):
         with pytest.raises(SystemExit) as exc:
             cli.main(argv)
         assert exc.value.code == 2

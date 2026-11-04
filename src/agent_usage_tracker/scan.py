@@ -214,15 +214,18 @@ def reset_watermarks(agents: Sequence[str]) -> None:
     save_state(state, agents)
 
 
-def _one_shot_batches(name: str, cfg: Config, wm: dict, failed: set[str]) -> Iterator[Batch]:
+def _one_shot_batches(name: str, cfg: Config, wm: dict, failed: set[str],
+                      keeps: set[str]) -> Iterator[Batch]:
     """All of a collector's batches for a one-shot command, which calls each batch's advance
-    itself: an unavailable source ends that pass, and its name goes into `failed`."""
+    itself: an unavailable source ends that pass, and its name goes into `failed` when the collector
+    can emit a kind of row in `keeps`. Otherwise the command is missing nothing."""
     for batches in drain(REGISTRY[name].collect, cfg, wm, name):
         try:
             yield from batches
         except CollectorUnavailable as exc:
             print(f"aut: {exc}", file=sys.stderr)
-            failed.add(name)
+            if REGISTRY[name].rows & keeps:
+                failed.add(name)
 
 
 def run_export(cfg: Config, agents: Sequence[str], out: TextIO) -> tuple[int, int, set[str]]:
@@ -230,7 +233,7 @@ def run_export(cfg: Config, agents: Sequence[str], out: TextIO) -> tuple[int, in
     Column order matches push.COLUMNS / the sink table, so it loads via COPY. Useful for
     an offline bulk backfill or a bridged load where the live transport is not wired yet.
     Returns (written, skipped, failed): skipped counts records with a missing/invalid ts, failed
-    names the collectors with a source they could not read, so the CSV is partial."""
+    names the usage collectors with a source they could not read, so the CSV is partial."""
     writer = csv.writer(out)
     writer.writerow(COLUMNS)
     n = skipped = 0
@@ -240,7 +243,7 @@ def run_export(cfg: Config, agents: Sequence[str], out: TextIO) -> tuple[int, in
         # has no ON CONFLICT to fall back on, so a session stored under two project paths would
         # land twice in the target table. See the note in run_scan.
         seen: set[str] = set()
-        for events, advance_watermark in _one_shot_batches(name, cfg, {}, failed):
+        for events, advance_watermark in _one_shot_batches(name, cfg, {}, failed, {"usage"}):
             for e in events:
                 if not isinstance(e, UsageEvent):   # the CSV is agents.usage_event only
                     continue
@@ -343,10 +346,11 @@ def run_history_backfill(cfg: Config, agents: Sequence[str], *, dry_run: bool,
     dsn = "" if dry_run else cfg.require_pg("backfill --sessions-only/--activity-only without "
                                             "--dry-run")
     history = _History(dsn, dry_run, sessions=sessions, activity=activity)
+    keeps = {kind for kind, on in (("session", sessions), ("activity", activity)) if on}
     for name in agents:
         seen: set[str] = set()                      # same session under two paths: one row
         for events, advance_watermark in _one_shot_batches(name, cfg, {},
-                                                           history.counts["failed"]):
+                                                           history.counts["failed"], keeps):
             for e in events:
                 history.take(e, seen, name)
             advance_watermark()                 # advances only the throwaway wm

@@ -27,6 +27,7 @@ from ._util import describe_files, describe_full_scan
 MAX_DRAIN_PASSES = 100_000
 
 Collect = Callable[[Config, dict], Iterator[Batch]]
+_USAGE_ONLY = frozenset({"usage"})      # no session or activity rows, see CONTRACT.md
 
 
 @dataclass(frozen=True)
@@ -34,18 +35,20 @@ class Collector:
     collect: Collect
     describe: Callable[[Config, dict], str] = describe_files    # one line for `aut status`
     after_scan: Callable[[Config], object] | None = None        # never run by a dry run
+    # What it can emit: a one-shot command is partial only if a collector it keeps rows from failed.
+    rows: frozenset[str] = frozenset({"usage", "session", "activity"})
 
 
 REGISTRY: dict[str, Collector] = {
     claude_code.NAME: Collector(claude_code.collect),
     codex.NAME: Collector(codex.collect),
-    cursor.NAME: Collector(cursor.collect, describe_full_scan),
-    cursor_sdk.NAME: Collector(cursor_sdk.collect, describe_full_scan),
-    cursor_api.NAME: Collector(cursor_api.collect, cursor_api.describe),
+    cursor.NAME: Collector(cursor.collect, describe_full_scan, rows=_USAGE_ONLY),
+    cursor_sdk.NAME: Collector(cursor_sdk.collect, describe_full_scan, rows=_USAGE_ONLY),
+    cursor_api.NAME: Collector(cursor_api.collect, cursor_api.describe, rows=_USAGE_ONLY),
     cursor_cli.NAME: Collector(cursor_cli.collect, cursor_cli.describe),
     pi.NAME: Collector(pi.collect),
     activitywatch.NAME: Collector(activitywatch.collect, activitywatch.describe,
-                                  activitywatch.purge),
+                                  activitywatch.purge, rows=frozenset({"time"})),
 }
 
 

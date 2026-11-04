@@ -64,6 +64,10 @@ TIME_TABLE = "agents.time_interval"
 _ERROR_MAX = 300
 
 
+class DeliveryError(RuntimeError):
+    """Rows could not be delivered and no route is left: an outage main reports on one line."""
+
+
 def _post_webhook(url: str, secret: str, batch: list[UsageEvent],
                   extra_headers: dict[str, str] | None = None) -> None:
     body = json.dumps({"events": [e.to_dict() for e in batch]}).encode("utf-8")
@@ -188,8 +192,8 @@ class _Sender:
         if cfg.pg_dsn:
             insert_pg(cfg.pg_dsn, batch)
             return
-        raise RuntimeError("webhook delivery failed and no PG fallback: "
-                           f"{local_error(webhook_err) if webhook_err else 'not sent'}") \
+        raise DeliveryError("webhook delivery failed and no PG fallback: "
+                            f"{local_error(webhook_err) if webhook_err else 'not sent'}") \
             from webhook_err
 
     def _post_usage(self, batch: list[Row], url: str, secret: str) -> Exception | None:
@@ -247,9 +251,10 @@ def local_error(exc: BaseException) -> str:
 
 
 def is_operational_failure(exc: Exception) -> bool:
-    """An outage, not a bug: a sink or webhook that failed, or a file that could not be read or
-    written. By module name because the driver is an optional extra; its errors are not imported."""
-    return isinstance(exc, (*HTTP_ERRORS, RuntimeError)) \
+    """An outage, not a bug: a sink or webhook that failed, or an OSError, the OS's own report on a
+    file or socket (the line keeps its errno and path). Any other RuntimeError is a bug.
+    By module name because the driver is an optional extra; its errors are not imported."""
+    return isinstance(exc, (*HTTP_ERRORS, DeliveryError)) \
         or type(exc).__module__.partition(".")[0] == "psycopg"
 
 
