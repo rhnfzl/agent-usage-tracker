@@ -42,7 +42,7 @@ from .collectors import pi as _pi
 from .collectors.activity_common import (COMMIT_LINE, commit_call, first_record, ms_between,
                                           text_of)
 from .collectors._util import epoch_ms_to_iso, safe_int
-from .config import Config
+from .config import Config, load_psycopg
 from .redact import clean_text
 
 _TITLE = re.compile(r'"(?:aiTitle|customTitle)":\s*"((?:[^"\\]|\\.)*)"')
@@ -586,7 +586,7 @@ def _month_bounds(month: str | None) -> tuple[str, datetime, datetime]:
 
 
 def load_month(dsn: str, start: datetime, end: datetime) -> list[dict]:
-    import psycopg  # optional dependency; install with the [postgres] extra
+    psycopg = load_psycopg()
 
     with psycopg.connect(dsn, connect_timeout=15) as conn:
         return load_episodes(conn, "e.first_ts >= %s AND e.first_ts < %s", (start, end))
@@ -613,7 +613,7 @@ def load_episodes(conn, where: str, params: tuple) -> list[dict]:
 
 def answered_sessions(dsn: str, sessions: list[str]) -> set[str]:
     """Seed sessions that already have a confirm or reject correction (the episodes to hide)."""
-    import psycopg  # optional dependency; install with the [postgres] extra
+    psycopg = load_psycopg()
 
     with psycopg.connect(dsn, connect_timeout=15) as conn:
         rows = conn.execute(
@@ -626,7 +626,7 @@ def answered_sessions(dsn: str, sessions: list[str]) -> set[str]:
 def insert_corrections(dsn: str, rows: list[dict]) -> None:
     if not rows:
         return
-    import psycopg  # optional dependency; install with the [postgres] extra
+    psycopg = load_psycopg()
 
     with psycopg.connect(dsn, connect_timeout=15) as conn:
         with conn.cursor() as cur:

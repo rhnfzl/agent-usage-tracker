@@ -18,7 +18,7 @@ from typing import Callable
 
 from ..collectors import activitywatch as aw
 from ..collectors.activity_common import text_of
-from ..config import Config
+from ..config import Config, load_psycopg
 from ..event import make_event_id
 from ..redact import redact
 from ..repo_keys import RepoKeys
@@ -94,7 +94,7 @@ class SourceUnavailable(RuntimeError):
 
 
 def _sql(dsn: str, sql: str, params: tuple) -> list[tuple]:
-    import psycopg  # optional dependency; install with the [postgres] extra
+    psycopg = load_psycopg()
 
     with psycopg.connect(dsn, connect_timeout=15) as conn:
         return conn.execute(sql, params).fetchall()

@@ -13,8 +13,11 @@ import contextlib
 import io
 import json
 import os
+import sys
 import tempfile
 from pathlib import Path
+from agent_usage_tracker import cli, push  # noqa: E402
+from agent_usage_tracker.config import Config, load_config  # noqa: E402
 from agent_usage_tracker.state import atomic_write_text, load_json_dict, load_state  # noqa: E402
 
 
@@ -104,12 +107,61 @@ def test_atomic_write_keeps_the_old_file_on_failure() -> None:
     print("ok atomic_write_keeps_the_old_file_on_failure")
 
 
+def test_config_errors_and_permission_warning() -> None:
+    prev = os.environ.get("AUT_CONFIG")
+    with tempfile.TemporaryDirectory() as d:
+        p = Path(d) / "config.toml"
+        os.environ["AUT_CONFIG"] = str(p)
+        try:
+            p.write_text("not = [valid")
+            try:
+                load_config()
+                raise AssertionError("bad TOML must be an operator error")
+            except SystemExit as exc:
+                assert str(p) in str(exc) and "TOML" in str(exc), exc
+            if os.name != "nt":
+                p.write_text('[transport]\nwebhook_secret = "env:AUT_TEST_UNSET"\n')
+                p.chmod(0o644)
+                with contextlib.redirect_stderr(io.StringIO()) as err:
+                    load_config()
+                assert err.getvalue() == "", "an env: reference holds no secret"
+                p.write_text('[transport]\nwebhook_secret = "plain"\n')
+                with contextlib.redirect_stderr(io.StringIO()) as err:
+                    load_config()
+                assert "holds a secret" in err.getvalue(), err.getvalue()
+        finally:
+            os.environ.pop("AUT_CONFIG") if prev is None else os.environ.update(AUT_CONFIG=prev)
+    print("ok config_errors_and_permission_warning")
+
+
+def test_missing_psycopg_names_the_extra_and_spares_the_heartbeat() -> None:
+    cfg = Config(machine="m", agents=(), webhook_url=None, webhook_secret=None, pg_dsn="pg://x",
+                 home=Path("."))
+    row = dict.fromkeys(push.SCAN_COLUMNS)
+    prev = sys.modules.get("psycopg")
+    sys.modules["psycopg"] = None           # makes `import psycopg` raise ImportError
+    try:
+        try:
+            push.insert_pg("pg://x", [])
+            raise AssertionError("a missing driver must be an operator error")
+        except SystemExit as exc:
+            assert "agent-usage-tracker[postgres]" in str(exc), exc
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            cli._deliver_scan_rows(cfg, [row])      # best effort: returns
+        assert "heartbeat not delivered" in err.getvalue()
+    finally:
+        sys.modules.pop("psycopg") if prev is None else sys.modules.update(psycopg=prev)
+    print("ok missing_psycopg_names_the_extra_and_spares_the_heartbeat")
+
+
 def main() -> int:
     test_missing_state_is_silent()
     test_valid_state_round_trips()
     test_corrupt_json_warns_and_preserves()
     test_wrong_shape_warns()
     test_atomic_write_keeps_the_old_file_on_failure()
+    test_config_errors_and_permission_warning()
+    test_missing_psycopg_names_the_extra_and_spares_the_heartbeat()
     print("\nALL PASS")
     return 0
 

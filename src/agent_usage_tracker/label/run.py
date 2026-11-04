@@ -15,7 +15,7 @@ from collections import Counter
 from datetime import date, datetime, timedelta, timezone
 
 from .. import __version__
-from ..config import Config
+from ..config import Config, load_psycopg
 from ..push import scrub_error, send_activity_rows, send_scan_rows
 from ..state import atomic_write_text, collector_wm, load_json_dict, load_state, save_state
 from .backends import make_backend
@@ -68,7 +68,7 @@ def _note_prompt(day: date, labels: list[dict], episodes: list[dict]) -> str:
 
 
 def _insert_note(dsn: str, day: date, text: str, model_id: str) -> None:
-    import psycopg  # optional dependency; install with the [postgres] extra
+    psycopg = load_psycopg()
 
     with psycopg.connect(dsn, connect_timeout=15) as conn:
         conn.execute("INSERT INTO agents.daily_note (day, text, model_id, created_at) "

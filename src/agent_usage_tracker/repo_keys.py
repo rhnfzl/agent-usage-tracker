@@ -12,7 +12,7 @@ import sys
 from urllib.parse import urlparse
 
 from .git_safe import git_argv, git_env
-from .state import state_path
+from .state import state_path, warn_if_group_readable
 
 
 def repo_identity(url: str) -> str:
@@ -49,8 +49,7 @@ def _load_salt(configured: str | None) -> bytes:
             finally:
                 tmp.unlink(missing_ok=True)
         salt = p.read_text().strip()
-        if os.name != "nt" and p.stat().st_mode & 0o077:     # Windows has no POSIX modes
-            print(f"aut: warning: {p} is group/other-readable; run: chmod 600 {p}", file=sys.stderr)
+        warn_if_group_readable(p)
     except OSError:
         return b""
     if len(salt) < 32:

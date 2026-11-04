@@ -60,6 +60,13 @@ def save_state(state: dict) -> None:
     atomic_write_text(state_path(), json.dumps(state, indent=1))
 
 
+def warn_if_group_readable(path: Path) -> None:
+    """For a file that holds a secret. Windows has no POSIX modes, so the check is off there."""
+    if os.name != "nt" and path.stat().st_mode & 0o077:
+        print(f"aut: warning: {path} holds a secret but is group/other-accessible; "
+              f"run: chmod 600 {path}", file=sys.stderr)
+
+
 def atomic_write_text(path: Path, text: str) -> None:
     """Write through a unique temp file and a rename, so a crash or a second process never leaves
     a half-written file. Creates the parent directory."""

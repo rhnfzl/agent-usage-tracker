@@ -8,12 +8,12 @@ from __future__ import annotations
 import os
 import re
 import socket
-import sys
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from .label.names import TASK_NAMES
+from .state import warn_if_group_readable
 
 ALL_AGENTS = ("claude_code", "codex", "cursor", "cursor_sdk", "cursor_api", "cursor_cli", "pi",
               "activitywatch")
@@ -28,6 +28,16 @@ def config_path() -> Path:
         return Path(os.environ["AUT_CONFIG"]).expanduser()
     base = os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config"))
     return Path(base) / "agent-usage-tracker" / "config.toml"
+
+
+def load_psycopg():
+    """The optional Postgres driver, or the operator's error naming the extra that installs it."""
+    try:
+        import psycopg
+    except ImportError as exc:
+        raise SystemExit("this needs the Postgres driver, which is not usable here: install "
+                         f"agent-usage-tracker[postgres] ({exc})") from None
+    return psycopg
 
 
 def _resolve(value):
@@ -106,8 +116,11 @@ def load_config() -> Config:
     path = config_path()
     data: dict = {}
     if path.exists():
-        with open(path, "rb") as fh:
-            data = tomllib.load(fh)
+        try:
+            with open(path, "rb") as fh:
+                data = tomllib.load(fh)
+        except (tomllib.TOMLDecodeError, UnicodeDecodeError, OSError) as exc:
+            raise SystemExit(f"config: {path} is not readable TOML ({exc})") from None
 
     transport = data.get("transport", {})
     machine = data.get("machine") or socket.gethostname().split(".")[0]
@@ -152,10 +165,11 @@ def load_config() -> Config:
     cf_id = _resolve(transport.get("cf_access_client_id"))
     cf_secret = _resolve(transport.get("cf_access_client_secret"))
     salt = _resolve(data.get("repo_key_salt"))
-    # If the config holds a secret, warn when it is group/other-accessible (should be chmod 600).
-    if path.exists() and (webhook_secret or pg_dsn or cf_secret or salt) and (path.stat().st_mode & 0o077):
-        print(f"aut: warning: {path} holds a secret but is group/other-accessible; "
-              f"run: chmod 600 {path}", file=sys.stderr)
+    # Only a value written in the file counts: an env:VAR reference keeps the secret out of it.
+    written = (transport.get("webhook_secret"), transport.get("pg_dsn"),
+               transport.get("cf_access_client_secret"), data.get("repo_key_salt"))
+    if path.exists() and any(v and not str(v).startswith("env:") for v in written):
+        warn_if_group_readable(path)
 
     return Config(
         machine=machine,

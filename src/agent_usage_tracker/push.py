@@ -20,7 +20,7 @@ import urllib.request
 from typing import Callable
 from urllib.parse import urlparse
 
-from .config import Config
+from .config import Config, load_psycopg
 from .event import ActivityEvent, TimeInterval, UsageEvent
 
 # Column order shared with the homelab schema (agents.usage_event). Keep in sync.
@@ -117,7 +117,7 @@ def insert_pg(dsn: str, batch: list) -> None:
     """Usage rows, their session rows, and the activity and time rows of the batch in ONE
     transaction: all land or none does, so a raise leaves the watermark where it was and the batch
     is re-sent."""
-    import psycopg  # optional dependency; install with the [postgres] extra
+    psycopg = load_psycopg()
 
     usage, acts, times = _split(batch)
     rows = [tuple(e.to_dict()[c] for c in COLUMNS) for e in usage]
@@ -139,7 +139,7 @@ def send_activity_rows(dsn: str, acts: list[ActivityEvent]) -> None:
     """Activity rows only (the activity backfill). Idempotent on (event_id, ts); raises on failure."""
     if not acts:
         return
-    import psycopg  # optional dependency; install with the [postgres] extra
+    psycopg = load_psycopg()
 
     with psycopg.connect(dsn, connect_timeout=15) as conn:
         with conn.cursor() as cur:
@@ -151,7 +151,7 @@ def send_session_rows(dsn: str, rows: list[dict]) -> None:
     """Session rows only (the sessions-only backfill). Idempotent on event_id; raises on failure."""
     if not rows:
         return
-    import psycopg  # optional dependency; install with the [postgres] extra
+    psycopg = load_psycopg()
 
     with psycopg.connect(dsn, connect_timeout=15) as conn:
         with conn.cursor() as cur:
@@ -243,7 +243,10 @@ def send_scan_rows(cfg: Config, rows: list[dict]) -> None:
         # shortcut: webhook path for scan rows not built; upgrade when a machine runs webhook-only.
         print("aut: note: scan heartbeat not sent (needs transport.pg_dsn)", file=sys.stderr)
         return
-    import psycopg  # optional dependency; install with the [postgres] extra
+    try:
+        psycopg = load_psycopg()
+    except SystemExit as exc:           # a heartbeat never stops a scan: its callers catch Exception
+        raise RuntimeError(str(exc)) from None
 
     cols = ", ".join(SCAN_COLUMNS)
     placeholders = ", ".join(["%s"] * len(SCAN_COLUMNS))

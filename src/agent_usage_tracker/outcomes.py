@@ -40,7 +40,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from . import __version__
-from .config import Config
+from .config import Config, load_psycopg
 from .git_safe import git_argv, git_env
 from .push import scrub_error, send_scan_rows
 from .repo_keys import RepoKeys, repo_identity
@@ -440,7 +440,7 @@ def _cache_path() -> Path:
 
 
 def _load_rows(dsn: str) -> list[dict]:
-    import psycopg  # optional dependency; install with the [postgres] extra
+    psycopg = load_psycopg()
 
     with psycopg.connect(dsn, connect_timeout=15) as conn:
         rows = conn.execute(
@@ -452,7 +452,7 @@ def _load_rows(dsn: str) -> list[dict]:
 
 
 def _load_stored(dsn: str) -> dict[tuple[str, str], tuple]:
-    import psycopg  # optional dependency; install with the [postgres] extra
+    psycopg = load_psycopg()
 
     with psycopg.connect(dsn, connect_timeout=15) as conn:
         rows = conn.execute(
@@ -463,7 +463,7 @@ def _load_stored(dsn: str) -> dict[tuple[str, str], tuple]:
 
 
 def _insert(dsn: str, rows: list[dict]) -> None:
-    import psycopg  # optional dependency; install with the [postgres] extra
+    psycopg = load_psycopg()
 
     with psycopg.connect(dsn, connect_timeout=15) as conn:
         with conn.cursor() as cur:
@@ -578,7 +578,7 @@ def build_manual_outcome(cfg: Config, outcome: str, cwd: str, session: str | Non
 
 
 def insert_manual(dsn: str, row: dict) -> None:
-    import psycopg  # optional dependency; install with the [postgres] extra
+    psycopg = load_psycopg()
 
     with psycopg.connect(dsn, connect_timeout=15) as conn:
         conn.execute("INSERT INTO agents.manual_outcome (session_id, outcome, ts, repo_key) "

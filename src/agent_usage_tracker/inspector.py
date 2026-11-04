@@ -16,7 +16,7 @@ from collections import Counter
 from datetime import datetime, timedelta, timezone
 
 from . import review
-from .config import Config
+from .config import Config, load_psycopg
 
 # (shown name, link row attrs): a commit key is a printed commit (commit_keys) or a quoted SHA
 # (sha_refs), both HMACs of the first 7 hex, so they meet in one type
@@ -56,7 +56,7 @@ def _episode_prefix(episode: str) -> str:
 def fetch(dsn: str, episode: str | None = None, day: str | None = None,
           label: str | None = None) -> dict:
     """Raw rows for one view. Read-only; every SELECT is ids, keys, enums and numbers."""
-    import psycopg  # optional dependency; install with the [postgres] extra
+    psycopg = load_psycopg()
 
     start = end = _EPOCH
     if episode is not None:
