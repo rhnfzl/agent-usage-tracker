@@ -14,7 +14,6 @@ persisted so resuming from a byte offset keeps the right attribution across scan
 
 from __future__ import annotations
 
-import copy
 import glob
 import os
 from collections import Counter
@@ -27,8 +26,8 @@ from ..repo_keys import RepoKeys, repo_identity
 from .activity_common import (Link, TurnAgg, add_call, blank_tool_tally, commit_rows, first_record,
                               ms_between, text_of, turn_attrs)
 from .commits import commit_call, commit_dir, commit_shas
-from ._util import (count_field, dict_or_empty, parse_record, project_name, read_new_lines, safe_int,
-                    same_file, str_or_none, warn_skipped)
+from ._util import (changed_files, count_field, dict_or_empty, parse_record, project_name, safe_int,
+                    str_or_none, warn_skipped)
 
 NAME = "codex"
 # The watermark's format. Older state is upgraded once by _upgrade_state; delete a step from there
@@ -450,21 +449,10 @@ def collect(cfg: Config, wm: dict) -> Iterator[Batch]:
     files: dict = wm["files"]
     skipped: Counter = Counter()
 
-    for path in session_files(cfg.home):
-        try:
-            st = os.stat(path)
-        except OSError:         # gone since the glob: nothing to read, and no offset to lose
-            continue
-        prev = files.get(path) or {}
-        if not same_file(prev, st):
-            prev = _fresh_state(st.st_dev, st.st_ino)
-        off = safe_int(prev.get("off"))
-        if st.st_size <= off:
-            continue
+    def fresh(st: os.stat_result) -> dict:
+        return _fresh_state(st.st_dev, st.st_ino)
 
-        lines, new_off = read_new_lines(path, off)
-        # A deep copy: only advance_watermark() may publish this chunk's state into the watermark.
-        cur = copy.deepcopy(prev)
+    for path, cur, off, lines, new_off in changed_files(session_files(cfg.home), files, fresh):
         recs = parsed_records(lines, off, cur, skipped)
         events = _chunk_rows(path, recs, cur, keys, skipped)
         cur["off"] = new_off

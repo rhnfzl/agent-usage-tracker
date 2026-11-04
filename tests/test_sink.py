@@ -22,7 +22,7 @@ from agent_usage_tracker.collectors import cursor_api  # noqa: E402
 from agent_usage_tracker.config import AutError, Config  # noqa: E402
 from agent_usage_tracker.event import (ActivityEvent, CollectorUnavailable, EventSession,  # noqa: E402
                                        UsageEvent)
-from test_activity import _fake_psycopg  # noqa: E402
+from fake_psycopg import _fake_psycopg  # noqa: E402
 
 WEBHOOK = "https://hooks.example/h"
 DSN = "postgresql://localhost/agents"

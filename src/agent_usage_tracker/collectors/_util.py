@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 import sys
 from collections import Counter
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Callable, Iterable, Iterator
 
 # Cap lines read per file per scan so a huge first-scan/backfill file can't spike memory.
 # The offset is committed at the cap, so the next scan simply continues from there.
@@ -148,6 +149,27 @@ def scan_file(path: str, fstate: dict) -> tuple[list[bytes], dict]:
     new_fstate["ino"] = st.st_ino
     new_fstate["off"] = new_off
     return lines, new_fstate
+
+
+def changed_files(paths: Iterable[str], files: dict,
+                  fresh: Callable[[os.stat_result], dict]) -> Iterator[tuple[str, dict, int, list[bytes], int]]:
+    """Each file of `paths` with bytes past its watermark entry in `files`: (path, private copy of
+    the entry, offset read from, complete new lines, new offset). `fresh(st)` is the entry of a
+    file seen for the first time or replaced. The copy is deep so that only the caller's watermark
+    callback can publish a chunk's state."""
+    for path in paths:
+        try:
+            st = os.stat(path)
+        except OSError:         # gone since the glob: nothing to read, and no offset to lose
+            continue
+        prev = files.get(path) or {}
+        if not same_file(prev, st):
+            prev = fresh(st)
+        off = safe_int(prev.get("off"))
+        if st.st_size <= off:
+            continue
+        lines, new_off = read_new_lines(path, off)
+        yield path, copy.deepcopy(prev), off, lines, new_off
 
 
 def _strip_worktree(parts: list[str]) -> list[str] | None:

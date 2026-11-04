@@ -13,7 +13,6 @@ the header cwd (the encoded directory name cannot be decoded: Pi uses dashes for
 
 from __future__ import annotations
 
-import copy
 import glob
 import os
 import re
@@ -27,8 +26,8 @@ from ..repo_keys import RepoKeys
 from .activity_common import (Link, TurnAgg, add_call, blank_tool_tally, commit_rows, first_record, ms_between,
                               pad_pending, text_of, tool_key, turn_attrs)
 from .commits import commit_call, commit_dir, commit_shas
-from ._util import (count_field, dict_or_empty, parse_record, project_name, read_new_lines, safe_int,
-                    same_file, str_or_none, warn_skipped)
+from ._util import (changed_files, count_field, dict_or_empty, parse_record, project_name, safe_int,
+                    str_or_none, warn_skipped)
 
 NAME = "pi"
 _UUID = re.compile(r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$")
@@ -333,21 +332,10 @@ def collect(cfg: Config, wm: dict) -> Iterator[Batch]:
     keys = RepoKeys(cfg.repo_key_salt)
     skipped: Counter = Counter()
 
-    for path in session_files(cfg.home):
-        try:
-            st = os.stat(path)
-        except OSError:         # gone since the glob: nothing to read, and no offset to lose
-            continue
-        prev = files.get(path) or {}
-        if not same_file(prev, st):
-            prev = {"off": 0, "dev": st.st_dev, "ino": st.st_ino, "model": None}
-        off = safe_int(prev.get("off"))
-        if st.st_size <= off:
-            continue
+    def fresh(st: os.stat_result) -> dict:
+        return {"off": 0, "dev": st.st_dev, "ino": st.st_ino, "model": None}
 
-        lines, new_off = read_new_lines(path, off)
-        # A deep copy: only advance_watermark() may publish this chunk's state into the watermark.
-        cur = copy.deepcopy(prev)
+    for path, cur, _off, lines, new_off in changed_files(session_files(cfg.home), files, fresh):
         events = _chunk_rows(path, lines, cur, keys, skipped)
         cur["off"] = new_off
         # shortcut: the last open turn of a file is emitted only when a later scan reads its end

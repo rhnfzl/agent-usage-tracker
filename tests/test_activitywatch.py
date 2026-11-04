@@ -8,8 +8,9 @@ Locks the rules:
     the watermark moves only on commit, and a re-run of a range gives the same event ids;
   - aw-server down or without this host's buckets: no rows and no error;
   - deny-list and idle apps are dropped before anything leaves the machine, counts only logged;
-  - every redaction pattern, the 300-char cut, and the per-machine title switch;
-  - the app -> category mapping, browser work titles, unknown apps, macOS app categories;
+  - the per-machine title switch (every redaction pattern is in tests/test_redact.py);
+  - the app -> category mapping, browser work titles and unknown apps (macOS app categories are in
+    tests/test_activitywatch_macos.py);
   - the purge is bounded and never fails the scan, and a dry run purges nothing;
   - `aut time add` validation; time rows ride the same Postgres transaction as usage.
 """
@@ -20,10 +21,8 @@ import contextlib
 import http.client
 import io
 import json
-import os
 import sys
 import tempfile
-import time
 import urllib.error
 import urllib.parse
 from datetime import datetime, timedelta, timezone
@@ -35,11 +34,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from agent_usage_tracker import cli, push, scan  # noqa: E402
 from agent_usage_tracker.collectors import REGISTRY  # noqa: E402
 from agent_usage_tracker.collectors import activitywatch as aw  # noqa: E402
-from agent_usage_tracker.config import (ALL_AGENTS, AW_CATEGORIES, DEFAULT_AGENTS, AutError,  # noqa: E402
+from agent_usage_tracker.config import (ALL_AGENTS, DEFAULT_AGENTS, AutError,  # noqa: E402
                                         Config, load_config)
-from agent_usage_tracker.redact import PATTERNS, clean_text  # noqa: E402
 from agent_usage_tracker.event import CollectorUnavailable, TimeInterval, UsageEvent  # noqa: E402
-from test_activity import _fake_psycopg  # noqa: E402
+from fake_psycopg import _fake_psycopg  # noqa: E402
 
 HOST = "host-a"
 WIN = f"aw-watcher-window_{HOST}"
@@ -277,43 +275,6 @@ def test_deny_list_and_idle_dropped() -> None:
     print("ok deny_list_and_idle_dropped")
 
 
-def test_redaction_each_pattern() -> None:
-    a24 = "Ab3" * 8
-    samples = {
-        "url_credentials": ("open https://" + "user:" + "hunter2@example.test/x", "hunter2"),
-        "assignment": ("run with password=" + "S3cretValue", "S3cretValue"),
-        "jwt": ("token eyJ" + "hbGciOi.eyJ" + "zdWIiOi.c2lnbmF0dXJl here", "c2lnbmF0dXJl"),
-        "sk_key": ("key sk-" + "proj-" + a24, a24),
-        "github_pat": ("github" + "_pat_" + a24 + "xyz", a24),
-        "github_token": ("gh" + "p_" + a24, a24),
-        "slack_token": ("xo" + "xb-" + "1234567890-abcdef", "1234567890-abcdef"),
-        "aws_key": ("AK" + "IA" + "ABCDEFGHIJ234567 used", "ABCDEFGHIJ234567"),
-        "email": ("mail from someone.x+tag@example.test", "someone.x+tag@example.test"),
-        "long_hex": ("commit " + "0123456789abcdef" * 2 + " done", "0123456789abcdef" * 2),
-        "long_base64": ("blob " + "QUJDREVGR0hJSktMTU5PUFFSU1RVVldY" + "==", "QUJDREVGR0hJSktMTU5PUFFSU1RV"),
-    }
-    # environment-variable and header forms of the same secrets (values synthetic)
-    for text, secret in (("PGPASS" + "WORD=hunter2 psql -h db", "hunter2"),
-                         ("export DB_PASS" + "WORD=hunter2", "hunter2"),
-                         ("MYSQL_P" + "WD=hunter2 mysql", "hunter2"),
-                         ("export GITHUB_TO" + "KEN=abc123", "abc123"),
-                         ("access_to" + "ken=abcdEFGH1234", "abcdEFGH1234"),
-                         ("export AWS_SECRET_ACCESS_K" + "EY=abcd/efgh", "abcd/efgh"),
-                         ("Authorization: Bea" + "rer abc123def", "abc123def")):
-        out = clean_text(text)
-        assert secret not in out and "[redacted]" in out, (text, out)
-    samples["bearer"] = ("curl -H 'Authorization: Bearer " + "zyx987'", "zyx987")
-    names = {name for name, _, _ in PATTERNS}
-    for name, (text, secret) in samples.items():
-        out = clean_text("Fix login - " + text)
-        assert secret not in out, (name, out)
-        assert out.startswith("Fix login - ") and "[redacted]" in out, (name, out)
-    assert names == set(samples) - {"long_hex", "long_base64"} | {"long_run"}, names
-    assert clean_text("A plain editor title") == "A plain editor title"
-    assert len(clean_text("word " * 200)) == 300
-    print("ok redaction_each_pattern")
-
-
 def test_titles_switch_and_redacted_title_sent() -> None:
     now = CREATED + timedelta(hours=4)
     t = CREATED + timedelta(minutes=10)
@@ -361,159 +322,6 @@ def test_mapping() -> None:
         assert aw.classify(cfg, "Firefox", "Dashboard", "http://localhost:3000/") == (
             "web-work", True, "browser_work_title")
     print("ok mapping")
-
-
-def test_macos_category() -> None:
-    pre = "public.app-category."
-    table = {f"App {k}": pre + k for k in (
-        "developer-tools", "business", "productivity", "graphics-design", "music", "video",
-        "entertainment", "games", "action-games", "social-networking", "sports", "lifestyle",
-        "news", "photography", "utilities", "finance")}
-    table["Odd App"] = "com.example.not-a-category"
-    want = {"developer-tools": ("dev", True), "business": ("comms", True),
-            "productivity": ("docs", True), "graphics-design": ("design", True),
-            **dict.fromkeys(("music", "video", "entertainment", "games", "action-games",
-                             "social-networking", "sports", "lifestyle", "news", "photography"),
-                            ("media", False)),
-            "utilities": ("other", False), "finance": ("other", False)}
-    cfg = _cfg(activitywatch_categories={"app business": "editor"})
-    with _mac({**table, "Code": pre + "games", "Safari": pre + "games"}) as asked:
-        for k, (cat, rel) in want.items():
-            if k == "business":
-                continue
-            assert aw.classify(cfg, f"App {k}", "") == (cat, rel, "macos_category"), k
-        assert aw.classify(cfg, "Odd App", "") == ("other", False, "macos_category")
-        assert aw.classify(cfg, "No Bundle", "") == ("other", False, "unknown")
-        # config and code defaults win, and are never looked up
-        assert aw.classify(cfg, "App business", "") == ("editor", True, "config_app")
-        assert aw.classify(cfg, "Code", "") == ("editor", True, "default_app")
-        assert aw.classify(cfg, "Safari", "Weekend") == ("web", False, "browser_other")
-        assert not {"App business", "Code", "Safari"} & set(asked), asked
-    # dev is a category the config may use, and it is relevant
-    assert "dev" in AW_CATEGORIES and aw.classify(
-        _cfg(activitywatch_categories={"x": "dev"}), "X", "") == ("dev", True, "config_app")
-    # through a scan: the rule lands in attrs
-    t = CREATED + timedelta(minutes=10)
-    fake = FakeAW([_ev(1, t, 60, "App developer-tools"), _ev(2, t + timedelta(minutes=2), 60, "Nope")])
-    with _patched(fake, CREATED + timedelta(hours=2)), _mac(table), \
-            contextlib.redirect_stderr(io.StringIO()):
-        rows = [r for rs, _ in aw.collect(_cfg(), _wm()) for r in rs]
-    assert [(r.category, r.work_relevant, r.attrs) for r in rows] == [
-        ("dev", True, {"rule": "macos_category"}), ("other", False, {"rule": "unknown"})], rows
-    print("ok macos_category")
-
-
-def test_macos_lookup_guards() -> None:
-    """The real lookup function with mdfind stubbed: plist read, off-macOS, errors, timeout."""
-    import plistlib
-    import subprocess
-    real_run, real_darwin = aw.subprocess.run, aw._DARWIN
-    with tempfile.TemporaryDirectory() as d:
-        bundle = Path(d) / "Some.app"
-        (bundle / "Contents").mkdir(parents=True)
-        with open(bundle / "Contents" / "Info.plist", "wb") as f:
-            plistlib.dump({"LSApplicationCategoryType": "public.app-category.developer-tools"}, f)
-        web = Path(d) / "Web.app"
-        (web / "Contents").mkdir(parents=True)
-        with open(web / "Contents" / "Info.plist", "wb") as f:   # a browser declaring productivity
-            plistlib.dump({"LSApplicationCategoryType": "public.app-category.productivity",
-                           "CFBundleURLTypes": [{"CFBundleURLSchemes": ["webx", "HTTPS"]}]}, f)
-        seen: list = []
-        hits = {"Some": f"/Volumes/net/Some.app\n{bundle}\n", "Web": f"{web}\n",
-                "Far": "/Volumes/net/Far.app\n"}
-
-        def run(args, **kw):
-            seen.append((args, kw.get("timeout")))
-            name = args[1].rsplit("'", 2)[1]
-            return subprocess.CompletedProcess(args, 0, stdout=hits.get(name, ""), stderr="")
-
-        def boom(args, **kw):
-            raise subprocess.TimeoutExpired(args, kw.get("timeout"))
-
-        real_dirs = aw._MAC_APP_DIRS
-        try:
-            aw.subprocess.run, aw._DARWIN, aw._MAC_APP_DIRS = run, True, (os.path.join(d, ""),)
-            mac = aw._MacCategories()
-            assert mac("Some") == "public.app-category.developer-tools"
-            assert mac("Some") == "public.app-category.developer-tools"
-            assert len(seen) == 1, "one lookup per app (cached)"
-            assert seen[0][0][0] == "mdfind" and seen[0][1] == 2
-            assert "kMDItemDisplayName == 'Some'" in seen[0][0][1]
-            assert "com.apple.application-bundle" in seen[0][0][1]
-            assert mac("Bad'Name") is None and len(seen) == 1, "no query injection"
-            # a hit outside the app folders (network or external volume) is never opened
-            assert mac("Far") is None and len(seen) == 2
-            # a bundle that opens http(s) links is a browser, whatever category it declares
-            assert mac("Web") == "browser"
-            with _mac({"Web": "browser"}):
-                assert aw.classify(_cfg(), "Web", "Weekend") == ("web", False, "browser_other")
-                assert aw.classify(_cfg(), "Web", "PR 1 - GitHub") == (
-                    "web-work", True, "browser_work_title")
-            aw.subprocess.run = lambda a, **k: subprocess.CompletedProcess(
-                a, 0, stdout=f"{d}/Missing.app\n", stderr="")
-            assert mac("Missing") is None
-            # one timeout (Spotlight stalled) turns lookups off for the rest of the process
-            aw.subprocess.run = boom
-            assert mac("Slow") is None
-            aw.subprocess.run = run
-            n = len(seen)
-            assert mac("Some Other") is None and len(seen) == n, "no more lookups"
-            # the off switch and the memo die with the object: the process's, in real use
-            assert aw._MacCategories()("Some") and len(seen) == n + 1, "the next process looks again"
-            aw._DARWIN = False
-            assert aw._MacCategories()("Some") is None and len(seen) == n + 1, "macOS only"
-        finally:
-            aw.subprocess.run, aw._DARWIN, aw._MAC_APP_DIRS = real_run, real_darwin, real_dirs
-    print("ok macos_lookup_guards")
-
-
-def test_macos_lookups_last_across_the_daily_passes() -> None:
-    """A catch-up runs collect() once per day: an app is looked up once, and a stalled Spotlight
-    costs one timeout in all."""
-    import subprocess
-    day2 = CREATED + timedelta(days=1)
-    now = CREATED + timedelta(days=3)
-    two_days = [_ev(1, CREATED + timedelta(hours=1), 60, "Known"),
-                _ev(2, CREATED + timedelta(hours=2), 60, "Slow"),
-                _ev(3, day2 + timedelta(hours=1), 60, "Known"),
-                _ev(4, day2 + timedelta(hours=2), 60, "Slow"),
-                _ev(5, day2 + timedelta(hours=3), 60, "Later")]
-    asked: list = []
-
-    def run(args, **kw):
-        name = args[1].rsplit("'", 2)[1]
-        asked.append(name)
-        if name == "Slow":
-            raise subprocess.TimeoutExpired(args, kw.get("timeout"))
-        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
-
-    real_run, real_darwin = aw.subprocess.run, aw._DARWIN
-    with _patched(FakeAW(two_days), now), contextlib.redirect_stderr(io.StringIO()):
-        aw._MAC = aw._MacCategories()
-        aw.subprocess.run, aw._DARWIN = run, True
-        try:
-            wm = _wm()
-            for _ in range(2):
-                for _rows_of_pass, advance in aw.collect(_cfg(), wm):
-                    advance()
-        finally:
-            aw.subprocess.run, aw._DARWIN = real_run, real_darwin
-    assert asked == ["Known", "Slow"], asked
-    print("ok macos_lookups_last_across_the_daily_passes")
-
-
-def test_macos_lookup_real() -> None:
-    if sys.platform != "darwin":
-        try:
-            import pytest
-            pytest.skip("macOS only")
-        except ImportError:
-            return
-    mac = aw._MacCategories()
-    got = mac("Preview")          # ships with every macOS
-    assert got is None or got.startswith("public.app-category."), got
-    assert mac("No Such App Name 0000") is None
-    print("ok macos_lookup_real")
 
 
 def test_purge_bounded_and_not_on_dry_run(monkeypatch) -> None:
@@ -684,21 +492,6 @@ def test_an_infinite_duration_is_a_malformed_event(monkeypatch) -> None:
     monkeypatch.setattr(aw, "_read_range", lambda cfg, wm: (raw, CREATED, now))
     out, err = _rows(_cfg(), _wm(), FakeAW(), now)
     assert [r.title for r in out[0][0]] == ["good"] and "1 malformed record(s)" in err
-
-
-def test_redaction_stays_fast_on_long_runs() -> None:
-    # was cubic on a word run (a pasted base64 blob hung the scan) and quadratic on dotted text
-    start = time.monotonic()
-    for run in ("a" * 200_000, "a." * 100_000, "a-" * 100_000):
-        clean_text(run)
-    assert time.monotonic() - start < 10
-
-
-def test_redaction_keeps_its_catches() -> None:
-    assert clean_text("PGPASSWORD=hunter2 go") == "PGPASSWORD=[redacted] go"
-    assert clean_text("git+ssh://me:pw@host/x") == "git+ssh://[redacted]@host/x"
-    assert clean_text("mail a.b+c@d-e.co.uk.") == "mail [redacted]."
-    assert clean_text("a@b.com+x@d.org") == "[redacted][redacted]"
 
 
 if __name__ == "__main__":

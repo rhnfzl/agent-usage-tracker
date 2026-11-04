@@ -4,10 +4,10 @@ Run: `python tests/test_activity.py`  (or `pytest`).
 Locks the rules:
   - one steer per human prompt (same uuid seed), with `via`, words, chars, after_interrupt;
   - the machine-message filters (system-reminder only, Stop hook feedback, IDE-only, /usage-only);
-  - interrupt, rejection vs hook block, commit pairing, pr host + repo_key, turn aggregates with the
+  - interrupt, rejection vs hook block, commit pairing, pr host + repo_key (commit detection is in
+    tests/test_commits.py, repo keys in tests/test_repo_keys.py), turn aggregates with the
     retry and runaway flags, compaction, invoke;
   - attrs never carry free text;
-  - Postgres delivery puts activity rows in the same transaction as usage + session rows;
   - the activity backfill sends zero usage rows and never touches the watermark.
 """
 
@@ -18,24 +18,20 @@ import hashlib
 import hmac
 import io
 import json
-import os
 import re
 import subprocess
 import sys
 import tempfile
-import time
-import types
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from agent_usage_tracker import push, scan  # noqa: E402
+from agent_usage_tracker import scan  # noqa: E402
 from agent_usage_tracker.collectors import claude_code  # noqa: E402
 from agent_usage_tracker.collectors import claude_code_activity as act  # noqa: E402
-from agent_usage_tracker.collectors.commits import GIT_COMMIT  # noqa: E402
 from agent_usage_tracker.config import Config  # noqa: E402
 from agent_usage_tracker.event import ActivityEvent, UsageEvent, make_event_id  # noqa: E402
-from agent_usage_tracker.repo_keys import RepoKeys, repo_identity  # noqa: E402
+from fake_psycopg import _fake_psycopg  # noqa: E402
 
 TS = "2026-07-18T10:00:00Z"
 NAME = claude_code.NAME
@@ -241,23 +237,6 @@ def test_commits() -> None:
     print("ok commits")
 
 
-def test_repo_key_normalisation() -> None:
-    k = repo_identity
-    assert k("https://user:secret@Example.com/Owner/Repo.git") == "example.com/owner/repo"
-    assert k("git@example.com:Owner/Repo.git") == "example.com/owner/repo"
-    assert k("ssh://git@example.com:22/Owner/Repo/") == "example.com/owner/repo"
-    keys = RepoKeys(SALT)
-    assert keys.of_cwd("/no/such/dir/anywhere") is None
-    with tempfile.TemporaryDirectory() as d:
-        plain = Path(d) / "plain"
-        plain.mkdir()
-        subprocess.run(["git", "init", "-q", str(plain)], check=True)
-        assert keys.of_cwd(str(plain)) is None                     # repo without a remote
-    assert keys.of("example.com/owner/repo") == _key("example.com/owner/repo")
-    assert RepoKeys("other").of("example.com/owner/repo") != _key("example.com/owner/repo")
-    print("ok repo_key_normalisation")
-
-
 def test_pr_rows() -> None:
     def check(home, repo):
         rows = _acts(_collect(home), "pr")
@@ -411,48 +390,6 @@ def test_turn_and_commit_carry_across_scans() -> None:
     print("ok turn_and_commit_carry_across_scans")
 
 
-def test_commit_detection() -> None:
-    cases = [   # (command, output, sha expected or None)
-        ("git merge --no-ff --no-commit topic", "abc1234 subject", None),
-        ("git cat-file commit HEAD", "2222222 tree", None),
-        ("git rev-parse HEAD^{commit}", "bbbbbbb", None),
-        ("git verify-commit HEAD", "ccccccc", None),
-        ('git log --oneline -5\necho "since last commit"', "8888888 subject", None),
-        ('git log --oneline -3\ngit commit -m "x"', "3333333 old subject\nok 4444444", "4444444"),
-        ('git commit -m "x" && git push', "ok 5555555\nok main", "5555555"),
-        ("git log --oneline -1 && git commit -m x", "6666666 old subject", None),
-        ('git -C /some/dir -c user.name=x commit -m "y"', "ok 7777777", "7777777"),
-        ("git commit --amend -m x && git log -1", "[main 9999999] x\nok aaaaaaa", "9999999"),
-        ("git commit -m x", "ddddddd subject", "ddddddd"),       # single segment: first line
-        # segments before the commit that print nothing: the first line is still the commit's own
-        ("cd /some/dir && git add -A && git commit -m x && git push", "eeeeeee subject\nok main",
-         "eeeeeee"),
-        ('set -e\nexport X=1\ngit -C d add f\ngit commit -m "$(cat <<\'EOF\'\nx\nEOF\n)"',
-         "fffffff subject", "fffffff"),
-        # a wrapper before git, and a -c value with a space in quotes
-        ('/usr/bin/env git -c user.name="A B" commit -m x', "[main 1234567] x", "1234567"),
-        ("GIT_EDITOR=true git commit --amend", "[main 2345678] x", "2345678"),
-        ("echo git commit", "3456789 subject", None),
-        # a heredoc body is data, not commands: neither its lines nor a "git commit" inside count
-        ('D="/a b/"\ncat > f.txt <<\'EOF\'\nhello\ngit commit -m y\nEOF\nmkdir -p d && git commit -m x',
-         "4567890 subject", "4567890"),
-        ("cat > f.sh <<'EOF'\ngit commit -m y\nEOF", "5678901 subject", None),
-        ("uv run pytest -q && git commit -m x", "6789012 passed\n7890123 subject", None),
-    ]
-    with tempfile.TemporaryDirectory() as d:
-        home = Path(d)
-        recs = [_user("h1", "go")]
-        recs += [_tools(f"m{i}", _use(f"k{i}", "Bash", command=c)) for i, (c, _o, _s) in
-                 enumerate(cases)]
-        recs += [_result(f"r{i}", f"k{i}", o) for i, (_c, o, _s) in enumerate(cases)]
-        _write_jsonl(home / ".claude/projects/-p/S1.jsonl", recs)
-        got = {e.event_id: e.attrs["sha"] for e in _acts(_collect(home), "commit")}
-        want = {make_event_id(NAME, "commit", f"k{i}|{s}"): s for i, (_c, _o, s) in
-                enumerate(cases) if s}
-        assert got == want, (got, want)
-    print("ok commit_detection")
-
-
 def test_failed_delivery_rescan_matches_clean_pass(monkeypatch) -> None:
     # The sink is down for one scan; the state saved after it must not already hold that scan's
     # turn counts or popped commit calls.
@@ -533,42 +470,6 @@ def test_activity_errors_never_block_usage() -> None:
         assert len(_acts(evs, "steer")) == 1 and not _acts(evs, "turn")
         assert "1 activity record" in err.getvalue(), err.getvalue()
     print("ok activity_errors_never_block_usage")
-
-
-def test_repo_key_salt(monkeypatch) -> None:
-    with tempfile.TemporaryDirectory() as d:
-        monkeypatch.setenv("AUT_STATE", str(Path(d) / "st" / "state.json"))
-        k1 = RepoKeys(None).of("example.com/owner/repo")
-        salt = Path(d) / "st" / "repo_key.salt"
-        assert salt.exists(), salt
-        if os.name != "nt":                                 # Windows has no POSIX modes
-            assert (salt.stat().st_mode & 0o777) == 0o600, oct(salt.stat().st_mode)
-        assert RepoKeys(None).of("example.com/owner/repo") == k1      # reused
-        assert k1 != hashlib.sha256(b"example.com/owner/repo").hexdigest()
-        assert k1 != _key("example.com/owner/repo")
-        cfgf = Path(d) / "config.toml"
-        cfgf.write_text('repo_key_salt = "env:AUT_TEST_SALT"\n')
-        cfgf.chmod(0o600)
-        monkeypatch.setenv("AUT_CONFIG", str(cfgf))
-        monkeypatch.setenv("AUT_TEST_SALT", "from-env")
-        from agent_usage_tracker.config import load_config
-        assert load_config().repo_key_salt == "from-env"
-        with tempfile.TemporaryDirectory() as d2:
-            monkeypatch.setenv("AUT_STATE", str(Path(d2) / "state.json"))
-            (Path(d2) / "repo_key.salt").write_text("")        # a broken salt: NULL, not unsalted
-            err = io.StringIO()
-            with contextlib.redirect_stderr(err):
-                assert RepoKeys(None).of("example.com/owner/repo") is None
-            assert "too short" in err.getvalue()
-    print("ok repo_key_salt")
-
-
-def test_commit_regex_is_linear() -> None:
-    t = time.perf_counter()
-    assert GIT_COMMIT.search("git " + "--no-pager " * 40 + "status --short") is None
-    assert GIT_COMMIT.search("git --no-pager -C x commit -m y")
-    assert time.perf_counter() - t < 0.5
-    print("ok commit_regex_is_linear")
 
 
 def test_usage_filter_only_on_fresh_read() -> None:
@@ -653,80 +554,6 @@ def test_subagent_keeps_no_agg() -> None:
         carried = wm["files"][str(f)].get("act", {})
         assert "agg" not in carried and "seen" not in carried, carried
     print("ok subagent_keeps_no_agg")
-
-
-class _Cur:
-    def __init__(self, log, fail_on=None):
-        self.log, self.fail_on = log, fail_on
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *a):
-        return False
-
-    def executemany(self, sql, rows):
-        if self.fail_on and self.fail_on in sql:
-            raise RuntimeError("insert failed")
-        self.log.append((sql, list(rows)))
-
-
-@contextlib.contextmanager
-def _fake_psycopg(log, fail_on=None):
-    class _Conn:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *a):
-            return False
-
-        def cursor(self):
-            return _Cur(log, fail_on)
-
-        def commit(self):
-            log.append("commit")
-
-    fake = types.ModuleType("psycopg")
-    fake.connect = lambda dsn, connect_timeout: _Conn()
-    prev = sys.modules.get("psycopg")
-    sys.modules["psycopg"] = fake
-    try:
-        yield
-    finally:
-        if prev is None:
-            sys.modules.pop("psycopg", None)
-        else:
-            sys.modules["psycopg"] = prev
-
-
-def test_pg_one_transaction() -> None:
-    def check(home, repo):
-        batch = _collect(home)
-        for e in batch:
-            e.machine = "test"
-        send = push.make_sender(_cfg(home, pg_dsn="postgresql://x"))
-        log: list = []
-        with _fake_psycopg(log):
-            send(batch)
-        assert [x if x == "commit" else x[0].split(" (")[0] for x in log] == [
-            "INSERT INTO agents.usage_event", "INSERT INTO agents.event_session",
-            "INSERT INTO agents.activity_event", "commit"], log
-        sql, rows = log[2]
-        assert "ON CONFLICT (event_id, ts) DO NOTHING" in sql
-        assert len(rows) == len(_acts(batch))
-        assert all(json.loads(r[-1]) == e.attrs for r, e in zip(rows, _acts(batch)))
-        assert len(log[0][1]) == sum(isinstance(e, UsageEvent) for e in batch)
-
-        log = []
-        with _fake_psycopg(log, fail_on="activity_event"):
-            try:
-                send(batch)
-                raise AssertionError("a failed activity insert must raise")
-            except RuntimeError as exc:
-                assert "insert failed" in str(exc)
-        assert "commit" not in log, log
-    _run(check)
-    print("ok pg_one_transaction")
 
 
 def test_activity_backfill_sends_no_usage(monkeypatch) -> None:
