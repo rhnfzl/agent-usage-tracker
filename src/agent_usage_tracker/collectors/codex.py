@@ -16,8 +16,10 @@ from __future__ import annotations
 
 import copy
 import glob
+import json
 import os
 from collections import Counter
+from pathlib import Path
 from typing import Iterator
 
 from ..config import Config
@@ -33,6 +35,28 @@ NAME = "codex"
 # The watermark's format. Older state is upgraded once by _upgrade_state; delete a step from there
 # once no machine can still hold state that old.
 _STATE_V = 1
+
+
+def session_files(home: Path) -> list[str]:
+    return glob.glob(str(home / ".codex" / "sessions" / "**" / "rollout-*.jsonl"), recursive=True)
+
+
+def thread_names(home: Path) -> dict[str, str]:
+    """session id -> the name Codex gave the thread (session_index.jsonl). Best effort."""
+    names: dict[str, str] = {}
+    try:
+        with open(home / ".codex" / "session_index.jsonl", encoding="utf-8") as fh:
+            for line in fh:
+                try:
+                    o = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(o, dict) and isinstance(o.get("id"), str) \
+                        and isinstance(o.get("thread_name"), str):
+                    names[o["id"]] = o["thread_name"]
+    except (OSError, ValueError):
+        pass
+    return names
 
 
 def _fresh_state(dev: int | None = None, ino: int | None = None) -> dict:
@@ -255,7 +279,7 @@ def _upgrade_state(wm: dict, keys: RepoKeys) -> None:
     wm["state_v"] = _STATE_V
 
 
-def _parsed_records(lines: list[bytes], off: int, cur: dict, skipped: Counter) -> list[tuple]:
+def parsed_records(lines: list[bytes], off: int, cur: dict, skipped: Counter) -> list[tuple]:
     """(record, type, payload, copied) of each new line that has a payload. A forked child's file
     opens with a copy of its parent's history: lines before the first meta's
     subagent_history_start_ordinal (0-based). `skip` is how many copied lines are still unread.
@@ -417,7 +441,7 @@ def collect(cfg: Config, wm: dict) -> Iterator[Batch]:
     files: dict = wm["files"]
     skipped: Counter = Counter()
 
-    for path in glob.glob(str(base / "**" / "rollout-*.jsonl"), recursive=True):
+    for path in session_files(cfg.home):
         try:
             st = os.stat(path)
         except OSError:
@@ -432,7 +456,7 @@ def collect(cfg: Config, wm: dict) -> Iterator[Batch]:
         lines, new_off = read_new_lines(path, off)
         # A deep copy: only advance_watermark() may publish this chunk's state into the watermark.
         cur = copy.deepcopy(prev)
-        recs = _parsed_records(lines, off, cur, skipped)
+        recs = parsed_records(lines, off, cur, skipped)
         events = _chunk_rows(path, recs, cur, keys, skipped)
         cur["off"] = new_off
         _trim_state(cur)

@@ -26,6 +26,7 @@ import time
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Iterator
 
 from ..config import Config
@@ -51,6 +52,11 @@ USER_QUERY = re.compile(r"<user_query>(.*?)</user_query>", re.S)
 EXIT_LINE = re.compile(r"^Exit code: (-?\d+)\s*(?:Command output:\s*)?")
 _IDENT = re.compile(r"[A-Za-z][A-Za-z_]*")
 _UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+
+
+def chat_stores(home: Path) -> list[str]:
+    """Every chat's store.db; a chat's directory name is its agentId in every store seen."""
+    return sorted(glob.glob(str(home / ".cursor" / "chats" / "*" / "*" / "store.db")))
 
 
 def _cursor_options(m: dict) -> dict:
@@ -392,7 +398,7 @@ def collect(cfg: Config, wm: dict) -> Iterator[Batch]:
     keys = RepoKeys(cfg.repo_key_salt)
     skipped: Counter = Counter()
     unreadable = 0
-    for path in sorted(glob.glob(str(cfg.home / ".cursor" / "chats" / "*" / "*" / "store.db"))):
+    for path in chat_stores(cfg.home):
         prev = chats.get(path) or {}
         con = connect_ro(path)
         if con is None:

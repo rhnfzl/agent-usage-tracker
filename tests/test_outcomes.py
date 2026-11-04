@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -487,7 +488,7 @@ def test_manual_outcome_picks_newest_interactive_session():
     with tempfile.TemporaryDirectory() as d:
         home = Path(d)
         work, s = _world(home)
-        proj = home / ".claude" / "projects" / oc.claude_project_dir(str(work))
+        proj = home / ".claude" / "projects" / re.sub(r"[^A-Za-z0-9]", "-", str(work))
         _claude_session(proj, "old-cli", "cli", NOW - 500)
         _claude_session(proj, "new-cli", "cli", NOW - 100)
         _claude_session(proj, "scripted", "sdk-py", NOW - 10)

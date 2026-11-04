@@ -39,6 +39,10 @@ _ENDS = ("stop", "aborted", "length")   # an `error` followed by another assista
 _STATE_V = 1
 
 
+def session_files(home: Path) -> list[str]:
+    return glob.glob(str(home / ".pi" / "agent" / "sessions" / "**" / "*.jsonl"), recursive=True)
+
+
 def _cost_total(cost) -> float | None:
     v = cost.get("total") if isinstance(cost, dict) else cost
     if isinstance(v, bool) or not isinstance(v, (int, float)):   # bool is an int subclass
@@ -301,7 +305,7 @@ def collect(cfg: Config, wm: dict) -> Iterator[Batch]:
     keys = RepoKeys(cfg.repo_key_salt)
     skipped: Counter = Counter()
 
-    for path in glob.glob(str(base / "**" / "*.jsonl"), recursive=True):
+    for path in session_files(cfg.home):
         try:
             st = os.stat(path)
         except OSError:

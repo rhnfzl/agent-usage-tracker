@@ -38,6 +38,7 @@ from glob import glob
 from datetime import datetime, timezone
 from pathlib import Path
 
+from .collectors import claude_code
 from .config import Config
 from .git_safe import git_argv, git_env
 from .push import deliver_scan_rows, scan_row, scrub_error
@@ -504,11 +505,6 @@ def run_outcomes(cfg: Config, fetch: bool, dry_run: bool, now: float | None = No
                               "outcomes")
 
 
-def claude_project_dir(path: str) -> str:
-    """The directory name Claude Code keeps a working directory's sessions under."""
-    return re.sub(r"[^A-Za-z0-9]", "-", path)
-
-
 def _project_paths(cwd: str) -> list[str]:
     """cwd and its parents up to the repo's top level (only cwd outside a repo)."""
     top = (_git(cwd, "rev-parse", "--show-toplevel", timeout=10) or "").strip()
@@ -522,24 +518,11 @@ def _project_paths(cwd: str) -> list[str]:
     return out + ([top] if top and top not in out else [])
 
 
-def _interactive(path: Path) -> bool:
-    """A main Claude Code session started at a terminal (entrypoint cli), from its first records."""
-    try:
-        with open(path, encoding="utf-8", errors="replace") as fh:
-            for _, line in zip(range(200), fh):
-                if '"entrypoint"' in line:
-                    return json.loads(line).get("entrypoint") == "cli"
-    except (OSError, ValueError):
-        pass
-    return False
-
-
 def latest_session(home: Path, cwd: str) -> str | None:
     # shortcut: Claude Code sessions only; upgrade when /outcome runs inside another agent.
-    base = home / ".claude" / "projects"
-    files = [f for p in _project_paths(cwd) for f in (base / claude_project_dir(p)).glob("*.jsonl")]
+    files = [f for p in _project_paths(cwd) for f in claude_code.project_session_files(home, p)]
     for f in sorted(set(files), key=lambda f: f.stat().st_mtime, reverse=True):
-        if _interactive(f):
+        if claude_code.is_interactive(f):
             return f.stem
     return None
 

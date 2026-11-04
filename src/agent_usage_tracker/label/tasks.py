@@ -8,16 +8,13 @@ Changing a candidate or a definition bumps that task's `ver`.
 
 from __future__ import annotations
 
-import glob
-import json
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 from typing import Callable
 
 from ..collectors import activitywatch as aw
-from ..collectors.activity_common import text_of
+from ..collectors import claude_code
 from ..config import Config
 from ..event import CollectorUnavailable, make_event_id
 from ..redact import redact
@@ -137,31 +134,12 @@ class Source:
 
     def texts(self, steers: list[dict]) -> dict[str, str]:
         """steer event_id -> its redacted text, from this machine's Claude Code logs.
-        shortcut: Claude Code only (its steer id is the record uuid); Codex and Pi seed theirs
-        from position, so their steers stay unlabelled. Upgrade when they carry many steers."""
+        shortcut: Claude Code only; Codex and Pi seed theirs from position, so their steers stay
+        unlabelled. Upgrade when they carry many steers."""
         want = {s["event_id"] for s in steers if s["agent"] == "claude_code"}
         sessions = {s["session_id"] for s in steers if s["agent"] == "claude_code"}
-        out: dict[str, str] = {}
-        base = Path(self.cfg.home) / ".claude" / "projects"
-        for f in glob.glob(str(base / "*" / "*.jsonl")):
-            if Path(f).stem not in sessions:
-                continue
-            with open(f, encoding="utf-8", errors="replace") as fh:
-                for line in fh:
-                    if '"user"' not in line:
-                        continue
-                    try:
-                        o = json.loads(line)
-                    except ValueError:
-                        continue
-                    uid = o.get("uuid") if isinstance(o, dict) else None
-                    if not isinstance(uid, str):
-                        continue
-                    eid = make_event_id("claude_code", "steer", uid)
-                    m = o.get("message")
-                    if eid in want and isinstance(m, dict):
-                        out[eid] = redact(text_of(m.get("content")))[:TEXT_MAX]
-        return out
+        return {eid: redact(text)[:TEXT_MAX]
+                for eid, text in claude_code.steer_texts(self.cfg.home, sessions, want).items()}
 
     def windows(self, since: datetime, until: datetime) -> list[dict]:
         """This machine's ActivityWatch window rows in [since, until), through the collector's own

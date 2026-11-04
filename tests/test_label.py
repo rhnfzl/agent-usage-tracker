@@ -216,6 +216,19 @@ class FakeSource(tasks.Source):
         return [w for w in self._w if since <= w["start"] < until]
 
 
+def test_steer_without_uuid_finds_its_text_under_the_collectors_id(tmp_path):
+    # the id the collector gives a record with no uuid: path:timestamp
+    proj = tmp_path / ".claude" / "projects" / "-p"
+    proj.mkdir(parents=True)
+    f = proj / "s1.jsonl"
+    ts = "2001-01-05T09:00:00Z"
+    f.write_text(json.dumps({"type": "user", "timestamp": ts, "sessionId": "s1",
+                             "message": {"role": "user", "content": "old log prompt"}}) + "\n")
+    src = FakeSource(_cfg(tmp_path))
+    steer = _steer(f"{f}:{ts}", "s1", DAY1)
+    assert src.texts([steer]) == {steer["event_id"]: "old log prompt"}
+
+
 def test_steer_units_read_local_redacted_text(tmp_path):
     t0 = DAY1
     _claude_log(tmp_path, "s1", [

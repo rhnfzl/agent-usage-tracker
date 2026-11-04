@@ -29,6 +29,8 @@ shape risks being wrong on the actual schema.
 3. Map each usage row -> `UsageEvent(agent="opencode", model=..., input/output/cache_*_tokens=...,
    ts=..., provider=...)`, `event_id = make_event_id("opencode", <stable row id>)`.
 4. Register in `collectors/__init__.py`, add `"opencode"` to `ALL_AGENTS`, add a fixture-backed test.
+5. If its logs hold prompts, add a reader to `collectors/session_digest.py` and call it from
+   `local_info`, so `aut episodes review` and `aut inspect` show its sessions' local text.
 
 Effort: ~1 hour once the real DB exists to read the schema from.
 

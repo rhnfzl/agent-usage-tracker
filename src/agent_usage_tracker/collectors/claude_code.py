@@ -14,6 +14,7 @@ intended cross-check for that.
 from __future__ import annotations
 
 import glob
+import json
 import os
 import re
 import time
@@ -32,6 +33,32 @@ NAME = "claude_code"
 # The watermark's format. Older state is upgraded once by _upgrade_state; delete a step from there
 # once no machine can still hold state that old.
 _STATE_V = 1
+
+
+def projects_dir(home: Path) -> Path:
+    return home / ".claude" / "projects"
+
+
+def main_session_files(home: Path) -> list[str]:
+    """Main sessions only (<project>/<id>.jsonl); subagents sit deeper and number tens of thousands."""
+    return glob.glob(str(projects_dir(home) / "*" / "*.jsonl"))
+
+
+def project_session_files(home: Path, project: str) -> list[Path]:
+    """The main sessions of one working directory; Claude Code names the directory after its path."""
+    return list((projects_dir(home) / re.sub(r"[^A-Za-z0-9]", "-", project)).glob("*.jsonl"))
+
+
+def is_interactive(path: Path) -> bool:
+    """A main session started at a terminal (entrypoint cli), from its first records."""
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            for _, line in zip(range(200), fh):
+                if '"entrypoint"' in line:
+                    return json.loads(line).get("entrypoint") == "cli"
+    except (OSError, ValueError):
+        pass
+    return False
 
 
 def _is_human_text(content: object) -> bool:
@@ -164,6 +191,30 @@ def _upgrade_state(wm: dict) -> None:
 
 def _record_uid(o: dict, path: str) -> object:
     return o.get("uuid") or f"{path}:{o.get('timestamp')}"
+
+
+def steer_texts(home: Path, sessions: set[str], want: set[str]) -> dict[str, str]:
+    """steer event_id -> its raw text, for the ids in `want`, from the main logs of `sessions`. The
+    id comes from the same record uid the steer row was made with."""
+    out: dict[str, str] = {}
+    for f in main_session_files(home):
+        if Path(f).stem not in sessions:
+            continue
+        with open(f, encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                if '"user"' not in line:
+                    continue
+                try:
+                    o = json.loads(line)
+                except ValueError:
+                    continue
+                if not isinstance(o, dict) or o.get("type") != "user":
+                    continue
+                eid = make_event_id(NAME, "steer", _record_uid(o, f))
+                m = o.get("message")
+                if eid in want and isinstance(m, dict):
+                    out[eid] = text_of(m.get("content"))
+    return out
 
 
 def _usage_event(o: dict, path: str, ident: tuple[bool, str, str | None],
@@ -300,7 +351,7 @@ def _keep_or_drop(fstate: dict, key: str, value: object) -> None:
 
 
 def collect(cfg: Config, wm: dict) -> Iterator[Batch]:
-    base = cfg.home / ".claude" / "projects"
+    base = projects_dir(cfg.home)
     if not base.exists():
         return
     _upgrade_state(wm)

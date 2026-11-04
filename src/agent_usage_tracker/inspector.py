@@ -3,7 +3,7 @@
 Shows why an episode (or each episode of a local day, or the episode a label belongs to) exists:
 its member sessions, the anchors by type that the linker joins on, the outcome rule that fired,
 labels with probability and model, and hand corrections. Everything is read from the sink, ids
-and keys only; titles and branch names come from THIS machine's logs (review.local_info) and
+and keys only; titles and branch names come from THIS machine's logs (session_digest) and
 exist only in the page served from 127.0.0.1 under a random token. The page is read-only and
 links to the existing correction form of `aut episodes review` for the episodes it shows.
 """
@@ -16,6 +16,7 @@ from collections import Counter
 from datetime import datetime, timedelta, timezone
 
 from . import review
+from .collectors.session_digest import local_info
 from .config import Config
 from .sink import connect
 
@@ -299,7 +300,7 @@ def run_inspect(cfg: Config, episode: str | None = None, day: str | None = None,
     view = build(fetch_fn(dsn, episode=episode, day=day, label=label))
     if not view["episodes"] and not view["labels"]:
         raise SystemExit(f"inspect: nothing found for {title.lower()}")
-    info = review.local_info(cfg.home, {s["session_id"] for ep in view["episodes"]
+    info = local_info(cfg.home, {s["session_id"] for ep in view["episodes"]
                                         for s in ep["sessions"][:4 * _SHOW]
                                         if s["role"] == "seed"})   # children have no title
     summary = serve_fn(view["episodes"], info, title.lower(),

@@ -24,10 +24,12 @@ import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from agent_usage_tracker import review  # noqa: E402
+from agent_usage_tracker.collectors import session_digest  # noqa: E402
 
 K1, K2 = "a1" * 32, "b2" * 32
 T0 = datetime(2001, 1, 5, 9, tzinfo=timezone.utc)
@@ -65,7 +67,7 @@ def test_local_info_reads_claude_and_codex_logs():
             + "\n")
         (home / ".codex" / "session_index.jsonl").write_text(
             json.dumps({"id": "cx1", "thread_name": "codex thread"}) + "\n")
-        info = review.local_info(home, {"s1", "cx1", "gone"})
+        info = session_digest.local_info(home, {"s1", "cx1", "gone"})
         tb = ("titles", "branches")
         assert {k: info["s1"][k] for k in tb} == {"titles": ['Fix the "thing"', "named <b>"],
                                                   "branches": ["feat/one", "wt/two"]}, info
@@ -199,7 +201,7 @@ def test_claude_session_fields():
     with tempfile.TemporaryDirectory() as d:
         home = Path(d)
         _jsonl(home / ".claude" / "projects" / "-work-acme-widget" / "s1.jsonl", recs)
-        v = review.local_info(home, {"s1"})["s1"]
+        v = session_digest.local_info(home, {"s1"})["s1"]
     assert (v["agent"], v["folder"], v["minutes"], v["n_prompts"]) == \
         ("Claude Code", "acme/widget", 135, 2), v
     assert v["start"] == datetime(2001, 1, 5, 9, tzinfo=timezone.utc)
@@ -235,7 +237,7 @@ def test_codex_session_fields():
         base = home / ".codex" / "sessions" / "2001" / "01" / "05"
         _jsonl(base / "rollout-2001-01-05T08-00-00-cx1.jsonl", recs)
         _jsonl(base / "rollout-2001-01-05T08-00-00-cx2.jsonl", auto)
-        info = review.local_info(home, {"cx1", "cx2"})
+        info = session_digest.local_info(home, {"cx1", "cx2"})
     v = info["cx1"]
     assert (v["agent"], v["folder"], v["minutes"], v["n_prompts"], v["first"]) == \
         ("Codex", "acme/gadget", 20, 2, "first codex ask"), v
@@ -291,7 +293,7 @@ def test_no_local_text_reaches_the_rows():
 
 
 def test_review_findings_edge_cases():
-    d = review._Digest("x")
+    d = session_digest.Digest("x")
     d.shell("gh pr create --fill && docker run -t myimage", "", False)
     d.shell("git commit -q --no-edit && python -m pytest", "", False)
     d.shell("git commit -m 'a; b' && echo -m nope", "", False)
@@ -300,7 +302,7 @@ def test_review_findings_edge_cases():
     v = d.view()
     assert (v["prs"], v["commits"]) == ([], ["a; b"]), v
     assert SECRET not in json.dumps(v), v
-    assert review.clip(review._BLOCK.sub(" ", "<user_info>OS Version: darwin 25</user_info> fix it")) \
+    assert session_digest.clip(session_digest._BLOCK.sub(" ", "<user_info>OS Version: darwin 25</user_info> fix it")) \
         == "fix it"
     with tempfile.TemporaryDirectory() as t:
         home = Path(t)
@@ -312,10 +314,41 @@ def test_review_findings_edge_cases():
         _jsonl(home / ".codex" / "sessions" / "2001" / "rollout-2001-cx2.jsonl", [
             {"type": "session_meta", "payload": {"id": "cx2"}}, {"payload": {}},
             {"type": "event_msg", "payload": {"type": "user_message", "message": "hello"}}])
-        info = review.local_info(home, {sid, "cx2"})
+        info = session_digest.local_info(home, {sid, "cx2"})
     assert info[sid]["first"] == "/tidy now", info
     assert info["cx2"]["first"] == "hello", info
     print("ok review_findings_edge_cases")
+
+
+def test_bad_values_in_one_log_cost_only_that_session():
+    meta = {"type": "session_meta", "payload": {"id": "cx1", "git": {"branch": ["not", "text"]}}}
+    with tempfile.TemporaryDirectory() as t:
+        home = Path(t)
+        _jsonl(home / ".codex" / "sessions" / "2001" / "rollout-2001-cx1.jsonl", [meta])
+        (home / ".codex" / "session_index.jsonl").write_text(
+            '[1]\n{"id": ["x"], "thread_name": "a"}\nnot json\n'
+            '{"id": "cx1", "thread_name": "named"}\n')
+        _jsonl(home / ".claude" / "projects" / "-p" / "s1.jsonl",
+               [{"type": "user", "gitBranch": "b1"}])
+        real = session_digest.Digest.view
+
+        def view(d):
+            if d.agent == "Claude Code":
+                raise TypeError("local text")
+            return real(d)
+        with patch.object(session_digest.Digest, "view", view):
+            info = session_digest.local_info(home, {"cx1", "s1"})
+    assert list(info) == ["cx1"], info
+    assert (info["cx1"]["branches"], info["cx1"]["titles"]) == ([], ["named"]), info
+    print("ok bad_values_in_one_log_cost_only_that_session")
+
+
+def test_digest_lists_hold_only_text():
+    d = session_digest.Digest("x")
+    d.shell("git commit --no-edit", "", False)
+    d.shell("gh pr create --fill", "", False)
+    assert d.commits == [] and d.prs == [], (d.commits, d.prs)
+    print("ok digest_lists_hold_only_text")
 
 
 def main() -> int:
