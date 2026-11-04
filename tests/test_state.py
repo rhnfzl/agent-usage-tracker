@@ -15,7 +15,7 @@ import json
 import os
 import tempfile
 from pathlib import Path
-from agent_usage_tracker.state import load_state  # noqa: E402
+from agent_usage_tracker.state import atomic_write_text, load_json_dict, load_state  # noqa: E402
 
 
 @contextlib.contextmanager
@@ -84,11 +84,32 @@ def test_wrong_shape_warns() -> None:
     print("ok wrong_shape_warns")
 
 
+def test_atomic_write_keeps_the_old_file_on_failure() -> None:
+    with tempfile.TemporaryDirectory() as d:
+        p = Path(d) / "sub" / "x.json"
+        atomic_write_text(p, '{"a": 1}')
+        assert load_json_dict(p) == {"a": 1}
+        real = os.replace
+        os.replace = lambda *a: (_ for _ in ()).throw(OSError("no"))
+        try:
+            atomic_write_text(p, "new")
+            raise AssertionError("the failed replace must raise")
+        except OSError:
+            pass
+        finally:
+            os.replace = real
+        assert p.read_text() == '{"a": 1}' and [f.name for f in p.parent.iterdir()] == ["x.json"]
+        p.write_text("[1]")
+        assert load_json_dict(p) == {} and load_json_dict(p.with_name("gone")) == {}
+    print("ok atomic_write_keeps_the_old_file_on_failure")
+
+
 def main() -> int:
     test_missing_state_is_silent()
     test_valid_state_round_trips()
     test_corrupt_json_warns_and_preserves()
     test_wrong_shape_warns()
+    test_atomic_write_keeps_the_old_file_on_failure()
     print("\nALL PASS")
     return 0
 

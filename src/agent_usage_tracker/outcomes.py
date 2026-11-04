@@ -30,7 +30,6 @@ import shutil
 import signal
 import subprocess
 import sys
-import tempfile
 import time
 from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor
@@ -45,7 +44,7 @@ from .collectors._activity_common import RepoKeys, repo_identity
 from .config import Config
 from .git_safe import git_argv, git_env
 from .push import scrub_error, send_scan_rows
-from .state import _state_path
+from .state import _state_path, atomic_write_text, load_json_dict
 
 DAY = 86400
 DECIDE_S = 14 * DAY          # undecided until day 14; also the revert and survival window
@@ -440,27 +439,6 @@ def _cache_path() -> Path:
     return _state_path().parent / CACHE_NAME
 
 
-def _load_cache() -> dict:
-    try:
-        obj = json.loads(_cache_path().read_text())
-        return obj if isinstance(obj, dict) else {}
-    except (OSError, ValueError):
-        return {}
-
-
-def _save_cache(cache: dict) -> None:
-    p = _cache_path()
-    p.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=str(p.parent), suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w") as fh:
-            json.dump(cache, fh)
-        os.replace(tmp, p)
-    finally:
-        if os.path.exists(tmp):
-            os.unlink(tmp)
-
-
 def _load_rows(dsn: str) -> list[dict]:
     import psycopg  # optional dependency; install with the [postgres] extra
 
@@ -515,11 +493,11 @@ def run_outcomes(cfg: Config, fetch: bool, dry_run: bool, now: float | None = No
             keys = {r["repo_key"] for r in rows if r["repo_key"]}
             want = [c for c in clones if c.key in keys]
             stats["fetch_ok"], stats["fetch_failed"] = fetch_clones(want)
-        cache = _load_cache()
+        cache = load_json_dict(_cache_path())
         outs, ev = evaluate(rows, clones, now, cache, gh=fetch)
         stats.update(ev)
         if not dry_run:
-            _save_cache(cache)          # before the sink: a failing write never redoes the blame
+            atomic_write_text(_cache_path(), json.dumps(cache))     # before the sink: a failing write never redoes the blame
         todo = pending(outs, _load_stored(cfg.pg_dsn))
         stats["to_write"] = len(todo)
         if not dry_run:

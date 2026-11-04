@@ -397,3 +397,28 @@ def test_cli_wiring(tmp_path, monkeypatch):
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-q"]))
+
+
+def test_corrupt_choice_file_warns_and_choose_keeps_it(tmp_path, monkeypatch, capsys):
+    p = tmp_path / "label.json"
+    monkeypatch.setattr(core, "choice_path", lambda: p)
+    assert core.load_choice(TASK) == core.Choice() and capsys.readouterr().err == ""    # missing
+    for bad in ("{not json", "[1]", '{"tasks": 5}'):
+        p.write_text(bad)
+        assert core.load_choice(TASK) == core.Choice()
+        assert str(p) in capsys.readouterr().err
+    p.write_text("{not json")
+    monkeypatch.setattr(bakeoff, "read_jsonl", lambda _p: [
+        {"task_ver": tasks.TASKS[TASK].ver, "model_id": "m", "backend": "b", "model_rev": "r",
+         "temperature": 1.0, "calib_ver": "c", "per_label": {}, "coverage": 1.0, "n_held": 9,
+         "size_mb": 1, "macro_f1": 1.0}])
+    monkeypatch.setattr(bakeoff, "passes", lambda *a: True)
+    with pytest.raises(SystemExit, match="unusable"):
+        bakeoff.choose(_cfg(tmp_path), TASK)
+    assert p.read_text() == "{not json", "another task's choice must survive"
+
+
+def test_unreadable_jsonl_is_not_an_empty_one(tmp_path):
+    assert evalset.read_jsonl(tmp_path / "gone.jsonl") == []
+    with pytest.raises(SystemExit, match="cannot read"):
+        evalset.read_jsonl(tmp_path)        # a directory: OSError that is not "missing"

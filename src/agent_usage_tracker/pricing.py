@@ -12,10 +12,11 @@ in USD per token.
 from __future__ import annotations
 
 import json
-import os
 import urllib.request
 from pathlib import Path
 from typing import Any, Callable
+
+from .state import atomic_write_text
 
 _MODELS_DEV_PRICE_SCALE = 1_000_000  # models.dev prices are per-1M tokens
 
@@ -159,19 +160,8 @@ def sync_prices(
             "sync-prices: built an empty rate map; keeping the existing "
             "price file."
         )
-    path = Path(out).expanduser()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    # Atomic publish: write a sibling temp then os.replace (same-dir rename
-    # is atomic), so a concurrent reader never sees a half-written file.
-    # Mirrors the the registry sync script.
-    tmp = path.with_name(path.name + ".tmp")
-    try:
-        tmp.write_text(
-            json.dumps(rates, indent=2, sort_keys=True), encoding="utf-8"
-        )
-        os.replace(tmp, path)
-    finally:
-        tmp.unlink(missing_ok=True)
+    # Atomic, so a concurrent reader never sees a half-written file.
+    atomic_write_text(Path(out).expanduser(), json.dumps(rates, indent=2, sort_keys=True))
     return len(rates)
 
 

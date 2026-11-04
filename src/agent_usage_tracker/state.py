@@ -57,17 +57,30 @@ def load_state() -> dict:
 
 
 def save_state(state: dict) -> None:
-    path = _state_path()
+    atomic_write_text(_state_path(), json.dumps(state, indent=1))
+
+
+def atomic_write_text(path: Path, text: str) -> None:
+    """Write through a unique temp file and a rename, so a crash or a second process never leaves
+    a half-written file. Creates the parent directory."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    # atomic write: tmp + rename, so a crash never leaves a half-written watermark.
     fd, tmp = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
     try:
-        with os.fdopen(fd, "w") as fh:
-            json.dump(state, fh, indent=1)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
         os.replace(tmp, path)
     finally:
         if os.path.exists(tmp):
             os.unlink(tmp)
+
+
+def load_json_dict(path: Path) -> dict:
+    """A rebuildable cache's contents; {} when it is missing or unusable (it is simply redone)."""
+    try:
+        obj = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return obj if isinstance(obj, dict) else {}
 
 
 def collector_wm(state: dict, name: str) -> dict:

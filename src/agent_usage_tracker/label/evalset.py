@@ -12,14 +12,13 @@ from __future__ import annotations
 import hashlib
 import itertools
 import json
-import os
 import random
-import tempfile
 from collections import defaultdict
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from ..config import Config
+from ..state import atomic_write_text
 from .core import Request, data_dir
 from .run import local_midnight
 from .tasks import TASKS, Source, units
@@ -39,8 +38,10 @@ def read_jsonl(p: Path) -> list[dict]:
     try:
         with open(p, encoding="utf-8") as fh:
             lines = fh.read().splitlines()
-    except OSError:
+    except FileNotFoundError:
         return []
+    except (OSError, UnicodeDecodeError) as exc:    # never "no labels": those labels exist
+        raise SystemExit(f"label: cannot read {p}: {exc}") from None
     out = []
     for line in lines:
         try:
@@ -59,15 +60,7 @@ def append_jsonl(p: Path, row: dict) -> None:
 
 
 def write_jsonl(p: Path, rows: list[dict]) -> None:
-    p.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=str(p.parent), suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            fh.writelines(json.dumps(r, sort_keys=True) + "\n" for r in rows)
-        os.replace(tmp, p)
-    finally:
-        if os.path.exists(tmp):
-            os.unlink(tmp)
+    atomic_write_text(p, "".join(json.dumps(r, sort_keys=True) + "\n" for r in rows))
 
 
 def gold_latest(task: str) -> dict[str, str]:

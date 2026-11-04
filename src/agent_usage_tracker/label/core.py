@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -76,12 +77,25 @@ class Choice:
     calib_ver: str = "none"
 
 
-def load_choice(task: str) -> Choice:
+def read_choices() -> dict:
+    """label.json; {} when there is none yet. Raises OSError or ValueError when it is unusable."""
     try:
         obj = json.loads(choice_path().read_text())
-    except (OSError, ValueError):
+    except FileNotFoundError:
+        return {}
+    if not isinstance(obj, dict) or not isinstance(obj.get("tasks", {}), dict):
+        raise ValueError("unexpected shape")
+    return obj
+
+
+def load_choice(task: str) -> Choice:
+    try:
+        obj = read_choices()
+    except (OSError, ValueError) as exc:
+        print(f"aut: warning: {choice_path()} is unusable ({exc}); {task} runs uncalibrated, so "
+              "none of its labels pass tau. Fix it or move it aside and re-run `aut label choose`.", file=sys.stderr)
         return Choice()
-    c = (obj.get("tasks") or {}).get(task) if isinstance(obj, dict) else None
+    c = (obj.get("tasks") or {}).get(task)
     if not isinstance(c, dict):
         return Choice()
     return Choice(**{k: c[k] for k in Choice.__slots__ if k in c})

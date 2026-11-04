@@ -9,9 +9,7 @@ where it stopped (a rerun of a unit is a no-op at the sink). The run never logs 
 from __future__ import annotations
 
 import json
-import os
 import sys
-import tempfile
 import time
 from collections import Counter
 from datetime import date, datetime, timedelta, timezone
@@ -19,7 +17,7 @@ from datetime import date, datetime, timedelta, timezone
 from .. import __version__
 from ..config import Config
 from ..push import scrub_error, send_activity_rows, send_scan_rows
-from ..state import collector_wm, load_state, save_state
+from ..state import atomic_write_text, collector_wm, load_json_dict, load_state, save_state
 from .backends import make_backend
 from .core import data_dir, decide, label_event, load_choice
 from .tasks import NOTE, OUTCOME_DAYS, TASKS, Source, SourceUnavailable, units
@@ -34,27 +32,6 @@ def local_midnight(d: date) -> datetime:
 
 def _cache_path():
     return data_dir() / "label" / "cache.json"
-
-
-def _load_cache() -> dict:
-    try:
-        obj = json.loads(_cache_path().read_text())
-        return obj if isinstance(obj, dict) else {}
-    except (OSError, ValueError):
-        return {}
-
-
-def _save_cache(cache: dict) -> None:
-    p = _cache_path()
-    p.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=str(p.parent), suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w") as fh:
-            json.dump(cache, fh)
-        os.replace(tmp, p)
-    finally:
-        if os.path.exists(tmp):
-            os.unlink(tmp)
 
 
 def _window(name: str, wm: dict, since: datetime | None, now: datetime):
@@ -136,7 +113,7 @@ def _run_task(cfg, task, src, choice, backend, since, until, dry_run, deadline, 
                 send_activity_rows(cfg.pg_dsn, pending)      # raises: watermark stays
             if task.cached and pending:
                 cache.setdefault(key, []).extend(e.attrs["unit_id"] for e in pending)
-                _save_cache(cache)
+                atomic_write_text(_cache_path(), json.dumps(cache))
             if task.window != "recent":
                 _advance(wm, task.name, next_wm)
                 save_state(state)
@@ -187,7 +164,7 @@ def run_label(cfg: Config, tasks: list[str] | None = None, since: datetime | Non
     backend_for = backend_for or default_backend
     state = load_state()
     wm = collector_wm(state, NAME)
-    cache = _load_cache()
+    cache = load_json_dict(_cache_path())
     deadline = time.monotonic() + cfg.label_budget_s
     report: dict[str, Counter] = {}
     status, error = "ok", None

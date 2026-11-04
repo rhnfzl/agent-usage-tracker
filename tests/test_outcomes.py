@@ -690,9 +690,9 @@ def test_fetch_only_clones_with_a_row_key():
     with tempfile.TemporaryDirectory() as d:
         work, s = _world(Path(d))
         fetched: list = []
-        saved = (oc._load_rows, oc._load_cache, oc._load_stored, oc.fetch_clones)
+        saved = (oc._load_rows, oc.load_json_dict, oc._load_stored, oc.fetch_clones)
         oc._load_rows = lambda dsn: [_row(s["A"], None, 30)]       # the SHA is there, no key
-        oc._load_cache, oc._load_stored = dict, lambda dsn: {}
+        oc.load_json_dict, oc._load_stored = (lambda p: {}), lambda dsn: {}
         oc.fetch_clones = lambda cs: (fetched.extend(cs), (len(cs), 0))[1]
         try:
             oc.run_outcomes(_cfg(Path(d), (str(Path(d) / "projects"),)), fetch=True,
@@ -703,7 +703,7 @@ def test_fetch_only_clones_with_a_row_key():
                             dry_run=True, now=NOW)
             assert [c.path for c in fetched] == [str(work)], fetched
         finally:
-            oc._load_rows, oc._load_cache, oc._load_stored, oc.fetch_clones = saved
+            oc._load_rows, oc.load_json_dict, oc._load_stored, oc.fetch_clones = saved
     print("ok fetch_only_clones_with_a_row_key")
 
 

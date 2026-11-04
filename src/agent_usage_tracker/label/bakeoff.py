@@ -12,10 +12,8 @@ from __future__ import annotations
 
 import json
 import math
-import os
 import random
 import sys
-import tempfile
 import time
 from collections import Counter
 from datetime import datetime, timezone
@@ -23,8 +21,9 @@ from datetime import datetime, timezone
 from ..config import Config
 from ..event import ActivityEvent, make_event_id
 from ..push import send_activity_rows
+from ..state import atomic_write_text
 from .backends import MODELS, Encoder, encoder_path, features, make_backend
-from .core import Choice, choice_path, fit_tau, fit_temperature, softmax, temper
+from .core import Choice, choice_path, fit_tau, fit_temperature, read_choices, softmax, temper
 from .evalset import (DAYS, append_jsonl, encoder_fit, gold_latest, held_out, path, read_jsonl,
                       silver_by_unit, stratum, window_units)
 from .tasks import TASKS, Source
@@ -204,23 +203,15 @@ def choose(cfg: Config, task: str) -> dict:
                                  -(r["macro_f1"] or 0)))
     p = choice_path()
     try:
-        obj = json.loads(p.read_text())
-        obj = obj if isinstance(obj, dict) else {}
-    except (OSError, ValueError):
-        obj = {}
+        obj = read_choices()
+    except (OSError, ValueError) as exc:    # overwriting would lose every other task's choice
+        raise SystemExit(f"label choose: {p} is unusable ({exc}); nothing written. Fix or move "
+                         "it aside and run choose again for each task.") from None
     obj.setdefault("tasks", {})[task] = {
         "backend": win["backend"], "model_id": win["model_id"], "model_rev": win["model_rev"],
         "temperature": win["temperature"], "calib_ver": win["calib_ver"],
         "tau": {k: v["tau"] for k, v in win["per_label"].items() if v["tau"] is not None}}
-    p.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=str(p.parent), suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w") as fh:
-            json.dump(obj, fh, indent=2, sort_keys=True)
-        os.replace(tmp, p)
-    finally:
-        if os.path.exists(tmp):
-            os.unlink(tmp)
+    atomic_write_text(p, json.dumps(obj, indent=2, sort_keys=True))
     return obj["tasks"][task]
 
 
