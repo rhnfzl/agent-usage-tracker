@@ -3,35 +3,33 @@
 Run: `AUT_TEST_PG_DSN=postgresql://... pytest tests/test_sink_sql.py`. The DSN must be a scratch
 database: the tests create the `agents` schema, and refuse to touch a database that already has one.
 
-SCHEMA is written from CONTRACT.md and the columns the code names; the homelab's own DDL is not in
-this repo. So this catches invalid SQL, a wrong column and an ON CONFLICT target with no matching
-key, and it does not prove the homelab schema matches CONTRACT.md.
+STAND_IN_SCHEMA is this file's own, written from CONTRACT.md and the columns the code names: the
+deployed DDL lives in the infrastructure repo (DEPLOY.md). So this catches invalid SQL, a wrong
+column and an ON CONFLICT target with no matching key against the stand-in. It proves nothing about
+the deployed schema; tests/test_sink.py only checks the stand-in names what CONTRACT.md names.
 """
 
 from __future__ import annotations
 
 import os
-import sys
 import uuid
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-
-from agent_usage_tracker import episode_store, inspector, outcomes, push  # noqa: E402
-from agent_usage_tracker.config import Config  # noqa: E402
-from agent_usage_tracker.event import (ActivityEvent, EventSession, TimeInterval,  # noqa: E402
+from agent_usage_tracker import episode_store, inspector, outcomes, push
+from agent_usage_tracker.config import Config
+from agent_usage_tracker.event import (ActivityEvent, EventSession, TimeInterval,
                                        UsageEvent)
-from agent_usage_tracker.label import run as label_run  # noqa: E402
-from agent_usage_tracker.label.tasks import Source  # noqa: E402
-from agent_usage_tracker.sink import connect  # noqa: E402
+from agent_usage_tracker.label import run as label_run
+from agent_usage_tracker.label.tasks import Source
+from agent_usage_tracker.sink import connect
 
 DSN = os.environ.get("AUT_TEST_PG_DSN")
 pytestmark = pytest.mark.skipif(not DSN, reason="AUT_TEST_PG_DSN is not set")
 
-SCHEMA = """
+STAND_IN_SCHEMA = """
 CREATE SCHEMA agents;
 CREATE TABLE agents.usage_event (
     event_id text, ts timestamptz, machine text, agent text, kind text, model text, provider text,
@@ -77,7 +75,7 @@ def dsn():
     with connect(DSN) as conn:
         if conn.execute("SELECT 1 FROM pg_namespace WHERE nspname = 'agents'").fetchone():
             pytest.fail("AUT_TEST_PG_DSN already has an agents schema: use a scratch database")
-        conn.execute(SCHEMA)
+        conn.execute(STAND_IN_SCHEMA)
         conn.commit()
     try:
         yield DSN
@@ -125,12 +123,12 @@ def test_heartbeat_inserts(dsn):
 def test_outcome_reads_and_writes(dsn):
     push.send_activity_rows(dsn, [_activity("c1", "commit", sha="abcdef1234", repo_key="k1",
                                             amend=False)])
-    rows = outcomes._load_rows(dsn)
+    rows = outcomes.load_rows(dsn)
     assert ("abcdef1234", "k1", False) in [(r["sha"], r["repo_key"], r["amend"]) for r in rows]
     for state, at in (("open", T0), ("merged", T0 + timedelta(days=1))):
-        outcomes._insert(dsn, [{"sha": "abcdef1234", "repo_key": "k1", "state": state,
+        outcomes.insert_outcomes(dsn, [{"sha": "abcdef1234", "repo_key": "k1", "state": state,
                                 "survival": 0.5, "decided_at": at}])
-    assert outcomes._load_stored(dsn) == {("abcdef1234", "k1"): ("merged", 0.5)}
+    assert outcomes.load_stored(dsn) == {("abcdef1234", "k1"): ("merged", 0.5)}
     outcomes.insert_manual_outcome(dsn, {"session_id": "s1", "outcome": "shipped", "ts": T0,
                                          "repo_key": "k1"})
     assert _rows(dsn, "manual_outcome") == 1
@@ -194,9 +192,5 @@ def test_inspect_day_means_a_member_row_that_day_not_span_overlap(dsn, episode):
         conn.commit()
     push.send_activity_rows(dsn, [_activity("s9a", "steer", "s9", via="typed")])
     a_quiet_day = (T0.astimezone() - timedelta(days=2)).date().isoformat()
-    assert inspector.fetch(dsn, day=a_quiet_day)["episodes"] == []
-    assert str(wide) in [ep["id"] for ep in inspector.fetch(dsn, day=DAY)["episodes"]]
-
-
-if __name__ == "__main__":
-    raise SystemExit(pytest.main([__file__, "-q"]))
+    assert inspector.fetch(dsn, "day", a_quiet_day)["episodes"] == []
+    assert str(wide) in [ep["id"] for ep in inspector.fetch(dsn, "day", DAY)["episodes"]]

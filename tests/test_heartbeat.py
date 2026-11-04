@@ -1,6 +1,5 @@
 """Hermetic tests for the per-collector scan heartbeat (agents.collector_scan).
 
-Run: `python tests/test_heartbeat.py`  (or `pytest`).
 Locks the rules that matter for a heartbeat that rides alongside usage delivery:
   - every collector that ran gets one row, 'ok', 'degraded' or 'error', and an error still
     re-raises, while a degraded collector delivers what it read and the scan goes on;
@@ -21,12 +20,10 @@ from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-
-from agent_usage_tracker import __version__, push, scan  # noqa: E402
-from agent_usage_tracker.collectors import Collector  # noqa: E402
-from agent_usage_tracker.config import Config  # noqa: E402
-from agent_usage_tracker.event import CollectorUnavailable, UsageEvent  # noqa: E402
+from agent_usage_tracker import __version__, push, scan
+from agent_usage_tracker.collectors import Collector
+from agent_usage_tracker.config import Config
+from agent_usage_tracker.event import CollectorUnavailable, UsageEvent
 
 
 def _cfg(pg_dsn: str | None = None, webhook_url: str | None = None) -> Config:
@@ -98,7 +95,6 @@ def test_scan_rows_ok_and_error() -> None:
         assert r["machine"] == "test" and r["aut_version"] == __version__
         assert r["started_at"].tzinfo is not None and r["started_at"] <= r["finished_at"]
         assert set(r) == set(push.SCAN_COLUMNS), r
-    print("ok scan_rows_ok_and_error")
 
 
 def test_degraded_collector_keeps_its_rows_and_the_scan_goes_on() -> None:
@@ -127,7 +123,6 @@ def test_degraded_collector_keeps_its_rows_and_the_scan_goes_on() -> None:
         == ("degraded", "CollectorUnavailable")
     assert rows["good"]["status"] == "ok"
     assert "could not read the rest" in err.getvalue() and "token expired" not in str(rows)
-    print("ok degraded_collector_keeps_its_rows_and_the_scan_goes_on")
 
 
 def test_delivery_failure_is_swallowed() -> None:
@@ -152,7 +147,6 @@ def test_delivery_failure_is_swallowed() -> None:
         assert rep_bad == rep_ok and sent_bad == sent_ok and state_bad == state_ok
         assert err_bad.count("\n") == 1 and "heartbeat" in err_bad, err_bad
     assert sent_ok == [["a1", "a2", "h1", "a3"]], sent_ok
-    print("ok delivery_failure_is_swallowed")
 
 
 def test_dry_run_sends_nothing() -> None:
@@ -162,7 +156,6 @@ def test_dry_run_sends_nothing() -> None:
         report = scan.run_scan(_cfg(pg_dsn="postgresql://x"), ["good"], dry_run=True)
     assert report["good"]["events"] == 3
     assert calls == [] and sent == [], (calls, sent)
-    print("ok dry_run_sends_nothing")
 
 
 def test_error_type_name() -> None:
@@ -173,7 +166,6 @@ def test_error_type_name() -> None:
                 "No such file: /home/someone/work/client-repo/session.jsonl", "x" * 1000):
         assert push.error_type_name(RuntimeError(msg)) == "RuntimeError", msg
     assert push.error_type_name(KeyError("k")) == "KeyError"
-    print("ok error_type_name")
 
 
 def test_interrupt_is_not_delivered() -> None:
@@ -190,10 +182,9 @@ def test_interrupt_is_not_delivered() -> None:
         except KeyboardInterrupt:
             pass
     assert calls == [], calls
-    print("ok interrupt_is_not_delivered")
 
 
-def test_send_scan_rows_transport() -> None:
+def test_send_scan_rows_transport(monkeypatch) -> None:
     row = {c: None for c in push.SCAN_COLUMNS} | {"machine": "test", "collector": "good",
                                                   "status": "ok", "events": 1, "human": 0}
     executed: list = []
@@ -217,23 +208,15 @@ def test_send_scan_rows_transport() -> None:
 
     fake = types.ModuleType("psycopg")
     fake.connect = lambda dsn, connect_timeout: _Conn()
-    prev = sys.modules.get("psycopg")
-    sys.modules["psycopg"] = fake
-    try:
-        err = io.StringIO()
-        with contextlib.redirect_stderr(err):
-            push.deliver_scan_rows(_cfg(webhook_url="https://hooks.example/h"), [row])
-        assert executed == [] and err.getvalue().count("\n") == 1, (executed, err.getvalue())
+    monkeypatch.setitem(sys.modules, "psycopg", fake)
+    err = io.StringIO()
+    with contextlib.redirect_stderr(err):
+        push.deliver_scan_rows(_cfg(webhook_url="https://hooks.example/h"), [row])
+    assert executed == [] and err.getvalue().count("\n") == 1, (executed, err.getvalue())
 
-        push.send_scan_rows("postgresql://x", [row])
-        _sql, rows = executed[0]
-        assert rows == [tuple(row[c] for c in push.SCAN_COLUMNS)] and executed[1] == "commit"
-    finally:
-        if prev is None:
-            sys.modules.pop("psycopg", None)
-        else:
-            sys.modules["psycopg"] = prev
-    print("ok send_scan_rows_transport")
+    push.send_scan_rows("postgresql://x", [row])
+    _sql, rows = executed[0]
+    assert rows == [tuple(row[c] for c in push.SCAN_COLUMNS)] and executed[1] == "commit"
 
 
 def test_a_failed_state_save_still_sends_the_heartbeat() -> None:
@@ -255,7 +238,3 @@ def test_a_failed_state_save_does_not_replace_the_pass_own_failure(capsys) -> No
         with pytest.raises(RuntimeError, match="boom"):
             scan.run_scan(_cfg(pg_dsn="postgresql://x"), ["bad"], dry_run=False)
     assert calls[0][0]["error"] == "RuntimeError" and "disk full" in capsys.readouterr().err
-
-
-if __name__ == "__main__":
-    raise SystemExit(pytest.main([__file__, "-q"]))

@@ -1,24 +1,16 @@
-"""Hermetic tests for the Cursor usage API collector, against a local fake of the API.
-
-Run: `python tests/test_cursor_api.py`  (or `pytest`).
-"""
+"""Hermetic tests for the Cursor usage API collector, against a local fake of the API."""
 
 from __future__ import annotations
 
 import http.server
 import sqlite3
-import sys
 import tempfile
 import threading
 import urllib.error
 from pathlib import Path
 
-import pytest
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-
-from agent_usage_tracker.event import CollectorUnavailable  # noqa: E402
-from test_collectors import _cfg  # noqa: E402
+from agent_usage_tracker.event import CollectorUnavailable
+from test_collectors import _cfg
 
 
 def test_a_stray_row_does_not_fail_the_page() -> None:
@@ -26,7 +18,7 @@ def test_a_stray_row_does_not_fail_the_page() -> None:
     assert cursor_api._page_events(["stray", None], "u", 0) == ([], 0, 0)
 
 
-def test_cursor_api() -> None:
+def test_cursor_api(monkeypatch) -> None:
     from agent_usage_tracker.collectors import cursor_api
     UID = 114903562
     # _map_event: maps my event; REJECTS a teammate's event (owningUser != uid); skips zero-token.
@@ -68,10 +60,9 @@ def test_cursor_api() -> None:
 
     cfg = _cfg(Path("/tmp"))
     cfg.cursor_api = True
-    orig_auth, orig_post = cursor_api._auth, cursor_api._post
-    cursor_api._auth = lambda c: ("cookie", 3867693)
-    cursor_api._post = fake_post
-    try:
+    with monkeypatch.context() as m:
+        m.setattr(cursor_api, "_auth", lambda c: ("cookie", 3867693))
+        m.setattr(cursor_api, "_post", fake_post)
         wm: dict = {}
         events = []
         for batch, commit in cursor_api.collect(cfg, wm):
@@ -87,8 +78,6 @@ def test_cursor_api() -> None:
                                         "tokenUsage": {"inputTokens": 1, "outputTokens": 1}}]
         again = [e for batch, _ in cursor_api.collect(cfg, wm) for e in batch]
         assert again == [], again                            # older than watermark -> skipped
-    finally:
-        cursor_api._auth, cursor_api._post = orig_auth, orig_post
     # a same-ms event at the watermark must NOT be permanently skipped (stop is strictly-older)
     wm2 = {"since_ms": 1784314315897}
     page1["usageEventsDisplay"] = [
@@ -96,11 +85,10 @@ def test_cursor_api() -> None:
          "tokenUsage": {"inputTokens": 3, "outputTokens": 3}},          # == watermark -> re-emitted
         {"owningUser": UID, "timestamp": "1784314310000", "model": "m", "conversationId": "older",
          "tokenUsage": {"inputTokens": 1, "outputTokens": 1}}]          # older -> stops paging
-    cursor_api._auth, cursor_api._post = (lambda c: ("ck", 1)), fake_post
-    try:
+    with monkeypatch.context() as m:
+        m.setattr(cursor_api, "_auth", lambda c: ("ck", 1))
+        m.setattr(cursor_api, "_post", fake_post)
         boundary = [e for batch, _ in cursor_api.collect(cfg, wm2) for e in batch]
-    finally:
-        cursor_api._auth, cursor_api._post = orig_auth, orig_post
     assert len(boundary) == 1 and boundary[0].total_tokens == 6, boundary   # same-ms emitted, not skipped
 
     # _auth must NOT crash on a malformed stored token (non-JWT / bad base64) -> returns None
@@ -117,10 +105,9 @@ def test_cursor_api() -> None:
             assert cursor_api._auth(c) is None, bad          # malformed -> no auth, no crash
     # disabled by default -> no network, no events
     assert list(cursor_api.collect(_cfg(Path("/tmp")), {})) == []
-    print("ok cursor_api")
 
 
-def test_cursor_cookie_not_sent_through_a_redirect() -> None:
+def test_cursor_cookie_not_sent_through_a_redirect(monkeypatch) -> None:
     from agent_usage_tracker.collectors import cursor_api
     seen: list[tuple[str, str | None]] = []
 
@@ -140,8 +127,7 @@ def test_cursor_cookie_not_sent_through_a_redirect() -> None:
 
     srv = http.server.HTTPServer(("127.0.0.1", 0), Handler)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
-    saved = cursor_api._BASE
-    cursor_api._BASE = f"http://127.0.0.1:{srv.server_port}"
+    monkeypatch.setattr(cursor_api, "_BASE", f"http://127.0.0.1:{srv.server_port}")
     try:
         try:
             cursor_api._post("secret-cookie", "get-me", {})
@@ -149,11 +135,9 @@ def test_cursor_cookie_not_sent_through_a_redirect() -> None:
         except urllib.error.HTTPError as exc:
             assert exc.code == 302
     finally:
-        cursor_api._BASE = saved
         srv.shutdown()
         srv.server_close()
     assert [p for p, _c in seen] == ["/get-me"], seen      # the cookie never reached /elsewhere
-    print("ok cursor_cookie_not_sent_through_a_redirect")
 
 
 def test_cursor_api_token_gone_is_unavailable_not_silent() -> None:
@@ -172,8 +156,3 @@ def test_cursor_api_token_gone_is_unavailable_not_silent() -> None:
             raise AssertionError("a Cursor with no usable token must not look like a quiet week")
         except CollectorUnavailable as exc:
             assert "token" in str(exc)
-    print("ok cursor_api_token_gone_is_unavailable_not_silent")
-
-
-if __name__ == "__main__":
-    raise SystemExit(pytest.main([__file__, "-q"]))

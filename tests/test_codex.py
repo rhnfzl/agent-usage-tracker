@@ -1,6 +1,5 @@
 """Hermetic tests for the Codex collector: usage, sessions and activity from rollout logs.
 
-Run: `python tests/test_codex.py`  (or `pytest`).
 Locks the rules:
   - Codex subtracts cached from input and uses the per-turn delta, keeps reasoning;
   - identity from the FIRST session_meta only (a fork's second meta is the parent's), run_origin
@@ -13,22 +12,16 @@ from __future__ import annotations
 
 import contextlib
 import io
-import sys
 import tempfile
 from pathlib import Path
 
-import pytest
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-
-from agent_usage_tracker.collectors import codex  # noqa: E402
-from agent_usage_tracker.event import UsageEvent  # noqa: E402
-from agent_usage_tracker.event import make_event_id  # noqa: E402
-from codex_pi_helpers import (T, _acts, _append, _call, _cfg, _collect, _ev, _item,  # noqa: E402
+from agent_usage_tracker.collectors import codex
+from agent_usage_tracker.event import UsageEvent
+from agent_usage_tracker.event import make_event_id
+from codex_pi_helpers import (T, _acts, _append, _call, _cfg, _collect, _ev, _item,
                               _meta, _run, _tok, _usage, _write_jsonl)
-from test_activity import _key  # noqa: E402
-from test_collectors import _drain  # noqa: E402
+from test_activity import _key
+from test_collectors import _drain
 
 
 def test_codex_human_turn_classification() -> None:
@@ -69,7 +62,6 @@ def test_codex_human_turn_classification() -> None:
 
         human = [e for e in _drain(codex.collect, _cfg(home)) if e.kind == "human"]
         assert len(human) == 3, [(e.event_id, e.ts) for e in human]
-    print("ok codex_human_turn_classification")
 
 
 def test_codex() -> None:
@@ -105,7 +97,6 @@ def test_codex() -> None:
         assert all(e.model == "gpt-5.6-sol" and e.provider == "openai" for e in ev)
         assert all(e.project == "repo" for e in ev)
         assert first.event_id != second.event_id                # content-hash ids are distinct
-    print("ok codex")
 
 
 def test_codex_sessions() -> None:
@@ -131,7 +122,6 @@ def test_codex_sessions() -> None:
                                   (codex.run_origin, {})]] == \
             ["interactive", "automated", "automated", "unknown"]
     _run(check)
-    print("ok codex_sessions")
 
 
 def test_codex_activity() -> None:
@@ -160,7 +150,6 @@ def test_codex_activity() -> None:
         [cc] = _acts(evs, "compaction")
         assert (cc.session_id, cc.turn_id, cc.attrs) == ("D1", "T3", {}), cc
     _run(check)
-    print("ok codex_activity")
 
 
 def test_codex_carries_across_scans() -> None:
@@ -193,7 +182,6 @@ def test_codex_carries_across_scans() -> None:
         assert (u.session.session_id, u.session.run_origin, u.session.turn_id) == \
             ("S1", "interactive", "T1"), u.session
         assert "act" not in next(iter(wm["files"].values())), "nothing left to carry"
-    print("ok codex_carries_across_scans")
 
 
 def test_codex_fork_copy_is_not_activity() -> None:
@@ -243,25 +231,15 @@ def test_codex_fork_copy_is_not_activity() -> None:
         assert sorted((u.session.session_id, u.session.turn_id) for u in _usage(evs)) == [
             ("F1", "FT1"), ("S2", "ST1")]
         assert all("skip" not in s for s in wm["files"].values()), "nothing left to carry"
-    print("ok codex_fork_copy_is_not_activity")
 
 
-def test_codex_activity_errors_never_block_usage() -> None:
+def test_codex_activity_errors_never_block_usage(monkeypatch) -> None:
     def check(home, repo):
-        saved = codex.commit_call
-        codex.commit_call = lambda cmd: 1 / 0
+        monkeypatch.setattr(codex, "commit_call", lambda cmd: 1 / 0)
         err = io.StringIO()
-        try:
-            with contextlib.redirect_stderr(err):
-                evs = _collect(codex, home)
-        finally:
-            codex.commit_call = saved
+        with contextlib.redirect_stderr(err):
+            evs = _collect(codex, home)
         assert not _acts(evs, "commit") and _acts(evs, "turn")
         assert len(_usage(evs)) == 5 and len(_usage(evs, "human")) == 4
         assert "activity record(s) skipped" in err.getvalue(), err.getvalue()
     _run(check)
-    print("ok codex_activity_errors_never_block_usage")
-
-
-if __name__ == "__main__":
-    raise SystemExit(pytest.main([__file__, "-q"]))

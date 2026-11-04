@@ -1,23 +1,20 @@
-"""Fakes shared by the `aut label` tests: backends, a sink-free source, logs and the environment.
-"""
+"""Fakes shared by the `aut label` tests: backends, a sink-free source, logs and the environment."""
 
 from __future__ import annotations
 
 import contextlib
 import json
-import os
 import re
-import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+import pytest
 
-from agent_usage_tracker.config import Config  # noqa: E402
-from agent_usage_tracker.event import make_event_id  # noqa: E402
-from agent_usage_tracker.label import backends  # noqa: E402
-from agent_usage_tracker.label import evalset  # noqa: E402
-from agent_usage_tracker.label import tasks  # noqa: E402
+from agent_usage_tracker.config import Config
+from agent_usage_tracker.event import make_event_id
+from agent_usage_tracker.label import backends
+from agent_usage_tracker.label import evalset
+from agent_usage_tracker.label import tasks
 
 SALT = "test-salt-for-labels-0123456789abcdef"
 NOW = datetime(2026, 11, 3, 3, 0, tzinfo=timezone.utc)
@@ -86,15 +83,11 @@ class FakeSource(tasks.Source):
 
 @contextlib.contextmanager
 def _env(tmp: Path):
-    keys = ("AUT_STATE", "XDG_DATA_HOME", "AUT_CONFIG")
-    saved = {k: os.environ.get(k) for k in keys}
-    os.environ.update(AUT_STATE=str(tmp / "state.json"), XDG_DATA_HOME=str(tmp / "data"),
-                      AUT_CONFIG=str(tmp / "config.toml"))
-    try:
+    with pytest.MonkeyPatch.context() as m:
+        m.setenv("AUT_STATE", str(tmp / "state.json"))
+        m.setenv("XDG_DATA_HOME", str(tmp / "data"))
+        m.setenv("AUT_CONFIG", str(tmp / "config.toml"))
         yield
-    finally:
-        for k, v in saved.items():
-            os.environ.pop(k, None) if v is None else os.environ.__setitem__(k, v)
 
 
 def _win(start, minutes, app="Safari", title="Docs - a page", category="web-work",

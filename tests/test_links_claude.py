@@ -1,26 +1,17 @@
-"""Hermetic tests for the link rows of Claude Code sessions: sources, order, roles and idle splits.
-
-Run: `python tests/test_links_claude.py`  (or `pytest`).
-"""
+"""Hermetic tests for the link rows of Claude Code sessions: sources, order, roles and idle splits."""
 
 from __future__ import annotations
 
 import json
 import os
-import sys
 import tempfile
 from pathlib import Path
 
-import pytest
-
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-
-from agent_usage_tracker.event import ActivityEvent  # noqa: E402
-from agent_usage_tracker.event import make_event_id  # noqa: E402
-from test_activity import (_base, _collect, _key, _result, _tools, _turn_end, _use,  # noqa: E402
+from agent_usage_tracker.event import ActivityEvent
+from agent_usage_tracker.event import make_event_id
+from test_activity import (_base, _collect, _key, _result, _tools, _turn_end, _use,
                            _user, _write_jsonl)
-from test_links import K1, K2, OLD, SHA_A, SHA_B, _bk, _links, _repos, _sk  # noqa: E402
+from test_links import K1, K2, OLD, SHA_A, SHA_B, _bk, _links, _repos, _sk
 
 
 def test_claude_sources_and_order() -> None:
@@ -74,7 +65,6 @@ def test_claude_sources_and_order() -> None:
         assert (l5.attrs["repo_key"], l5.attrs["branch_key"]) == (K1, None), l5.attrs
         assert l5.attrs["ticket_keys"] == [_key("ZZ-9")], l5.attrs          # from the title
         assert len(links) == 5
-    print("ok claude_sources_and_order")
 
 
 def test_claude_commit_repo_fallbacks() -> None:
@@ -99,7 +89,6 @@ def test_claude_commit_repo_fallbacks() -> None:
         got = {e.attrs["sha"]: e.attrs["repo_key"] for e in evs
                if isinstance(e, ActivityEvent) and e.kind == "commit"}
         assert got == {"1111aaa": K1, "2222bbb": None, "3333ccc": K2}, got
-    print("ok claude_commit_repo_fallbacks")
 
 
 def test_claude_roles_and_idle_close() -> None:
@@ -132,7 +121,6 @@ def test_claude_roles_and_idle_close() -> None:
         assert (la.event_id, la.turn_id) == (make_event_id("claude_code", "link", "a-sm1"), "P-s1")
         assert "act" not in wm["files"][str(sub)], "closed: nothing left to carry"
         assert not _links(_collect(home, wm)), "closed once"
-    print("ok claude_roles_and_idle_close")
 
 
 def test_claude_backfill_determinism() -> None:
@@ -175,7 +163,6 @@ def test_claude_backfill_determinism() -> None:
                                json.dumps(e.attrs, sort_keys=True)) for e in _links(evs))
             assert view(live) == view(full), (cut, view(live), view(full))
             assert len(view(full)) == 3, view(full)       # td1, the idle tail of S1, the subagent
-    print("ok claude_backfill_determinism")
 
 
 def test_claude_idle_gap_split_is_deterministic() -> None:
@@ -212,8 +199,3 @@ def test_claude_idle_gap_split_is_deterministic() -> None:
                 fh.writelines(json.dumps(r) + "\n" for r in recs[2:])
             live += _collect(home, wm)
             assert view(live) == full, (idle, view(live), full)
-    print("ok claude_idle_gap_split_is_deterministic")
-
-
-if __name__ == "__main__":
-    raise SystemExit(pytest.main([__file__, "-q"]))

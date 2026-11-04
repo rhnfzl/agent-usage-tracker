@@ -1,6 +1,5 @@
 """Hermetic tests for the Pi collector: usage, sessions, activity and its small readers.
 
-Run: `python tests/test_pi.py`  (or `pytest`).
 Locks the rules:
   - usage comes from message.usage; the header identity is carried in the watermark, with
     reasoning tokens, modelId, project from the header cwd and compaction usage; fork copies are
@@ -11,22 +10,18 @@ Locks the rules:
 from __future__ import annotations
 
 import json
-import sys
 import tempfile
 from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-
-from agent_usage_tracker.collectors import pi  # noqa: E402
-from agent_usage_tracker.event import UsageEvent  # noqa: E402
-from agent_usage_tracker.event import make_event_id  # noqa: E402
-from codex_pi_helpers import (FORK, SID, T, _acts, _append, _cfg, _collect, _hdr,  # noqa: E402
+from agent_usage_tracker.collectors import pi
+from agent_usage_tracker.event import UsageEvent
+from agent_usage_tracker.event import make_event_id
+from codex_pi_helpers import (FORK, SID, T, _acts, _append, _cfg, _collect, _hdr,
                               _pa, _pi_file, _pr, _pu, _run, _usage, _write_jsonl)
-from test_activity import _git_repo, _key  # noqa: E402
-from test_collectors import _drain  # noqa: E402
+from test_activity import _git_repo, _key
+from test_collectors import _drain
 
 
 def test_pi() -> None:
@@ -50,7 +45,6 @@ def test_pi() -> None:
         assert e.total_tokens == 340 and e.est_cost_usd == 0.0021
         assert e.model == "claude-opus-4-8"                    # streamed from model_change
         assert e.project is None                               # encoded dir is not reconstructable
-    print("ok pi")
 
 
 def test_pi_usage_and_sessions() -> None:
@@ -86,7 +80,6 @@ def test_pi_usage_and_sessions() -> None:
         assert pi.uuid_in(f"/gone/2026-01-01T00-00-00-000Z_{FORK}.jsonl") == FORK
         assert pi.uuid_in("/gone/not-a-session.jsonl") is None
     _run(check)
-    print("ok pi_usage_and_sessions")
 
 
 def test_pi_activity() -> None:
@@ -119,7 +112,6 @@ def test_pi_activity() -> None:
         assert (turns["u3"][0], turns["u3"][1]["duration_ms"]) == (T(12), 2000)   # by next user
         assert (turns["u4"][0], turns["u4"][1]["duration_ms"]) == (T(15), 2000)   # retry, stop
     _run(check)
-    print("ok pi_activity")
 
 
 def test_pi_carries_across_scans() -> None:
@@ -145,7 +137,6 @@ def test_pi_carries_across_scans() -> None:
         assert c.attrs["sha"] == "0a1b2c3" and c.attrs["repo_key"]
         [u] = _usage(second)
         assert (u.project, u.session.session_id, u.session.turn_id) == ("repo", SID, "u1")
-    print("ok pi_carries_across_scans")
 
 
 def test_pi_watermark_with_an_old_dev_is_not_read_again() -> None:
@@ -168,7 +159,6 @@ def test_pi_watermark_with_an_old_dev_is_not_read_again() -> None:
         later = _collect(pi, home, wm)
         assert [u.event_id for u in _usage(later)] == [make_event_id("pi", "a2")], later  # new only
         assert [h.session.turn_id for h in _usage(later, "human")] == ["u2"]
-    print("ok pi_watermark_with_an_old_dev_is_not_read_again")
 
 
 UUID = "0f0e0d0c-0b0a-4909-8807-060504030201"
@@ -304,7 +294,3 @@ def test_trim_state_keeps_only_what_carries_over():
     cur = {"act": {"link": {"repo": 1}}}
     pi._trim_state(cur)
     assert cur == {"act": {"link": {"repo": 1}}}
-
-
-if __name__ == "__main__":
-    raise SystemExit(pytest.main([__file__, "-q"]))

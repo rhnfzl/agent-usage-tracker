@@ -1,6 +1,5 @@
 """Hermetic tests for label/gold.py: `aut label review`, the local gold page.
 
-Run: `python tests/test_label_gold.py`  (or `pytest`).
 Locks the rules: the page lives on 127.0.0.1 under a token, hides the teachers' answers until the
 item is answered, writes gold rows without text, and skip / undo / done behave.
 """
@@ -8,23 +7,19 @@ item is answered, writes gold rows without text, and skip / undo / done behave.
 from __future__ import annotations
 
 import re
-import sys
 import threading
 import urllib.error
 import urllib.parse
 import urllib.request
 from collections import Counter
-from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-
-from agent_usage_tracker.label import evalset  # noqa: E402
-from agent_usage_tracker.label import gold  # noqa: E402
-from label_helpers import LABELS, TASK, TODAY, WORD, _env, _src  # noqa: E402
-from agent_usage_tracker.label import tasks  # noqa: E402
-from label_helpers import BASE, _cfg  # noqa: E402
+from agent_usage_tracker.label import evalset
+from agent_usage_tracker.label import gold
+from label_helpers import LABELS, TASK, TODAY, WORD, _env, _src
+from agent_usage_tracker.label import tasks
+from label_helpers import BASE, _cfg
 
 
 def _serve(reqs, **kw):
@@ -243,7 +238,3 @@ def test_print_review_names_the_counts_and_the_floor(capsys):
     out = capsys.readouterr().out
     assert f'label review {TASK}: 1 answered, 2 skipped; gold per label {{"stop": 1}}' in out
     assert f"(floor {gold.FLOORS[TASK][0]})" in out
-
-
-if __name__ == "__main__":
-    raise SystemExit(pytest.main([__file__, "-q"]))

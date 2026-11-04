@@ -1,21 +1,11 @@
-"""Hermetic tests for the redaction of secrets in local text and window titles.
-
-Run: `python tests/test_redact.py`  (or `pytest`).
-"""
+"""Hermetic tests for the redaction of secrets in local text and window titles."""
 
 from __future__ import annotations
 
-import sys
 import time
-from pathlib import Path
 
-import pytest
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-
-from agent_usage_tracker.redact import PATTERNS  # noqa: E402
-from agent_usage_tracker.redact import clean_text  # noqa: E402
+from agent_usage_tracker.redact import PATTERNS
+from agent_usage_tracker.redact import clean_text
 
 
 def test_redaction_each_pattern() -> None:
@@ -52,7 +42,6 @@ def test_redaction_each_pattern() -> None:
     assert names == set(samples) - {"long_hex", "long_base64"} | {"long_run"}, names
     assert clean_text("A plain editor title") == "A plain editor title"
     assert len(clean_text("word " * 200)) == 300
-    print("ok redaction_each_pattern")
 
 
 def test_redaction_stays_fast_on_long_runs() -> None:
@@ -68,7 +57,3 @@ def test_redaction_keeps_its_catches() -> None:
     assert clean_text("git+ssh://me:pw@host/x") == "git+ssh://[redacted]@host/x"
     assert clean_text("mail a.b+c@d-e.co.uk.") == "mail [redacted]."
     assert clean_text("a@b.com+x@d.org") == "[redacted][redacted]"
-
-
-if __name__ == "__main__":
-    raise SystemExit(pytest.main([__file__, "-q"]))

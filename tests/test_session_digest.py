@@ -1,6 +1,5 @@
 """Hermetic tests for session_digest: the local-only titles and text read from each agent's logs.
 
-Run: `python tests/test_session_digest.py`  (or `pytest`).
 Locks the rule: titles, branches, prompts, commit subjects, PR titles and files come from this
 machine's own logs, prompts trimmed and redacted, and one bad log costs only its own session.
 """
@@ -8,17 +7,13 @@ machine's own logs, prompts trimmed and redacted, and one bad log costs only its
 from __future__ import annotations
 
 import json
-import sys
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
-import pytest
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-
-from agent_usage_tracker.collectors import session_digest  # noqa: E402
+from agent_usage_tracker.collectors import session_digest
+from test_cursor_cli import A, _calls, _prompt, _result, _store
 
 
 def test_local_info_reads_claude_and_codex_logs():
@@ -49,7 +44,6 @@ def test_local_info_reads_claude_and_codex_logs():
         assert {k: info["cx1"][k] for k in tb} == {"titles": ["codex thread"],
                                                    "branches": ["fix/three"]}, info
         assert "gone" not in info
-        print("ok local_info_reads_claude_and_codex_logs")
 
 
 def _jsonl(path: Path, recs: list[dict]) -> None:
@@ -111,7 +105,6 @@ def test_claude_session_fields():
     assert v["commits"] == ["Add the widget", "Fix two, from git"], v["commits"]
     assert v["prs"] == ["Widget PR"], v["prs"]
     assert v["files"] == ["src/a.py", "b.py", "x/c.py"], v["files"]
-    print("ok claude_session_fields")
 
 
 def test_codex_session_fields():
@@ -144,7 +137,6 @@ def test_codex_session_fields():
     assert v["last"] == "second ask [redacted]" and v["branches"] == ["feat/g"], v
     assert (v["commits"], v["files"]) == (["Gadget works"], ["g.py"]), v
     assert info["cx2"]["n_prompts"] == 0 and info["cx2"]["first"] == ""
-    print("ok codex_session_fields")
 
 
 def test_review_findings_edge_cases():
@@ -172,7 +164,6 @@ def test_review_findings_edge_cases():
         info = session_digest.local_info(home, {sid, "cx2"})
     assert info[sid]["first"] == "/tidy now", info
     assert info["cx2"]["first"] == "hello", info
-    print("ok review_findings_edge_cases")
 
 
 def test_bad_values_in_one_log_cost_only_that_session():
@@ -195,7 +186,6 @@ def test_bad_values_in_one_log_cost_only_that_session():
             info = session_digest.local_info(home, {"cx1", "s1"})
     assert list(info) == ["cx1"], info
     assert (info["cx1"]["branches"], info["cx1"]["titles"]) == ([], ["named"]), info
-    print("ok bad_values_in_one_log_cost_only_that_session")
 
 
 def test_codex_fork_skips_the_copied_history():
@@ -208,7 +198,6 @@ def test_codex_fork_skips_the_copied_history():
         _jsonl(Path(t) / ".codex" / "sessions" / "rollout-2001-cx1.jsonl", recs)
         v = session_digest.local_info(Path(t), {"cx1"})["cx1"]
     assert (v["n_prompts"], v["first"]) == (1, "mine"), v
-    print("ok codex_fork_skips_the_copied_history")
 
 
 def test_codex_digest_keeps_a_record_with_an_invalid_byte():
@@ -223,7 +212,6 @@ def test_codex_digest_keeps_a_record_with_an_invalid_byte():
         v = session_digest.local_info(Path(t), {"cx1"})["cx1"]
     assert (v["n_prompts"], v["last"]) == (2, "second"), v
     assert v["first"].startswith("first "), v
-    print("ok codex_digest_keeps_a_record_with_an_invalid_byte")
 
 
 def test_digest_lists_hold_only_text():
@@ -231,7 +219,6 @@ def test_digest_lists_hold_only_text():
     d.note_shell("git commit --no-edit", "", False)
     d.note_shell("gh pr create --fill", "", False)
     assert d.commits == [] and d.prs == [], (d.commits, d.prs)
-    print("ok digest_lists_hold_only_text")
 
 
 def test_local_info_says_a_log_failed_without_its_text(capsys):
@@ -247,5 +234,24 @@ def test_local_info_says_a_log_failed_without_its_text(capsys):
     assert "1 local session log(s) not shown (KeyError)" in err and "private" not in err
 
 
-if __name__ == "__main__":
-    raise SystemExit(pytest.main([__file__, "-q"]))
+def test_cursor_chat_fields(tmp_path):
+    cwd = "/work/acme/parser"
+    def shell(cid, cmd):
+        return _calls((cid, "Shell", {"command": cmd, "working_directory": cwd}))
+
+    # stored newest first, as a resumed chat can be: the digest orders prompts by their own time
+    chat = [_prompt("r2", "second ask", "Monday, Jul 20, 2026, 10:00 AM (UTC+0)"),
+            _prompt("r1", "first ask", "Monday, Jul 20, 2026, 9:00 AM (UTC+0)"),
+            shell("c1", "git commit -m 'made'"),
+            _result("c1", "Shell", "Exit code: 0\nCommand output:\n[main 1a2b3c4] Made, from git\n"),
+            shell("c2", "git commit -m 'exit one'"),
+            _result("c2", "Shell", "Exit code: 1\nCommand output:\nhook failed\n"),
+            shell("c3", "git commit -m 'no exit line'"),
+            _result("c3", "Shell", "the shell was killed"),
+            _calls(("e1", "Edit", {"file_path": cwd + "/src/a.py"}))]
+    _store(tmp_path, A, [chat])
+    v = session_digest.local_info(tmp_path, {A})[A]
+    assert (v["agent"], v["n_prompts"], v["first"], v["last"]) == \
+        ("Cursor", 2, "first ask", "second ask"), v
+    assert v["folder"] == "acme/parser" and v["files"] == ["src/a.py"], v
+    assert v["commits"] == ["Made, from git"], "a non-zero or unknown exit made no commit"

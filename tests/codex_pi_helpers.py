@@ -1,20 +1,15 @@
-"""Log fixtures and small readers shared by the Codex and Pi collector tests.
-"""
+"""Log fixtures and small readers shared by the Codex and Pi collector tests."""
 
 from __future__ import annotations
 
 import json
-import sys
 import tempfile
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-
-from agent_usage_tracker.config import Config  # noqa: E402
-from agent_usage_tracker.event import ActivityEvent  # noqa: E402
-from agent_usage_tracker.event import UsageEvent  # noqa: E402
-from test_activity import _git_repo  # noqa: E402
+from agent_usage_tracker.config import Config
+from agent_usage_tracker.event import ActivityEvent
+from agent_usage_tracker.event import UsageEvent
+from test_activity import _git_repo
 
 SALT = "test-salt"
 TYPED = "please tidy the parser module"

@@ -1,7 +1,6 @@
 """Hermetic tests for the cursor_cli collector (Cursor CLI chat stores and SDK run stores), on
 synthetic sqlite fixtures built in a temp dir.
 
-Run: `python tests/test_cursor_cli.py`  (or `pytest`).
 Locks the rules:
   - no token usage ever (tokens come from cursor_api); human rows only for CLI prompts carrying
     `providerOptions.cursor.requestId`, never for a subagent chat or a summary message;
@@ -23,20 +22,16 @@ import io
 import json
 import os
 import sqlite3
-import sys
 import tempfile
 import time
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+from test_activity import _git_repo, _key, _plain_value
 
-from test_activity import _git_repo, _key, _plain_value  # noqa: E402
-
-from agent_usage_tracker import scan  # noqa: E402
-from agent_usage_tracker.collectors import REGISTRY, cursor_cli  # noqa: E402
-from agent_usage_tracker.config import ALL_AGENTS, Config  # noqa: E402
-from agent_usage_tracker.event import (ActivityEvent, CollectorUnavailable, UsageEvent,  # noqa: E402
+from agent_usage_tracker import scan
+from agent_usage_tracker.collectors import REGISTRY, cursor_cli
+from agent_usage_tracker.config import ALL_AGENTS, Config
+from agent_usage_tracker.event import (ActivityEvent, CollectorUnavailable, UsageEvent,
                                        make_event_id)
 
 SALT = "test-salt"
@@ -214,14 +209,15 @@ def _eid(kind: str, seed: str) -> str:
 
 def test_registered() -> None:
     assert NAME in REGISTRY and set(REGISTRY) == set(ALL_AGENTS), "config and registry drifted"
-    print("ok registered")
 
 
 def test_cli_human_and_sessions() -> None:
     def check(home, repo):
         evs = _collect(home)
         usage = [e for e in evs if isinstance(e, UsageEvent)]
-        assert all(e.kind == "human" and not e.any_tokens and e.model is None for e in usage)
+        assert all(e.kind == "human" and e.model is None and not (
+            e.input_tokens or e.output_tokens or e.cache_read_tokens or e.cache_write_tokens
+            or e.reasoning_tokens or e.total_tokens) for e in usage)
         by = {e.session.turn_id: e for e in usage}
         # r0 sits in no root but is still a prompt; rb is the subagent's, not a person's
         assert sorted(by) == ["r0", "r1", "r2", "r3"], sorted(by)
@@ -238,7 +234,6 @@ def test_cli_human_and_sessions() -> None:
                                      "images": 1}, steer["r1"].attrs
         assert steer["r1"].ts == by["r1"].ts and steer["r1"].session_id == A
     _run(check)
-    print("ok cli_human_and_sessions")
 
 
 def test_cli_activity() -> None:
@@ -272,7 +267,6 @@ def test_cli_activity() -> None:
         assert rej.event_id == _eid("rejection", f"{A}|c4")
         assert not _acts(evs, "steer", B)
     _run(check)
-    print("ok cli_activity")
 
 
 def test_open_turn_waits_and_counts_once() -> None:
@@ -305,7 +299,6 @@ def test_open_turn_waits_and_counts_once() -> None:
         assert t2.attrs["tool_calls"] == 1
         assert _collect(home, wm) == []
     _run(check)
-    print("ok open_turn_waits_and_counts_once")
 
 
 def _blob(m: dict) -> str:
@@ -334,7 +327,6 @@ def test_rewritten_call_counts_once() -> None:
         [t] = _acts(_rows(_collect(home), C), "turn")
         assert (t.attrs["tool_calls"], t.attrs["by_tool"]) == (2, {"Read": 1, "Grep": 1}), t.attrs
     _run(check)
-    print("ok rewritten_call_counts_once")
 
 
 def test_follow_up_prompt_in_running_turn() -> None:
@@ -360,7 +352,6 @@ def test_follow_up_prompt_in_running_turn() -> None:
         [t] = _acts(evs, "turn")
         assert (t.turn_id, t.attrs["tool_calls"], t.ts) == ("q1", 2, "2026-07-20T09:05:00+00:00")
     _run(check)
-    print("ok follow_up_prompt_in_running_turn")
 
 
 def test_unlisted_prompt_waits_while_active() -> None:
@@ -379,7 +370,6 @@ def test_unlisted_prompt_waits_while_active() -> None:
         [t] = [e for e in _acts(later, "turn") if e.turn_id == "q2"]
         assert t.attrs["tool_calls"] == 2, t.attrs
     _run(check)
-    print("ok unlisted_prompt_waits_while_active")
 
 
 def test_sdk_runs() -> None:
@@ -398,7 +388,6 @@ def test_sdk_runs() -> None:
         _collect(home, wm)
         assert not [e for e in _collect(home, wm) if e.session_id == "agent-sdk1"]
     _run(check)
-    print("ok sdk_runs")
 
 
 def test_attrs_carry_no_text() -> None:
@@ -414,25 +403,19 @@ def test_attrs_carry_no_text() -> None:
         for bad in ("mcp_acmecorp-internal_lookup", "wc -l x", "a/b"):
             assert cursor_cli._by_tool_key(bad) in ("mcp", "other"), bad
     _run(check)
-    print("ok attrs_carry_no_text (cursor_cli)")
 
 
-def test_activity_errors_never_block_human_rows() -> None:
+def test_activity_errors_never_block_human_rows(monkeypatch) -> None:
     def check(home, repo):
-        real = cursor_cli._Activity.record
 
         def boom(*a, **k):
             raise RuntimeError("boom")
-        cursor_cli._Activity.record = boom
-        try:
-            with contextlib.redirect_stderr(io.StringIO()) as err:
-                evs = _collect(home)
-        finally:
-            cursor_cli._Activity.record = real
+        monkeypatch.setattr(cursor_cli._Activity, "record", boom)
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            evs = _collect(home)
         assert len([e for e in evs if isinstance(e, UsageEvent)]) == 4
         assert "activity record(s) skipped" in err.getvalue()
     _run(check)
-    print("ok activity_errors_never_block_human_rows")
 
 
 def test_unreadable_store_is_reported_after_the_rest() -> None:
@@ -453,7 +436,6 @@ def test_unreadable_store_is_reported_after_the_rest() -> None:
             "the readable chats still came first"
         assert str(bad) not in wm["chats"], "and the bad one is retried next scan"
     _run(check)
-    print("ok unreadable_store_is_reported_after_the_rest")
 
 
 def test_backfill_cursor_cli(monkeypatch) -> None:
@@ -471,9 +453,3 @@ def test_backfill_cursor_cli(monkeypatch) -> None:
         assert c["turn_null"] == 0, c
         assert c["by_kind"] == {"steer": 4, "turn": 7, "commit": 2, "rejection": 1, "link": 4}, c   # SDK runs: no link
     _run(check)
-    print("ok backfill_cursor_cli")
-
-
-if __name__ == "__main__":
-    import pytest
-    raise SystemExit(pytest.main([__file__, "-q"]))

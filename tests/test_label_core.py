@@ -1,6 +1,5 @@
 """Hermetic tests for label/core.py: the decision interface, calibration and the stored label row.
 
-Run: `python tests/test_label_core.py`  (or `pytest`).
 Locks the rules:
   - a backend's distribution is normalized over the candidates, and the original and reversed
     candidate orders are averaged (letter position bias cancels);
@@ -13,18 +12,14 @@ Locks the rules:
 from __future__ import annotations
 
 import json
-import sys
 from datetime import date, datetime
-from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-
-from agent_usage_tracker.label import backends  # noqa: E402
-from agent_usage_tracker.label import core  # noqa: E402
-from agent_usage_tracker.label import tasks  # noqa: E402
-from label_helpers import ById, NOW, SECRET  # noqa: E402
+from agent_usage_tracker.label import backends
+from agent_usage_tracker.label import core
+from agent_usage_tracker.label import tasks
+from label_helpers import ById, NOW, SECRET
 
 
 class FixedLetters(backends.LetterBackend):
@@ -267,7 +262,3 @@ def test_label_event_rounds_its_numbers_and_keeps_the_given_time():
     assert (ev.session_id, ev.turn_id, ev.agent) == (None, None, "label")
     other_calib = core.decide(req, {"a": 2 / 3, "b": 1 / 3}, core.Choice(calib_ver="c2"), "m", "r")
     assert core.label_event(req, other_calib).event_id != ev.event_id
-
-
-if __name__ == "__main__":
-    raise SystemExit(pytest.main([__file__, "-q"]))

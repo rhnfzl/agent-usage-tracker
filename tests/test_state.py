@@ -1,7 +1,5 @@
 """Watermark store tests.
 
-Run: `python tests/test_state.py`  (or `pytest`).
-
 The property under test is mostly about NOISE, not correctness: losing the watermark is always
 safe (the sink dedups on event_id) but never free, because the next scan re-reads and re-pushes
 every log from byte 0. So an unusable state file has to say so on stderr instead of quietly
@@ -19,11 +17,9 @@ from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-
-from agent_usage_tracker import push  # noqa: E402
-from agent_usage_tracker.config import AutError, Config, load_config  # noqa: E402
-from agent_usage_tracker.state import (atomic_write_text, load_json_dict, load_state,  # noqa: E402
+from agent_usage_tracker import push
+from agent_usage_tracker.config import AutError, Config, load_config
+from agent_usage_tracker.state import (atomic_write_text, load_json_dict, load_state,
                                        save_state)
 
 
@@ -51,7 +47,6 @@ def test_missing_state_is_silent() -> None:
         state, err = _load_capturing_stderr()
         assert state == {"collectors": {}}
         assert err == ""
-    print("ok missing_state_is_silent")
 
 
 def test_valid_state_round_trips() -> None:
@@ -61,7 +56,6 @@ def test_valid_state_round_trips() -> None:
         assert state == good
         assert err == ""
         assert not p.with_suffix(".corrupt").exists()
-    print("ok valid_state_round_trips")
 
 
 def test_corrupt_json_warns_and_preserves() -> None:
@@ -73,7 +67,6 @@ def test_corrupt_json_warns_and_preserves() -> None:
         # so the copy is the only thing that survives to be inspected.
         assert p.exists()
         assert p.with_suffix(".corrupt").read_text() == '{"collectors": {"codex":'
-    print("ok corrupt_json_warns_and_preserves")
 
 
 def test_wrong_shape_warns() -> None:
@@ -83,27 +76,22 @@ def test_wrong_shape_warns() -> None:
             assert state == {"collectors": {}}
             assert "unusable" in err
             assert p.with_suffix(".corrupt").exists()
-    print("ok wrong_shape_warns")
 
 
-def test_atomic_write_keeps_the_old_file_on_failure() -> None:
+def test_atomic_write_keeps_the_old_file_on_failure(monkeypatch) -> None:
     with tempfile.TemporaryDirectory() as d:
         p = Path(d) / "sub" / "x.json"
         atomic_write_text(p, '{"a": 1}')
         assert load_json_dict(p) == {"a": 1}
-        real = os.replace
-        os.replace = lambda *a: (_ for _ in ()).throw(OSError("no"))
+        monkeypatch.setattr(os, "replace", lambda *a: (_ for _ in ()).throw(OSError("no")))
         try:
             atomic_write_text(p, "new")
             raise AssertionError("the failed replace must raise")
         except OSError:
             pass
-        finally:
-            os.replace = real
         assert p.read_text() == '{"a": 1}' and [f.name for f in p.parent.iterdir()] == ["x.json"]
         p.write_text("[1]")
         assert load_json_dict(p) == {} and load_json_dict(p.with_name("gone")) == {}
-    print("ok atomic_write_keeps_the_old_file_on_failure")
 
 
 def test_config_errors_and_permission_warning(monkeypatch) -> None:
@@ -127,28 +115,22 @@ def test_config_errors_and_permission_warning(monkeypatch) -> None:
             with contextlib.redirect_stderr(io.StringIO()) as err:
                 load_config()
             assert "holds a secret" in err.getvalue(), err.getvalue()
-    print("ok config_errors_and_permission_warning")
 
 
-def test_missing_psycopg_names_the_extra_and_spares_the_heartbeat() -> None:
+def test_missing_psycopg_names_the_extra_and_spares_the_heartbeat(monkeypatch) -> None:
     cfg = Config(machine="m", agents=(), webhook_url=None, webhook_secret=None, pg_dsn="pg://x",
                  home=Path("."))
     row = dict.fromkeys(push.SCAN_COLUMNS)
-    prev = sys.modules.get("psycopg")
-    sys.modules["psycopg"] = None           # makes `import psycopg` raise ImportError
+    monkeypatch.setitem(sys.modules, "psycopg", None)   # makes `import psycopg` raise ImportError
     try:
-        try:
-            push.insert_pg("pg://x", [])
-            raise AssertionError("a missing driver must be an operator error")
-        except AutError as exc:
-            assert "agent-usage-tracker[postgres]" in str(exc), exc
-        with contextlib.redirect_stderr(io.StringIO()) as err:
-            push.deliver_scan_rows(cfg, [row])      # best effort: returns
-        assert "heartbeat not delivered" in err.getvalue()
-        assert "agent-usage-tracker[postgres]" in err.getvalue(), err.getvalue()
-    finally:
-        sys.modules.pop("psycopg") if prev is None else sys.modules.update(psycopg=prev)
-    print("ok missing_psycopg_names_the_extra_and_spares_the_heartbeat")
+        push.insert_pg("pg://x", [])
+        raise AssertionError("a missing driver must be an operator error")
+    except AutError as exc:
+        assert "agent-usage-tracker[postgres]" in str(exc), exc
+    with contextlib.redirect_stderr(io.StringIO()) as err:
+        push.deliver_scan_rows(cfg, [row])      # best effort: returns
+    assert "heartbeat not delivered" in err.getvalue()
+    assert "agent-usage-tracker[postgres]" in err.getvalue(), err.getvalue()
 
 
 def test_undecodable_state_recovers_like_any_corrupt_file() -> None:
@@ -172,7 +154,3 @@ def test_a_save_never_rolls_back_another_process_watermark() -> None:
         del scan_copy["collectors"]["codex"]
         save_state(scan_copy, ["codex"])                        # a name gone from state is dropped
         assert json.loads(p.read_text())["collectors"] == {"label": {"t": "new"}}
-
-
-if __name__ == "__main__":
-    raise SystemExit(pytest.main([__file__, "-q"]))

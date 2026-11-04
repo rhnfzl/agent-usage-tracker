@@ -1,6 +1,5 @@
 """Hermetic tests for label/teach.py: `aut label teach`, the teacher (silver) labels. No claude.
 
-Run: `python tests/test_label_teach.py`  (or `pytest`).
 Locks the rules: Sonnet sees only units whose text comes from Claude Code; window units never
 reach it; the headless call saves no session, has no tools and runs Sonnet; spend is capped; a
 rerun only adds what is missing; silver rows hold ids, teachers and numbers, never text.
@@ -11,22 +10,18 @@ from __future__ import annotations
 import json
 import os
 import subprocess
-import sys
 from collections import Counter
 from datetime import timedelta
-from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-
-from agent_usage_tracker.label import evalset  # noqa: E402
-from agent_usage_tracker.label import tasks  # noqa: E402
-from agent_usage_tracker.label import teach  # noqa: E402
-from label_helpers import (BASE, FakeSource, Oracle, TASK, WORD, _cfg, _env,  # noqa: E402
+from agent_usage_tracker.label import evalset
+from agent_usage_tracker.label import tasks
+from agent_usage_tracker.label import teach
+from label_helpers import (BASE, FakeSource, Oracle, TASK, WORD, _cfg, _env,
                            _src, _win)
-from agent_usage_tracker.config import AutError  # noqa: E402
-from agent_usage_tracker.label import core  # noqa: E402
+from agent_usage_tracker.config import AutError
+from agent_usage_tracker.label import core
 
 
 def test_parse_dist_and_prompt():
@@ -209,7 +204,3 @@ def test_print_teach_shows_the_counts_and_the_spend(tmp_path, capsys):
         out = capsys.readouterr().out
         assert "3 units, local 2, sonnet 1 (unusable 0, failed 4, skipped 0)" in out
         assert "spent $0.25 of $5.00" in out and str(evalset.eval_path(TASK, "silver")) in out
-
-
-if __name__ == "__main__":
-    raise SystemExit(pytest.main([__file__, "-q"]))

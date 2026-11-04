@@ -331,7 +331,7 @@ def _load_cache() -> dict[str, Any]:
     return cache
 
 
-def _load_rows(dsn: str) -> list[dict[str, Any]]:
+def load_rows(dsn: str) -> list[dict[str, Any]]:
     with connect(dsn) as conn:
         rows = conn.execute(
             "SELECT session_id, ts, attrs->>'sha', attrs->>'repo_key', "
@@ -341,7 +341,7 @@ def _load_rows(dsn: str) -> list[dict[str, Any]]:
             for s, ts, sha, k, am in rows]
 
 
-def _load_stored(dsn: str) -> dict[tuple[str, str], tuple[str, float | None]]:
+def load_stored(dsn: str) -> dict[tuple[str, str], tuple[str, float | None]]:
     with connect(dsn) as conn:
         rows = conn.execute(
             "SELECT DISTINCT ON (sha, repo_key) sha, repo_key, state, survival "
@@ -350,7 +350,7 @@ def _load_stored(dsn: str) -> dict[tuple[str, str], tuple[str, float | None]]:
             for sha, k, st, sv in rows}
 
 
-def _insert(dsn: str, rows: list[dict[str, Any]]) -> None:
+def insert_outcomes(dsn: str, rows: list[dict[str, Any]]) -> None:
     write_many(dsn, "INSERT INTO agents.commit_outcome (sha, repo_key, state, survival, decided_at) "
                "VALUES (%s, %s, %s, %s, %s) ON CONFLICT DO NOTHING",
                [(r["sha"], r["repo_key"], r["state"], r["survival"], r["decided_at"])
@@ -366,7 +366,7 @@ def run_outcomes(cfg: Config, *, refresh: bool, dry_run: bool,
     started = datetime.now(timezone.utc)
     decided = (now or started).astimezone(timezone.utc)
     with job_heartbeat(cfg, "outcomes", started, dry_run=dry_run) as beat:
-        rows = _load_rows(dsn)
+        rows = load_rows(dsn)
         clones = find_clones(list(cfg.outcome_repo_roots), RepoKeys(cfg.repo_key_salt))
         stats: dict[str, Any] = {"clones": len(clones)}
         if refresh and dry_run:
@@ -384,10 +384,10 @@ def run_outcomes(cfg: Config, *, refresh: bool, dry_run: bool,
         stats["states"] = Counter(o["state"] for o in outs)
         if not dry_run:
             atomic_write_text(_cache_path(), json.dumps(cache))     # before the sink: a failing write never redoes the blame
-        todo = pending(outs, _load_stored(dsn))
+        todo = pending(outs, load_stored(dsn))
         stats["to_write"] = len(todo)
         if not dry_run:
-            _insert(dsn, [{"sha": o["sha"], "repo_key": o["repo_key"], "state": o["state"],
+            insert_outcomes(dsn, [{"sha": o["sha"], "repo_key": o["repo_key"], "state": o["state"],
                            "survival": o["survival"], "decided_at": decided} for o in todo])
             beat.events = len(todo)
     return stats

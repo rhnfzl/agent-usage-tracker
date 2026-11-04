@@ -1,6 +1,5 @@
 """Hermetic tests for `aut outcomes` and `aut outcome` on temp git repos (real git, synthetic commits).
 
-Run: `python tests/test_outcomes.py`  (or `pytest`).
 Locks the rules:
   - merged: ancestor of origin/HEAD, or a single-commit patch-id twin on it, or (network on) a
     merged GitHub PR found by gh; reverted within 14 days of the merge; reworked when under half
@@ -25,19 +24,18 @@ import json
 import os
 import re
 import subprocess
-import sys
 import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+import pytest
 
-from agent_usage_tracker import outcome_git as og  # noqa: E402
-from agent_usage_tracker import outcomes as oc  # noqa: E402
-from agent_usage_tracker import push  # noqa: E402
-from agent_usage_tracker.repo_keys import RepoKeys, repo_identity  # noqa: E402
-from agent_usage_tracker.config import AutError, Config  # noqa: E402
+from agent_usage_tracker import outcome_git as og
+from agent_usage_tracker import outcomes as oc
+from agent_usage_tracker import push
+from agent_usage_tracker.repo_keys import RepoKeys, repo_identity
+from agent_usage_tracker.config import AutError, Config
 
 os.environ["GIT_CONFIG_GLOBAL"] = os.devnull      # the user's git config never reaches the tests
 os.environ["GIT_CONFIG_NOSYSTEM"] = "1"
@@ -148,7 +146,6 @@ def test_states_from_git():
             assert got[s[name][:9]][:2] == (state, surv), (name, got[s[name][:9]])
             assert got[s[name][:9]][2] == key
         assert stats["found"] == 9 and stats["not_found"] == 0, stats
-        print("ok states_from_git")
 
 
 def test_null_key_resolution_needs_matching_time():
@@ -167,7 +164,6 @@ def test_null_key_resolution_needs_matching_time():
         assert got[s["F"][:9]] == ("abandoned", None, ""), got      # unresolved: no key
         assert got["abcdef1234"] == ("abandoned", None, ""), got
         assert stats["null_key_resolved"] == 1 and stats["not_found"] == 2, stats
-        print("ok null_key_resolution_needs_matching_time")
 
 
 def test_null_key_resolved_counts_the_chosen_clone_of_each_anchor():
@@ -183,16 +179,14 @@ def test_null_key_resolved_counts_the_chosen_clone_of_each_anchor():
         for order in (rows, rows[::-1]):                   # one anchor resolves to a keyed clone
             _, stats = oc.evaluate(order, clones, NOW, cache={})
             assert stats["found"] == 2 and stats["null_key_resolved"] == 1, stats
-        print("ok null_key_resolved_counts_the_chosen_clone_of_each_anchor")
 
 
 def test_young_missing_commit_is_undecided():
     outs, stats = oc.evaluate([_row("abcdef1234", None, 3, short=10)], [], NOW, cache={})
     assert _states(outs)["abcdef1234"][0] == "undecided", outs
-    print("ok young_missing_commit_is_undecided")
 
 
-def test_survival_cached_and_never_recomputed():
+def test_survival_cached_and_never_recomputed(monkeypatch):
     with tempfile.TemporaryDirectory() as d:
         work, s = _world(Path(d))
         key = _key(str(Path(d) / "origin.git"))
@@ -200,17 +194,13 @@ def test_survival_cached_and_never_recomputed():
         cache: dict = {}
         oc.evaluate([_row(s["D"], key, 40)], clones, NOW, cache=cache)
         assert cache == {s["D"]: 0.0}, cache
-        real, oc.survival = oc.survival, lambda *a: (_ for _ in ()).throw(AssertionError("blame"))
-        try:
-            outs, stats = oc.evaluate([_row(s["D"], key, 40)], clones, NOW, cache=cache)
-        finally:
-            oc.survival = real
+        monkeypatch.setattr(oc, "survival", lambda *a: (_ for _ in ()).throw(AssertionError("blame")))
+        outs, stats = oc.evaluate([_row(s["D"], key, 40)], clones, NOW, cache=cache)
         assert _states(outs)[s["D"][:9]][:2] == ("reworked", 0.0)
         assert stats["survival_cached"] == 1 and stats["survival_computed"] == 0, stats
-        print("ok survival_cached_and_never_recomputed")
 
 
-def test_gh_merged_pr_counts_as_merged():
+def test_gh_merged_pr_counts_as_merged(monkeypatch):
     if os.name == "nt":                    # the fakes are POSIX shell scripts
         return
     with tempfile.TemporaryDirectory() as d:
@@ -226,18 +216,13 @@ def test_gh_merged_pr_counts_as_merged():
         key = _key(url)
         clones = oc.find_clones([str(Path(d) / "projects")], RepoKeys(SALT))
         rows = [_row(s["F"], key, 25), _row(s["E"], key, 25)]
-        old = os.environ["PATH"]
-        os.environ["PATH"] = f"{bindir}{os.pathsep}{old}"
-        try:
-            outs, stats = oc.evaluate(rows, clones, NOW, cache={}, use_gh=True)
-            off, _ = oc.evaluate(rows, clones, NOW, cache={}, use_gh=False)
-        finally:
-            os.environ["PATH"] = old
+        monkeypatch.setenv("PATH", f"{bindir}{os.pathsep}{os.environ['PATH']}")
+        outs, stats = oc.evaluate(rows, clones, NOW, cache={}, use_gh=True)
+        off, _ = oc.evaluate(rows, clones, NOW, cache={}, use_gh=False)
         assert _states(outs)[s["F"][:9]][:2] == ("merged", None), outs
         assert _states(outs)[s["E"][:9]][0] == "open", outs        # gh said no
         assert _states(off)[s["F"][:9]][0] == "abandoned", off       # gh only with the network on
         assert stats["gh_lookups"] == 2, stats
-        print("ok gh_merged_pr_counts_as_merged")
 
 
 def test_pending_writes_only_changes():
@@ -246,7 +231,6 @@ def test_pending_writes_only_changes():
             {"sha": "c" * 9, "repo_key": "", "state": "undecided", "survival": None}]
     stored = {("a" * 9, "k"): ("merged", 1.0), ("b" * 9, "k"): ("undecided", None)}
     assert [o["sha"][0] for o in oc.pending(outs, stored)] == ["b", "c"]
-    print("ok pending_writes_only_changes")
 
 
 def test_run_outcomes_dry_run_writes_nothing(monkeypatch):
@@ -255,27 +239,22 @@ def test_run_outcomes_dry_run_writes_nothing(monkeypatch):
         key = _key(str(Path(d) / "origin.git"))
         monkeypatch.setenv("AUT_STATE", str(Path(d) / "state" / "state.json"))
         sent: dict = {"rows": [], "scan": []}
-        saved = (oc._load_rows, oc._load_stored, oc._insert, push.send_scan_rows)
-        oc._load_rows = lambda dsn: [_row(s["A"], key, 30), _row(s["D"], key, 40)]
-        oc._load_stored = lambda dsn: {}
-        oc._insert = lambda dsn, rows: sent["rows"].extend(rows)
-        push.send_scan_rows = lambda dsn, rows: sent["scan"].extend(rows)
-        try:
-            cfg = _cfg(Path(d), (str(Path(d) / "projects"),))
-            stats = oc.run_outcomes(cfg, refresh=False, dry_run=True, now=NOW_DT)
-            assert sent == {"rows": [], "scan": []} and stats["to_write"] == 2, (sent, stats)
-            assert not (Path(d) / "state").exists()                # no cache file either
-            stats = oc.run_outcomes(cfg, refresh=False, dry_run=False, now=NOW_DT)
-            assert {r["state"] for r in sent["rows"]} == {"merged", "reworked"}, sent
-            assert all(set(r) == {"sha", "repo_key", "state", "survival", "decided_at"}
-                       for r in sent["rows"])
-            assert [(r["collector"], r["status"], r["events"]) for r in sent["scan"]] == \
-                [("outcomes", "ok", 2)]
-            cache = json.loads((Path(d) / "state" / oc.CACHE_NAME).read_text())
-            assert cache == {"v": oc._CACHE_V, s["A"]: 1.0, s["D"]: 0.0}, cache
-        finally:
-            (oc._load_rows, oc._load_stored, oc._insert, push.send_scan_rows) = saved
-        print("ok run_outcomes_dry_run_writes_nothing")
+        monkeypatch.setattr(oc, "load_rows", lambda dsn: [_row(s["A"], key, 30), _row(s["D"], key, 40)])
+        monkeypatch.setattr(oc, "load_stored", lambda dsn: {})
+        monkeypatch.setattr(oc, "insert_outcomes", lambda dsn, rows: sent["rows"].extend(rows))
+        monkeypatch.setattr(push, "send_scan_rows", lambda dsn, rows: sent["scan"].extend(rows))
+        cfg = _cfg(Path(d), (str(Path(d) / "projects"),))
+        stats = oc.run_outcomes(cfg, refresh=False, dry_run=True, now=NOW_DT)
+        assert sent == {"rows": [], "scan": []} and stats["to_write"] == 2, (sent, stats)
+        assert not (Path(d) / "state").exists()                # no cache file either
+        stats = oc.run_outcomes(cfg, refresh=False, dry_run=False, now=NOW_DT)
+        assert {r["state"] for r in sent["rows"]} == {"merged", "reworked"}, sent
+        assert all(set(r) == {"sha", "repo_key", "state", "survival", "decided_at"}
+                   for r in sent["rows"])
+        assert [(r["collector"], r["status"], r["events"]) for r in sent["scan"]] == \
+            [("outcomes", "ok", 2)]
+        cache = json.loads((Path(d) / "state" / oc.CACHE_NAME).read_text())
+        assert cache == {"v": oc._CACHE_V, s["A"]: 1.0, s["D"]: 0.0}, cache
 
 
 def test_merge_time_is_when_it_landed_and_base_is_first_parent():
@@ -305,7 +284,6 @@ def test_merge_time_is_when_it_landed_and_base_is_first_parent():
         got = _states(outs)
         assert got[x[:9]][:2] == ("merged", 1.0), got               # was 0.0: base lacked X
         assert got[w[:9]][0] == "undecided", got                    # merged a day ago
-        print("ok merge_time_is_when_it_landed_and_base_is_first_parent")
 
 
 def test_final_state_is_kept_when_the_commit_goes_missing():
@@ -315,10 +293,9 @@ def test_final_state_is_kept_when_the_commit_goes_missing():
         stored = {("abcdef1234", "somekey"): (st, None)}            # scored under a clone key
         assert oc.pending(outs, stored) == [], st
     assert oc.pending(outs, {}) == outs                             # never seen: written once
-    print("ok final_state_is_kept_when_the_commit_goes_missing")
 
 
-def test_gh_failure_leaves_the_commit_undecided():
+def test_gh_failure_leaves_the_commit_undecided(monkeypatch):
     with tempfile.TemporaryDirectory() as d:
         work, s = _world(Path(d))
         url = "https://github.com/owner/repo.git"
@@ -328,17 +305,12 @@ def test_gh_failure_leaves_the_commit_undecided():
         (bindir / "gh").write_text("#!/bin/sh\necho 'rate limited' >&2\nexit 1\n")
         (bindir / "gh").chmod(0o755)
         clones = oc.find_clones([str(Path(d) / "projects")], RepoKeys(SALT))
-        old = os.environ["PATH"]
-        os.environ["PATH"] = f"{bindir}{os.pathsep}{old}"
+        monkeypatch.setenv("PATH", f"{bindir}{os.pathsep}{os.environ['PATH']}")
         cache: dict = {}
-        try:
-            outs, stats = oc.evaluate([_row(s["F"], _key(url), 25)], clones, NOW, cache=cache,
-                                      use_gh=True)
-        finally:
-            os.environ["PATH"] = old
+        outs, stats = oc.evaluate([_row(s["F"], _key(url), 25)], clones, NOW, cache=cache,
+                                  use_gh=True)
         assert (outs[0]["state"], outs[0]["sticky"]) == ("undecided", True), outs
         assert stats["gh_failed"] == 1 and cache == {}, (stats, cache)
-        print("ok gh_failure_leaves_the_commit_undecided")
 
 
 def test_stale_default_ref_defers_survival():
@@ -354,7 +326,6 @@ def test_stale_default_ref_defers_survival():
         clones[0].fetched_at = NOW                                  # fetched this run: current
         outs, _ = oc.evaluate([_row(s["A"], key, 30)], clones, NOW, cache=cache)
         assert (outs[0]["state"], outs[0]["survival"]) == ("merged", 1.0), outs
-        print("ok stale_default_ref_defers_survival")
 
 
 def test_most_advanced_clone_wins():
@@ -371,7 +342,6 @@ def test_most_advanced_clone_wins():
         outs, _ = oc.evaluate([_row(s["A"], _key(str(Path(d) / "origin.git")), 30)], clones,
                               NOW, cache={})
         assert outs[0]["state"] == "merged", outs
-        print("ok most_advanced_clone_wins")
 
 
 def test_amend_with_the_same_ts_is_ordered_after_the_commit():
@@ -382,7 +352,6 @@ def test_amend_with_the_same_ts_is_ordered_after_the_commit():
         rows = [_row(s["G2"], key, 25, "sg", amend=True), _row(s["G"], key, 25, "sg")]
         outs, _ = oc.evaluate(rows, clones, NOW, cache={})            # same ts, amend listed first
         assert _states(outs)[s["G"][:9]][0] == "superseded", outs
-        print("ok amend_with_the_same_ts_is_ordered_after_the_commit")
 
 
 def test_outcome_repo_roots_must_be_a_list_of_strings(monkeypatch):
@@ -399,7 +368,6 @@ def test_outcome_repo_roots_must_be_a_list_of_strings(monkeypatch):
             assert "outcome_repo_roots" in str(exc)
         else:
             raise AssertionError("a non-list must refuse")
-        print("ok outcome_repo_roots_must_be_a_list_of_strings")
 
 
 def test_cache_is_saved_before_the_sink_is_written(monkeypatch):
@@ -407,21 +375,16 @@ def test_cache_is_saved_before_the_sink_is_written(monkeypatch):
         work, s = _world(Path(d))
         key = _key(str(Path(d) / "origin.git"))
         monkeypatch.setenv("AUT_STATE", str(Path(d) / "state" / "state.json"))
-        saved = (oc._load_rows, oc._load_stored, push.send_scan_rows)
-        oc._load_rows = lambda dsn: [_row(s["D"], key, 40)]
-        oc._load_stored = lambda dsn: (_ for _ in ()).throw(RuntimeError("no table"))
-        push.send_scan_rows = lambda dsn, rows: None
+        monkeypatch.setattr(oc, "load_rows", lambda dsn: [_row(s["D"], key, 40)])
+        monkeypatch.setattr(oc, "load_stored", lambda dsn: (_ for _ in ()).throw(RuntimeError("no table")))
+        monkeypatch.setattr(push, "send_scan_rows", lambda dsn, rows: None)
         try:
-            try:
-                oc.run_outcomes(_cfg(Path(d), (str(Path(d) / "projects"),)), refresh=False,
-                                dry_run=False, now=NOW_DT)
-            except RuntimeError:
-                pass
-            cache = json.loads((Path(d) / "state" / oc.CACHE_NAME).read_text())
-            assert cache == {"v": oc._CACHE_V, s["D"]: 0.0}, cache
-        finally:
-            (oc._load_rows, oc._load_stored, push.send_scan_rows) = saved
-        print("ok cache_is_saved_before_the_sink_is_written")
+            oc.run_outcomes(_cfg(Path(d), (str(Path(d) / "projects"),)), refresh=False,
+                            dry_run=False, now=NOW_DT)
+        except RuntimeError:
+            pass
+        cache = json.loads((Path(d) / "state" / oc.CACHE_NAME).read_text())
+        assert cache == {"v": oc._CACHE_V, s["D"]: 0.0}, cache
 
 
 def _claude_session(proj: Path, sid: str, entrypoint: str, mtime: float) -> None:
@@ -455,7 +418,6 @@ def test_manual_outcome_picks_newest_interactive_session():
             assert "--session" in str(exc)
         else:
             raise AssertionError("no session must refuse")
-        print("ok manual_outcome_picks_newest_interactive_session")
 
 
 def test_cli_outcome_and_outcomes(monkeypatch):
@@ -470,21 +432,17 @@ def test_cli_outcome_and_outcomes(monkeypatch):
         conf.chmod(0o600)
         monkeypatch.setenv("AUT_CONFIG", str(conf))
         got: dict = {}
-        saved = (oc.insert_manual_outcome, oc.run_outcomes)
-        oc.insert_manual_outcome = lambda dsn, row: got.update(row=row)
-        oc.run_outcomes = lambda cfg, refresh, dry_run: (got.update(fetch=refresh, dry=dry_run)
-                                                       or oc.Counter(rows=3, states=oc.Counter(merged=2)))
+        monkeypatch.setattr(oc, "insert_manual_outcome", lambda dsn, row: got.update(row=row))
+        monkeypatch.setattr(oc, "run_outcomes", lambda cfg, refresh, dry_run: (
+            got.update(fetch=refresh, dry=dry_run)
+            or oc.Counter(rows=3, states=oc.Counter(merged=2))))
         out = io.StringIO()
-        try:
-            with contextlib.redirect_stdout(out):
-                assert cli.main(["outcome", "ruled-out", "--session", "abc"]) == 0
-                assert cli.main(["outcomes", "--dry-run"]) == 0
-        finally:
-            oc.insert_manual_outcome, oc.run_outcomes = saved
+        with contextlib.redirect_stdout(out):
+            assert cli.main(["outcome", "ruled-out", "--session", "abc"]) == 0
+            assert cli.main(["outcomes", "--dry-run"]) == 0
         assert got["row"]["session_id"] == "abc" and got["row"]["outcome"] == "ruled_out"
         assert got["fetch"] is True and got["dry"] is True            # config turns fetch on
         assert '"merged": 2' in out.getvalue() and "DRY-RUN" in out.getvalue(), out.getvalue()
-    print("ok cli_outcome_and_outcomes")
 
 
 def test_fetch_only_clones_with_a_row_key(monkeypatch):
@@ -492,42 +450,32 @@ def test_fetch_only_clones_with_a_row_key(monkeypatch):
         work, s = _world(Path(d))
         fetched: list = []
         monkeypatch.setenv("AUT_STATE", str(Path(d) / "state" / "state.json"))
-        saved = (oc._load_rows, oc.load_json_dict, oc._load_stored, oc.fetch_clones, oc._insert,
-                 push.send_scan_rows)
-        oc._load_rows = lambda dsn: [_row(s["A"], None, 30)]       # the SHA is there, no key
-        oc.load_json_dict, oc._load_stored = (lambda p: {}), lambda dsn: {}
-        oc.fetch_clones = lambda cs: (fetched.extend(cs), (len(cs), 0))[1]
-        oc._insert, push.send_scan_rows = (lambda dsn, rows: None), lambda dsn, rows: None
-        try:
-            oc.run_outcomes(_cfg(Path(d), (str(Path(d) / "projects"),)), refresh=True,
-                            dry_run=False, now=NOW_DT)
-            assert fetched == [], fetched
-            oc._load_rows = lambda dsn: [_row(s["A"], _key(str(Path(d) / "origin.git")), 30)]
-            oc.run_outcomes(_cfg(Path(d), (str(Path(d) / "projects"),)), refresh=True,
-                            dry_run=False, now=NOW_DT)
-            assert [c.path for c in fetched] == [str(work)], fetched
-        finally:
-            (oc._load_rows, oc.load_json_dict, oc._load_stored, oc.fetch_clones, oc._insert,
-             push.send_scan_rows) = saved
-    print("ok fetch_only_clones_with_a_row_key")
+        monkeypatch.setattr(oc, "load_rows", lambda dsn: [_row(s["A"], None, 30)])       # the SHA is there, no key
+        monkeypatch.setattr(oc, "load_json_dict", lambda p: {})
+        monkeypatch.setattr(oc, "load_stored", lambda dsn: {})
+        monkeypatch.setattr(oc, "fetch_clones", lambda cs: (fetched.extend(cs), (len(cs), 0))[1])
+        monkeypatch.setattr(oc, "insert_outcomes", lambda dsn, rows: None)
+        monkeypatch.setattr(push, "send_scan_rows", lambda dsn, rows: None)
+        oc.run_outcomes(_cfg(Path(d), (str(Path(d) / "projects"),)), refresh=True,
+                        dry_run=False, now=NOW_DT)
+        assert fetched == [], fetched
+        monkeypatch.setattr(oc, "load_rows", lambda dsn: [_row(s["A"], _key(str(Path(d) / "origin.git")), 30)])
+        oc.run_outcomes(_cfg(Path(d), (str(Path(d) / "projects"),)), refresh=True,
+                        dry_run=False, now=NOW_DT)
+        assert [c.path for c in fetched] == [str(work)], fetched
 
 
-def test_dry_run_never_fetches_or_asks_gh():
+def test_dry_run_never_fetches_or_asks_gh(monkeypatch):
     with tempfile.TemporaryDirectory() as d:
         work, s = _world(Path(d))
         key = _key(str(Path(d) / "origin.git"))
-        saved = (oc._load_rows, oc._load_stored, oc.fetch_clones, oc.gh_merged)
-        oc._load_rows = lambda dsn: [_row(s["F"], key, 25)]
-        oc._load_stored = lambda dsn: {}
-        oc.fetch_clones = lambda cs: (_ for _ in ()).throw(AssertionError("fetched"))
-        oc.gh_merged = lambda *a: (_ for _ in ()).throw(AssertionError("asked gh"))
-        try:
-            stats = oc.run_outcomes(_cfg(Path(d), (str(Path(d) / "projects"),)), refresh=True,
-                                    dry_run=True, now=NOW_DT)
-        finally:
-            oc._load_rows, oc._load_stored, oc.fetch_clones, oc.gh_merged = saved
+        monkeypatch.setattr(oc, "load_rows", lambda dsn: [_row(s["F"], key, 25)])
+        monkeypatch.setattr(oc, "load_stored", lambda dsn: {})
+        monkeypatch.setattr(oc, "fetch_clones", lambda cs: (_ for _ in ()).throw(AssertionError("fetched")))
+        monkeypatch.setattr(oc, "gh_merged", lambda *a: (_ for _ in ()).throw(AssertionError("asked gh")))
+        stats = oc.run_outcomes(_cfg(Path(d), (str(Path(d) / "projects"),)), refresh=True,
+                                dry_run=True, now=NOW_DT)
         assert stats["fetch_skipped_dry_run"] == 1 and "fetch_ok" not in stats, stats
-    print("ok dry_run_never_fetches_or_asks_gh")
 
 
 def _failing_git(match):
@@ -540,12 +488,9 @@ def _failing_git(match):
 
 
 def _with_git(match, fn):
-    real = og.run_git
-    og.run_git = _failing_git(match)
-    try:
+    with pytest.MonkeyPatch.context() as m:
+        m.setattr(og, "run_git", _failing_git(match))
         return fn()
-    finally:
-        og.run_git = real
 
 
 def test_a_git_failure_never_replaces_a_stored_state():
@@ -566,10 +511,9 @@ def test_a_git_failure_never_replaces_a_stored_state():
             assert oc.pending(outs, {(s["A"][:9], key): ("merged", 1.0)}) == [], name
         outs, _ = oc.evaluate(rows, clones, NOW, cache={})
         assert outs[0]["state"] == "merged" and "sticky" not in outs[0], outs   # healthy again
-    print("ok a_git_failure_never_replaces_a_stored_state")
 
 
-def test_a_clone_that_cannot_answer_may_know_more():
+def test_a_clone_that_cannot_answer_may_know_more(monkeypatch):
     """The stale clone says open; the current one fails: do not take the stale answer."""
     with tempfile.TemporaryDirectory() as d:
         work, s = _world(Path(d))
@@ -580,14 +524,10 @@ def test_a_clone_that_cannot_answer_may_know_more():
         clones = oc.find_clones([str(Path(d) / "projects")], RepoKeys(SALT))
         rows = [_row(s["A"], _key(str(Path(d) / "origin.git")), 30)]
         real = oc.resolve_shas
-        oc.resolve_shas = lambda c, shas: None if c.path == str(work) else real(c, shas)
-        try:
-            outs, stats = oc.evaluate(rows, clones, NOW, cache={})
-        finally:
-            oc.resolve_shas = real
+        monkeypatch.setattr(oc, "resolve_shas", lambda c, shas: None if c.path == str(work) else real(c, shas))
+        outs, stats = oc.evaluate(rows, clones, NOW, cache={})
         assert (outs[0]["state"], outs[0]["sticky"]) == ("undecided", True), outs
         assert stats["repo_unreadable"] == 1, stats
-    print("ok a_clone_that_cannot_answer_may_know_more")
 
 
 def test_a_cached_gh_answer_counts_without_gh():
@@ -597,7 +537,6 @@ def test_a_cached_gh_answer_counts_without_gh():
         outs, stats = oc.evaluate([_row(s["F"], None, 25)], clones, NOW,
                                   cache={f"gh:{s['F']}": True}, use_gh=False)
         assert outs[0]["state"] == "merged" and stats["gh_lookups"] == 0, (outs, stats)
-    print("ok a_cached_gh_answer_counts_without_gh")
 
 
 def test_a_cache_from_before_the_failed_read_rule_is_measured_again(monkeypatch):
@@ -608,7 +547,6 @@ def test_a_cache_from_before_the_failed_read_rule_is_measured_again(monkeypatch)
         assert "abc" not in cache and cache["gh:def"] is True, cache
         (Path(d) / oc.CACHE_NAME).write_text(json.dumps({**cache, "abc": 0.1}))
         assert oc._load_cache()["abc"] == 0.1
-    print("ok a_cache_from_before_the_failed_read_rule_is_measured_again")
 
 
 def test_failed_survival_is_neither_scored_nor_cached():
@@ -632,25 +570,20 @@ def test_failed_survival_is_neither_scored_nor_cached():
         outs, stats = oc.evaluate(rows, clones, NOW, cache=cache)       # measured on the next run
         assert (outs[0]["state"], outs[0]["survival"]) == ("merged", 1.0), outs
         assert cache == {s["A"]: 1.0} and stats["survival_computed"] == 1, (cache, stats)
-    print("ok failed_survival_is_neither_scored_nor_cached")
 
 
-def test_ctrl_c_sends_no_heartbeat():
+def test_ctrl_c_sends_no_heartbeat(monkeypatch):
     def stop(dsn):
         raise KeyboardInterrupt
     sent: list = []
-    saved = (oc._load_rows, push.send_scan_rows)
-    oc._load_rows, push.send_scan_rows = stop, lambda dsn, rows: sent.extend(rows)
+    monkeypatch.setattr(oc, "load_rows", stop)
+    monkeypatch.setattr(push, "send_scan_rows", lambda dsn, rows: sent.extend(rows))
     try:
-        try:
-            oc.run_outcomes(_cfg(Path(tempfile.gettempdir())), refresh=False, dry_run=False, now=NOW_DT)
-            raise AssertionError("KeyboardInterrupt must propagate")
-        except KeyboardInterrupt:
-            pass
-    finally:
-        oc._load_rows, push.send_scan_rows = saved
+        oc.run_outcomes(_cfg(Path(tempfile.gettempdir())), refresh=False, dry_run=False, now=NOW_DT)
+        raise AssertionError("KeyboardInterrupt must propagate")
+    except KeyboardInterrupt:
+        pass
     assert sent == [], sent
-    print("ok ctrl_c_sends_no_heartbeat")
 
 
 def test_the_keyed_anchor_wins_a_duplicate_whatever_the_row_order(monkeypatch):
@@ -662,8 +595,3 @@ def test_the_keyed_anchor_wins_a_duplicate_whatever_the_row_order(monkeypatch):
     for rows in ([keyed, null], [null, keyed]):
         outs, _ = oc.evaluate(rows, [], NOW, cache={})
         assert [o["state"] for o in outs] == ["merged"], rows
-
-
-if __name__ == "__main__":
-    import pytest
-    raise SystemExit(pytest.main([__file__, "-q"]))

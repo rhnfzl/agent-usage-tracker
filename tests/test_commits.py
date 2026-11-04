@@ -1,22 +1,14 @@
-"""Hermetic tests for commit detection: which shell commands and outputs count as a commit.
-
-Run: `python tests/test_commits.py`  (or `pytest`).
-"""
+"""Hermetic tests for commit detection: which shell commands and outputs count as a commit."""
 
 from __future__ import annotations
 
-import sys
 import tempfile
 import time
 from pathlib import Path
 
-import pytest
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-
-from agent_usage_tracker.collectors.commits import GIT_COMMIT  # noqa: E402
-from agent_usage_tracker.event import make_event_id  # noqa: E402
-from test_activity import (NAME, _acts, _collect, _result, _tools, _use, _user,  # noqa: E402
+from agent_usage_tracker.collectors.commits import GIT_COMMIT
+from agent_usage_tracker.event import make_event_id
+from test_activity import (NAME, _acts, _collect, _result, _tools, _use, _user,
                            _write_jsonl)
 
 
@@ -59,7 +51,6 @@ def test_commit_detection() -> None:
         want = {make_event_id(NAME, "commit", f"k{i}|{s}"): s for i, (_c, _o, s) in
                 enumerate(cases) if s}
         assert got == want, (got, want)
-    print("ok commit_detection")
 
 
 def test_commit_regex_is_linear() -> None:
@@ -67,8 +58,3 @@ def test_commit_regex_is_linear() -> None:
     assert GIT_COMMIT.search("git " + "--no-pager " * 40 + "status --short") is None
     assert GIT_COMMIT.search("git --no-pager -C x commit -m y")
     assert time.perf_counter() - t < 0.5
-    print("ok commit_regex_is_linear")
-
-
-if __name__ == "__main__":
-    raise SystemExit(pytest.main([__file__, "-q"]))

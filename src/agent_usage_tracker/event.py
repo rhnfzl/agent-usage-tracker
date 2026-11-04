@@ -87,12 +87,6 @@ class UsageEvent:
         return {"event_id": self.event_id, "machine": self.machine, "agent": self.agent,
                 **asdict(self.session)}
 
-    @property
-    def any_tokens(self) -> bool:
-        return (self.input_tokens + self.output_tokens
-                + self.cache_read_tokens + self.cache_write_tokens
-                + (self.reasoning_tokens or 0) + self.total_tokens) > 0
-
 
 @dataclass(slots=True)
 class ActivityEvent:

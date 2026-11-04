@@ -1,24 +1,18 @@
 """Hermetic tests for the Claude Code collector on synthetic fixtures.
 
-Run: `python tests/test_claude_code.py`  (or `pytest`).
 Locks the rule: Claude Code captures all four token classes (the "undercount" trap).
 """
 
 from __future__ import annotations
 
 import json
-import sys
 import tempfile
 from pathlib import Path
 
-import pytest
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-
-from agent_usage_tracker.collectors import claude_code  # noqa: E402
-from agent_usage_tracker.config import Config  # noqa: E402
-from agent_usage_tracker.event import UsageEvent  # noqa: E402
-from test_collectors import _cfg, _drain, _write_jsonl  # noqa: E402
+from agent_usage_tracker.collectors import claude_code
+from agent_usage_tracker.config import Config
+from agent_usage_tracker.event import UsageEvent
+from test_collectors import _cfg, _drain, _write_jsonl
 
 
 def test_claude_code() -> None:
@@ -44,7 +38,6 @@ def test_claude_code() -> None:
         assert e.total_tokens == 1802, e.total_tokens          # all four, not just input
         assert e.model == "claude-opus-4-8" and e.provider == "anthropic"
         assert e.project == "myproj"
-    print("ok claude_code")
 
 
 def test_duplicate_session_paths_counted_once() -> None:
@@ -82,7 +75,6 @@ def test_duplicate_session_paths_counted_once() -> None:
         assert written == 2, written                  # 1 human + 1 assistant, each once
         ids = [ln.split(",")[0] for ln in buf.getvalue().strip().splitlines()[1:]]
         assert len(ids) == len(set(ids)), ids         # a COPY load has no ON CONFLICT to save it
-    print("ok duplicate_session_paths_counted_once")
 
 
 def test_claude_code_human_turn_classification() -> None:
@@ -157,7 +149,6 @@ def test_claude_code_human_turn_classification() -> None:
                                          "2026-07-18T10:00:08Z",    # turnOrigin human, typed
                                          "2026-07-18T10:00:09Z",    # accepted suggestion
                                          "2026-07-18T10:00:17Z"}, sorted(e.ts for e in human)
-    print("ok claude_code_human_turn_classification")
 
 
 def test_claude_code_old_loop_repeats() -> None:
@@ -190,7 +181,6 @@ def test_claude_code_old_loop_repeats() -> None:
                                                "2026-05-01T11:01:00Z",
                                                "2026-11-01T10:00:00Z",   # both new, typed
                                                "2026-11-01T10:05:00Z"], sorted(e.ts for e in human)
-    print("ok claude_code_old_loop_repeats")
 
 
 def test_claude_code_multiblock_dedup() -> None:
@@ -220,7 +210,6 @@ def test_claude_code_multiblock_dedup() -> None:
         _write_jsonl(home / ".claude/projects/p/s.jsonl", recs)
         ev = _drain(claude_code.collect, _cfg(home))
         assert len(ev) == 1 and ev[0].output_tokens == 300, ev   # keeps the final cumulative
-    print("ok claude_code_multiblock_dedup")
 
 
 def test_claude_truncated_in_place_drops_its_carried_state() -> None:
@@ -252,7 +241,6 @@ def test_claude_truncated_in_place_drops_its_carried_state() -> None:
         with open(path, "w") as fh:      # the same inode, now shorter than the offset
             fh.write(json.dumps(turn("a3")) + "\n")
         assert [e.session.turn_id for e in scan(_cfg(home), wm)] == [None]
-    print("ok claude_truncated_in_place_drops_its_carried_state")
 
 
 def test_is_interactive_survives_a_line_that_is_no_record():
@@ -260,7 +248,3 @@ def test_is_interactive_survives_a_line_that_is_no_record():
         p = Path(t) / "s.jsonl"
         p.write_text('["entrypoint"]\n')
         assert claude_code.is_interactive(p) is False
-
-
-if __name__ == "__main__":
-    raise SystemExit(pytest.main([__file__, "-q"]))

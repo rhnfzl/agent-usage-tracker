@@ -1,6 +1,5 @@
 """Hermetic tests for `aut inspect` (the evidence inspector) and the retired `aut report`.
 
-Run: `python tests/test_inspect.py`  (or `pytest`).
 Locks the rules:
   - anchors come from seed sessions only and from their own repo's unit; a key two sessions
     share is shown as shared; commit outcomes are the latest per 7-digit prefix;
@@ -25,11 +24,9 @@ from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-
-from agent_usage_tracker import inspector  # noqa: E402
-from agent_usage_tracker import cli, review  # noqa: E402
-from agent_usage_tracker.config import AutError  # noqa: E402
+from agent_usage_tracker import inspector
+from agent_usage_tracker import cli, review
+from agent_usage_tracker.config import AutError
 
 K1, K2 = "a1" * 32, "b2" * 32
 T0 = datetime(2001, 1, 5, 9, tzinfo=timezone.utc)
@@ -91,7 +88,6 @@ def test_build_collects_evidence():
     assert [c[1] for c in ep["corrections"]] == ["confirm", "merge"]
     assert [s.get("agent") for s in ep["member_activity"]] == ["claude_code", "codex", None]
     assert [x["unit_id"] for x in view["labels"]] == ["blk"]
-    print("ok build_collects_evidence")
 
 
 def test_outcome_rule_manual_first_and_no_outcome_yet():
@@ -102,7 +98,6 @@ def test_outcome_rule_manual_first_and_no_outcome_yet():
     assert ep["commits"][0][1] == "no outcome yet"
     for out in ("reworked", "open", "ruled_out", "undecided", "no_code"):
         assert inspector.build(_raw(out))["episodes"][0]["rule"] == inspector.RULES[out]
-    print("ok outcome_rule_manual_first_and_no_outcome_yet")
 
 
 def test_latest_labels_matches_label_latest():
@@ -114,7 +109,6 @@ def test_latest_labels_matches_label_latest():
             ("d", T0, {"task": "t", "unit": "u", "unit_id": "2", "label": "x"})]
     got = {x["unit_id"]: x for x in inspector.latest_labels(rows)}
     assert got["1"]["label"] == "new" and got["2"]["below_tau"] is True, got
-    print("ok latest_labels_matches_label_latest")
 
 
 def test_page_escapes_and_serves_read_only_with_correction_link():
@@ -156,7 +150,6 @@ def test_page_escapes_and_serves_read_only_with_correction_link():
         assert r.status == 200
     t.join(10)
     assert [w["action"] for w in written] == ["confirm"] and box["s"]["reviewed"] == 1
-    print("ok page_escapes_and_serves_read_only_with_correction_link")
 
 
 def test_run_inspect_passes_mode_and_stops_on_empty(monkeypatch):
@@ -181,7 +174,6 @@ def test_run_inspect_passes_mode_and_stops_on_empty(monkeypatch):
             assert "nothing found" in str(exc)
         else:
             raise AssertionError("no AutError")
-    print("ok run_inspect_passes_mode_and_stops_on_empty")
 
 
 def test_exactly_one_selector():
@@ -189,10 +181,9 @@ def test_exactly_one_selector():
         for call in (inspector.fetch, inspector.run_inspect):
             with pytest.raises(TypeError):
                 call("not reached", *args)
-    print("ok exactly_one_selector")
 
 
-def test_fetch_checks_episode_and_day_uses_activity_rows():
+def test_fetch_checks_episode_and_day_uses_activity_rows(monkeypatch):
     import types
     sqls: list = []
 
@@ -208,28 +199,20 @@ def test_fetch_checks_episode_and_day_uses_activity_rows():
             return types.SimpleNamespace(fetchall=lambda: [])
     fake = types.ModuleType("psycopg")
     fake.connect = lambda *a, **k: Conn()
-    old = sys.modules.get("psycopg")
-    sys.modules["psycopg"] = fake
-    try:
-        for bad in (" ", "", "0f_f", "0f%", "nope", "0f0"):
-            try:
-                inspector.fetch("dsn", "episode", bad)
-            except AutError as exc:
-                assert "episode id or prefix" in str(exc)
-            else:
-                raise AssertionError(f"accepted --episode {bad!r}")
-        assert sqls == []
-        inspector.fetch("dsn", "episode", " 0F0F ")
-        assert sqls[0][1] == ("0f0f%",)
-        sqls.clear()
-        inspector.fetch("dsn", "day", "2001-01-05")
-        assert sqls[0][1] == inspector._day_bounds("2001-01-05")
-    finally:
-        if old is None:
-            sys.modules.pop("psycopg")
+    monkeypatch.setitem(sys.modules, "psycopg", fake)
+    for bad in (" ", "", "0f_f", "0f%", "nope", "0f0"):
+        try:
+            inspector.fetch("dsn", "episode", bad)
+        except AutError as exc:
+            assert "episode id or prefix" in str(exc)
         else:
-            sys.modules["psycopg"] = old
-    print("ok fetch_checks_episode_and_day_uses_activity_rows")
+            raise AssertionError(f"accepted --episode {bad!r}")
+    assert sqls == []
+    inspector.fetch("dsn", "episode", " 0F0F ")
+    assert sqls[0][1] == ("0f0f%",)
+    sqls.clear()
+    inspector.fetch("dsn", "day", "2001-01-05")
+    assert sqls[0][1] == inspector._day_bounds("2001-01-05")
 
 
 def test_day_bounds_are_local_midnights():
@@ -241,7 +224,6 @@ def test_day_bounds_are_local_midnights():
         pass
     else:
         raise AssertionError("bad day accepted")
-    print("ok day_bounds_are_local_midnights")
 
 
 def test_report_is_retired_and_writes_nothing(monkeypatch):
@@ -252,7 +234,6 @@ def test_report_is_retired_and_writes_nothing(monkeypatch):
         with contextlib.redirect_stderr(err):
             assert cli.main(["report", "--out", str(out), "--idle-gap", "60"]) == 0
         assert not out.exists() and "retired" in err.getvalue()
-    print("ok report_is_retired_and_writes_nothing")
 
 
 def test_day_bounds_are_local_midnights_and_refuse_another_format():
@@ -379,7 +360,3 @@ def test_print_inspect_is_quiet_when_nothing_was_saved(capsys):
     assert capsys.readouterr().out == ""
     inspector.print_inspect({"reviewed": 2})
     assert capsys.readouterr().out == "inspect: 2 corrections saved\n"
-
-
-if __name__ == "__main__":
-    raise SystemExit(pytest.main([__file__, "-q"]))

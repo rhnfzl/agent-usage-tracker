@@ -1,24 +1,17 @@
-"""Hermetic tests for net.py: what a failed urllib call raises, and refusing to follow a redirect.
-
-Run: `python tests/test_net.py`  (or `pytest`).
-"""
+"""Hermetic tests for net.py: what a failed urllib call raises, and refusing to follow a redirect."""
 
 from __future__ import annotations
 
 import http.client
 import http.server
-import sys
 import threading
 import urllib.error
 import urllib.request
 from email.message import Message
-from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-
-from agent_usage_tracker import net  # noqa: E402
+from agent_usage_tracker import net
 
 
 def test_http_errors_hold_what_a_failed_call_raises_and_nothing_else():
@@ -71,7 +64,3 @@ def test_a_redirect_raises_and_its_target_is_never_asked(server):
     with urllib.request.urlopen(base + "/start", timeout=5) as r:
         assert r.status == 200
     assert seen == ["/start", "/start", "/target"]
-
-
-if __name__ == "__main__":
-    raise SystemExit(pytest.main([__file__, "-q"]))

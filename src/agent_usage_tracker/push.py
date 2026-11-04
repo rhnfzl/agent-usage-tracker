@@ -72,7 +72,7 @@ class DeliveryError(RuntimeError):
     """Rows could not be delivered and no route is left: an outage main reports on one line."""
 
 
-def _post_webhook(url: str, secret: str, batch: list[UsageEvent],
+def post_webhook(url: str, secret: str, batch: list[UsageEvent],
                   extra_headers: dict[str, str] | None = None) -> None:
     body = json.dumps({"events": [e.to_dict() for e in batch]}).encode("utf-8")
     headers = {"Content-Type": "application/json", "X-AUT-Secret": secret}
@@ -201,7 +201,7 @@ class _Sender:
         usage = _split(batch)[0]
         try:
             if usage:
-                _post_webhook(url, secret, usage, self.cfg.cf_access_headers)
+                post_webhook(url, secret, usage, self.cfg.cf_access_headers)
         except (*HTTP_ERRORS, RuntimeError) as exc:
             if self.cfg.pg_dsn and not self.fallback_shown:  # printed first: a PG failure shows both
                 self.fallback_shown = True

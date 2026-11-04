@@ -1,6 +1,5 @@
 """Hermetic tests for Claude Code activity rows (agents.activity_event) on synthetic fixtures.
 
-Run: `python tests/test_activity.py`  (or `pytest`).
 Locks the rules:
   - one steer per human prompt (same uuid seed), with `via`, words, chars, after_interrupt;
   - the machine-message filters (system-reminder only, Stop hook feedback, IDE-only, /usage-only);
@@ -20,18 +19,15 @@ import io
 import json
 import re
 import subprocess
-import sys
 import tempfile
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-
-from agent_usage_tracker import scan  # noqa: E402
-from agent_usage_tracker.collectors import claude_code  # noqa: E402
-from agent_usage_tracker.collectors import claude_code_activity as act  # noqa: E402
-from agent_usage_tracker.config import Config  # noqa: E402
-from agent_usage_tracker.event import ActivityEvent, UsageEvent, make_event_id  # noqa: E402
-from fake_psycopg import _fake_psycopg  # noqa: E402
+from agent_usage_tracker import scan
+from agent_usage_tracker.collectors import claude_code
+from agent_usage_tracker.collectors import claude_code_activity as act
+from agent_usage_tracker.config import Config
+from agent_usage_tracker.event import ActivityEvent, UsageEvent, make_event_id
+from fake_psycopg import _fake_psycopg
 
 TS = "2026-07-18T10:00:00Z"
 NAME = claude_code.NAME
@@ -208,7 +204,6 @@ def test_steer_and_filters() -> None:
         assert steers[make_event_id(NAME, "steer", "h2")].attrs["after_interrupt"] is True
         assert (s1.ts, s1.session_id, s1.turn_id) == (TS, "S1", "P-h1"), s1
     _run(check)
-    print("ok steer_and_filters")
 
 
 def test_interrupt_rejection_hook() -> None:
@@ -221,7 +216,6 @@ def test_interrupt_rejection_hook() -> None:
         t1 = next(e for e in _acts(evs, "turn") if e.event_id == make_event_id(NAME, "turn", "td1"))
         assert t1.attrs["hook_blocks"] == 1, t1.attrs              # a hook denial, not a rejection
     _run(check)
-    print("ok interrupt_rejection_hook")
 
 
 def test_commits() -> None:
@@ -234,7 +228,6 @@ def test_commits() -> None:
         keys = {e.attrs["repo_key"] for e in _acts(evs, "commit")}
         assert keys == {_key("example.com/owner/repo")}, keys      # creds and .git stripped
     _run(check)
-    print("ok commits")
 
 
 def test_pr_rows() -> None:
@@ -251,7 +244,6 @@ def test_pr_rows() -> None:
         assert [t for t, _ in twelve] == [TS, "2026-07-18T11:00:00Z"], twelve
         assert twelve[0][1] == make_event_id(NAME, "pr", f"S1|12|{TS}"), twelve
     _run(check)
-    print("ok pr_rows")
 
 
 def test_turn_aggregates() -> None:
@@ -265,7 +257,6 @@ def test_turn_aggregates() -> None:
         assert t2["retry_flag"] is True and t2["runaway_flag"] is True, t2
         assert len(turns) == 2
     _run(check)
-    print("ok turn_aggregates")
 
 
 def test_compaction_and_invoke() -> None:
@@ -276,7 +267,6 @@ def test_compaction_and_invoke() -> None:
         assert [(e.event_id, e.attrs) for e in inv] == [
             (make_event_id(NAME, "invoke", "x3"), {"skill": "my-skill"})], inv
     _run(check)
-    print("ok compaction_and_invoke")
 
 
 # attrs allowlist: every string value is a fixed enum, lowercase hex or a uuid; dicts map known
@@ -362,7 +352,6 @@ def test_attrs_carry_no_text() -> None:
             assert all(re.fullmatch(r"[0-9a-f]{64}", v) for v in lv.attrs[k]), (k, lv.attrs)
         assert "abc1234" not in json.dumps(lv.attrs), lv.attrs
     _run(check)
-    print("ok attrs_carry_no_text")
 
 
 def test_turn_and_commit_carry_across_scans() -> None:
@@ -387,7 +376,6 @@ def test_turn_and_commit_carry_across_scans() -> None:
             (2, 1, {"Bash": 1, "Read": 1}), t.attrs
         assert [e.attrs["sha"] for e in _acts(second, "commit")] == ["1a2b3c4"]
         assert "act" not in next(iter(wm["files"].values())), "nothing left to carry"
-    print("ok turn_and_commit_carry_across_scans")
 
 
 def test_failed_delivery_rescan_matches_clean_pass(monkeypatch) -> None:
@@ -409,16 +397,13 @@ def test_failed_delivery_rescan_matches_clean_pass(monkeypatch) -> None:
                 if fail:
                     raise RuntimeError("sink down")
                 sent.extend(batch)
-            saved = scan.make_sender
-            scan.make_sender = lambda c: sender
+            monkeypatch.setattr(scan, "make_sender", lambda c: sender)
             try:
                 with contextlib.redirect_stderr(io.StringIO()):
                     scan.run_scan(_cfg(home), ["claude_code"], dry_run=False)
                 assert not fail
             except RuntimeError:
                 assert fail
-            finally:
-                scan.make_sender = saved
         scan_once(False)
         with f.open("a") as fh:
             for r in (_result("r1", "c1", "[main 1a2b3c4] x"),
@@ -433,10 +418,9 @@ def test_failed_delivery_rescan_matches_clean_pass(monkeypatch) -> None:
             return sorted((e.kind, e.event_id, e.ts, json.dumps(e.attrs, sort_keys=True))
                           for e in _acts(evs) if e.kind in ("turn", "commit"))
         assert view(sent) == view(clean) and len(view(clean)) == 2, (view(sent), view(clean))
-    print("ok failed_delivery_rescan_matches_clean_pass")
 
 
-def test_activity_errors_never_block_usage() -> None:
+def test_activity_errors_never_block_usage(monkeypatch) -> None:
     with tempfile.TemporaryDirectory() as d:
         home = Path(d)
         f = home / ".claude/projects/-p/S1.jsonl"
@@ -457,19 +441,14 @@ def test_activity_errors_never_block_usage() -> None:
         f.unlink()
         _write_jsonl(f, [_user("h1", "go", promptSource="typed"), _tools("m1", _use("x1", "Read")),
                          _turn_end("td1", 9, 3)])
-        saved = act.Activity._turn
-        act.Activity._turn = lambda self, o, sess: 1 / 0
+        monkeypatch.setattr(act.Activity, "_turn", lambda self, o, sess: 1 / 0)
         err = io.StringIO()
-        try:
-            with contextlib.redirect_stderr(err):
-                evs = _collect(home, {})
-        finally:
-            act.Activity._turn = saved
+        with contextlib.redirect_stderr(err):
+            evs = _collect(home, {})
         assert len(_humans(evs)) == 1 and any(e.kind == "agent" for e in evs
                                               if isinstance(e, UsageEvent)), evs
         assert len(_acts(evs, "steer")) == 1 and not _acts(evs, "turn")
         assert "1 activity record" in err.getvalue(), err.getvalue()
-    print("ok activity_errors_never_block_usage")
 
 
 def test_usage_filter_only_on_fresh_read() -> None:
@@ -491,7 +470,6 @@ def test_usage_filter_only_on_fresh_read() -> None:
         g = home / ".claude/projects/-p/S2.jsonl"
         _write_jsonl(g, [_user("u3", usage, sessionId="S2")])
         assert not [e for e in _collect(home, wm) if e.session_id == "S2"]   # fresh: dropped
-    print("ok usage_filter_only_on_fresh_read")
 
 
 def test_relogged_blocks_across_scans() -> None:
@@ -524,7 +502,6 @@ def test_relogged_blocks_across_scans() -> None:
             fh.write(json.dumps(_tools("m9", *[_use(f"z{i}", "Read") for i in range(250)])) + "\n")
         _collect(home, wm)
         assert len(wm["files"][str(f)]["act"]["seen"]) == act._SEEN_MAX
-    print("ok relogged_blocks_across_scans")
 
 
 def test_relog_after_turn_end_counts_once() -> None:
@@ -540,7 +517,6 @@ def test_relog_after_turn_end_counts_once() -> None:
         ])
         t1, t2 = _acts(_collect(home), "turn")
         assert (t1.attrs["tool_calls"], t2.attrs["tool_calls"]) == (2, 1), (t1.attrs, t2.attrs)
-    print("ok relog_after_turn_end_counts_once")
 
 
 def test_subagent_keeps_no_agg() -> None:
@@ -553,7 +529,6 @@ def test_subagent_keeps_no_agg() -> None:
         _collect(home, wm)
         carried = wm["files"][str(f)].get("act", {})
         assert "agg" not in carried and "seen" not in carried, carried
-    print("ok subagent_keeps_no_agg")
 
 
 def test_activity_backfill_sends_no_usage(monkeypatch) -> None:
@@ -566,16 +541,12 @@ def test_activity_backfill_sends_no_usage(monkeypatch) -> None:
             before = (state.read_text(), state.stat().st_mtime_ns)
             monkeypatch.setenv("AUT_STATE", str(state))
             log: list = []
-            saved = scan.make_sender
-            scan.make_sender = lambda c: (_ for _ in ()).throw(AssertionError("no usage sender"))
-            try:
-                with _fake_psycopg(log), contextlib.redirect_stderr(io.StringIO()):
-                    counts = scan.run_history_backfill(cfg, ["claude_code"], dry_run=False,
-                                                      sessions=False, activity=True)
-                    dry = scan.run_history_backfill(cfg, ["claude_code"], dry_run=True,
-                                                   sessions=False, activity=True)
-            finally:
-                scan.make_sender = saved
+            monkeypatch.setattr(scan, "make_sender", lambda c: (_ for _ in ()).throw(AssertionError("no usage sender")))
+            with _fake_psycopg(log), contextlib.redirect_stderr(io.StringIO()):
+                counts = scan.run_history_backfill(cfg, ["claude_code"], dry_run=False,
+                                                  sessions=False, activity=True)
+                dry = scan.run_history_backfill(cfg, ["claude_code"], dry_run=True,
+                                               sessions=False, activity=True)
             assert (state.read_text(), state.stat().st_mtime_ns) == before, "state untouched"
         inserts = [x for x in log if x != "commit"]
         assert inserts and all("agents.activity_event" in sql for sql, _ in inserts), log
@@ -583,9 +554,3 @@ def test_activity_backfill_sends_no_usage(monkeypatch) -> None:
         assert counts == dry and dry["activity"] == n_acts and dry["rows"] == 0, dry
         assert dry["by_kind"]["steer"] == 9 and dry["via"]["queued"] == 2, dry
     _run(check)
-    print("ok activity_backfill_sends_no_usage")
-
-
-if __name__ == "__main__":
-    import pytest
-    raise SystemExit(pytest.main([__file__, "-q"]))

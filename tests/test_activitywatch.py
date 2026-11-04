@@ -1,6 +1,5 @@
 """Hermetic tests for the ActivityWatch collector and manual time (agents.time_interval).
 
-Run: `python tests/test_activitywatch.py`  (or `pytest`).
 Every fixture is synthetic; the aw-server is a stub of the collector's one HTTP function.
 Locks the rules:
   - activitywatch is opt-in: in ALL_AGENTS, never in the default agent list;
@@ -18,26 +17,26 @@ Locks the rules:
 from __future__ import annotations
 
 import contextlib
+import http.server
 import http.client
 import io
 import json
-import sys
 import tempfile
+import threading
 import urllib.error
 import urllib.parse
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+import pytest
 
-from agent_usage_tracker import cli, manual_time, push, scan  # noqa: E402
-from agent_usage_tracker.collectors import REGISTRY  # noqa: E402
-from agent_usage_tracker.collectors import activitywatch as aw  # noqa: E402
-from agent_usage_tracker.config import (ALL_AGENTS, DEFAULT_AGENTS, AutError,  # noqa: E402
+from agent_usage_tracker import cli, manual_time, push, scan
+from agent_usage_tracker.collectors import REGISTRY
+from agent_usage_tracker.collectors import activitywatch as aw
+from agent_usage_tracker.config import (ALL_AGENTS, DEFAULT_AGENTS, AutError,
                                         Config, load_config)
-from agent_usage_tracker.event import CollectorUnavailable, TimeInterval, UsageEvent  # noqa: E402
-from fake_psycopg import _fake_psycopg  # noqa: E402
+from agent_usage_tracker.event import CollectorUnavailable, TimeInterval, UsageEvent
+from fake_psycopg import _fake_psycopg
 
 HOST = "host-a"
 WIN = f"aw-watcher-window_{HOST}"
@@ -109,23 +108,20 @@ class FakeAW:
 
 @contextlib.contextmanager
 def _patched(fake: FakeAW, now: datetime):
-    saved = aw._http, aw._now, aw._MAC
-    aw._http, aw._now, aw._MAC = fake, (lambda: now), (lambda app: None)
-    try:
+    with pytest.MonkeyPatch.context() as m:
+        m.setattr(aw, "_http", fake)
+        m.setattr(aw, "_now", lambda: now)
+        m.setattr(aw, "_MAC", lambda app: None)
         yield
-    finally:
-        aw._http, aw._now, aw._MAC = saved
 
 
 @contextlib.contextmanager
 def _mac(table: dict):
     """Stub the macOS bundle lookup: app name -> LSApplicationCategoryType (missing: None)."""
-    saved, asked = aw._MAC, []
-    aw._MAC = lambda app: (asked.append(app), table.get(app))[1]
-    try:
+    asked: list = []
+    with pytest.MonkeyPatch.context() as m:
+        m.setattr(aw, "_MAC", lambda app: (asked.append(app), table.get(app))[1])
         yield asked
-    finally:
-        aw._MAC = saved
 
 
 def _wm() -> dict:
@@ -148,7 +144,6 @@ def test_plaintext_url_to_another_host_warns_but_works() -> None:
         aw._warn_if_plaintext("http://aw.example:5600")
         aw._warn_if_plaintext("http://aw.example:5600")
     assert err.getvalue().count("aw.example") == 1, err.getvalue()    # once per run, not refused
-    print("ok plaintext_url_to_another_host_warns_but_works")
 
 
 def test_default_agents_exclude_activitywatch(monkeypatch) -> None:
@@ -181,7 +176,6 @@ def test_default_agents_exclude_activitywatch(monkeypatch) -> None:
             raise AssertionError("a bad regex must be refused")
         except AutError:
             pass
-    print("ok default_agents_exclude_activitywatch")
 
 
 def test_range_and_watermark() -> None:
@@ -225,7 +219,6 @@ def test_range_and_watermark() -> None:
     assert [r.ts for r in rows3] == [early["timestamp"]]
     commit3()
     assert wm2 == {"end": CREATED.isoformat()}
-    print("ok range_and_watermark")
 
 
 def test_aw_down_or_no_buckets() -> None:
@@ -245,7 +238,6 @@ def test_aw_down_or_no_buckets() -> None:
             assert wm == {}
         with _patched(fake, now), contextlib.redirect_stderr(io.StringIO()):
             assert aw.purge(_cfg()) == 0
-    print("ok aw_down_or_no_buckets")
 
 
 def test_deny_list_and_idle_dropped() -> None:
@@ -272,7 +264,6 @@ def test_deny_list_and_idle_dropped() -> None:
     assert "dropped 7 intervals (7.0 min) by the deny-list" in err, err
     assert "1.0 min idle" in err, err
     assert secret_title not in err and "Examplebank" not in err
-    print("ok deny_list_and_idle_dropped")
 
 
 def test_titles_switch_and_redacted_title_sent() -> None:
@@ -289,7 +280,6 @@ def test_titles_switch_and_redacted_title_sent() -> None:
     stale = _rows(_cfg(), {"end": (old_t - timedelta(hours=1)).isoformat()},
                   FakeAW([_ev(1, old_t, 60, "Code", "old")]), now)[0][0][0][0]
     assert stale.title is None and stale.category == "editor"
-    print("ok titles_switch_and_redacted_title_sent")
 
 
 def test_mapping() -> None:
@@ -321,7 +311,6 @@ def test_mapping() -> None:
             assert aw.classify(cfg, app, title) == want, (app, title, aw.classify(cfg, app, title))
         assert aw.classify(cfg, "Firefox", "Dashboard", "http://localhost:3000/") == (
             "web-work", True, "browser_work_title")
-    print("ok mapping")
 
 
 def test_purge_bounded_and_not_on_dry_run(monkeypatch) -> None:
@@ -341,12 +330,10 @@ def test_purge_bounded_and_not_on_dry_run(monkeypatch) -> None:
     assert f"purged {n} window events" in err.getvalue()
     query = [p for m, p in fake.calls if m == "GET" and "/events?" in p][0]
     assert f"limit={aw._PURGE_BATCH}" in query
-    saved, aw._PURGE_BUDGET = aw._PURGE_BUDGET, 0
-    try:
+    with monkeypatch.context() as m:
+        m.setattr(aw, "_PURGE_BUDGET", 0)
         with _patched(FakeAW(old=old), now), contextlib.redirect_stderr(io.StringIO()):
             assert aw.purge(_cfg()) == 0, "the time budget bounds a scan's purge"
-    finally:
-        aw._PURGE_BUDGET = saved
 
     class Boom(FakeAW):
         def __call__(self, cfg, method, path, body=None):
@@ -366,7 +353,6 @@ def test_purge_bounded_and_not_on_dry_run(monkeypatch) -> None:
     assert fake2.deleted == [] and not any(m == "DELETE" for m, _ in fake2.calls)
     agg = report["activitywatch"]
     assert agg["intervals"] == 1 and agg["time"] == {"editor": 60.0} and agg["relevant_s"] == 60.0
-    print("ok purge_bounded_and_not_on_dry_run")
 
 
 def test_time_add_validation(monkeypatch) -> None:
@@ -413,10 +399,9 @@ def test_time_add_validation(monkeypatch) -> None:
     (sql, rows), commit = log
     assert sql.startswith("INSERT INTO agents.time_interval") and commit == "commit"
     assert len(rows) == 1 and rows[0][4] == "manual" and rows[0][8] is False
-    print("ok time_add_validation")
 
 
-def test_delivery_one_transaction_and_webhook_note() -> None:
+def test_delivery_one_transaction_and_webhook_note(monkeypatch) -> None:
     usage = UsageEvent(event_id="u1", ts="2026-11-03T10:00:00Z", agent="fake", model="m",
                        provider="p", output_tokens=5, total_tokens=5, machine="test")
     ti = TimeInterval(event_id="t1", ts="2026-11-03T10:00:00+00:00",
@@ -443,32 +428,24 @@ def test_delivery_one_transaction_and_webhook_note() -> None:
     assert "commit" not in log
 
     posted: list = []
-    saved = push._post_webhook
-    push._post_webhook = lambda url, secret, batch, headers=None: posted.append(batch)
-    try:
-        hook = push.make_sender(_cfg(webhook_url="https://hook.example.test/x", webhook_secret="s"))
-        with contextlib.redirect_stderr(io.StringIO()) as err:
-            hook([ti])
-            hook([usage, ti])
-    finally:
-        push._post_webhook = saved
+    monkeypatch.setattr(push, "post_webhook",
+                        lambda url, secret, batch, headers=None: posted.append(batch))
+    hook = push.make_sender(_cfg(webhook_url="https://hook.example.test/x", webhook_secret="s"))
+    with contextlib.redirect_stderr(io.StringIO()) as err:
+        hook([ti])
+        hook([usage, ti])
     assert posted == [[usage]], "time rows never go over the webhook"
     assert err.getvalue().count("not sent over the webhook") == 1, err.getvalue()
 
     # webhook first, pg_dsn too: usage over the webhook, the time rows still land in Postgres
     posted, log = [], []
-    push._post_webhook = lambda url, secret, batch, headers=None: posted.append(batch)
-    try:
-        both = push.make_sender(_cfg(webhook_url="https://hook.example.test/x", webhook_secret="s",
-                                     pg_dsn="postgresql://x"))
-        with _fake_psycopg(log), contextlib.redirect_stderr(io.StringIO()):
-            both([usage, ti])
-    finally:
-        push._post_webhook = saved
+    both = push.make_sender(_cfg(webhook_url="https://hook.example.test/x", webhook_secret="s",
+                                 pg_dsn="postgresql://x"))
+    with _fake_psycopg(log), contextlib.redirect_stderr(io.StringIO()):
+        both([usage, ti])
     assert posted == [[usage]]
     assert [x if x == "commit" else x[0].split(" (")[0] for x in log] == [
         "INSERT INTO agents.time_interval", "commit"], log
-    print("ok delivery_one_transaction_and_webhook_note")
 
 
 def test_titles_kept_for_good_by_default() -> None:
@@ -482,7 +459,6 @@ def test_titles_kept_for_good_by_default() -> None:
     with _patched(fake, now), contextlib.redirect_stderr(io.StringIO()):
         assert aw.purge(cfg) == 0
     assert not [c for c in fake.calls if c[0] == "DELETE"], fake.calls
-    print("ok titles_kept_for_good_by_default")
 
 
 def test_an_infinite_duration_is_a_malformed_event(monkeypatch) -> None:
@@ -494,6 +470,36 @@ def test_an_infinite_duration_is_a_malformed_event(monkeypatch) -> None:
     assert [r.title for r in out[0][0]] == ["good"] and "1 malformed record(s)" in err
 
 
-if __name__ == "__main__":
-    import pytest
-    raise SystemExit(pytest.main([__file__, "-q"]))
+def test_http_against_a_real_server():
+    seen: list = []
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def _answer(self) -> None:
+            n = int(self.headers.get("Content-Length") or 0)
+            seen.append((self.command, self.path, self.headers.get("Content-Type"),
+                         self.rfile.read(n)))
+            status, body = {"/json": (200, b'{"hostname": "h"}'), "/empty": (200, b"")}.get(
+                self.path, (500, b"boom"))
+            self.send_response(status)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        do_GET = do_POST = do_DELETE = _answer
+
+        def log_message(self, *args) -> None:
+            pass
+
+    srv = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        cfg = _cfg(activitywatch_url=f"http://127.0.0.1:{srv.server_port}/")
+        assert aw._http(cfg, "POST", "/json", {"a": 1}) == {"hostname": "h"}
+        assert seen[0] == ("POST", "/json", "application/json", b'{"a": 1}')
+        assert aw._http(cfg, "DELETE", "/empty") is None, "an empty body is no JSON error"
+        assert seen[1][3] == b""
+        with pytest.raises(urllib.error.HTTPError):
+            aw._http(cfg, "GET", "/down")
+    finally:
+        srv.shutdown()
+        srv.server_close()

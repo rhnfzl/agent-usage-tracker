@@ -1,7 +1,5 @@
 """Hermetic collector tests on synthetic fixtures (no real logs, no PII): the rules every collector
 shares. Each collector has its own test file.
-
-Run: `python tests/test_collectors.py`  (or `pytest`).
 """
 
 from __future__ import annotations
@@ -9,17 +7,14 @@ from __future__ import annotations
 import contextlib
 import json
 import sqlite3
-import sys
 import tempfile
 from collections import Counter
 from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-
-from agent_usage_tracker.config import Config  # noqa: E402
-from agent_usage_tracker.collectors import claude_code, codex, cursor, pi  # noqa: E402
+from agent_usage_tracker.config import Config
+from agent_usage_tracker.collectors import claude_code, codex, cursor, pi
 
 
 def _cfg(home: Path) -> Config:
@@ -119,31 +114,25 @@ def test_human_turns() -> None:
         assert len(human) == 1 and human[0].ts is not None, human      # coarse composer ts
         assert human[0].total_tokens == 0
         assert sum(e.kind == "agent" for e in ev) == 1
-    print("ok human_turns")
 
 
-def test_export_drains_past_cap() -> None:
+def test_export_drains_past_cap(monkeypatch) -> None:
     # aut export is one-shot ("from scratch"); it must return EVERY event even when a single file
     # exceeds the per-scan _MAX_LINES cap (regression guard for the drain loop).
     import io
 
     from agent_usage_tracker import scan
     from agent_usage_tracker.collectors import _util
-    orig = _util._MAX_LINES
-    _util._MAX_LINES = 2                      # tiny cap: 5 turns -> multiple passes
-    try:
-        with tempfile.TemporaryDirectory() as d:
-            home = Path(d)
-            _write_jsonl(home / ".claude/projects/p/s.jsonl", [
-                {"type": "assistant", "uuid": f"u{i}", "timestamp": f"2026-07-18T10:00:0{i}Z",
-                 "message": {"model": "m", "usage": {"input_tokens": 1, "output_tokens": 1,
-                             "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}}}
-                for i in range(5)])
-            n, skipped, _failed = scan.run_export(_cfg(home), ["claude_code"], io.StringIO())
-            assert n == 5, (n, skipped)       # all 5 drained despite cap=2
-    finally:
-        _util._MAX_LINES = orig
-    print("ok export_drains_past_cap")
+    monkeypatch.setattr(_util, "_MAX_LINES", 2)                      # tiny cap: 5 turns -> multiple passes
+    with tempfile.TemporaryDirectory() as d:
+        home = Path(d)
+        _write_jsonl(home / ".claude/projects/p/s.jsonl", [
+            {"type": "assistant", "uuid": f"u{i}", "timestamp": f"2026-07-18T10:00:0{i}Z",
+             "message": {"model": "m", "usage": {"input_tokens": 1, "output_tokens": 1,
+                         "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}}}
+            for i in range(5)])
+        n, skipped, _failed = scan.run_export(_cfg(home), ["claude_code"], io.StringIO())
+        assert n == 5, (n, skipped)       # all 5 drained despite cap=2
 
 
 def test_file_identity_reset() -> None:
@@ -172,7 +161,6 @@ def test_file_identity_reset() -> None:
         # it on reboot, which used to invalidate every watermark and re-push all history. A
         # changed dev with the same inode is the SAME file -> keep the offset, read nothing.
         assert scan({**s1, "dev": 4}) == []          # what an older version's entry still holds
-    print("ok file_identity_reset")
 
 
 def test_status_line_comes_from_each_collector() -> None:
@@ -187,10 +175,9 @@ def test_status_line_comes_from_each_collector() -> None:
                            ("activitywatch", {"end": "x"}, "read until x"),
                            ("activitywatch", {}, "never scanned")):
         assert REGISTRY[name].describe(cfg, wm) == want, name
-    print("ok status_line_comes_from_each_collector")
 
 
-def test_one_shot_commands_warn_at_the_drain_cap() -> None:
+def test_one_shot_commands_warn_at_the_drain_cap(monkeypatch) -> None:
     # a collector that never settles used to stop export and backfill silently, unlike scan
     import io
 
@@ -199,21 +186,17 @@ def test_one_shot_commands_warn_at_the_drain_cap() -> None:
     def endless(cfg, wm):
         yield [], lambda: wm.update(n=wm.get("n", 0) + 1)
 
-    saved = (collectors.MAX_DRAIN_PASSES, scan.REGISTRY)
-    collectors.MAX_DRAIN_PASSES, scan.REGISTRY = 3, {"endless": collectors.Collector(endless)}
-    try:
-        for run in (lambda c: scan.run_export(c, ["endless"], io.StringIO()),
-                    lambda c: scan.run_history_backfill(c, ["endless"], dry_run=True)):
-            err = io.StringIO()
-            with contextlib.redirect_stderr(err):
-                run(_cfg(Path("/tmp")))
-            assert "drain-pass cap (3)" in err.getvalue(), err.getvalue()
-    finally:
-        collectors.MAX_DRAIN_PASSES, scan.REGISTRY = saved
-    print("ok one_shot_commands_warn_at_the_drain_cap")
+    monkeypatch.setattr(collectors, "MAX_DRAIN_PASSES", 3)
+    monkeypatch.setattr(scan, "REGISTRY", {"endless": collectors.Collector(endless)})
+    for run in (lambda c: scan.run_export(c, ["endless"], io.StringIO()),
+                lambda c: scan.run_history_backfill(c, ["endless"], dry_run=True)):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            run(_cfg(Path("/tmp")))
+        assert "drain-pass cap (3)" in err.getvalue(), err.getvalue()
 
 
-def test_hardening_edges() -> None:
+def test_hardening_edges(monkeypatch) -> None:
     # project_name: cross-platform + non-str guard (Windows path reduced on POSIX, containers -> None)
     from agent_usage_tracker.collectors._util import project_name
     assert project_name("/home/u/repo") == "repo"
@@ -260,15 +243,10 @@ def test_hardening_edges() -> None:
 
     cfg = _cfg(Path("/tmp"))
     cfg.cursor_api = True
-    oa, op = cursor_api._auth, cursor_api._post
-    cursor_api._auth = lambda c: ("ck", 1)
-    cursor_api._post = fake_post
-    try:
-        evs = [e for batch, _ in cursor_api.collect(cfg, {}) for e in batch]
-    finally:
-        cursor_api._auth, cursor_api._post = oa, op
+    monkeypatch.setattr(cursor_api, "_auth", lambda c: ("ck", 1))
+    monkeypatch.setattr(cursor_api, "_post", fake_post)
+    evs = [e for batch, _ in cursor_api.collect(cfg, {}) for e in batch]
     assert len(evs) == 1 and evs[0].input_tokens == 5, evs   # reached page 2 past the all-zero page
-    print("ok hardening_edges")
 
 
 def test_non_object_lines() -> None:
@@ -287,7 +265,6 @@ def test_non_object_lines() -> None:
         path.write_text('42\n[1,2,3]\n"a string"\n' + overflow + "\n" + json.dumps(good) + "\n")
         ev = _drain(claude_code.collect, _cfg(home))
         assert len(ev) == 1 and ev[0].total_tokens == 2
-    print("ok non_object_lines")
 
 
 def test_valid_ts() -> None:
@@ -296,7 +273,6 @@ def test_valid_ts() -> None:
     assert valid_ts("2026-07-18T10:00:00+00:00")
     for bad in (None, "", "   ", 12345, 3.14, "not-a-date", []):
         assert not valid_ts(bad), bad
-    print("ok valid_ts")
 
 
 def test_changed_files_yields_only_new_bytes_in_a_private_copy(tmp_path) -> None:
@@ -417,7 +393,3 @@ def test_warn_skipped_names_the_failure_type_of_each_activity_skip(capsys) -> No
     warn_skipped("x", Counter({"activity:KeyError": 2, "activity:TypeError": 1}))
     err = capsys.readouterr().err
     assert "3 activity record(s)" in err and "KeyError x2, TypeError x1" in err
-
-
-if __name__ == "__main__":
-    raise SystemExit(pytest.main([__file__, "-q"]))

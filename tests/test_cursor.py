@@ -1,6 +1,5 @@
 """Hermetic tests for the Cursor collector, which reads the local state database.
 
-Run: `python tests/test_cursor.py`  (or `pytest`).
 Locks the rule: Cursor joins bubbleId -> composerData for a timestamp and handles ISO + epoch-ms.
 """
 
@@ -10,17 +9,12 @@ import contextlib
 import io
 import json
 import sqlite3
-import sys
 import tempfile
 from pathlib import Path
 
-import pytest
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-
-from agent_usage_tracker.collectors import cursor  # noqa: E402
-from agent_usage_tracker.event import CollectorUnavailable  # noqa: E402
-from test_collectors import _cfg, _drain  # noqa: E402
+from agent_usage_tracker.collectors import cursor
+from agent_usage_tracker.event import CollectorUnavailable
+from test_collectors import _cfg, _drain
 
 
 def test_cursor() -> None:
@@ -71,10 +65,9 @@ def test_cursor() -> None:
         only = _drain(cursor.collect, cfg)
         assert [e.kind for e in only] == ["human"], only
         assert only[0].total_tokens == 0 and only[0].ts is not None   # inherits composer ts
-    print("ok cursor")
 
 
-def test_cursor_composer_read_failure_degrades_and_keeps_the_rows() -> None:
+def test_cursor_composer_read_failure_degrades_and_keeps_the_rows(monkeypatch) -> None:
     with tempfile.TemporaryDirectory() as d:
         db = Path(d) / "state.vscdb"
         real = sqlite3.connect(db)
@@ -97,7 +90,7 @@ def test_cursor_composer_read_failure_degrades_and_keeps_the_rows() -> None:
 
         cfg = _cfg(Path(d))
         cfg.cursor_db_path = str(db)
-        saved, cursor.connect_ro = cursor.connect_ro, lambda path: Failing()
+        monkeypatch.setattr(cursor, "connect_ro", lambda path: Failing())
         rows: list = []
         try:
             for batch, _advance in cursor.collect(cfg, {}):
@@ -105,10 +98,7 @@ def test_cursor_composer_read_failure_degrades_and_keeps_the_rows() -> None:
             raise AssertionError("the failed read stayed silent")
         except CollectorUnavailable as exc:
             assert "malformed" in str(exc), exc
-        finally:
-            cursor.connect_ro = saved
         assert len(rows) == 1, rows
-    print("ok cursor_composer_read_failure_degrades_and_keeps_the_rows")
 
 
 def test_cursor_counts_malformed_bubbles() -> None:
@@ -125,7 +115,6 @@ def test_cursor_counts_malformed_bubbles() -> None:
         with contextlib.redirect_stderr(io.StringIO()) as err:
             assert _drain(cursor.collect, cfg) == []
         assert "1 malformed record(s) skipped" in err.getvalue(), err.getvalue()
-    print("ok cursor_counts_malformed_bubbles")
 
 
 def test_cursor_db_path() -> None:
@@ -139,7 +128,6 @@ def test_cursor_db_path() -> None:
     assert p is not None
     assert p.parts[-4:] == ("Cursor", "User", "globalStorage", "state.vscdb")  # same subpath every OS
     assert str(home) in str(p) or "AppData" in str(p)
-    print("ok cursor_db_path")
 
 
 def test_cursor_counts_a_composer_with_bad_bytes(capsys):
@@ -157,7 +145,3 @@ def test_cursor_counts_a_composer_with_bad_bytes(capsys):
         cfg.cursor_db_path = str(db)
         assert [e.total_tokens for e in _drain(cursor.collect, cfg)] == [10]
     assert "1 malformed record(s)" in capsys.readouterr().err
-
-
-if __name__ == "__main__":
-    raise SystemExit(pytest.main([__file__, "-q"]))

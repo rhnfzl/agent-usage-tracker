@@ -1,6 +1,5 @@
 """Hermetic tests of what Codex and Pi rows must share, on synthetic fixtures.
 
-Run: `python tests/test_codex_pi.py`  (or `pytest`).
 Locks the rules:
   - attrs never carry free text; backfill works for both and never touches the watermark;
   - both tailers reset on truncation or replacement, upgrade old state once at load, and count a
@@ -12,18 +11,14 @@ from __future__ import annotations
 import contextlib
 import io
 import json
-import sys
 import tempfile
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+from test_activity import _git_repo, _plain_value
 
-from test_activity import _git_repo, _plain_value  # noqa: E402
-
-from agent_usage_tracker import scan  # noqa: E402
-from agent_usage_tracker.collectors import claude_code, codex, pi  # noqa: E402
-from codex_pi_helpers import (AGAIN, SID, T, TYPED, _acts, _append, _cfg, _collect, _hdr,  # noqa: E402
+from agent_usage_tracker import scan
+from agent_usage_tracker.collectors import claude_code, codex, pi
+from codex_pi_helpers import (AGAIN, SID, T, TYPED, _acts, _append, _cfg, _collect, _hdr,
                               _meta, _pa, _pi_file, _pr, _pu, _run, _tok, _usage, _write_jsonl)
 
 LEAKS = (TYPED, AGAIN, "tidy", "clientname", "acmecorp", "ABC-1", "feature", "src/pkg",
@@ -51,7 +46,6 @@ def test_attrs_carry_no_text() -> None:
                 for leak in (*LEAKS, str(repo)):
                     assert leak not in blob, (mod.NAME, e.kind, leak)
     _run(check)
-    print("ok attrs_carry_no_text (codex, pi)")
 
 
 def test_backfill_codex_pi(monkeypatch) -> None:
@@ -73,7 +67,6 @@ def test_backfill_codex_pi(monkeypatch) -> None:
                                 "compaction": 2, "invoke": 1, "link": 9}, c
         assert sum(r["rows"] for r in c["link"].values()) == 9 and c["link"]["seed"]["repo_key"], c
     _run(check)
-    print("ok backfill_codex_pi")
 
 
 def test_tailers_share_the_truncation_and_replacement_reset() -> None:
@@ -91,7 +84,6 @@ def test_tailers_share_the_truncation_and_replacement_reset() -> None:
             wm["files"][str(path)]["ino"] += 1          # a different file now sits at this path
             assert len(_usage(_collect(mod, home, wm))) == 1, f
             assert _collect(mod, home, wm) == [], f     # and it resumes normally after
-    print("ok tailers_share_the_truncation_and_replacement_reset")
 
 
 def test_state_upgrades_run_once_at_load() -> None:
@@ -124,7 +116,6 @@ def test_state_upgrades_run_once_at_load() -> None:
         [c] = _acts(second, "commit")
         assert c.attrs["sha"] == "0a1b2c3" and c.attrs["repo_key"]
         assert "skipped" not in err.getvalue(), err.getvalue()
-    print("ok state_upgrades_run_once_at_load")
 
 
 def test_a_version_1_watermark_upgrades_without_reading_anything_again() -> None:
@@ -178,9 +169,3 @@ def test_malformed_usage_records_are_counted() -> None:
                 evs = _collect(mod, home)
             assert len(_usage(evs)) == 1, mod.NAME          # the good row is untouched
             assert f"{want} malformed record(s) skipped" in err.getvalue(), err.getvalue()
-    print("ok malformed_usage_records_are_counted")
-
-
-if __name__ == "__main__":
-    import pytest
-    raise SystemExit(pytest.main([__file__, "-q"]))

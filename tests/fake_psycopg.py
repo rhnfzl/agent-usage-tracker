@@ -6,6 +6,8 @@ import contextlib
 import sys
 import types
 
+import pytest
+
 
 class _Cur:
     def __init__(self, log, fail_on=None):
@@ -40,12 +42,6 @@ def _fake_psycopg(log, fail_on=None):
 
     fake = types.ModuleType("psycopg")
     fake.connect = lambda dsn, connect_timeout: _Conn()
-    prev = sys.modules.get("psycopg")
-    sys.modules["psycopg"] = fake
-    try:
+    with pytest.MonkeyPatch.context() as m:
+        m.setitem(sys.modules, "psycopg", fake)
         yield
-    finally:
-        if prev is None:
-            sys.modules.pop("psycopg", None)
-        else:
-            sys.modules["psycopg"] = prev

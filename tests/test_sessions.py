@@ -1,6 +1,5 @@
 """Hermetic tests for session identity (agents.event_session) on synthetic Claude Code fixtures.
 
-Run: `python tests/test_sessions.py`  (or `pytest`).
 Locks the rules:
   - main file -> session_id = sessionId, no parent; subagent file (also under workflows/) ->
     session_id = agentId, parent = sessionId;
@@ -23,12 +22,10 @@ from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-
-from agent_usage_tracker import push, scan  # noqa: E402
-from agent_usage_tracker.collectors import claude_code  # noqa: E402
-from agent_usage_tracker.config import Config  # noqa: E402
-from agent_usage_tracker.event import ActivityEvent  # noqa: E402
+from agent_usage_tracker import push, scan
+from agent_usage_tracker.collectors import claude_code
+from agent_usage_tracker.config import Config
+from agent_usage_tracker.event import ActivityEvent
 
 TS = "2026-07-18T10:00:00Z"
 
@@ -142,7 +139,6 @@ def test_session_rules() -> None:
 
         e = next(iter(evs.values()))
         assert "session" not in e.to_dict()                 # webhook payload stays usage-only
-    print("ok session_rules")
 
 
 class _Cur:
@@ -184,15 +180,9 @@ def _fake_psycopg(log, fail_on=None):
 
     fake = types.ModuleType("psycopg")
     fake.connect = _connect
-    prev = sys.modules.get("psycopg")
-    sys.modules["psycopg"] = fake
-    try:
+    with pytest.MonkeyPatch.context() as m:
+        m.setitem(sys.modules, "psycopg", fake)
         yield connects
-    finally:
-        if prev is None:
-            sys.modules.pop("psycopg", None)
-        else:
-            sys.modules["psycopg"] = prev
 
 
 def _events(home: Path) -> list:
@@ -229,28 +219,22 @@ def test_pg_one_transaction() -> None:
             except RuntimeError as exc:
                 assert "insert failed" in str(exc)
         assert "commit" not in log, log                     # nothing committed -> watermark stays
-    print("ok pg_one_transaction")
 
 
-def test_webhook_skips_sessions_once() -> None:
+def test_webhook_skips_sessions_once(monkeypatch) -> None:
     with tempfile.TemporaryDirectory() as d:
         home = Path(d)
         _fixture(home)
         batch = _events(home)
         posted: list = []
-        saved = push._post_webhook
-        push._post_webhook = lambda url, secret, b, h=None: posted.append(b)
+        monkeypatch.setattr(push, "post_webhook", lambda url, secret, b, h=None: posted.append(b))
         err = io.StringIO()
-        try:
-            send = push.make_sender(_cfg(home, webhook_url="https://hooks.example/h"))
-            with contextlib.redirect_stderr(err):
-                send(batch)
-                send(batch)
-        finally:
-            push._post_webhook = saved
+        send = push.make_sender(_cfg(home, webhook_url="https://hooks.example/h"))
+        with contextlib.redirect_stderr(err):
+            send(batch)
+            send(batch)
         assert len(posted) == 2
         assert err.getvalue().count("\n") == 1 and "session" in err.getvalue(), err.getvalue()
-    print("ok webhook_skips_sessions_once")
 
 
 def _with_state(fn):
@@ -261,7 +245,7 @@ def _with_state(fn):
         return fn(state)
 
 
-def test_sessions_only_backfill() -> None:
+def test_sessions_only_backfill(monkeypatch) -> None:
     with tempfile.TemporaryDirectory() as d:
         home = Path(d)
         _fixture(home)
@@ -271,17 +255,13 @@ def test_sessions_only_backfill() -> None:
         def run(state: Path):
             before = (state.read_text(), state.stat().st_mtime_ns)
             log: list = []
-            saved = scan.make_sender
-            scan.make_sender = lambda c: (_ for _ in ()).throw(AssertionError("no usage sender"))
+            monkeypatch.setattr(scan, "make_sender", lambda c: (_ for _ in ()).throw(AssertionError("no usage sender")))
             err = io.StringIO()
-            try:
-                with _fake_psycopg(log), contextlib.redirect_stderr(err):
-                    counts = scan.run_history_backfill(cfg, ["claude_code"], dry_run=False)
-                    dry_log: list = []
-                with _fake_psycopg(dry_log), contextlib.redirect_stderr(err):
-                    dry = scan.run_history_backfill(cfg, ["claude_code"], dry_run=True)
-            finally:
-                scan.make_sender = saved
+            with _fake_psycopg(log), contextlib.redirect_stderr(err):
+                counts = scan.run_history_backfill(cfg, ["claude_code"], dry_run=False)
+                dry_log: list = []
+            with _fake_psycopg(dry_log), contextlib.redirect_stderr(err):
+                dry = scan.run_history_backfill(cfg, ["claude_code"], dry_run=True)
             assert (state.read_text(), state.stat().st_mtime_ns) == before, "state untouched"
             return counts, dry, log, dry_log, err.getvalue()
 
@@ -297,7 +277,6 @@ def test_sessions_only_backfill() -> None:
                                     "unknown": 1}, dry
         assert dry["turn_null"] == 2 and dry["subagent_no_parent"] == 0, dry
         assert "11 session rows sent" in err and "counted" in err, err   # progress on stderr
-    print("ok sessions_only_backfill")
 
 
 def test_turn_carries_across_scans() -> None:
@@ -318,8 +297,3 @@ def test_turn_carries_across_scans() -> None:
             commit()
         s = _by_msg(evs, "m9")
         assert (s.turn_id, s.run_origin, s.parent_session_id) == ("P1", "interactive", None), s
-    print("ok turn_carries_across_scans")
-
-
-if __name__ == "__main__":
-    raise SystemExit(pytest.main([__file__, "-q"]))

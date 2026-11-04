@@ -1,6 +1,5 @@
 """Hermetic tests for outcome_git: what a clone says, and that reading one never runs its config.
 
-Run: `python tests/test_outcome_git.py`  (or `pytest`).
 Locks the rules:
   - a fetch that fails or times out is skipped and counted, never runs gc and is terminated on
     timeout;
@@ -18,16 +17,12 @@ import tempfile
 import time
 from pathlib import Path
 
-import pytest
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-
-from agent_usage_tracker import outcome_git as og  # noqa: E402
-from agent_usage_tracker import outcomes as oc  # noqa: E402
-from agent_usage_tracker.git_safe import git_argv  # noqa: E402
-from agent_usage_tracker.git_safe import git_env  # noqa: E402
-from agent_usage_tracker.repo_keys import RepoKeys  # noqa: E402
-from test_outcomes import (NOW, SALT, _commit, _g, _key, _lines, _row, _states, _with_git,  # noqa: E402
+from agent_usage_tracker import outcome_git as og
+from agent_usage_tracker import outcomes as oc
+from agent_usage_tracker.git_safe import git_argv
+from agent_usage_tracker.git_safe import git_env
+from agent_usage_tracker.repo_keys import RepoKeys
+from test_outcomes import (NOW, SALT, _commit, _g, _key, _lines, _row, _states, _with_git,
                            _world)
 
 
@@ -42,7 +37,6 @@ def test_fetch_failure_and_timeout_are_counted():
         assert len(clones) == 2
         assert oc.fetch_clones(clones) == (1, 1)
         assert sum(c.fetched_at > 0 for c in clones) == 1 and og.FETCH_TIMEOUT_S == 30
-        print("ok fetch_failure_and_timeout_are_counted")
 
 
 def test_find_clones_dedups_worktrees_and_skips_vendored():
@@ -55,7 +49,6 @@ def test_find_clones_dedups_worktrees_and_skips_vendored():
         clones = oc.find_clones([str(Path(d) / "projects"), str(Path(d) / "nope")],
                                 RepoKeys(SALT))
         assert len(clones) == 1, clones
-        print("ok find_clones_dedups_worktrees_and_skips_vendored")
 
 
 def test_local_branch_is_never_the_default():
@@ -68,10 +61,9 @@ def test_local_branch_is_never_the_default():
         assert clones[0].default is None, clones
         outs, _ = oc.evaluate([_row(a, None, 30)], clones, NOW, cache={})
         assert outs[0]["state"] == "open", outs                     # never pushed: not merged
-        print("ok local_branch_is_never_the_default")
 
 
-def test_fetch_leaves_the_repo_alone_and_terminates_on_timeout():
+def test_fetch_leaves_the_repo_alone_and_terminates_on_timeout(monkeypatch):
     seen: list = []
     real = og.subprocess.Popen
 
@@ -80,20 +72,16 @@ def test_fetch_leaves_the_repo_alone_and_terminates_on_timeout():
             seen.append((cmd, kw.get("env", {}).get("GIT_TERMINAL_PROMPT")))
             return real(["sleep", "30"], **kw)                       # hangs like a dead remote
         return real(cmd, **kw)
-    og.subprocess.Popen, timeout = fake, og.FETCH_TIMEOUT_S
-    og.FETCH_TIMEOUT_S = 0.3
-    try:
-        t = time.time()
-        assert oc.fetch_clones([oc.Clone("/nonexistent", None, None, None)]) == (0, 1)
-        assert time.time() - t < 10
-    finally:
-        og.subprocess.Popen, og.FETCH_TIMEOUT_S = real, timeout
+    monkeypatch.setattr(og.subprocess, "Popen", fake)
+    monkeypatch.setattr(og, "FETCH_TIMEOUT_S", 0.3)
+    t = time.time()
+    assert oc.fetch_clones([oc.Clone("/nonexistent", None, None, None)]) == (0, 1)
+    assert time.time() - t < 10
     cmd, prompt = seen[0]
     for flag in ("gc.auto=0", "--no-auto-maintenance", "--no-write-fetch-head",
                  "--no-recurse-submodules", "--no-tags"):
         assert flag in cmd, (flag, cmd)
     assert prompt == "0" and "--prune" not in cmd
-    print("ok fetch_leaves_the_repo_alone_and_terminates_on_timeout")
 
 
 def test_repo_config_never_runs_commands():
@@ -151,10 +139,9 @@ def test_repo_config_never_runs_commands():
             subprocess.run(git_argv(str(work), *args), capture_output=True, env=git_env(),
                            timeout=60)
         assert not list(marks.iterdir()), sorted(marks.iterdir())
-    print("ok repo_config_never_runs_commands")
 
 
-def test_signing_proxy_alternates_and_helpers_never_run():
+def test_signing_proxy_alternates_and_helpers_never_run(monkeypatch):
     if os.name == "nt":                    # the fakes are POSIX shell scripts
         return
     import http.server
@@ -173,7 +160,6 @@ def test_signing_proxy_alternates_and_helpers_never_run():
     srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Deny)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     url = f"http://127.0.0.1:{srv.server_port}/r.git"
-    saved_global = os.environ["GIT_CONFIG_GLOBAL"]
     with tempfile.TemporaryDirectory() as d:
         work, s = _world(Path(d))
         marks = Path(d) / "marks"
@@ -203,7 +189,7 @@ def test_signing_proxy_alternates_and_helpers_never_run():
         _g(work, "config", f"credential.{url}.helper", "!" + tools["credurl"])
         gconf = Path(d) / "global.gitconfig"
         gconf.write_text(f"[credential]\n\thelper = !{tools['global']}\n")
-        os.environ["GIT_CONFIG_GLOBAL"] = str(gconf)
+        monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(gconf))
         try:
             def run(argv):
                 subprocess.run(argv, capture_output=True, timeout=60, env=git_env())
@@ -238,9 +224,7 @@ def test_signing_proxy_alternates_and_helpers_never_run():
             # the repo's helpers are gone, the user's global one still answers
             assert {p.name for p in marks.iterdir()} == {"global"}, sorted(marks.iterdir())
         finally:
-            os.environ["GIT_CONFIG_GLOBAL"] = saved_global
             srv.shutdown()
-    print("ok signing_proxy_alternates_and_helpers_never_run")
 
 
 def test_patch_id_failure_is_not_an_empty_answer():
@@ -248,18 +232,14 @@ def test_patch_id_failure_is_not_an_empty_answer():
         work, s = _world(Path(d))
         assert s["A"] in og._patch_ids(str(work), ["-1", s["A"]])
         assert og._patch_ids(str(work), ["refs/heads/no-such-ref"]) is None
-    print("ok patch_id_failure_is_not_an_empty_answer")
 
 
-def test_a_clone_git_cannot_identify_is_unreadable_not_gone():
+def test_a_clone_git_cannot_identify_is_unreadable_not_gone(monkeypatch):
     with tempfile.TemporaryDirectory() as d:
         _work, s = _world(Path(d))
-        real = og._common_dir
-        og._common_dir = lambda path: None      # rev-parse timed out
-        try:
+        with monkeypatch.context() as m:
+            m.setattr(og, "_common_dir", lambda path: None)      # rev-parse timed out
             clones = oc.find_clones([str(Path(d) / "projects")], RepoKeys(SALT))
-        finally:
-            og._common_dir = real
         assert not clones[0].readable, clones
         outs, stats = oc.evaluate([_row(s["A"], None, 30)], clones, NOW, cache={})
         assert (outs[0]["state"], outs[0]["sticky"]) == ("undecided", True), outs
@@ -269,7 +249,6 @@ def test_a_clone_git_cannot_identify_is_unreadable_not_gone():
         (stale / ".git").mkdir(parents=True)
         assert og._common_dir(str(stale)) == ""
         assert oc.find_clones([str(stale.parent)], RepoKeys(SALT)) == []
-    print("ok a_clone_git_cannot_identify_is_unreadable_not_gone")
 
 
 def test_default_ref_ignores_an_origin_head_outside_origin():
@@ -281,7 +260,6 @@ def test_default_ref_ignores_an_origin_head_outside_origin():
         assert og._default_ref(str(work)) == ("refs/remotes/origin/main", True)
         _g(work, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/heads/main")
         assert og._default_ref(str(work)) == ("refs/remotes/origin/main", True)
-    print("ok default_ref_ignores_an_origin_head_outside_origin")
 
 
 def test_default_ref_failure_is_not_no_default():
@@ -297,7 +275,6 @@ def test_default_ref_failure_is_not_no_default():
         assert clones[0].default is None and not clones[0].readable, clones
         outs, _ = oc.evaluate([_row(s["A"], None, 30)], clones, NOW, cache={})
         assert (outs[0]["state"], outs[0]["sticky"]) == ("undecided", True), outs
-    print("ok default_ref_failure_is_not_no_default")
 
 
 def test_file_deleted_by_the_base_counts_as_zero_alive():
@@ -319,7 +296,6 @@ def test_file_deleted_by_the_base_counts_as_zero_alive():
         outs, _ = oc.evaluate([_row(x, _key(str(origin)), 40)], clones, NOW, cache=cache)
         assert (outs[0]["state"], outs[0]["survival"]) == ("reworked", 0.0), outs
         assert cache == {x: 0.0}, cache
-    print("ok file_deleted_by_the_base_counts_as_zero_alive")
 
 
 def test_a_clone_with_no_branches_still_answers():
@@ -334,7 +310,6 @@ def test_a_clone_with_no_branches_still_answers():
         clones = oc.find_clones([str(Path(d) / "projects")], RepoKeys(SALT))
         outs, stats = oc.evaluate([_row(a, None, 30)], clones, NOW, cache={})
         assert outs[0]["state"] == "abandoned" and not stats["repo_unreadable"], (outs, stats)
-    print("ok a_clone_with_no_branches_still_answers")
 
 
 def test_repo_cannot_switch_a_protocol_back_on():
@@ -380,7 +355,3 @@ def test_a_failed_origin_read_is_an_unreadable_clone_not_a_clone_without_origin(
     monkeypatch.setattr(og, "run_git", lambda path, *a, **kw: "upstream\n" if a[0] == "remote" else None)
     clone = og._clone_at(str(tmp_path), str(tmp_path), RepoKeys("s" * 40))
     assert clone.readable and clone.key is None, "no origin at all is still readable"
-
-
-if __name__ == "__main__":
-    raise SystemExit(pytest.main([__file__, "-q"]))

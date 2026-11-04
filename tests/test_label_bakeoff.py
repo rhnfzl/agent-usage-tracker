@@ -1,6 +1,5 @@
 """Hermetic tests for label/bakeoff.py: `aut label eval`, `choose` and `train-encoder`. No model.
 
-Run: `python tests/test_label_bakeoff.py`  (or `pytest`).
 Locks the rules: the bake-off fits on the calibration days and reports on the held-out ones; its
 record has the fields agents.eval_latest reads, and no text; choose writes the smallest passing
 backend; the encoder trains on gold + silver, never on a held-out gold unit, and its file holds no
@@ -10,20 +9,16 @@ word.
 from __future__ import annotations
 
 import json
-import sys
-from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-
-from agent_usage_tracker.config import AutError  # noqa: E402
-from agent_usage_tracker.label import backends  # noqa: E402
-from agent_usage_tracker.label import bakeoff  # noqa: E402
-from agent_usage_tracker.label import core  # noqa: E402
-from agent_usage_tracker.label import evalset  # noqa: E402
-from agent_usage_tracker.label import tasks  # noqa: E402
-from label_helpers import BASE, LABELS, Oracle, TASK, TODAY, WORD, _cfg, _env, _gold  # noqa: E402
+from agent_usage_tracker.config import AutError
+from agent_usage_tracker.label import backends
+from agent_usage_tracker.label import bakeoff
+from agent_usage_tracker.label import core
+from agent_usage_tracker.label import evalset
+from agent_usage_tracker.label import tasks
+from label_helpers import BASE, LABELS, Oracle, TASK, TODAY, WORD, _cfg, _env, _gold
 
 
 def test_metrics():
@@ -296,7 +291,3 @@ def test_print_lines_carry_the_numbers(capsys):
                       "n 10 (held out 4), 0.5 s per decision")
     assert out[1] == f'label choose {TASK}: b m (T 1.5, tau {{"a": 0.6}})'
     assert out[2] == f'label train-encoder {TASK}: {{"accuracy": 0.5}}'
-
-
-if __name__ == "__main__":
-    raise SystemExit(pytest.main([__file__, "-q"]))

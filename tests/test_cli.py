@@ -1,29 +1,23 @@
 """cli.main dispatch for the ingest commands, on one synthetic Claude Code log and a temp state.
 
-Run: `python tests/test_cli.py`  (or `pytest`).
 Locks: exit codes, and that `backfill` forgets the selected agents' watermarks and nothing else.
 """
 
 from __future__ import annotations
 
 import json
-import subprocess
-import sys
 import urllib.error
 from dataclasses import replace
 from datetime import datetime, timezone
-from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-
-from agent_usage_tracker import cli, episode_store, local_page, manual_time, push, scan  # noqa: E402
-from agent_usage_tracker.collectors import Collector  # noqa: E402
-from agent_usage_tracker.event import CollectorUnavailable  # noqa: E402
-from agent_usage_tracker.config import load_config  # noqa: E402
-from agent_usage_tracker.state import load_state  # noqa: E402
+from agent_usage_tracker import cli, episode_store, inspector, local_page, manual_time, push, scan
+from agent_usage_tracker.collectors import Collector
+from agent_usage_tracker.event import CollectorUnavailable
+from agent_usage_tracker.config import load_config
+from agent_usage_tracker.state import load_state
 
 _TURN = {"type": "assistant", "uuid": "a1", "requestId": "req_1",
          "timestamp": "2026-07-18T10:00:01Z", "cwd": "/x/proj", "sessionId": "s1",
@@ -62,6 +56,8 @@ def _recording_sender(monkeypatch) -> list:
     (["scan", "--dry-run"], "DRY-RUN"),
     (["--agents", "claude_code", "scan", "--dry-run"], "claude_code"),
     (["status"], "watermarks"),
+    (["backfill", "--sessions-only", "--dry-run"], "sessions-only backfill DRY-RUN (nothing sent): 1 rows"),
+    (["backfill", "--activity-only", "--dry-run"], "activity-only backfill DRY-RUN (nothing sent)"),
 ])
 def test_read_only_commands_exit_0_and_keep_state(world, monkeypatch, capsys, argv, out):
     monkeypatch.setattr(scan, "make_sender", lambda cfg: pytest.fail("a read-only command sent"))
@@ -136,12 +132,6 @@ def test_export_writes_the_csv(world, capsys):
     assert "exported 1 events" in capsys.readouterr().err
 
 
-def test_script_mode_runs_a_test_file_on_its_own():
-    r = subprocess.run([sys.executable, str(Path(__file__).with_name("test_state.py"))],
-                       capture_output=True, text=True, timeout=120)
-    assert r.returncode == 0 and " passed" in r.stdout, r.stdout + r.stderr
-
-
 def _psycopg_error() -> Exception:
     return type("OperationalError", (Exception,), {"__module__": "psycopg"})(
         "connection to postgresql://aut:hunter2@db.example/agents failed")
@@ -180,7 +170,7 @@ def test_a_webhook_with_no_fallback_is_one_line_and_exit_1(world, monkeypatch, c
                                        'webhook_secret = "s"\n')
     def down(*a, **kw):
         raise urllib.error.URLError("refused")
-    monkeypatch.setattr(push, "_post_webhook", down)
+    monkeypatch.setattr(push, "post_webhook", down)
     assert cli.main(["scan"]) == 1
     assert "aut: DeliveryError: webhook delivery failed" in capsys.readouterr().err
 
@@ -285,5 +275,21 @@ def test_print_scan_shows_an_activity_only_collector(world, capsys):
     assert '{"turn": 7}' in out and "no new usage" not in out
 
 
-if __name__ == "__main__":
-    raise SystemExit(pytest.main([__file__, "-q"]))
+def test_print_scan_shows_active_time(world, capsys):
+    report = {"activitywatch": {**scan._blank_agent_tally(), "intervals": 2, "relevant_s": 60.0,
+                                "time": {"editor": 60.0, "web": 120.0}}}
+    scan.print_scan(load_config(), report, dry_run=True)
+    out = capsys.readouterr().out
+    assert "2 intervals  3.0 min active (1.0 min work-relevant)" in out
+    assert out.index("web") < out.index("editor"), "the largest category first"
+
+
+@pytest.mark.parametrize("flag, kind", [("--episode", "episode"), ("--day", "day"),
+                                        ("--label", "label")])
+def test_inspect_passes_the_chosen_selector(world, monkeypatch, capsys, flag, kind):
+    seen = []
+    monkeypatch.setattr(inspector, "run_inspect",
+                        lambda cfg, k, v: seen.append((k, v)) or {"reviewed": 2})
+    assert cli.main(["inspect", flag, "x"]) == 0
+    assert seen == [(kind, "x")]
+    assert "inspect: 2 corrections saved" in capsys.readouterr().out

@@ -1,25 +1,18 @@
-"""Hermetic tests for label/evalset.py: the local label files and the shared unit order.
-
-Run: `python tests/test_label_evalset.py`  (or `pytest`).
-"""
+"""Hermetic tests for label/evalset.py: the local label files and the shared unit order."""
 
 from __future__ import annotations
 
 import os
-import sys
 from datetime import date, timedelta
-from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-
-from agent_usage_tracker.config import AutError  # noqa: E402
-from agent_usage_tracker.label import evalset  # noqa: E402
-from agent_usage_tracker.label import tasks  # noqa: E402
-from label_helpers import BASE, TASK  # noqa: E402
-from agent_usage_tracker.label import core  # noqa: E402
-from label_helpers import FakeSource, _cfg, _env  # noqa: E402
+from agent_usage_tracker.config import AutError
+from agent_usage_tracker.label import evalset
+from agent_usage_tracker.label import tasks
+from label_helpers import BASE, TASK
+from agent_usage_tracker.label import core
+from label_helpers import FakeSource, _cfg, _env
 
 
 def test_stratified_and_split():
@@ -147,7 +140,3 @@ def test_append_jsonl_creates_a_private_file(tmp_path):
     p = tmp_path / "gold.jsonl"
     evalset.append_jsonl(p, {"a": 1})
     assert p.stat().st_mode & 0o077 == 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(pytest.main([__file__, "-q"]))

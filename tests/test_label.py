@@ -1,7 +1,6 @@
 """Hermetic tests for the `aut label` run and its wiring. No model and no mlx: every backend here
 is a fake that returns fixed letter logits.
 
-Run: `python tests/test_label.py`  (or `pytest`).
 Locks the rules:
   - a run sends rows in batches, advances its watermark only when not a dry run, writes one
     heartbeat row (collector `label`), stops at the time budget, and never re-asks a cached title;
@@ -23,14 +22,12 @@ from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-
-from agent_usage_tracker import cli, push  # noqa: E402
-from agent_usage_tracker.collectors import activitywatch as aw  # noqa: E402
-from agent_usage_tracker.config import LABEL_DAYS, AutError  # noqa: E402
-from agent_usage_tracker.label import backends, core, run, tasks  # noqa: E402
-from agent_usage_tracker.label import bakeoff, gold, teach  # noqa: E402
-from label_helpers import ById, DAY1, FakeSource, NOW, TASK, _cfg, _claude_log, _env, _steer, _win  # noqa: E402
+from agent_usage_tracker import cli, push
+from agent_usage_tracker.collectors import activitywatch as aw
+from agent_usage_tracker.config import LABEL_DAYS, AutError
+from agent_usage_tracker.label import backends, core, run, tasks
+from agent_usage_tracker.label import bakeoff, gold, teach
+from label_helpers import ById, DAY1, FakeSource, NOW, TASK, _cfg, _claude_log, _env, _steer, _win
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -399,7 +396,6 @@ def test_cached_snapshot_needs_config_and_every_weight():
         (snap / "w-2.safetensors").write_text("x")
         assert cached_snapshot(look, "r", None) == snap               # no LICENSE needed
         assert cached_snapshot(lambda *a, **k: None, "r", None) is None
-    print("ok cached_snapshot")
 
 
 def test_cli_wiring(tmp_path, monkeypatch):
@@ -431,7 +427,3 @@ def test_a_recent_task_says_since_does_not_apply(capsys):
     start, until = run._window("soft_outcome", {}, now - timedelta(days=90), now)
     assert start == now - timedelta(days=14) and until is None
     assert "do not apply" in capsys.readouterr().err
-
-
-if __name__ == "__main__":
-    raise SystemExit(pytest.main([__file__, "-q"]))

@@ -1,6 +1,5 @@
 """Hermetic tests for `aut episodes review` (the hand check of one month's episodes).
 
-Run: `python tests/test_review.py`  (or `pytest`).
 Locks the rules:
   - local text (tests/test_session_digest.py reads it) is escaped on the page;
   - "don't know" is the default answer and writes nothing;
@@ -16,18 +15,14 @@ from __future__ import annotations
 
 import http.client
 import json
-import sys
 import threading
 import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
-from pathlib import Path
 from unittest.mock import patch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-
-from agent_usage_tracker import local_page, review  # noqa: E402
+from agent_usage_tracker import local_page, review
 
 K1, K2 = "a1" * 32, "b2" * 32
 T0 = datetime(2001, 1, 5, 9, tzinfo=timezone.utc)
@@ -49,7 +44,6 @@ def test_page_escapes_local_text():
                                               "branches": ["a&b"]}}, "tok", "2001-01")
     assert "<script>x" not in page and "&lt;script&gt;x" in page and "a&amp;b" in page
     assert 'action="/tok"' in page
-    print("ok page_escapes_local_text")
 
 
 def test_answers_become_key_only_corrections():
@@ -72,7 +66,6 @@ def test_answers_become_key_only_corrections():
            "a2": ["right"]}
     rows, summary = review.corrections(odd, _episodes(), T0)
     assert [r["action"] for r in rows] == ["confirm"] and summary["reviewed"] == 1, rows
-    print("ok answers_become_key_only_corrections")
 
 
 def test_server_serves_under_token_and_stops_on_submit():
@@ -113,7 +106,6 @@ def test_server_serves_under_token_and_stops_on_submit():
     assert not t.is_alive()
     assert [w["action"] for w in written] == ["confirm", "reject"], written
     assert box["summary"] == {"reviewed": 2, "right": 1}
-    print("ok server_serves_under_token_and_stops_on_submit")
 
 
 def test_post_with_a_bad_content_length_is_a_404_not_a_crash():
@@ -147,7 +139,6 @@ def test_post_with_a_bad_content_length_is_a_404_not_a_crash():
         assert r.read() == b"done"
     t.join(10)
     assert not t.is_alive()
-    print("ok post_with_a_bad_content_length_is_a_404_not_a_crash")
 
 
 def test_ctrl_c_ends_the_page_quietly():
@@ -155,7 +146,6 @@ def test_ctrl_c_ends_the_page_quietly():
         got = review.serve(_episodes(), [].extend, review.month_pages(_episodes(), {}, "2001-01"),
                            open_browser=False)
     assert got == {"reviewed": 0, "right": 0}
-    print("ok ctrl_c_ends_the_page_quietly")
 
 
 def test_month_bounds():
@@ -163,7 +153,6 @@ def test_month_bounds():
     assert label == "2001-12" and (start.month, end.year, end.month) == (12, 2002, 1)
     label, start, end = review._month_bounds(None)
     assert end <= datetime.now().astimezone() and (end - start).days in (28, 29, 30, 31)
-    print("ok month_bounds")
 
 
 def test_dont_know_is_the_default_and_writes_nothing():
@@ -172,7 +161,6 @@ def test_dont_know_is_the_default_and_writes_nothing():
     assert "not building work (admin, personal, a quick question)" in page
     rows, summary = review.corrections({f"a{i}": ["skip"] for i in range(4)}, _episodes(), T0)
     assert rows == [] and summary == {"reviewed": 0, "right": 0}
-    print("ok dont_know_is_the_default_and_writes_nothing")
 
 
 def test_sample_is_30_spread_over_outcome_and_size():
@@ -193,7 +181,6 @@ def test_sample_is_30_spread_over_outcome_and_size():
     page = review.render(eps, {}, "tok", "2001-01", got, answered=3)
     assert page.count("<fieldset>") == 30 and 'href="/tok?all=1"' in page
     assert "3 already answered" in page
-    print("ok sample_is_30_spread_over_outcome_and_size")
 
 
 def test_no_local_text_reaches_the_rows():
@@ -208,7 +195,6 @@ def test_no_local_text_reaches_the_rows():
     rows, _ = review.corrections(form, _episodes(), T0)
     assert len(rows) == 4 and text not in json.dumps(rows, default=str)
     assert all(set(r["attrs"]) <= {"repo_keys", "b_repo_keys"} for r in rows)
-    print("ok no_local_text_reaches_the_rows")
 
 
 def test_a_failed_save_answers_500_and_keeps_the_page_serving(capsys):
@@ -240,8 +226,3 @@ def test_a_failed_save_answers_500_and_keeps_the_page_serving(capsys):
     assert not t.is_alive()
     err = capsys.readouterr().err
     assert "save failed" in err and "hunter2" not in err
-
-
-if __name__ == "__main__":
-    import pytest
-    raise SystemExit(pytest.main([__file__, "-q"]))

@@ -1,25 +1,21 @@
 """Hermetic tests for how push picks its transport and writes one Postgres transaction.
 
-Run: `python tests/test_push.py`  (or `pytest`).
 Locks the rule: Postgres delivery puts activity rows in the same transaction as usage + session rows.
 """
 
 from __future__ import annotations
 
 import json
-import sys
 from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-
-from agent_usage_tracker import push  # noqa: E402
-from agent_usage_tracker.config import AutError  # noqa: E402
-from agent_usage_tracker.config import Config  # noqa: E402
-from agent_usage_tracker.event import UsageEvent  # noqa: E402
-from fake_psycopg import _fake_psycopg  # noqa: E402
-from test_activity import _acts, _cfg, _collect, _run  # noqa: E402
+from agent_usage_tracker import push
+from agent_usage_tracker.config import AutError
+from agent_usage_tracker.config import Config
+from agent_usage_tracker.event import UsageEvent
+from fake_psycopg import _fake_psycopg
+from test_activity import _acts, _cfg, _collect, _run
 
 
 def test_pg_one_transaction() -> None:
@@ -49,7 +45,6 @@ def test_pg_one_transaction() -> None:
                 assert "insert failed" in str(exc)
         assert "commit" not in log, log
     _run(check)
-    print("ok pg_one_transaction")
 
 
 def test_sender_config() -> None:
@@ -83,10 +78,9 @@ def test_sender_config() -> None:
     for url in ("http://localhost:5678/h", "HTTPS://ok.example/h"):
         make_sender(Config(machine="t", agents=(), webhook_url=url, webhook_secret="s",
                            pg_dsn=None, home=Path("/tmp")))
-    print("ok sender_config")
 
 
-def test_cf_access_headers() -> None:
+def test_cf_access_headers(monkeypatch) -> None:
     from agent_usage_tracker import push
     from agent_usage_tracker.config import Config
     both = Config(machine="t", agents=(), webhook_url="https://x/h", webhook_secret="s",
@@ -98,7 +92,7 @@ def test_cf_access_headers() -> None:
     partial = Config(machine="t", agents=(), webhook_url="https://x/h", webhook_secret="s",
                      pg_dsn=None, home=Path("/tmp"), cf_access_client_id="id.abc")
     assert partial.cf_access_headers == {}
-    # _post_webhook merges the extra headers onto the request alongside X-AUT-Secret
+    # post_webhook merges the extra headers onto the request alongside X-AUT-Secret
     captured = {}
 
     class _Resp:
@@ -113,15 +107,10 @@ def test_cf_access_headers() -> None:
             captured.update(req.headers)
             return _Resp()
 
-    orig = push.urllib.request.build_opener
-    push.urllib.request.build_opener = lambda *handlers: _Opener()
-    try:
-        push._post_webhook("https://x/h", "sec", [], extra_headers=both.cf_access_headers)
-    finally:
-        push.urllib.request.build_opener = orig
+    monkeypatch.setattr(push.urllib.request, "build_opener", lambda *handlers: _Opener())
+    push.post_webhook("https://x/h", "sec", [], extra_headers=both.cf_access_headers)
     keys = {k.lower() for k in captured}
     assert {"cf-access-client-id", "cf-access-client-secret", "x-aut-secret"} <= keys, captured
-    print("ok cf_access_headers")
 
 
 def test_a_refused_webhook_names_the_host_not_the_url() -> None:
@@ -131,7 +120,3 @@ def test_a_refused_webhook_names_the_host_not_the_url() -> None:
         push.make_sender(cfg)
     assert "remote.example" in str(exc.value)
     assert "hunter2" not in str(exc.value) and "tok" not in str(exc.value)
-
-
-if __name__ == "__main__":
-    raise SystemExit(pytest.main([__file__, "-q"]))

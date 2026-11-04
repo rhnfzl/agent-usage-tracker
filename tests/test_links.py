@@ -1,6 +1,5 @@
 """Hermetic tests for the link rows (agents.activity_event kind `link`) on synthetic fixtures.
 
-Run: `python tests/test_links.py`  (or `pytest`).
 Locks the rules:
   - one link row per closed turn: repo_key, branch_key, ticket_keys, sha_refs, commit_keys,
     pr_keys, role;
@@ -18,24 +17,21 @@ Locks the rules:
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
-import sys
 import tempfile
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-
-from test_activity import (SALT, _base, _collect, _git_repo, _key, _plain_value,  # noqa: E402
+from test_activity import (SALT, _base, _collect, _git_repo, _key, _plain_value,
                            _result, _tools, _turn_end, _use, _user, _write_jsonl)
 
-from agent_usage_tracker.collectors import activity_common as ac  # noqa: E402
-from agent_usage_tracker.collectors import commits  # noqa: E402
-from agent_usage_tracker.repo_keys import RepoKeys  # noqa: E402
-from agent_usage_tracker.collectors import codex, pi  # noqa: E402
-from agent_usage_tracker.config import Config  # noqa: E402
-from agent_usage_tracker.event import ActivityEvent  # noqa: E402
+from agent_usage_tracker.collectors import activity_common as ac
+from agent_usage_tracker.collectors import commits
+from agent_usage_tracker.repo_keys import RepoKeys
+from agent_usage_tracker.collectors import codex, pi
+from agent_usage_tracker.config import Config
+from agent_usage_tracker.event import ActivityEvent
 
 OLD = 1_600_000_000            # an mtime long past: the file is idle
 R1, R2 = "https://example.com/owner/one.git", "git@example.com:owner/two.git"
@@ -80,7 +76,6 @@ def test_ticket_pattern() -> None:
     capped = ac.Link(_keys(), {})
     capped.note_tickets(" ".join(f"AB-{i}" for i in range(9)))
     assert len(capped.s["tix"]) == ac.MAX_TICKETS
-    print("ok ticket_pattern")
 
 
 def test_sha_refs_filter() -> None:
@@ -108,7 +103,6 @@ def test_sha_refs_filter() -> None:
     ac.drop_raw_shas(act)                               # safe to run again, and on nothing
     ac.drop_raw_shas(None)
     assert act["link"]["shas"] == [_sk(secret)]
-    print("ok sha_refs_filter")
 
 
 def test_junk_commit_sha_gets_no_key() -> None:
@@ -121,7 +115,6 @@ def test_junk_commit_sha_gets_no_key() -> None:
     assert link.s.get("cks", []) == [], link.s
     link.note_commit(None, "", commits.commit_shas("", False, False, "ABC1234"))
     assert link.s["cks"] == [_sk("abc1234")], link.s
-    print("ok junk_commit_sha_gets_no_key")
 
 
 def test_pr_urls() -> None:
@@ -138,7 +131,6 @@ def test_pr_urls() -> None:
     many = ac.Link(keys, {})
     many.note_text(" ".join(f"https://github.com/o/r/pull/{i}" for i in range(15)))
     assert len(many.s["prs"]) == ac.MAX_PRS
-    print("ok pr_urls")
 
 
 def test_commit_dir() -> None:
@@ -158,7 +150,6 @@ def test_commit_dir() -> None:
     for cmd, want in cases:                                      # Windows joins with "\\"
         got = commits.commit_dir(cmd)
         assert (got and os.path.normpath(got)) == (want and os.path.normpath(want)), (cmd, got)
-    print("ok commit_dir")
 
 
 def test_default_branches_get_no_key() -> None:
@@ -168,7 +159,6 @@ def test_default_branches_get_no_key() -> None:
     assert ac.branch_key(keys, None, "feat/x") is None            # no repo, no branch key
     assert ac.branch_key(keys, K1, "feat/x") == _bk(K1, "feat/x")
     assert ac.branch_key(keys, K1, "feat/x") != ac.branch_key(keys, K2, "feat/x")
-    print("ok default_branches_get_no_key")
 
 
 def test_branch_never_crosses_repos() -> None:
@@ -187,7 +177,6 @@ def test_branch_never_crosses_repos() -> None:
     assert attrs(None, "[feat/y abc1234] x") == (K1, _bk(K1, "feat/x"))
     old = ac.Link(keys, {"at": {"0": [K2, None], "3": [K1, _bk(K1, "feat/x")]}})  # older state
     assert (old.attrs("interactive")["repo_key"], old.attrs("interactive")["branch_key"]) == (K2, None)
-    print("ok branch_never_crosses_repos")
 
 
 def test_commit_repo_order() -> None:
@@ -200,15 +189,10 @@ def test_commit_repo_order() -> None:
         assert commits.commit_repo(keys, "/gone/wt", None, K1) == K1       # else the worktree
         assert commits.commit_repo(keys, "/gone/wt", "/gone/x", None) is None
         # with no cwd a relative target means nothing (never the aut process's own directory)
-        here = os.getcwd()
-        try:
-            os.chdir(d)
+        with contextlib.chdir(d):
             rel = os.path.relpath(one, d)
             assert commits.commit_repo(_keys(), None, rel, None) is None
             assert commits.commit_repo(_keys(), None, str(one), None) == K1
-        finally:
-            os.chdir(here)
-    print("ok commit_repo_order")
 
 
 # ---------------------------------------------------------------- Claude Code sources
@@ -242,7 +226,6 @@ def test_link_attrs_carry_no_text() -> None:
         assert set(lk.attrs) == {"repo_key", "branch_key", "ticket_keys", "sha_refs",
                                  "commit_keys", "pr_keys", "role"}
         assert lk.attrs["commit_keys"] == [_sk("abc1234")] and "abc1234" not in blob, lk.attrs
-    print("ok link_attrs_carry_no_text")
 
 
 # ---------------------------------------------------------------- Codex, Pi
@@ -310,7 +293,6 @@ def test_codex_link() -> None:
                                        "role": "child"}
         commit = [e for e in _run_mod(codex, home) if getattr(e, "kind", "") == "commit"]
         assert [e.attrs["repo_key"] for e in commit] == [K2]
-    print("ok codex_link")
 
 
 def test_codex_link_from_older_watermark() -> None:
@@ -340,7 +322,6 @@ def test_codex_link_from_older_watermark() -> None:
             commit()
         [lk] = _links(out)
         assert (lk.attrs["repo_key"], lk.attrs["branch_key"]) == (K1, _bk(K1, "feat/x")), lk.attrs
-    print("ok codex_link_from_older_watermark")
 
 
 def test_pi_link() -> None:
@@ -369,7 +350,6 @@ def test_pi_link() -> None:
                                "sha_refs": [_sk(SHA_A), _sk("abcd123")],
                                "commit_keys": [_sk("abcd123")], "pr_keys": [], "role": "seed"}, links
         assert links["u2"]["sha_refs"] == [] and links["u2"]["repo_key"] == K1, links
-    print("ok pi_link")
 
 
 def test_cursor_link() -> None:
@@ -385,9 +365,3 @@ def test_cursor_link() -> None:
         assert links[(tc.B, "rb")]["role"] == "child", links
         assert links[(tc.A, "r3")]["repo_key"] is None, links      # no working_directory
     tc._run(check)
-    print("ok cursor_link")
-
-
-if __name__ == "__main__":
-    import pytest
-    raise SystemExit(pytest.main([__file__, "-q"]))

@@ -1,6 +1,5 @@
 """Hermetic tests for label/tasks.py: which units each task asks about, and what they hold.
 
-Run: `python tests/test_label_tasks.py`  (or `pytest`).
 Locks the rule: steer text is read from the local Claude Code log and redacted; a steer without
 local text is not labelled.
 """
@@ -8,20 +7,14 @@ local text is not labelled.
 from __future__ import annotations
 
 import json
-import sys
 from datetime import timedelta
-from pathlib import Path
 
-import pytest
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-
-from agent_usage_tracker.event import make_event_id  # noqa: E402
-from agent_usage_tracker.label import core  # noqa: E402
-from agent_usage_tracker import config  # noqa: E402
-from agent_usage_tracker.label import run  # noqa: E402
-from agent_usage_tracker.label import tasks  # noqa: E402
-from label_helpers import DAY1, FakeSource, NOW, _cfg, _claude_log, _steer, _win  # noqa: E402
+from agent_usage_tracker.event import make_event_id
+from agent_usage_tracker.label import core
+from agent_usage_tracker import config
+from agent_usage_tracker.label import run
+from agent_usage_tracker.label import tasks
+from label_helpers import DAY1, FakeSource, NOW, _cfg, _claude_log, _steer, _win
 
 
 def test_steer_without_uuid_finds_its_text_under_the_collectors_id(tmp_path):
@@ -127,7 +120,3 @@ def test_soft_outcome_only_no_code(tmp_path):
 def test_task_names_match_the_tasks():
     assert config.LABEL_DECISION_TASKS == tuple(tasks.TASKS)
     assert config.LABEL_NOTE not in tasks.TASKS
-
-
-if __name__ == "__main__":
-    raise SystemExit(pytest.main([__file__, "-q"]))

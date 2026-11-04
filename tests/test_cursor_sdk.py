@@ -1,23 +1,17 @@
-"""Hermetic tests for the Cursor SDK collector, which reads run manifests.
-
-Run: `python tests/test_cursor_sdk.py`  (or `pytest`).
-"""
+"""Hermetic tests for the Cursor SDK collector, which reads run manifests."""
 
 from __future__ import annotations
 
 import json
-import sys
 import tempfile
 from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-
-from agent_usage_tracker.collectors import cursor_sdk  # noqa: E402
-from agent_usage_tracker.event import make_event_id  # noqa: E402
-from test_collectors import _cfg, _drain  # noqa: E402
-from agent_usage_tracker.config import Config  # noqa: E402
+from agent_usage_tracker.collectors import cursor_sdk
+from agent_usage_tracker.event import make_event_id
+from test_collectors import _cfg, _drain
+from agent_usage_tracker.config import Config
 
 
 def test_cursor_sdk() -> None:
@@ -68,7 +62,6 @@ def test_cursor_sdk() -> None:
         assert e1.event_id != e4.event_id
         e5 = next(e for e in ev if e.input_tokens == 9)
         assert e5.model is None                          # non-str model coerced to None (no crash)
-    print("ok cursor_sdk")
 
 
 def test_cursor_sdk_runs_without_index_or_run_id_stay_distinct() -> None:
@@ -213,7 +206,3 @@ def test_cursor_sdk_reports_a_manifest_it_cannot_open_as_unavailable(tmp_path, m
     assert len(events) == 1, "what it could read still goes out"
     with pytest.raises(CollectorUnavailable, match="1 file"):
         next(batches)
-
-
-if __name__ == "__main__":
-    raise SystemExit(pytest.main([__file__, "-q"]))

@@ -5,16 +5,13 @@ from __future__ import annotations
 
 import os
 import stat
-import sys
 import tempfile
 from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-
-from agent_usage_tracker import pricing  # noqa: E402
-from agent_usage_tracker.config import AutError  # noqa: E402
+from agent_usage_tracker import pricing
+from agent_usage_tracker.config import AutError
 
 
 def test_normalize_model_key() -> None:
@@ -78,7 +75,6 @@ def test_sync_prices_writes_the_mode_a_plain_write_would() -> None:
         out.chmod(0o644)
         pricing.sync_prices(out, fetch=lambda url: sample)
         assert stat.S_IMODE(out.stat().st_mode) == 0o644, "an existing file keeps its mode"
-    print("ok sync_prices_writes_the_mode_a_plain_write_would")
 
 
 def test_fetch_refuses_a_url_that_is_not_http() -> None:
@@ -130,21 +126,13 @@ def test_load_prices_raises_on_corrupt_file() -> None:
     assert raised
 
 
-def test_cli_sync_prices() -> None:
+def test_cli_sync_prices(monkeypatch) -> None:
     from agent_usage_tracker import cli
-    orig = pricing._fetch_json
-    pricing._fetch_json = lambda url, timeout=30: {
+    monkeypatch.setattr(pricing, "_fetch_json", lambda url, timeout=30: {
         "claude-opus-4": {"output_cost_per_token": 7.5e-05}
-    }
-    try:
-        with tempfile.TemporaryDirectory() as d:
-            out = str(Path(d) / "prices.json")
-            rc = cli.main(["sync-prices", "--out", out])
-            assert rc == 0
-            assert pricing.load_prices(out)["claude-opus-4"]["output_cost"] == 7.5e-05
-    finally:
-        pricing._fetch_json = orig
-
-
-if __name__ == "__main__":
-    raise SystemExit(pytest.main([__file__, "-q"]))
+    })
+    with tempfile.TemporaryDirectory() as d:
+        out = str(Path(d) / "prices.json")
+        rc = cli.main(["sync-prices", "--out", out])
+        assert rc == 0
+        assert pricing.load_prices(out)["claude-opus-4"]["output_cost"] == 7.5e-05

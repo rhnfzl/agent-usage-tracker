@@ -1,7 +1,5 @@
 """Hermetic tests for the sink boundary: the connect point, the webhook fallback, and
 the failures every urllib caller must survive.
-
-Run: `python tests/test_sink.py`  (or `pytest`).
 """
 
 from __future__ import annotations
@@ -9,20 +7,19 @@ from __future__ import annotations
 import contextlib
 import http.client
 import io
-import os
-import sys
+import re
 import tempfile
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+import pytest
 
-from agent_usage_tracker import pricing, push, sink  # noqa: E402
-from agent_usage_tracker.collectors import cursor_api  # noqa: E402
-from agent_usage_tracker.config import AutError, Config  # noqa: E402
-from agent_usage_tracker.event import (ActivityEvent, CollectorUnavailable, EventSession,  # noqa: E402
+from agent_usage_tracker import pricing, push, sink
+from agent_usage_tracker.collectors import cursor_api
+from agent_usage_tracker.config import AutError, Config
+from agent_usage_tracker.event import (ActivityEvent, CollectorUnavailable, EventSession,
                                        UsageEvent)
-from fake_psycopg import _fake_psycopg  # noqa: E402
+from fake_psycopg import _fake_psycopg
+from test_sink_sql import STAND_IN_SCHEMA
 
 WEBHOOK = "https://hooks.example/h"
 DSN = "postgresql://localhost/agents"
@@ -51,12 +48,9 @@ def _tables(log: list) -> list[str]:
 
 @contextlib.contextmanager
 def _webhook(fn):
-    saved = push._post_webhook
-    push._post_webhook = fn
-    try:
+    with pytest.MonkeyPatch.context() as m:
+        m.setattr(push, "post_webhook", fn)
         yield
-    finally:
-        push._post_webhook = saved
 
 
 def _raiser(exc):
@@ -65,8 +59,9 @@ def _raiser(exc):
     return post
 
 
-def test_connect_warns_only_when_tls_is_not_required() -> None:
-    env = {k: os.environ.pop(k) for k in ("PGHOST", "PGSSLMODE") if k in os.environ}
+def test_connect_warns_only_when_tls_is_not_required(monkeypatch) -> None:
+    monkeypatch.delenv("PGHOST", raising=False)
+    monkeypatch.delenv("PGSSLMODE", raising=False)
     cases = {
         "postgresql://agents_writer:hunter2@db.example:5432/agents": True,
         "postgresql://db.example/agents?sslmode=prefer": True,
@@ -89,9 +84,7 @@ def test_connect_warns_only_when_tls_is_not_required() -> None:
             assert err.getvalue().count("\n") == (1 if warns else 0), (dsn, err.getvalue())
             assert "hunter2" not in err.getvalue(), err.getvalue()
     finally:
-        os.environ.update(env)
         sink._warn_if_plaintext.cache_clear()
-    print("ok connect_warns_only_when_tls_is_not_required")
 
 
 def test_a_warned_dsn_still_connects() -> None:
@@ -100,7 +93,6 @@ def test_a_warned_dsn_still_connects() -> None:
         push.insert_pg("postgresql://db.example/agents", [_act()])
     assert _tables(log) == ["agents.activity_event", "commit"], log
     sink._warn_if_plaintext.cache_clear()
-    print("ok a_warned_dsn_still_connects")
 
 
 def test_webhook_failure_warns_once_and_falls_back() -> None:
@@ -114,7 +106,6 @@ def test_webhook_failure_warns_once_and_falls_back() -> None:
     assert err.getvalue().count("\n") == 1 and "webhook delivery failed" in err.getvalue()
     assert "BadStatusLine" in err.getvalue(), err.getvalue()
     assert _tables(log).count("agents.usage_event") == 2, log
-    print("ok webhook_failure_warns_once_and_falls_back")
 
 
 def test_double_failure_reports_both_causes() -> None:
@@ -130,7 +121,6 @@ def test_double_failure_reports_both_causes() -> None:
             assert "insert failed" in str(exc)
     assert "webhook HTTP 403" in err.getvalue(), err.getvalue()
     assert "commit" not in log, log
-    print("ok double_failure_reports_both_causes")
 
 
 def test_webhook_success_sends_every_other_row_over_pg() -> None:
@@ -149,7 +139,6 @@ def test_webhook_success_sends_every_other_row_over_pg() -> None:
     with _webhook(lambda url, secret, b, h=None: None), _fake_psycopg(log):
         send([_usage(session=False)])
     assert log == [], "nothing but usage: no connection"
-    print("ok webhook_success_sends_every_other_row_over_pg")
 
 
 def test_half_cloudflare_config_warns_and_still_sends() -> None:
@@ -160,23 +149,17 @@ def test_half_cloudflare_config_warns_and_still_sends() -> None:
         with contextlib.redirect_stderr(io.StringIO()) as err:
             assert callable(push.make_sender(_cfg(**kw)))
         assert ("Cloudflare" in err.getvalue()) == warns, (kw, err.getvalue())
-    print("ok half_cloudflare_config_warns_and_still_sends")
 
 
-def test_heartbeat_warning_keeps_the_message_without_the_credential() -> None:
+def test_heartbeat_warning_keeps_the_message_without_the_credential(monkeypatch) -> None:
     def broken(dsn, rows):
         raise RuntimeError("could not connect:\n  postgresql://aut:hunter2@db.example/agents")
-    saved = push.send_scan_rows
-    push.send_scan_rows = broken
-    try:
-        with contextlib.redirect_stderr(io.StringIO()) as err:
-            push.deliver_scan_rows(_cfg(), [{}], "label")
-    finally:
-        push.send_scan_rows = saved
+    monkeypatch.setattr(push, "send_scan_rows", broken)
+    with contextlib.redirect_stderr(io.StringIO()) as err:
+        push.deliver_scan_rows(_cfg(), [{}], "label")
     text = err.getvalue()
     assert text.count("\n") == 1 and "label heartbeat not delivered: RuntimeError" in text, text
     assert "could not connect" in text and "hunter2" not in text, text
-    print("ok heartbeat_warning_keeps_the_message_without_the_credential")
 
 
 def test_require_pg() -> None:
@@ -186,33 +169,32 @@ def test_require_pg() -> None:
         raise AssertionError("no DSN must be an operator error")
     except AutError as exc:
         assert str(exc) == "time add needs transport.pg_dsn"
-    print("ok require_pg")
 
 
-def test_truncated_body_is_a_handled_fetch_failure() -> None:
+def test_truncated_body_is_a_handled_fetch_failure(monkeypatch) -> None:
     def truncated(*a, **k):
         raise http.client.IncompleteRead(b"")
 
-    saved = pricing.urllib.request.urlopen
-    pricing.urllib.request.urlopen = truncated
+    monkeypatch.setattr(pricing.urllib.request, "urlopen", truncated)
+    assert pricing._fetch_json("https://prices.example/x") is None
+
+    monkeypatch.setattr(cursor_api, "_auth", lambda cfg: ("cookie", 0))
+    monkeypatch.setattr(cursor_api, "_post", truncated)
     try:
-        assert pricing._fetch_json("https://prices.example/x") is None
-    finally:
-        pricing.urllib.request.urlopen = saved
-
-    saved_auth, saved_post = cursor_api._auth, cursor_api._post
-    cursor_api._auth, cursor_api._post = (lambda cfg: ("cookie", 0)), truncated
-    try:
-        try:
-            list(cursor_api.collect(_cfg(cursor_api=True), {}))
-            raise AssertionError("a failed fetch must report the source unavailable")
-        except CollectorUnavailable as exc:
-            assert "skipping this run" in str(exc), exc
-    finally:
-        cursor_api._auth, cursor_api._post = saved_auth, saved_post
-    print("ok truncated_body_is_a_handled_fetch_failure")
+        list(cursor_api.collect(_cfg(cursor_api=True), {}))
+        raise AssertionError("a failed fetch must report the source unavailable")
+    except CollectorUnavailable as exc:
+        assert "skipping this run" in str(exc), exc
 
 
-if __name__ == "__main__":
-    import pytest
-    raise SystemExit(pytest.main([__file__, "-q"]))
+def test_stand_in_schema_names_only_what_the_contract_names():
+    # the Postgres tests run on a schema of their own: it may not grow a table or column the
+    # contract does not know, or they stop saying anything about the contract
+    contract = (Path(__file__).parents[1] / "CONTRACT.md").read_text(encoding="utf-8")
+    tables = re.findall(r"CREATE TABLE agents\.(\w+) \((.*?)\);", STAND_IN_SCHEMA, re.S)
+    assert tables
+    for table, body in tables:
+        assert f"agents.{table}" in contract or f"`{table}`" in contract, table
+        for col in re.sub(r"PRIMARY KEY \([^)]*\)", "", body).split(","):
+            if col.strip():
+                assert re.search(rf"\b{col.split()[0]}\b", contract), (table, col)

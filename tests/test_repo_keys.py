@@ -1,7 +1,4 @@
-"""Hermetic tests for repo keys: origin URLs normalized to one identity, salted per machine.
-
-Run: `python tests/test_repo_keys.py`  (or `pytest`).
-"""
+"""Hermetic tests for repo keys: origin URLs normalized to one identity, salted per machine."""
 
 from __future__ import annotations
 
@@ -10,17 +7,12 @@ import hashlib
 import io
 import os
 import subprocess
-import sys
 import tempfile
 from pathlib import Path
 
-import pytest
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-
-from agent_usage_tracker.repo_keys import RepoKeys  # noqa: E402
-from agent_usage_tracker.repo_keys import repo_identity  # noqa: E402
-from test_activity import SALT, _key  # noqa: E402
+from agent_usage_tracker.repo_keys import RepoKeys
+from agent_usage_tracker.repo_keys import repo_identity
+from test_activity import SALT, _key
 
 
 def test_repo_key_normalisation() -> None:
@@ -37,7 +29,6 @@ def test_repo_key_normalisation() -> None:
         assert keys.of_cwd(str(plain)) is None                     # repo without a remote
     assert keys.of("example.com/owner/repo") == _key("example.com/owner/repo")
     assert RepoKeys("other").of("example.com/owner/repo") != _key("example.com/owner/repo")
-    print("ok repo_key_normalisation")
 
 
 def test_repo_key_salt(monkeypatch) -> None:
@@ -65,7 +56,6 @@ def test_repo_key_salt(monkeypatch) -> None:
             with contextlib.redirect_stderr(err):
                 assert RepoKeys(None).of("example.com/owner/repo") is None
             assert "too short" in err.getvalue()
-    print("ok repo_key_salt")
 
 
 def test_a_binary_salt_file_means_null_keys_not_a_crash(tmp_path, monkeypatch, capsys) -> None:
@@ -73,7 +63,3 @@ def test_a_binary_salt_file_means_null_keys_not_a_crash(tmp_path, monkeypatch, c
     (tmp_path / "repo_key.salt").write_bytes(b"\xff\xfe" * 40)
     assert RepoKeys(None).of("github.com/o/r") is None
     assert "repo_key stays NULL" in capsys.readouterr().err
-
-
-if __name__ == "__main__":
-    raise SystemExit(pytest.main([__file__, "-q"]))
