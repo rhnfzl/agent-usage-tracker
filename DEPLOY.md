@@ -1,16 +1,17 @@
 # Deploy runbook
 
 Two halves: the **collector** (this repo, on every machine) and the **sink** (one central
-install of Postgres/TimescaleDB, with n8n in front for the webhook). The sink's own files
-live in a separate infrastructure repo; this page names what they must provide.
+install of Postgres/TimescaleDB). Collectors write to it over `pg_dsn`. An n8n webhook in front
+is optional: it carries usage rows only, for machines with no route to Postgres. The sink's own
+files live in a separate infrastructure repo; this page names what they must provide.
 
 ## A. Sink (once)
 
 | Piece | Purpose |
 |---|---|
 | schema SQL | database `agents`: every table in [CONTRACT.md](CONTRACT.md) (`usage_event` as a hypertable, `event_session`, `activity_event`, `time_interval`, `collector_scan`, `commit_outcome`, `manual_outcome`, `episode_correction`, `daily_note`), the views built from them (`usage_event_dedup`, `time_interval_public`, `episode`, `episode_member`, `label_latest`, ...), compression and retention |
-| grants SQL | least-privilege `agents_writer` (INSERT and SELECT, used by n8n and `pg_dsn`) and `agents_ro` (read-only, used by Grafana; sees `time_interval_public`, never titles) |
-| n8n workflow | webhook -> check `X-AUT-Secret` -> `INSERT ... ON CONFLICT (event_id, ts) DO NOTHING` into `agents.usage_event` |
+| grants SQL | least-privilege `agents_writer` (INSERT and SELECT, used by `pg_dsn`, and by n8n if you run the webhook) and `agents_ro` (read-only, used by Grafana; sees `time_interval_public`, never titles) |
+| n8n workflow (optional) | webhook -> check `X-AUT-Secret` -> `INSERT ... ON CONFLICT (event_id, ts) DO NOTHING` into `agents.usage_event` |
 | Grafana dashboard | reads the views as `agents_ro` |
 
 ### 1. Database and roles (as superuser)
@@ -19,13 +20,17 @@ live in a separate infrastructure repo; this page names what they must provide.
 CREATE DATABASE agents;
 \c agents
 -- generate strong passwords and keep them out of any repo
-CREATE ROLE agents_writer LOGIN PASSWORD 'REDACTED';   -- n8n and the collectors' pg_dsn
+CREATE ROLE agents_writer LOGIN PASSWORD 'REDACTED';   -- the collectors' pg_dsn, and n8n if you run the webhook
 CREATE ROLE agents_ro     LOGIN PASSWORD 'REDACTED';   -- Grafana
 \i /path/agents_schema.sql
 \i /path/agents_grants.sql
 ```
 
-### 2. n8n (webhook transport, carries usage rows only)
+### 2. n8n (optional: webhook transport, carries usage rows only)
+
+Skip this when every machine can reach Postgres, directly or through a tunnel: `pg_dsn` alone
+carries every row. If you change the `agents_writer` password, also update this n8n credential
+when you run the webhook.
 
 1. In the n8n UI create two credentials: **Header Auth** "LLM Usage Token" (header
    `X-AUT-Secret` = a shared secret) and **Postgres** "Postgres agents" (db `agents`, user
@@ -75,7 +80,7 @@ the label model, install the `[label]` extra and set `AUT_LABEL=1` in `scan.env`
 ## C. Verify end-to-end
 
 ```bash
-# 1. a fake event lands a row (the secret comes from the env, so it stays out of shell history)
+# 1. webhook only: a fake event lands a row (the secret comes from the env, so it stays out of shell history)
 curl -sS -X POST https://n8n.<domain>/webhook/llm-usage \
   -H "X-AUT-Secret: $AUT_WEBHOOK_SECRET" -H 'content-type: application/json' \
   -d '{"events":[{"event_id":"t1","ts":"2026-07-18T00:00:00Z","machine":"test","agent":"codex","kind":"agent","model":"x","provider":"openai","input_tokens":1,"output_tokens":1,"cache_read_tokens":0,"cache_write_tokens":0,"reasoning_tokens":null,"total_tokens":2,"est_cost_usd":null,"project":null}]}'
