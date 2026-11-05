@@ -184,7 +184,8 @@ def cmd_label(cfg: Config, args: argparse.Namespace) -> None:
     elif args.label_cmd == "teach":
         from .label import teach
         teach.print_teach(args.task, teach.run_teach(cfg, args.task, args.n,
-                                                     budget_usd=args.budget_usd, days=args.days),
+                                                     budget_usd=args.budget_usd, days=args.days,
+                                                     sonnet_only=args.sonnet_only),
                           args.budget_usd)
     elif args.label_cmd == "review":
         from .label import gold
@@ -283,6 +284,8 @@ def _build_parser() -> argparse.ArgumentParser:
     p_teach.add_argument("--n", type=int, required=True, help="units to label this run")
     p_teach.add_argument("--budget-usd", type=float, default=5.0,
                          help="cap on this run's Sonnet spend (default 5)")
+    p_teach.add_argument("--sonnet-only", action="store_true",
+                         help="skip the local teacher, and every unit Sonnet may not read")
     p_lrev = lab_sub.add_parser("review", help="label gold answers on a local page")
     p_lrev.add_argument("--task", choices=LABEL_DECISION_TASKS)
     for name, text in (("eval", "score every backend on the gold labels; print the table"),

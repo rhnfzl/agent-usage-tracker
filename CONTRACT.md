@@ -607,6 +607,10 @@ webhook carries the usage and the activity and time rows of the same batch still
 `pg_dsn`, with the batch's session rows. A webhook-only machine skips them with the same one-line note; there is no backfill for
 time, so it does not send time.
 
+## What a label prompt reads
+
+`steer_intent` units carry `agent_reply_before`, the agent's last text before the steer. `work_category` episode days and `soft_outcome` episodes carry `last_agent_reply`, its latest text after the last steer. Text blocks only, redacted, cut to their last 1,500 characters, from Claude Code main logs. Every backend and `aut label teach` read the same facts. These fields moved all three tasks to version 2, so labels of version 1 no longer count.
+
 ## Steer estimates: activity_event kind `steer_estimate` (`aut history-steers`)
 
 Session logs are gone for Claude Code from 2 March to 19 April 2026 and for most Codex days from

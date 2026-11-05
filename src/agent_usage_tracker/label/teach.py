@@ -104,19 +104,22 @@ def _sonnet_dist(r: Request, run: _SonnetRun, c: Counter[str]) -> dict[str, floa
 
 
 def run_teach(cfg: Config, task: str, n: int, *, budget_usd: float = 5.0, days: int = LABEL_DAYS,
-              src: Source | None = None, now: datetime | None = None) -> Counter[str]:
+              src: Source | None = None, now: datetime | None = None,
+              sonnet_only: bool = False) -> Counter[str]:
     """Silver labels for up to n units not yet labelled by every teacher that applies to them. The
-    local teacher is the config's label_model, uncalibrated."""
+    local teacher is the config's label_model, uncalibrated; sonnet_only skips it, and with it every
+    unit Sonnet may not read."""
     t = TASKS[task]
     today = (now or datetime.now(timezone.utc)).astimezone().date()
     reqs = window_units(cfg, task, days, src, today)
-    local = make_backend(task, Choice(), cfg.label_model, cfg.label_llama_server)
+    local = None if sonnet_only else make_backend(task, Choice(), cfg.label_model,
+                                                  cfg.label_llama_server)
     out = eval_path(task, "silver")
     have = {(r.get("unit_id"), r.get("teacher")) for r in read_jsonl(out)
             if r.get("task_ver") == t.ver}
 
     def wants(r: Request) -> list[str]:
-        teachers = [local.model_id] + ([SONNET] if r.unit in CLAUDE_UNITS else [])
+        teachers = ([local.model_id] if local else []) + ([SONNET] if r.unit in CLAUDE_UNITS else [])
         return [x for x in teachers if (r.unit_id, x) not in have]
 
     order = stratified(list(reqs.values()), lambda r: (r.unit, unit_day(r)), seed=task)

@@ -18,6 +18,7 @@ import os
 import re
 import time
 from collections import Counter
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterator, NamedTuple, TypedDict
 
@@ -229,6 +230,45 @@ def steer_texts(home: Path, sessions: set[str], want: set[str]) -> dict[str, str
                 if eid in want and isinstance(m, dict):
                     out[eid] = text_of(m.get("content"))
     return out
+
+
+def agent_replies(home: Path, sessions: set[str], want: set[str], until: datetime | None = None,
+                  ) -> dict[str, tuple[str, str]]:
+    """steer event_id -> (the agent's last text before it, the agent's last text after it and
+    before the next steer in `want`), from the main logs of `sessions`. Text blocks only: no tool
+    output and no thinking. A record at or after `until` is not read, so a replay sees only what
+    was said by then."""
+    out: dict[str, tuple[str, str]] = {}
+    for f in main_session_files(home):
+        if Path(f).stem not in sessions:
+            continue
+        last, cur = "", None
+        with open(f, encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                o = parse_record(line)          # a malformed line holds no reply to show
+                if o is None:
+                    continue
+                if until and _record_ts(o) and _record_ts(o) >= until:
+                    break
+                m = o.get("message")
+                if o.get("type") == "assistant" and isinstance(m, dict):
+                    text = text_of(m.get("content"))
+                    if text.strip():
+                        last = text
+                        if cur:
+                            out[cur] = (out[cur][0], text)
+                elif o.get("type") == "user":
+                    eid = make_event_id(NAME, "steer", _record_uid(o, f))
+                    if eid in want:
+                        out[eid], cur = (last, ""), eid
+    return out
+
+
+def _record_ts(o: dict[str, Any]) -> datetime | None:
+    try:
+        return datetime.fromisoformat(str(o.get("timestamp")).replace("Z", "+00:00"))
+    except ValueError:
+        return None
 
 
 def _usage_event(o: dict[str, Any], path: str, ident: FileIdentity,

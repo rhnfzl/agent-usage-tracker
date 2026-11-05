@@ -217,10 +217,10 @@ def test_notes_prompt_counts_only(tmp_path, sink):
                             "below_tau": False}),
               # same unit and ts: the newer calibrated run wins over the uncalibrated one
               ("e3", DAY1, {"task": "steer_intent", "unit_id": "b", "label": "stop",
-                            "below_tau": False, "task_ver": 1,
+                            "below_tau": False, "task_ver": 2,
                             "labelled_at": "2026-11-05T02:00:00.000+00:00"}),
               ("e4", DAY1, {"task": "steer_intent", "unit_id": "b", "label": "stop",
-                            "below_tau": True, "task_ver": 1,
+                            "below_tau": True, "task_ver": 2,
                             "labelled_at": "2026-11-03T02:00:00.000+00:00"})]
     eps = [{"id": "e1", "first_ts": DAY1, "last_ts": DAY1, "n_sessions": 2,
             "n_steers": 4, "n_commits": 3, "outcome": "shipped",
@@ -408,7 +408,7 @@ def test_cached_snapshot_needs_config_and_every_weight():
 def test_cli_wiring(tmp_path, monkeypatch):
     seen = []
     monkeypatch.setattr(cli, "load_config", lambda: _cfg(tmp_path))
-    monkeypatch.setattr(teach, "run_teach", lambda cfg, t, n, budget_usd, days: seen.append(
+    monkeypatch.setattr(teach, "run_teach", lambda cfg, t, n, budget_usd, days, sonnet_only: seen.append(
         ("teach", t, n, budget_usd, days)) or Counter())
     monkeypatch.setattr(gold, "run_gold_review", lambda cfg, t, d: seen.append(("review", t, d)) or {
         "task": TASK, "answered": 0, "skipped": 0, "gold": {}})

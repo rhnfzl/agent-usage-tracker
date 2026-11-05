@@ -24,6 +24,7 @@ from ..sink import connect
 from .core import Request, local_days
 
 TEXT_MAX = 1500              # chars of one steer text a prompt carries
+REPLY_MAX = 1500             # chars of one agent reply a prompt carries: its end, where it concludes
 AW_BLOCK_MIN_S = 300
 AW_GAP_S = 60                # windows of one category this close form one block
 OUTCOME_DAYS = 14
@@ -52,7 +53,7 @@ class Task:
 
 _OTHER = ("other", "none of the above fits")
 TASKS: dict[str, Task] = {t.name: t for t in (
-    Task("work_category", 1, "Which kind of work was this time mostly?", "choice", (
+    Task("work_category", 2, "Which kind of work was this time mostly?", "choice", (
         ("planning", "deciding what to do: specs, plans ('write the plan for the export step')"),
         ("research", "finding out about an external fact or system to decide something "
                      "('compare these two queue libraries')"),
@@ -66,7 +67,7 @@ TASKS: dict[str, Task] = {t.name: t for t in (
                         "('bump the deps and fix lints')"),
         ("collaboration", "communicating with people: meetings, chat replies, tickets for others"),
         _OTHER), "other", "day"),
-    Task("steer_intent", 1, "What is this input mainly doing to the agent's work?", "choice", (
+    Task("steer_intent", 2, "What is this input mainly doing to the agent's work?", "choice", (
         ("framing", "sets up goal and context for new work"),
         ("instruction", "tells the agent the next thing to do inside the current goal"),
         ("clarification", "answers the agent's question or adds missing facts, same direction"),
@@ -76,7 +77,7 @@ TASKS: dict[str, Task] = {t.name: t for t in (
         ("acceptance", "approves, confirms, or ends happily"),
         ("stop", "halts work without a new direction"),
         _OTHER), "other", "steer"),
-    Task("soft_outcome", 1, "Where does this piece of work stand now?", "choice", (
+    Task("soft_outcome", 2, "Where does this piece of work stand now?", "choice", (
         ("ruled_out", "tried and dropped on purpose"),
         ("blocked", "cannot go on until something outside it changes"),
         ("still_open", "there is positive evidence it will continue"),
@@ -139,6 +140,15 @@ class Source:
         return {eid: redact(text)[:TEXT_MAX]
                 for eid, text in claude_code.steer_texts(self.cfg.home, sessions, want).items()}
 
+    def replies(self, steers: list[dict[str, Any]], until: datetime | None = None,
+                ) -> dict[str, tuple[str, str]]:
+        """steer event_id -> (agent reply before it, agent reply after it), redacted and cut to
+        their last REPLY_MAX chars, from this machine's Claude Code logs."""
+        want = {s["event_id"] for s in steers if s["agent"] == "claude_code"}
+        sessions = {s["session_id"] for s in steers if s["agent"] == "claude_code"}
+        return {eid: (redact(a)[-REPLY_MAX:], redact(b)[-REPLY_MAX:]) for eid, (a, b)
+                in claude_code.agent_replies(self.cfg.home, sessions, want, until).items()}
+
     def windows(self, since: datetime, until: datetime) -> list[dict[str, Any]]:
         """This machine's ActivityWatch window rows in [since, until), through the collector's own
         guards (idle, deny-list, redaction, title settings), one day per query. No rows where
@@ -161,6 +171,7 @@ class Source:
 def _steer_units(task: Task, src: Source, since: datetime, until: datetime | None) -> list[Request]:
     rows = src.steers(since)
     text = src.texts(rows)
+    reply = src.replies(rows, until)
     by_session: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for r in rows:
         by_session[r["session_id"]].append(r)
@@ -173,6 +184,7 @@ def _steer_units(task: Task, src: Source, since: datetime, until: datetime | Non
             a = r["attrs"] or {}
             out.append(task.request("steer", r["event_id"], r["ts"], {
                 "text": text[r["event_id"]],
+                "agent_reply_before": reply.get(r["event_id"], ("", ""))[0],
                 "previous_text": text.get(prev["event_id"], "") if prev else "",
                 "index_in_session": i,
                 "seconds_since_previous": int((r["ts"] - prev["ts"]).total_seconds())
@@ -233,7 +245,8 @@ def _episode_days(mine: list[dict[str, Any]], acts: list[dict[str, Any]], of_ses
     return days
 
 
-def _episode_day_unit(task: Task, ep: str, d: date, u: dict[str, Any], text: dict[str, str]) -> Request | None:
+def _episode_day_unit(task: Task, ep: str, d: date, u: dict[str, Any], text: dict[str, str],
+                      reply: dict[str, tuple[str, str]]) -> Request | None:
     """The unit of one episode day; None when none of its steers has local text."""
     st = u["steers"]
     said = [text[r["event_id"]] for r in st if r["event_id"] in text]
@@ -246,6 +259,7 @@ def _episode_day_unit(task: Task, ep: str, d: date, u: dict[str, Any], text: dic
             tools.update((a["attrs"] or {}).get("by_tool") or {})
     return task.request("episode_day", f"{ep}:{d.isoformat()}", st[0]["ts"], {
         "first_steer": said[0], "last_steers": said[1:][-3:], "steers": len(st),
+        "last_agent_reply": reply.get(st[-1]["event_id"], ("", ""))[1],
         "sessions": len(u["sessions"]), "tool_calls_by_tool": dict(tools),
         "tool_errors": sum((a["attrs"] or {}).get("tool_errors") or 0 for a in u["acts"]
                            if a["kind"] == "turn"),
@@ -257,6 +271,7 @@ def _category_units(task: Task, src: Source, since: datetime, until: datetime | 
     until = until or datetime.now(timezone.utc)
     steers = [r for r in src.steers(since) if r["ts"] < until]
     text = src.texts(steers)
+    reply = src.replies(steers, until)
     mine = _claude_steers(steers)
     claude_sessions = {r["session_id"] for r in mine}
     eps = src.episodes(since)
@@ -268,7 +283,7 @@ def _category_units(task: Task, src: Source, since: datetime, until: datetime | 
     acts = src.activity(sids, since, until) if sids else []
     day_of = set(local_days(since, until))
     days = _episode_days(mine, acts, of_session, day_of)
-    built = (_episode_day_unit(task, ep, d, u, text) for (ep, d), u in days.items())
+    built = (_episode_day_unit(task, ep, d, u, text, reply) for (ep, d), u in days.items())
     out = [r for r in built if r]
     wins = src.windows(since, until)
     out += _aw_blocks(task, wins, [r["ts"] for r in steers])
@@ -282,6 +297,7 @@ def _outcome_units(task: Task, src: Source, since: datetime, until: datetime | N
     eps = [e for e in src.episodes(since) if e["outcome"] == "no_code" and e["first_ts"] < now]
     steers = [r for r in _claude_steers(src.steers(since)) if r["ts"] < now] if eps else []
     text = src.texts(steers)
+    reply = src.replies(steers, until)
     out = []
     for ep in eps:
         mine = {m["session_id"] for m in ep["members"]}
@@ -292,7 +308,10 @@ def _outcome_units(task: Task, src: Source, since: datetime, until: datetime | N
         # ts = the episode start, so the row's day (and its fold) never moves; rev =
         # its last activity, so a changed episode is re-asked and an unchanged one is a no-op
         out.append(task.request("episode", ep["id"], ep["first_ts"], {
-            "last_steers": said[-5:], "days_idle": max((now - ep["last_ts"]).days, 0),
+            "last_steers": said[-5:],
+            "last_agent_reply": next((reply[r["event_id"]][1] for r in reversed(st)
+                                      if reply.get(r["event_id"], ("", ""))[1]), ""),
+            "days_idle": max((now - ep["last_ts"]).days, 0),
             "sessions": len({r["session_id"] for r in st}), "steers": len(st)},
             rev=ep["last_ts"].astimezone(timezone.utc).isoformat()))
     return out
