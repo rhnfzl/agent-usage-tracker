@@ -15,34 +15,36 @@ Nothing leaves the machine before these guards run, in this order:
 Category and work relevance come from an app mapping (config over code defaults, then the app's
 declared macOS category); a browser row is 'web-work' when its title or URL matches a work
 pattern, else 'web'. A scan never fails because ActivityWatch is closed: no server or no buckets
-means no rows.
+means no rows and a 'degraded' heartbeat.
 """
 
 from __future__ import annotations
 
 import functools
-import http.client
 import json
 import os
 import plistlib
 import re
-import subprocess
+import subprocess  # nosec B404 # one mdfind argv below, no shell
 import sys
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections import Counter
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Iterator
 
 from ..config import Config
-from ..event import TimeInterval, make_event_id
+from ..event import CollectorUnavailable, TimeInterval, make_event_id
+from ..net import HTTP_ERRORS, LOCAL_HOSTS
+from ..redact import clean_text
+from ._util import MALFORMED_RECORD, dict_or_empty, warn_skipped
 
 NAME = "activitywatch"
 _LAG = timedelta(minutes=5)          # aw-watcher-window extends its last event; leave it settle
 _CHUNK = timedelta(days=1)           # one query per pass; the scan's drain loop runs the next day
 _MIN_RANGE = timedelta(minutes=1)    # below this, wait for the next scan (lets the drain loop end)
-_TITLE_MAX = 300
 _PURGE_BATCH = 500
 _PURGE_BUDGET = 20.0                 # seconds of GET+DELETE per scan; a backlog drains over scans
 _TIMEOUT = 10
@@ -51,27 +53,6 @@ _QUERY = """window = flood(query_bucket({win}));
 afk = flood(query_bucket({afk}));
 not_afk = filter_keyvals(afk, "status", ["not-afk"]);
 RETURN = filter_period_intersect(window, not_afk);"""
-
-R = "[redacted]"
-# (name, pattern, replacement). Order matters: URL credentials before emails, specific before
-# the generic long run.
-_REDACT = (
-    ("url_credentials", re.compile(r"\b([a-z][a-z0-9+.-]*://)[^\s/@:]+:[^\s/@]+@", re.I),
-     r"\1" + R + "@"),
-    # no leading \b: env names (PGPASSWORD=, DB_PASSWORD=, GITHUB_TOKEN=) carry a prefix
-    ("assignment", re.compile(r"([A-Za-z0-9_]*(?:password|passwd|pwd|secret|token|api[_-]?key"
-                              r"|access[_-]?key))(\s*[=:]\s*)\S+", re.I), r"\1\2" + R),
-    ("bearer", re.compile(r"\b(bearer\s+)\S+", re.I), r"\1" + R),
-    ("jwt", re.compile(r"\beyJ[\w-]+\.[\w-]+\.[\w-]+"), R),
-    ("sk_key", re.compile(r"\bsk-[\w-]{16,}"), R),
-    ("github_pat", re.compile(r"\bgithub_pat_\w{20,}"), R),
-    ("github_token", re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}"), R),
-    ("slack_token", re.compile(r"\bxox[abprs]-[\w-]{10,}"), R),
-    ("aws_key", re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b"), R),
-    ("email", re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+"), R),
-    # long hex and base64 runs; also takes long slugs and paths, which is the safe side
-    ("long_run", re.compile(r"[A-Za-z0-9+/_=-]{32,}"), R),
-)
 
 _IDLE_APPS = ("loginwindow", "screensaverengine", "screen saver")
 _DENY_APPS = ("1password", "bitwarden", "keepassxc", "keychain access", "passwords", "dashlane",
@@ -108,11 +89,11 @@ _RELEVANT = frozenset(("editor", "terminal", "agent", "dev", "comms", "docs", "d
 
 _DARWIN = sys.platform == "darwin"
 _MAC_TIMEOUT = 2
-_mac_off = False                  # set by the first timeout: a stalled Spotlight is not retried
-# local app folders only: a bundle on a network or external volume could block the plist read
-_MAC_APP_DIRS = ("/Applications/", "/System/", os.path.expanduser("~/Applications/"))
+# local app folders only (and ~/Applications): a bundle on a network or external volume could
+# block the plist read
+_MAC_APP_DIRS = ("/Applications/", "/System/")
 # LSApplicationCategoryType (after 'public.app-category.') -> category; games-* are media too.
-# 'browser' is what _macos_category reports for a bundle that opens http(s) links.
+# 'browser' is what _MacCategories reports for a bundle that opens http(s) links.
 _MAC_CATEGORIES = {
     "developer-tools": "dev", "business": "comms", "productivity": "docs",
     "graphics-design": "design", "browser": "browser",
@@ -121,15 +102,25 @@ _MAC_CATEGORIES = {
 }
 
 
+@functools.lru_cache(maxsize=None)     # once per URL per run: a scan makes many calls
+def _warn_if_plaintext(url: str) -> None:
+    """Window titles travel this link, and purge deletes over it. Warn, never refuse: an aw-server
+    on a private network works today."""
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme == "http" and (parsed.hostname or "").lower() not in LOCAL_HOSTS:
+        print(f"aut: warning: activitywatch_url reaches {parsed.hostname} over plain http, so window "
+              "titles travel unencrypted. Use https:// unless the link is private (for example "
+              "Tailscale).", file=sys.stderr)
+
+
 def _http(cfg: Config, method: str, path: str, body: Any = None) -> Any:
     """The one HTTP call to aw-server (tests stub this). Raises on transport or HTTP failure."""
     url = cfg.activitywatch_url.rstrip("/") + path
-    if not url.startswith(("http://", "https://")):
-        raise ValueError("activitywatch_url must be http(s)")
+    _warn_if_plaintext(cfg.activitywatch_url)
     req = urllib.request.Request(url, method=method,
                                  data=None if body is None else json.dumps(body).encode(),
                                  headers={"Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=_TIMEOUT) as resp:
+    with urllib.request.urlopen(req, timeout=_TIMEOUT) as resp:  # nosec B310 # load_config admits http(s) only
         raw = resp.read()
     return json.loads(raw) if raw else None
 
@@ -138,9 +129,14 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _parse(ts: str) -> datetime:
+def _parse_aw_ts(ts: str) -> datetime:
     dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
     return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+def _event_span(ev: dict[str, Any]) -> tuple[datetime, datetime]:
+    start = _parse_aw_ts(ev["timestamp"])
+    return start, start + timedelta(seconds=float(ev.get("duration") or 0))
 
 
 def _buckets(cfg: Config) -> tuple[str, str, datetime] | None:
@@ -158,58 +154,79 @@ def _buckets(cfg: Config) -> tuple[str, str, datetime] | None:
         return None
     meta = buckets[win].get("metadata") or {}
     if meta.get("start"):
-        return win, afk, _parse(meta["start"])
+        return win, afk, _parse_aw_ts(meta["start"])
     # aw-server-rust writes 'created' in local time labelled UTC, up to 14 h late: start a day
     # earlier (empty chunks cost one query each)
-    return win, afk, _parse(buckets[win]["created"]) - timedelta(days=1)
+    return win, afk, _parse_aw_ts(buckets[win]["created"]) - timedelta(days=1)
 
 
 def _norm(app: str) -> str:
     return app.strip().lower()
 
 
-def _lookup(table, name: str):
+def _lookup(table: dict[str, Any], name: str) -> Any:
     """Exact name, else a known name followed by a space ('pycharm professional')."""
     if name in table:
         return table[name]
     return next((v for k, v in table.items() if name.startswith(k + " ")), None)
 
 
-@functools.cache                  # once per app per scan: a scan is one process
-def _macos_category(app: str) -> str | None:
-    """'browser' when the app bundle opens http(s) links (browsers declare productivity), else
-    its declared LSApplicationCategoryType, or None: off macOS, no local bundle, no key, or any
-    error or timeout. The app name only goes to the local Spotlight index."""
-    global _mac_off
-    if _mac_off or not _DARWIN or not app or any(c in app for c in "'\\*"):  # no quoting
-        return None
-    query = ("kMDItemContentType == 'com.apple.application-bundle' && "
-             f"kMDItemDisplayName == '{app}'")
-    try:
-        out = subprocess.run(["mdfind", query], capture_output=True, text=True, check=True,
-                             timeout=_MAC_TIMEOUT).stdout.splitlines()
-        hit = next((p for p in out if p.startswith(_MAC_APP_DIRS)), None)
-        if hit is None:
+class _MacCategories:
+    """macOS lookups: once per app, and the first timeout (a stalled Spotlight) ends them. Each
+    returns 'browser' when the app bundle opens http(s) links (browsers declare
+    productivity), else its declared LSApplicationCategoryType, or None: off macOS, no local
+    bundle, no key, or any error or timeout. The app name only goes to the local Spotlight index."""
+
+    def __init__(self) -> None:
+        self.seen: dict[str, str | None] = {}
+        self.off = False
+
+    def __call__(self, app: str) -> str | None:
+        if app not in self.seen:
+            self.seen[app] = None if self.off else self._lookup(app)
+        return self.seen[app]
+
+    def _lookup(self, app: str) -> str | None:
+        if not _DARWIN or not app or any(c in app for c in "'\\*"):  # no quoting
             return None
-        with open(f"{hit}/Contents/Info.plist", "rb") as f:
-            info = plistlib.load(f)
-        schemes = {str(x).lower() for t in info.get("CFBundleURLTypes") or ()
-                   for x in t.get("CFBundleURLSchemes") or ()}
-        cat = "browser" if schemes & {"http", "https"} else info.get("LSApplicationCategoryType")
-    except subprocess.TimeoutExpired:
-        _mac_off = True
-        return None
-    except Exception:                 # a lookup must never fail a scan
-        return None
-    return cat if isinstance(cat, str) and cat else None
+        query = ("kMDItemContentType == 'com.apple.application-bundle' && "
+                 f"kMDItemDisplayName == '{app}'")
+        dirs = (*_MAC_APP_DIRS, os.path.expanduser("~/Applications/"))
+        try:
+            out = subprocess.run(  # nosec B603, B607 # one query argument, quotes refused, no shell
+                ["mdfind", query], capture_output=True, text=True, check=True,
+                timeout=_MAC_TIMEOUT).stdout.splitlines()
+            hit = next((p for p in out if p.startswith(dirs)), None)
+            if hit is None:
+                return None
+            cat = _bundle_category(hit)
+        except subprocess.TimeoutExpired:
+            self.off = True
+            return None
+        except Exception:                 # a lookup must never fail a scan
+            return None
+        return cat if isinstance(cat, str) and cat else None
 
 
-def _mac_category(declared: str) -> str:
+def _bundle_category(bundle: str) -> object:
+    """'browser' when the bundle opens http(s) links, else its declared category, if any."""
+    with open(f"{bundle}/Contents/Info.plist", "rb") as f:
+        info = plistlib.load(f)
+    schemes = {str(x).lower() for t in info.get("CFBundleURLTypes") or ()
+               for x in t.get("CFBundleURLSchemes") or ()}
+    return "browser" if schemes & {"http", "https"} else info.get("LSApplicationCategoryType")
+
+
+# One per process, not per collect(): a pass covers one day, and a catch-up runs many.
+_MAC = _MacCategories()
+
+
+def _category_from_declared(declared: str) -> str:
     kind = declared.removeprefix("public.app-category.")
     return "media" if kind.endswith("games") else _MAC_CATEGORIES.get(kind, "other")
 
 
-def denied(cfg: Config, app: str, title: str, data: dict | None = None) -> bool:
+def denied(cfg: Config, app: str, title: str, data: dict[str, Any] | None = None) -> bool:
     """Password managers, private browsing, and config deny patterns, matched on title + URL.
     A Chromium private window (Brave, Chrome, Helium) has neither a title marker nor an
     incognito flag from today's watcher, so it is not detectable here."""
@@ -220,17 +237,6 @@ def denied(cfg: Config, app: str, title: str, data: dict | None = None) -> bool:
         return True
     text = f"{title} {(data or {}).get('url') or ''}"
     return any(re.search(p, text, re.I) for p in (*_DENY_TITLES, *cfg.activitywatch_deny_titles))
-
-
-def redact(text: str) -> str:
-    """The redaction alone, for any local text (titles here, steer text in `aut label`)."""
-    for _, pattern, repl in _REDACT:
-        text = pattern.sub(repl, text)
-    return text
-
-
-def clean_title(title: str) -> str:
-    return redact(title)[:_TITLE_MAX]
 
 
 def browser_category(cfg: Config, title: str, url: str = "") -> tuple[str, str]:
@@ -248,8 +254,8 @@ def classify(cfg: Config, app: str, title: str, url: str = "") -> tuple[str, boo
     cat, rule = _lookup(cfg.activitywatch_categories, name), "config_app"
     if cat is None:
         cat, rule = _lookup(_DEFAULT_APPS, name), "default_app"
-    if cat is None and (declared := _macos_category(app.strip())):
-        cat, rule = _mac_category(declared), "macos_category"
+    if cat is None and (declared := _MAC(app.strip())):
+        cat, rule = _category_from_declared(declared), "macos_category"
     if cat is None:
         cat, rule = "other", "unknown"
     if cat == "browser":
@@ -257,36 +263,62 @@ def classify(cfg: Config, app: str, title: str, url: str = "") -> tuple[str, boo
     return cat, cat in _RELEVANT, rule
 
 
-def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[TimeInterval], Callable[[], None]]]:
+def describe(cfg: Config, wm: dict[str, Any]) -> str:
+    return f"read until {wm['end']}" if "end" in wm else "never scanned"
+
+
+def _read_range(cfg: Config, wm: dict[str, Any]) -> tuple[list[dict[str, Any]], datetime, datetime] | None:
+    """(raw events, start, end) of this pass; None while the range is too short to read yet."""
     try:
         found = _buckets(cfg)
         if found is None:
-            return
+            raise CollectorUnavailable("activitywatch: aw-server has no window and AFK buckets for "
+                                       "this host; skipping")
         win, afk, first = found
-        start = _parse(wm["end"]) if wm.get("end") else first
+        start = _parse_aw_ts(wm["end"]) if wm.get("end") else first
         end = min(_now() - _LAG, start + _CHUNK)
         if end - start < _MIN_RANGE:
-            return
+            return None
         query = _QUERY.format(win=json.dumps(win), afk=json.dumps(afk)).splitlines()
         res = _http(cfg, "POST", "/api/0/query/",
                     {"query": query, "timeperiods": [f"{start.isoformat()}/{end.isoformat()}"]})
-        raw = res[0] if isinstance(res, list) and res and isinstance(res[0], list) else []
-    except (urllib.error.URLError, http.client.HTTPException, OSError, ValueError, TypeError,
-            AttributeError, KeyError) as exc:
-        print(f"aut: activitywatch: aw-server not usable ({type(exc).__name__}); skipping",
-              file=sys.stderr)
-        return
+        return (res[0] if isinstance(res, list) and res and isinstance(res[0], list) else []), \
+            start, end
+    except (*HTTP_ERRORS, ValueError, TypeError, AttributeError, KeyError) as exc:
+        raise CollectorUnavailable(f"activitywatch: aw-server not usable ({type(exc).__name__}); "
+                                   "skipping") from exc
 
+
+def _interval(cfg: Config, s: datetime, e: datetime, app: str, title: str, data: dict[str, Any],
+              title_from: datetime | None) -> TimeInterval:
+    category, relevant, rule = classify(cfg, app, title, str(data.get("url") or ""))
+    keep = cfg.activitywatch_titles and (title_from is None or s >= title_from)
+    sent = (clean_text(title) or None) if keep else None
+    s_iso, e_iso = s.astimezone(timezone.utc).isoformat(), e.astimezone(timezone.utc).isoformat()
+    # No title in the id: only one window has focus at a time, and an id must not let anyone
+    # confirm a guessed title.
+    return TimeInterval(
+        event_id=make_event_id(NAME, cfg.machine, app, s_iso, e_iso),
+        ts=s_iso, end_ts=e_iso, source="aw", app=app or None, title=sent,
+        category=category, work_relevant=relevant, attrs={"rule": rule})
+
+
+def collect(cfg: Config, wm: dict[str, Any]) -> Iterator[tuple[list[TimeInterval], Callable[[], None]]]:
+    read = _read_range(cfg, wm)
+    if read is None:
+        return
+    raw, start, end = read
     rows: list[TimeInterval] = []
     days = cfg.activitywatch_title_days
     title_from = _now() - timedelta(days=days) if days else None
     denied_n, denied_s, idle_s = 0, 0.0, 0.0
+    skipped: Counter[str] = Counter()
     for ev in raw:
         try:
-            s = _parse(ev["timestamp"])
-            e = s + timedelta(seconds=float(ev.get("duration") or 0))
-            data = ev.get("data") if isinstance(ev.get("data"), dict) else {}
-        except (KeyError, TypeError, ValueError, AttributeError):
+            s, e = _event_span(ev)
+            data = dict_or_empty(ev.get("data"))
+        except MALFORMED_RECORD:
+            skipped["malformed"] += 1
             continue
         s, e = max(s, start), min(e, end)
         if e <= s:
@@ -300,25 +332,32 @@ def collect(cfg: Config, wm: dict) -> Iterator[tuple[list[TimeInterval], Callabl
         if denied(cfg, app, title, data):
             denied_n, denied_s = denied_n + 1, denied_s + secs
             continue
-        category, relevant, rule = classify(cfg, app, title, str(data.get("url") or ""))
-        keep = cfg.activitywatch_titles and (title_from is None or s >= title_from)
-        sent = (clean_title(title) or None) if keep else None
-        s_iso, e_iso = s.astimezone(timezone.utc).isoformat(), e.astimezone(timezone.utc).isoformat()
-        # No title in the id: only one window has focus at a time, and an id must not let anyone
-        # confirm a guessed title.
-        rows.append(TimeInterval(
-            event_id=make_event_id(NAME, cfg.machine, app, s_iso, e_iso),
-            ts=s_iso, end_ts=e_iso, source="aw", app=app or None, title=sent,
-            category=category, work_relevant=relevant, attrs={"rule": rule}))
+        rows.append(_interval(cfg, s, e, app, title, data, title_from))
+    warn_skipped(NAME, skipped)
     if denied_n or idle_s:
         print(f"aut: activitywatch: dropped {denied_n} intervals ({denied_s / 60:.1f} min) by the "
               f"deny-list, {idle_s / 60:.1f} min idle (login window / screen saver)",
               file=sys.stderr)
 
-    def commit(w: dict = wm, end_iso: str = end.isoformat()) -> None:
+    def advance_watermark(w: dict[str, Any] = wm, end_iso: str = end.isoformat()) -> None:
         w["end"] = end_iso
 
-    yield rows, commit
+    yield rows, advance_watermark
+
+
+def intervals(cfg: Config, since: datetime, until: datetime) -> list[TimeInterval]:
+    """The rows from `since` until `until` is covered, through the same guards as a scan, one day
+    per query: the last row can run past `until`. Raises CollectorUnavailable."""
+    wm = {"end": since.astimezone(timezone.utc).isoformat()}
+    out: list[TimeInterval] = []
+    while _parse_aw_ts(wm["end"]) < until:
+        before = wm["end"]
+        for rows, advance_watermark in collect(cfg, wm):
+            out += rows
+            advance_watermark()
+        if wm["end"] == before:     # the range is too short to read yet
+            break
+    return out
 
 
 def purge(cfg: Config) -> int:
@@ -341,8 +380,7 @@ def purge(cfg: Config) -> int:
             batch = _http(cfg, "GET", f"/api/0/buckets/{win}/events?{query}") or []
             # aw-server-rust clips the event spanning `end` to it, so one that reaches the cutoff
             # is partly inside the retention window and stays
-            gone = [int(ev["id"]) for ev in batch if _parse(ev["timestamp"])
-                    + timedelta(seconds=float(ev.get("duration") or 0)) < cutoff]
+            gone = [int(ev["id"]) for ev in batch if _event_span(ev)[1] < cutoff]
             if not gone:
                 break
             for i in gone:

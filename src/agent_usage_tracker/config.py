@@ -5,6 +5,7 @@ written as "env:VAR" is resolved from the environment at run time.
 
 from __future__ import annotations
 
+from typing import Any
 import os
 import re
 import socket
@@ -13,29 +14,60 @@ import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .state import warn_if_group_readable
+
+# Must name what collectors.REGISTRY names (a test asserts it): collectors import this module, so
+# it cannot derive the list from the registry.
 ALL_AGENTS = ("claude_code", "codex", "cursor", "cursor_sdk", "cursor_api", "cursor_cli", "pi",
               "activitywatch")
 # activitywatch reads window titles, so it is opt-in: a config without `agents` never enables it.
 DEFAULT_AGENTS = tuple(a for a in ALL_AGENTS if a != "activitywatch")
+# Must name what label.tasks.TASKS names (tests/label/test_label_tasks.py asserts it): label.tasks imports
+# this module, so this module cannot derive the list from it.
+LABEL_DECISION_TASKS = ("work_category", "steer_intent", "soft_outcome", "aw_title_relevance")
+LABEL_NOTE = "daily_note"    # generative, private: one draft per day (label/run.py), not a decision
+LABEL_TASK_NAMES = (*LABEL_DECISION_TASKS, LABEL_NOTE)
+LABEL_DAYS = 90              # the window units are rebuilt over (teach, review, eval, train)
+DEFAULT_AW_URL = "http://localhost:5600"
+DEFAULT_LABEL_MODEL = "mlx-community/gemma-4-31b-it-4bit"
+DEFAULT_REPO_ROOTS = ("~/projects",)
 AW_CATEGORIES = ("editor", "terminal", "agent", "dev", "browser", "comms", "docs", "design",
                  "media", "other")
 
 
-def _config_path() -> Path:
+class AutError(Exception):
+    """An error for the operator: main prints the message and exits 1, with no traceback."""
+
+
+def config_path() -> Path:
     if os.environ.get("AUT_CONFIG"):
         return Path(os.environ["AUT_CONFIG"]).expanduser()
     base = os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config"))
     return Path(base) / "agent-usage-tracker" / "config.toml"
 
 
-def _resolve(value):
-    """Resolve an "env:VAR" indirection to its environment value; pass through otherwise."""
-    if isinstance(value, str) and value.startswith("env:"):
-        return os.environ.get(value[4:])
+def _text(section: dict[str, Any], key: str) -> str | None:
+    """A string setting, or None when absent. A TypeError names the key, never the value."""
+    value = section.get(key)
+    if value is not None and not isinstance(value, str):
+        raise TypeError(f"{key} must be a string")
     return value
 
 
-def _as_bool(value) -> bool:
+def _resolve(section: dict[str, Any], key: str) -> str | None:
+    """A string setting, with an "env:VAR" indirection resolved from the environment. An unset
+    variable reads as not configured, and says so: a scheduled job often lacks the variable."""
+    value = _text(section, key)
+    if value is None or not value.startswith("env:"):
+        return value
+    resolved = os.environ.get(value[4:])
+    if resolved is None:
+        print(f"aut: warning: {key} names the environment variable {value[4:]}, which is not set; "
+              "treating it as not configured.", file=sys.stderr)
+    return resolved
+
+
+def _as_bool(value: object) -> bool:
     """Truthy parse that respects a quoted string. TOML `x = false` is already a native bool, but
     `x = "false"` (a quoted string) would be truthy under bool(); treat common false-y strings as
     False so a mistyped opt-in flag can't silently enable a network collector."""
@@ -65,7 +97,7 @@ class Config:
     # next to the state file. Set the same value on every machine so their keys match.
     repo_key_salt: str | None = None
     # activitywatch (opt-in): local aw-server, title retention there, and the guards' extensions.
-    activitywatch_url: str = "http://localhost:5600"
+    activitywatch_url: str = DEFAULT_AW_URL
     activitywatch_title_days: int = 0                  # 0: keep titles for good (no purge)
     activitywatch_titles: bool = True                  # false: intervals and categories, no titles
     activitywatch_deny_apps: tuple[str, ...] = ()      # lowercased app names, dropped entirely
@@ -73,12 +105,12 @@ class Config:
     activitywatch_work_titles: tuple[str, ...] = ()    # regexes that make a browser row web-work
     activitywatch_categories: dict[str, str] = field(default_factory=dict)   # lowercased app -> cat
     # `aut outcomes`: where the local clones live, and whether it fetches them (and asks gh) first.
-    outcome_repo_roots: tuple[str, ...] = ("~/projects",)
+    outcome_repo_roots: tuple[str, ...] = DEFAULT_REPO_ROOTS
     outcome_fetch: bool = False
     # `aut label` (local model on this machine): which tasks the nightly run labels, the model,
     # the precision bar for tau and the coverage gate, and the run's time budget.
     label_tasks: tuple[str, ...] = ()
-    label_model: str = "mlx-community/gemma-4-31b-it-4bit"
+    label_model: str = DEFAULT_LABEL_MODEL
     label_precision: float = 0.90
     label_coverage: float = 0.75
     label_budget_s: int = 3600
@@ -99,90 +131,142 @@ class Config:
     def has_pg(self) -> bool:
         return bool(self.pg_dsn)
 
+    def require_pg(self, what: str) -> str:
+        """The DSN, or the operator's error saying that `what` cannot run without it."""
+        if not self.pg_dsn:
+            raise AutError(f"{what} needs transport.pg_dsn")
+        return self.pg_dsn
+
 
 def load_config() -> Config:
-    path = _config_path()
-    data: dict = {}
+    path = config_path()
+    data: dict[str, Any] = {}
     if path.exists():
-        with open(path, "rb") as fh:
-            data = tomllib.load(fh)
+        try:
+            with open(path, "rb") as fh:
+                data = tomllib.load(fh)
+        except (tomllib.TOMLDecodeError, UnicodeDecodeError, OSError) as exc:
+            raise AutError(f"config: {path} is not readable TOML ({exc})") from None
+    try:
+        return _config_from(data, path)
+    except (AttributeError, OverflowError, TypeError, ValueError) as exc:
+        # Safe to print: only int() and float() echo a value, and no secret goes through them.
+        raise AutError(f"config: {path} has a value of the wrong type ({exc})") from None
 
-    transport = data.get("transport", {})
-    machine = data.get("machine") or socket.gethostname().split(".")[0]
+
+def _agents_of(data: dict[str, Any]) -> tuple[str, ...]:
     agents = tuple(data.get("agents") or DEFAULT_AGENTS)
     unknown = [a for a in agents if a not in ALL_AGENTS]
     if unknown:
-        raise SystemExit(f"config: unknown agent(s) {unknown}; valid = {list(ALL_AGENTS)}")
+        raise AutError(f"config: unknown agent(s) {unknown}; valid = {list(ALL_AGENTS)}")
+    return agents
 
-    aw_cats = {str(k).strip().lower(): v
-               for k, v in (data.get("activitywatch_categories") or {}).items()}
-    bad = sorted(k for k, v in aw_cats.items() if v not in AW_CATEGORIES)
+
+def _aw_categories(data: dict[str, Any]) -> dict[str, str]:
+    cats = {str(k).strip().lower(): v
+            for k, v in (data.get("activitywatch_categories") or {}).items()}
+    bad = sorted(k for k, v in cats.items() if v not in AW_CATEGORIES)
     if bad:
-        raise SystemExit(f"config: activitywatch_categories {bad}: category must be one of "
-                         f"{list(AW_CATEGORIES)}")
-    aw_titles = {k: tuple(str(p) for p in data.get(k) or ())
-                 for k in ("activitywatch_deny_titles", "activitywatch_work_titles")}
-    for key, patterns in aw_titles.items():
-        for i, pat in enumerate(patterns):
-            try:
-                re.compile(pat)
-            except re.error as exc:     # the pattern itself may name a bank: never echo it
-                raise SystemExit(f"config: {key}[{i}] is not a valid regex ({exc.msg})") from None
-    roots = data.get("outcome_repo_roots") or ["~/projects"]
+        raise AutError(f"config: activitywatch_categories {bad}: category must be one of "
+                       f"{list(AW_CATEGORIES)}")
+    return cats
+
+
+def _regex_list(data: dict[str, Any], key: str) -> tuple[str, ...]:
+    patterns = tuple(str(p) for p in data.get(key) or ())
+    for i, pat in enumerate(patterns):
+        try:
+            re.compile(pat)
+        except re.error as exc:     # the pattern itself may name a bank: never echo it
+            raise AutError(f"config: {key}[{i}] is not a valid regex ({exc.msg})") from None
+    return patterns
+
+
+def _repo_roots(data: dict[str, Any]) -> tuple[str, ...]:
+    roots = data.get("outcome_repo_roots") or list(DEFAULT_REPO_ROOTS)
     roots = [roots] if isinstance(roots, str) else roots
     if not isinstance(roots, list) or not all(isinstance(r, str) and r for r in roots):
-        raise SystemExit("config: outcome_repo_roots must be a list of directory strings")
+        raise AutError("config: outcome_repo_roots must be a list of directory strings")
+    return tuple(roots)
+
+
+def _aw_url(data: dict[str, Any]) -> str:
+    url = str(data.get("activitywatch_url") or DEFAULT_AW_URL)
+    if not url.startswith(("http://", "https://")):
+        raise AutError("config: activitywatch_url must start with http:// or https://")
+    return url
+
+
+def _aw_title_days(data: dict[str, Any]) -> int:
     # 0 (the default) keeps titles for good; a number of days turns the limit on.
-    aw_days = int(data.get("activitywatch_title_days") or 0)
-    if aw_days < 0:
-        raise SystemExit("config: activitywatch_title_days must be 0 (keep) or a number of days")
+    days = int(data.get("activitywatch_title_days") or 0)
+    if days < 0:
+        raise AutError("config: activitywatch_title_days must be 0 (keep) or a number of days")
+    return days
 
-    from .label.tasks import TASK_NAMES      # late: label imports config
-    label_tasks = data.get("label_tasks") or []
-    if not isinstance(label_tasks, list) or any(t not in TASK_NAMES for t in label_tasks):
-        raise SystemExit(f"config: label_tasks must be a list of {list(TASK_NAMES)}")
-    label_precision, label_coverage = (float(data.get(k, d)) for k, d in
-                                       (("label_precision", 0.90), ("label_coverage", 0.75)))
-    if not (0 < label_precision <= 1 and 0 <= label_coverage <= 1):
-        raise SystemExit("config: label_precision and label_coverage must lie in 0..1")
 
-    webhook_secret = _resolve(transport.get("webhook_secret"))
-    pg_dsn = _resolve(transport.get("pg_dsn"))
-    cf_id = _resolve(transport.get("cf_access_client_id"))
-    cf_secret = _resolve(transport.get("cf_access_client_secret"))
-    salt = _resolve(data.get("repo_key_salt"))
-    # If the config holds a secret, warn when it is group/other-accessible (should be chmod 600).
-    if path.exists() and (webhook_secret or pg_dsn or cf_secret or salt) and (path.stat().st_mode & 0o077):
-        print(f"aut: warning: {path} holds a secret but is group/other-accessible; "
-              f"run: chmod 600 {path}", file=sys.stderr)
+def _label_tasks(data: dict[str, Any]) -> tuple[str, ...]:
+    tasks = data.get("label_tasks") or []
+    if not isinstance(tasks, list) or any(t not in LABEL_TASK_NAMES for t in tasks):
+        raise AutError(f"config: label_tasks must be a list of {list(LABEL_TASK_NAMES)}")
+    return tuple(tasks)
+
+
+def _label_bars(data: dict[str, Any]) -> tuple[float, float]:
+    precision, coverage = (float(data.get(k, d)) for k, d in
+                           (("label_precision", 0.90), ("label_coverage", 0.75)))
+    if not (0 < precision <= 1 and 0 <= coverage <= 1):
+        raise AutError("config: label_precision and label_coverage must lie in 0..1")
+    return precision, coverage
+
+
+def _warn_if_secrets_written(path: Path, transport: dict[str, Any], data: dict[str, Any]) -> None:
+    # Only a value written in the file counts: an env:VAR reference keeps the secret out of it.
+    written = (transport.get("webhook_secret"), transport.get("pg_dsn"),
+               transport.get("cf_access_client_secret"), data.get("repo_key_salt"))
+    if path.exists() and any(v and not str(v).startswith("env:") for v in written):
+        warn_if_group_readable(path)
+
+
+def _config_from(data: dict[str, Any], path: Path) -> Config:
+    transport = data.get("transport", {})
+    agents = _agents_of(data)
+    aw_cats = _aw_categories(data)
+    deny_titles = _regex_list(data, "activitywatch_deny_titles")
+    work_titles = _regex_list(data, "activitywatch_work_titles")
+    roots = _repo_roots(data)
+    aw_days = _aw_title_days(data)
+    label_tasks = _label_tasks(data)
+    label_precision, label_coverage = _label_bars(data)
+    _warn_if_secrets_written(path, transport, data)
 
     return Config(
-        machine=machine,
+        machine=_text(data, "machine") or socket.gethostname().split(".")[0],
         agents=agents,
-        webhook_url=_resolve(transport.get("webhook_url")),
-        webhook_secret=webhook_secret,
-        pg_dsn=pg_dsn,
+        webhook_url=_resolve(transport, "webhook_url"),
+        webhook_secret=_resolve(transport, "webhook_secret"),
+        pg_dsn=_resolve(transport, "pg_dsn"),
         home=Path(data.get("home") or Path.home()).expanduser(),
-        cursor_db_path=_resolve(data.get("cursor_db_path")),
+        cursor_db_path=_resolve(data, "cursor_db_path"),
         cursor_human_only=_as_bool(data.get("cursor_human_only", False)),
-        cursor_sdk_manifests=_resolve(data.get("cursor_sdk_manifests")),
+        cursor_sdk_manifests=_resolve(data, "cursor_sdk_manifests"),
         cursor_api=_as_bool(data.get("cursor_api", False)),
         cursor_api_lookback_days=int(data.get("cursor_api_lookback_days") or 90),
-        cf_access_client_id=cf_id,
-        cf_access_client_secret=cf_secret,
-        repo_key_salt=salt,
-        activitywatch_url=str(data.get("activitywatch_url") or "http://localhost:5600"),
+        cf_access_client_id=_resolve(transport, "cf_access_client_id"),
+        cf_access_client_secret=_resolve(transport, "cf_access_client_secret"),
+        repo_key_salt=_resolve(data, "repo_key_salt"),
+        activitywatch_url=_aw_url(data),
         activitywatch_title_days=aw_days,
         activitywatch_titles=_as_bool(data.get("activitywatch_titles", True)),
         activitywatch_deny_apps=tuple(str(a).strip().lower()
                                       for a in data.get("activitywatch_deny_apps") or ()),
-        activitywatch_deny_titles=aw_titles["activitywatch_deny_titles"],
-        activitywatch_work_titles=aw_titles["activitywatch_work_titles"],
+        activitywatch_deny_titles=deny_titles,
+        activitywatch_work_titles=work_titles,
         activitywatch_categories=aw_cats,
-        outcome_repo_roots=tuple(roots),
+        outcome_repo_roots=roots,
         outcome_fetch=_as_bool(data.get("outcome_fetch", False)),
-        label_tasks=tuple(label_tasks),
-        label_model=str(data.get("label_model") or "mlx-community/gemma-4-31b-it-4bit"),
+        label_tasks=label_tasks,
+        label_model=str(data.get("label_model") or DEFAULT_LABEL_MODEL),
         label_precision=label_precision,
         label_coverage=label_coverage,
         label_budget_s=int(data.get("label_budget_s") or 3600),

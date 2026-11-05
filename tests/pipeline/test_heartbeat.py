@@ -1,0 +1,290 @@
+"""Hermetic tests for the per-collector scan heartbeat (agents.collector_scan).
+
+Locks the rules that matter for a heartbeat that rides alongside usage delivery:
+  - every collector that ran gets one row, 'ok', 'degraded' or 'error', and an error still
+    re-raises, while a degraded collector delivers what it read and the scan goes on;
+  - all rows go out in ONE delivery call, and a failing delivery never changes the scan;
+  - dry-run sends nothing;
+  - error text is short and never carries a DSN or URL with credentials.
+"""
+
+from __future__ import annotations
+
+import contextlib
+import io
+import sys
+import tempfile
+import types
+from datetime import datetime, timezone
+from pathlib import Path
+
+import pytest
+
+from agent_usage_tracker import __version__, push, scan
+from agent_usage_tracker.collectors import Collector
+from agent_usage_tracker.config import Config
+from agent_usage_tracker.event import CollectorUnavailable, UsageEvent
+
+
+def _cfg(pg_dsn: str | None = None, webhook_url: str | None = None) -> Config:
+    return Config(machine="test", agents=(), webhook_url=webhook_url,
+                  webhook_secret="s" if webhook_url else None, pg_dsn=pg_dsn,
+                  home=Path(tempfile.gettempdir()))
+
+
+def _ev(eid: str, ts: str | None, kind: str = "agent") -> UsageEvent:
+    return UsageEvent(event_id=eid, ts=ts, agent="fake", model="m", provider="p", kind=kind,
+                      output_tokens=0 if kind == "human" else 5,
+                      total_tokens=0 if kind == "human" else 5)
+
+
+def _ok_collector(cfg, wm):
+    if wm.get("done"):
+        return
+    # +02:00 is 08:00Z, so a plain string max would wrongly pick it over 09:00Z
+    events = [_ev("a1", "2026-07-18T10:00:00+02:00"), _ev("a2", "2026-07-18T09:00:00Z"),
+              _ev("h1", "2026-07-18T07:00:00Z", kind="human"), _ev("x1", None),
+              # no time zone (valid_ts accepts it): read as UTC, and it must never break the scan
+              _ev("a3", "2026-07-18T09:30:00")]
+    yield events, lambda: wm.update(done=True)
+
+
+def _empty_collector(cfg, wm):
+    return
+    yield  # pragma: no cover
+
+
+def _bad_collector(cfg, wm):
+    raise RuntimeError("boom reading logs")
+    yield  # pragma: no cover
+
+
+@contextlib.contextmanager
+def _patched(registry: dict, send_scan_rows):
+    """Swap in fake collectors, a recording usage sender and a scan-row sink; isolate state."""
+    sent: list[list[str]] = []
+    with tempfile.TemporaryDirectory() as d, pytest.MonkeyPatch.context() as mp:
+        mp.setenv("AUT_STATE", str(Path(d) / "state.json"))
+        mp.setattr(scan, "REGISTRY", {name: Collector(fn) for name, fn in registry.items()})
+        mp.setattr(scan, "make_sender",
+                   lambda cfg: (lambda batch: sent.append([e.event_id for e in batch])))
+        mp.setattr(push, "send_scan_rows", send_scan_rows)
+        yield sent, Path(d) / "state.json"
+
+
+def test_scan_rows_ok_and_error() -> None:
+    calls: list[list[dict]] = []
+    reg = {"good": _ok_collector, "quiet": _empty_collector, "bad": _bad_collector}
+    with _patched(reg, lambda cfg, rows: calls.append(list(rows))):
+        try:
+            scan.run_scan(_cfg(pg_dsn="postgresql://x"), ["good", "quiet", "bad"], dry_run=False)
+            raise AssertionError("the collector error must still propagate")
+        except RuntimeError as exc:
+            assert "boom" in str(exc)
+    assert len(calls) == 1, calls                       # ONE delivery, even though a collector raised
+    rows = {r["collector"]: r for r in calls[0]}
+    assert set(rows) == {"good", "quiet", "bad"}, rows
+    good, quiet, bad = rows["good"], rows["quiet"], rows["bad"]
+    assert good["status"] == "ok" and good["error"] is None
+    assert good["events"] == 3 and good["human"] == 1   # the no-ts record is not counted
+    assert good["newest_ts"] == datetime(2026, 7, 18, 9, 30, tzinfo=timezone.utc), good["newest_ts"]
+    assert quiet["status"] == "ok" and quiet["events"] == 0 and quiet["newest_ts"] is None
+    # only the error TYPE is stored: messages can carry paths or secrets, and stay on local stderr
+    assert bad["status"] == "error" and bad["error"] == "RuntimeError", bad
+    for r in calls[0]:
+        assert r["machine"] == "test" and r["aut_version"] == __version__
+        assert r["started_at"].tzinfo is not None and r["started_at"] <= r["finished_at"]
+        assert set(r) == set(push.SCAN_COLUMNS), r
+
+
+def test_degraded_collector_keeps_its_rows_and_the_scan_goes_on() -> None:
+    advanced: list[bool] = []
+
+    def partly(cfg, wm):
+        yield [_ev("a", "2026-07-18T09:00:00+00:00")], lambda: advanced.append(True)
+        try:
+            raise OSError("token expired")
+        except OSError as exc:
+            raise CollectorUnavailable("partly: could not read the rest") from exc
+
+    def unreadable(cfg, wm):
+        raise CollectorUnavailable("unreadable: no source")
+        yield
+
+    calls: list[list[dict]] = []
+    reg = {"partly": partly, "unreadable": unreadable, "good": _ok_collector}
+    with _patched(reg, lambda cfg, rows: calls.append(list(rows))) as (sent, _state), \
+            contextlib.redirect_stderr(io.StringIO()) as err:
+        scan.run_scan(_cfg(pg_dsn="postgresql://x"), list(reg), dry_run=False)
+    rows = {r["collector"]: r for r in calls[0]}
+    assert (rows["partly"]["status"], rows["partly"]["error"]) == ("degraded", "OSError"), rows
+    assert rows["partly"]["events"] == 1 and sent[0] == ["a"] and advanced  # read rows went out
+    assert (rows["unreadable"]["status"], rows["unreadable"]["error"]) \
+        == ("degraded", "CollectorUnavailable")
+    assert rows["good"]["status"] == "ok"
+    assert "could not read the rest" in err.getvalue() and "token expired" not in str(rows)
+
+
+def test_delivery_failure_is_swallowed() -> None:
+    def _ok(cfg, rows):
+        pass
+
+    def _broken(cfg, rows):
+        raise OSError("connection refused")
+
+    def _broken_other(cfg, rows):
+        raise ValueError("relation agents.collector_scan does not exist")
+
+    results = []
+    for sink in (_ok, _broken, _broken_other):
+        err = io.StringIO()
+        with _patched({"good": _ok_collector}, sink) as (sent, state_path):
+            with contextlib.redirect_stderr(err):
+                report = scan.run_scan(_cfg(pg_dsn="postgresql://x"), ["good"], dry_run=False)
+            results.append((report, sent, state_path.read_text(), err.getvalue()))
+    rep_ok, sent_ok, state_ok, _ = results[0]
+    for rep_bad, sent_bad, state_bad, err_bad in results[1:]:
+        assert rep_bad == rep_ok and sent_bad == sent_ok and state_bad == state_ok
+        assert err_bad.count("\n") == 1 and "heartbeat" in err_bad, err_bad
+    assert sent_ok == [["a1", "a2", "h1", "a3"]], sent_ok
+
+
+def test_dry_run_sends_nothing() -> None:
+    calls: list = []
+    with _patched({"good": _ok_collector}, lambda cfg, rows: calls.append(rows)) as (sent, _):
+        scan.make_sender = lambda cfg: (_ for _ in ()).throw(AssertionError("no sender in dry-run"))
+        report = scan.run_scan(_cfg(pg_dsn="postgresql://x"), ["good"], dry_run=True)
+    assert report["good"]["events"] == 3
+    assert calls == [] and sent == [], (calls, sent)
+
+
+def test_error_type_name() -> None:
+    # The stored error is the exception TYPE only. Free text can hold a work repo path or part of
+    # a secret, and no redaction pattern catches every form, so none of it leaves the machine.
+    for msg in ("could not connect: postgresql://aut:hunter2@db.example/agents",
+                "host=db user=aut password='my secret' dbname=agents",
+                "No such file: /home/someone/work/client-repo/session.jsonl", "x" * 1000):
+        assert push.error_type_name(RuntimeError(msg)) == "RuntimeError", msg
+    assert push.error_type_name(KeyError("k")) == "KeyError"
+
+
+def test_interrupt_is_not_delivered() -> None:
+    # Ctrl-C must stop at once: no 5-15 s connect to the sink on the way out.
+    def _interrupted(cfg, wm):
+        raise KeyboardInterrupt
+        yield  # pragma: no cover
+
+    calls: list = []
+    with _patched({"stop": _interrupted}, lambda cfg, rows: calls.append(rows)):
+        try:
+            scan.run_scan(_cfg(pg_dsn="postgresql://x"), ["stop"], dry_run=False)
+            raise AssertionError("KeyboardInterrupt must propagate")
+        except KeyboardInterrupt:
+            pass
+    assert calls == [], calls
+
+
+def test_send_scan_rows_transport(monkeypatch) -> None:
+    row = {c: None for c in push.SCAN_COLUMNS} | {"machine": "test", "collector": "good",
+                                                  "status": "ok", "events": 1, "human": 0}
+    executed: list = []
+
+    class _Cur:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def executemany(self, sql, rows):
+            executed.append((sql, rows))
+
+    class _Conn(_Cur):
+        def cursor(self):
+            return _Cur()
+
+        def commit(self):
+            executed.append("commit")
+
+    fake = types.ModuleType("psycopg")
+    fake.connect = lambda dsn, connect_timeout: _Conn()
+    monkeypatch.setitem(sys.modules, "psycopg", fake)
+    err = io.StringIO()
+    with contextlib.redirect_stderr(err):
+        push.deliver_scan_rows(_cfg(webhook_url="https://hooks.example/h"), [row])
+    assert executed == [] and err.getvalue().count("\n") == 1, (executed, err.getvalue())
+
+    push.send_scan_rows("postgresql://x", [row])
+    _sql, rows = executed[0]
+    assert rows == [tuple(row[c] for c in push.SCAN_COLUMNS)] and executed[1] == "commit"
+
+
+def test_a_failed_state_save_still_sends_the_heartbeat() -> None:
+    calls: list[list[dict]] = []
+    with _patched({"good": _ok_collector}, lambda cfg, rows: calls.append(list(rows))), \
+            pytest.MonkeyPatch.context() as mp:
+        mp.setattr(scan, "save_state", lambda *a: (_ for _ in ()).throw(OSError(28, "disk full")))
+        with pytest.raises(OSError, match="disk full"):
+            scan.run_scan(_cfg(pg_dsn="postgresql://x"), ["good"], dry_run=False)
+    assert [(r["collector"], r["status"], r["error"]) for r in calls[0]] == [
+        ("good", "error", "OSError")]
+
+
+def test_a_failed_state_save_does_not_replace_the_pass_own_failure(capsys) -> None:
+    calls: list[list[dict]] = []
+    with _patched({"bad": _bad_collector}, lambda cfg, rows: calls.append(list(rows))), \
+            pytest.MonkeyPatch.context() as mp:
+        mp.setattr(scan, "save_state", lambda *a: (_ for _ in ()).throw(OSError(28, "disk full")))
+        with pytest.raises(RuntimeError, match="boom"):
+            scan.run_scan(_cfg(pg_dsn="postgresql://x"), ["bad"], dry_run=False)
+    assert calls[0][0]["error"] == "RuntimeError" and "disk full" in capsys.readouterr().err
+
+
+class CheckViolation(Exception):
+    """Stands in for psycopg.errors.CheckViolation: the code goes by the name."""
+
+
+def _scan_rows() -> list[dict]:
+    started = datetime(2026, 7, 18, tzinfo=timezone.utc)
+    return [push.scan_row(_cfg(), "aw", started, status="degraded", error="OSError"),
+            push.scan_row(_cfg(), "pi", started)]
+
+
+def _statuses(sent: list) -> list[str]:
+    return [row[push.SCAN_COLUMNS.index("status")] for row in sent]
+
+
+def test_a_check_that_refuses_degraded_keeps_the_scan_rows_as_error(monkeypatch) -> None:
+    calls: list[list] = []
+
+    def write_many(dsn, sql, rows, timeout):
+        calls.append(rows)
+        if "degraded" in _statuses(rows):
+            raise CheckViolation("collector_scan_status_check")
+
+    monkeypatch.setattr(push, "write_many", write_many)
+    push.send_scan_rows("postgresql://x", _scan_rows())
+    assert [_statuses(c) for c in calls] == [["degraded", "ok"], ["error", "ok"]]
+    assert calls[1][0][push.SCAN_COLUMNS.index("error")] == "OSError"
+
+
+def test_a_sink_that_allows_degraded_stores_it_as_is(monkeypatch) -> None:
+    calls: list[list] = []
+    monkeypatch.setattr(push, "write_many", lambda dsn, sql, rows, timeout: calls.append(rows))
+    push.send_scan_rows("postgresql://x", _scan_rows())
+    assert [_statuses(c) for c in calls] == [["degraded", "ok"]]
+
+
+@pytest.mark.parametrize("exc,rows", [(OSError("down"), _scan_rows()),
+                                      (CheckViolation("other"), _scan_rows()[1:])])
+def test_any_other_refusal_still_raises_without_a_second_write(monkeypatch, exc, rows) -> None:
+    calls: list[list] = []
+
+    def write_many(dsn, sql, batch, timeout):
+        calls.append(batch)
+        raise exc
+
+    monkeypatch.setattr(push, "write_many", write_many)
+    with pytest.raises(type(exc)):
+        push.send_scan_rows("postgresql://x", rows)
+    assert len(calls) == 1

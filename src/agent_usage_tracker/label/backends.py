@@ -12,8 +12,10 @@ import json
 import math
 import re
 from pathlib import Path
+from typing import Any, Callable
 
-from .core import Choice, Request, data_dir, letter_distribution, softmax
+from ..config import AutError
+from .core import Backend, Choice, Request, data_dir, letter_distribution, softmax
 
 ENCODER_DIM = 1 << 18
 
@@ -25,6 +27,10 @@ MODELS: dict[str, str | None] = {
     "gemma-4-31b": "mlx-community/gemma-4-31b-it-4bit",
     "pplx-decider-flash-v1.2": None,
 }
+
+
+class BackendUnavailable(AutError):
+    """This task's backend cannot run here yet; a nightly run still labels the other tasks."""
 
 
 class LetterBackend:
@@ -41,7 +47,7 @@ class LetterBackend:
         return letter_distribution(self.letter_logits, req)
 
 
-def cached_snapshot(lookup, repo: str, revision: str | None) -> Path | None:
+def cached_snapshot(lookup: Callable[..., object], repo: str, revision: str | None) -> Path | None:
     """The cached snapshot directory when its config and every weight file are on disk, else
     None. Not snapshot_download(local_files_only=True): it refuses a snapshot that lacks files the
     model never needs (LICENSE, .gitattributes), which partial downloads routinely skip."""
@@ -60,46 +66,53 @@ def cached_snapshot(lookup, repo: str, revision: str | None) -> Path | None:
 
 class MlxLetter(LetterBackend):
     """mlx_lm on Apple silicon. The model comes from the local Hugging Face cache only (a nightly
-    run never downloads several GB); model_rev is the snapshot directory name."""
+    run never downloads several GB). model_rev (the snapshot directory name) and size_mb are final
+    after the first distribution or generate call, which loads the model."""
 
     def __init__(self, model_id: str, revision: str | None = None) -> None:
-        self.model_id, self.model_rev, self._rev, self._m = model_id, revision or "", revision, None
+        self.model_id, self.model_rev, self._rev = model_id, revision or "", revision
+        self._m: Any = None                 # (model, tokenizer) once loaded
 
-    def _load(self):
+    def _load(self) -> tuple[Any, Any]:
         if self._m is None:
             try:
                 from huggingface_hub import try_to_load_from_cache
                 from mlx_lm import load
             except ImportError:
-                raise SystemExit("label: the mlx_letter backend needs the optional extra: "
-                                 "pip install 'agent-usage-tracker[label]' (Apple silicon)") \
-                    from None
+                raise BackendUnavailable(
+                    "label: the mlx_letter backend needs the optional extra: "
+                    "pip install 'agent-usage-tracker[label]' (Apple silicon)") from None
             path = cached_snapshot(try_to_load_from_cache, self.model_id, self._rev)
             if path is None:
-                raise SystemExit(f"label: {self.model_id} is not fully in the local Hugging Face "
-                                 f"cache; fetch it once with `hf download {self.model_id}`")
+                raise BackendUnavailable(
+                    f"label: {self.model_id} is not fully in the local Hugging Face "
+                    f"cache; fetch it once with `hf download {self.model_id}`")
             self.model_rev = path.name
             self.size_mb = round(sum(f.stat().st_size for f in Path(path).rglob("*")
                                      if f.is_file()) / 1e6)
-            self._m = load(path)
+            try:
+                self._m = load(str(path))
+            except Exception as exc:    # an unsupported model type or a broken snapshot: any kind
+                raise BackendUnavailable(f"label: {self.model_id} could not be loaded "
+                                         f"({type(exc).__name__})") from exc
         return self._m
 
-    def _chat(self, tok, prompt: str) -> str:
+    def _chat(self, tok: Any, prompt: str) -> str:
         return tok.apply_chat_template([{"role": "user", "content": prompt}],
                                        add_generation_prompt=True, tokenize=False)
 
     def letter_logits(self, prompt: str, letters: list[str]) -> list[float]:
+        model, tok = self._load()       # first: it turns a missing mlx into the install hint
         import mlx.core as mx
 
-        model, tok = self._load()
         ids = tok.encode(self._chat(tok, prompt), add_special_tokens=False)
         last = model(mx.array([ids]))[0, -1].astype(mx.float32)
         return [last[tok.encode(x, add_special_tokens=False)[0]].item() for x in letters]
 
     def generate(self, prompt: str, max_tokens: int = 300) -> str:
+        model, tok = self._load()       # first: it turns a missing mlx into the install hint
         from mlx_lm import generate
 
-        model, tok = self._load()
         return generate(model, tok, prompt=self._chat(tok, prompt), max_tokens=max_tokens,
                         verbose=False)
 
@@ -108,12 +121,12 @@ def encoder_path(task: str) -> Path:
     return data_dir() / "label" / "encoder" / f"{task}.json"
 
 
-def features(state: dict) -> list[int]:
-    """Hashed binary features of a unit's state: words and word pairs of each text field (per
+def features(facts: dict[str, Any]) -> list[int]:
+    """Hashed binary features of a unit's facts: words and word pairs of each text field (per
     field name), and the other facts as name=value (numbers in log2 buckets). Bucket ids only:
     the trained file holds weights, never a word."""
     toks: set[str] = set()
-    for k, v in state.items():
+    for k, v in facts.items():
         if isinstance(v, (str, list)):
             for t in [v] if isinstance(v, str) else [x for x in v if isinstance(x, str)]:
                 w = re.findall(r"\w+", t.lower())
@@ -137,31 +150,49 @@ class Encoder:
     Until one is trained, choosing it fails loudly instead of guessing."""
 
     def __init__(self, task: str, model_id: str | None = None, model_rev: str | None = None):
-        self.task, self.model_id, self._m = task, model_id or f"encoder/{task}", None
+        self.task, self.model_id = task, model_id or f"encoder/{task}"
+        self._m: dict[str, Any] | None = None
         p = encoder_path(task)
-        rev = hashlib.sha256(p.read_bytes()).hexdigest()[:12] if p.exists() else ""
+        try:
+            data = p.read_bytes()
+        except FileNotFoundError:
+            data = None
+        except OSError as exc:
+            raise self._unusable() from exc
+        rev = hashlib.sha256(data).hexdigest()[:12] if data is not None else ""
         if model_rev and rev and model_rev != rev:
-            raise SystemExit(f"label: the {task} encoder was retrained after it was chosen; "
-                             "run `aut label eval` and `aut label choose` again")
+            raise BackendUnavailable(f"label: the {task} encoder was retrained after it was "
+                                     "chosen; run `aut label eval` and `aut label choose` again")
         self.model_rev = rev or model_rev or ""
-        self.size_mb = round(p.stat().st_size / 1e6, 3) if p.exists() else None
+        self.size_mb = round(len(data) / 1e6, 3) if data is not None else None
 
-    def _load(self) -> dict:
+    def _unusable(self) -> BackendUnavailable:
+        return BackendUnavailable(f"label: the {self.task} encoder is unreadable or corrupt; "
+                                  "run `aut label train-encoder` again")
+
+    def _load(self) -> dict[str, Any]:
         if self._m is None:
             try:
-                self._m = json.loads(encoder_path(self.task).read_text())
-            except (OSError, ValueError):
-                raise SystemExit(f"label: no encoder is trained for {self.task} yet") from None
+                m = json.loads(encoder_path(self.task).read_text())
+            except FileNotFoundError:
+                raise BackendUnavailable(f"label: no encoder is trained for {self.task} yet") \
+                    from None
+            except (OSError, ValueError) as exc:
+                raise self._unusable() from exc
+            if not (isinstance(m, dict) and isinstance(m.get("w"), dict)
+                    and isinstance(m.get("labels"), list)):
+                raise self._unusable()
+            self._m = m
         return self._m
 
     def distribution(self, req: Request) -> dict[str, float]:
         m = self._load()
         if m.get("task_ver") != req.task_ver:
-            raise SystemExit(f"label: the {self.task} encoder is for another task version; "
-                             "run `aut label train-encoder` again")
+            raise BackendUnavailable(f"label: the {self.task} encoder is for another task "
+                                     "version; run `aut label train-encoder` again")
         w, labels = m["w"], m["labels"]
         z = [0.0] * len(labels)
-        for f in features(req.state):
+        for f in features(req.facts):
             for k, x in enumerate(w.get(str(f), ())):
                 z[k] += x
         p = dict(zip(labels, softmax(z)))
@@ -170,13 +201,13 @@ class Encoder:
         return {k: v / s for k, v in out.items()}
 
 
-def make_backend(task: str, choice: Choice, default_model: str):
+def make_backend(task: str, choice: Choice, default_model: str) -> Backend:
     if choice.backend == "encoder":
         return Encoder(task, choice.model_id, choice.model_rev)
     if choice.backend != "mlx_letter":
-        raise SystemExit(f"label: unknown backend {choice.backend!r} for {task}")
+        raise BackendUnavailable(f"label: unknown backend {choice.backend!r} for {task}")
     name = choice.model_id or default_model
     repo = MODELS.get(name, name)
     if repo is None:
-        raise SystemExit(f"label: {name} has no official MLX build yet")
+        raise BackendUnavailable(f"label: {name} has no official MLX build yet")
     return MlxLetter(repo, choice.model_rev)

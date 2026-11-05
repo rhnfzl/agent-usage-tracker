@@ -109,7 +109,7 @@ both transports, re-scans) never double-counts.
   its collector stores `input = input - cached_input` and `cache_read = cached_input`.
 - One row per assistant response / `token_count` event, not per session. Codex uses the
   per-turn `last_token_usage` delta (not the cumulative total) to avoid double counting.
-- `est_cost_usd` is only populated where the source logs a cost (Pi, Cursor). It is an
+- `est_cost_usd` is only populated where the source logs a cost (Pi alone today). It is an
   API-equivalent estimate, never a real bill.
 - `ts` is required at the sink (hypertable partition column). The collector **drops** any
   record whose source line has no timestamp (they are counted as skipped, never pushed), so
@@ -122,7 +122,7 @@ both transports, re-scans) never double-counts.
 | **claude_code** | `~/.claude/projects/**/*.jsonl` `assistant.message.usage` | yes | record `timestamp` | Most tokens are in the **cache** fields; summing only `input_tokens` undercounts ~460x. Globs all files (20k+); an inode+offset watermark reads only changed ones. |
 | **codex** | `~/.codex/sessions/**/rollout-*.jsonl` `token_count` | `turn_context.model` | event `timestamp` | `input` includes cached; we split it. Captures `reasoning_tokens`. Known gap, not fixed: some Codex Desktop `token_count` rows carry only `total_tokens` (input and output 0, no model) and are dropped (177 rows, about half of the Desktop tokens, when measured). |
 | **pi** | `~/.pi/agent/sessions/**/*.jsonl` `message.usage`, plus the `usage` of `compaction` records | `message.model` / `model_change.modelId` | record `timestamp` | Cleanest schema; older sessions may log zeros. `reasoning_tokens` from `usage.reasoning` (part of output). `project` from the session header's `cwd`. |
-| **cursor** | `state.vscdb` `cursorDiskKV bubbleId:*` | **often null** (not in DB) | bubble `createdAt` or joined `composerData` | EXPERIMENTAL: a LOWER BOUND on tokens. For complete + model-attributed + costed data use `cursor_api`. Full-scans each run + dedups at the sink. **The only source of Cursor IDE human turns** (CLI prompts come from `cursor_cli`); see below. |
+| **cursor** | `state.vscdb` `cursorDiskKV bubbleId:*` | **often null** (not in DB) | bubble `createdAt` or joined `composerData` | EXPERIMENTAL: a LOWER BOUND on tokens. For complete + model-attributed data use `cursor_api`. Full-scans each run + dedups at the sink. **The only source of Cursor IDE human turns** (CLI prompts come from `cursor_cli`); see below. |
 | **cursor_cli** | `~/.cursor/chats/<h>/<uuid>/store.db` (cursor-agent CLI chats) and `~/.cursor/projects/*/sdk-agent-store/*/index.db` (SDK runs) | none | prompt's embedded `<timestamp>` (minute precision), else the chat's `createdAt`; SDK: run `started_at` | **No token rows** (the stores hold none, and `cursor_api` counts these tokens). Human rows, session rows and activity only. See the Cursor CLI sections below. |
 
 ### The two Cursor sources are complementary, not redundant
@@ -152,17 +152,20 @@ it ran, after the usage for that collector has been delivered:
 |---|---|
 | `machine`, `collector` | who ran, which collector |
 | `started_at`, `finished_at` | wall clock around that collector's drain loop (UTC) |
-| `status` | `ok`, or `error` if the collector raised (the scan still fails exactly as before) |
-| `events`, `human` | new agent / human turns this scan, the same counts the scan report prints |
+| `status` | `ok`; `degraded` if the collector ran but could not read a source that is there (an expired Cursor token, a stopped aw-server, a locked or corrupt store, a log or manifest it has no permission to read: what it could read is still delivered, the reason is on local stderr, and the scan goes on to the next collector); or `error` if the collector raised (the scan still fails exactly as before). A source that is simply absent (the tool is not installed) stays `ok`. Skipped records do not change it: one bad line is normal in a live log, so they are only counted on stderr, and a log format change that breaks every activity record or malformed usage record still shows `ok` here |
+| `events`, `human` | `events`: new agent turns plus ActivityWatch intervals this scan (the report prints those two apart); `human`: new human turns |
 | `newest_ts` | latest valid event timestamp seen this scan, null if none |
-| `error` | the exception type only (for example `OperationalError`). The message never leaves the machine: it can name a project path or part of a credential, so it stays on local stderr |
+| `error` | the exception type only (for example `OperationalError`, or `HTTPError` on a `degraded` row; `CollectorUnavailable` when no exception caused it). The message never leaves the machine: it can name a project path or part of a credential, so it stays on local stderr |
 | `aut_version` | the client version |
 
 All rows of a scan go out in one `INSERT ... ON CONFLICT (machine, collector, finished_at) DO
 NOTHING` over `transport.pg_dsn`, also when a collector raised. A webhook-only config skips it
-with one stderr note. The heartbeat **never blocks usage delivery**: any failure sending it
-prints one warning and is swallowed, so usage rows, the watermark and the exit status are the
-same as without it.
+with one stderr note. A sink whose `status` CHECK does not allow `degraded` (the deployed
+`ok`/`error` one) refuses that delivery, so it is sent again once with each `degraded` row as
+`error`, same `error` type: the other collectors' rows are kept. The heartbeat **never blocks usage delivery**: any failure sending it
+prints one warning (type and redacted message, on local stderr) and is swallowed, so usage rows,
+the watermark and the exit status are the same as without it. Ctrl-C leaves at once and sends no
+heartbeat, in `aut scan`, `aut outcomes` and `aut label` alike.
 
 ## Session identity: agents.event_session
 
@@ -225,8 +228,10 @@ origin by joining on `(session_id, turn_id)`.
 
 Delivery: over `transport.pg_dsn`, usage rows and session rows are written on one connection in
 **one transaction** (`ON CONFLICT (event_id) DO NOTHING` for sessions), so a failure stores
-neither and the watermark does not move. The webhook carries usage only and says so once on
-stderr.
+neither and the watermark does not move. The webhook carries usage only: with a `pg_dsn` too, the
+session rows of the batch go over `pg_dsn` in one transaction with its activity and time rows, and
+a failure there leaves the watermark in place. A webhook-only machine skips them and says so once
+on stderr.
 
 History: `aut backfill --sessions-only [--agents claude_code,codex,pi,cursor_cli] [--dry-run]` re-reads every file from
 the start on a throwaway watermark (the live one is neither read nor saved) and sends **only**
@@ -262,8 +267,11 @@ Rules worth knowing:
 - `after_interrupt`: the previous non-meta user record in the file was an interrupt.
 - Hook denials (`PreToolUse:... hook error`) are not rejections; they count in the turn's
   `hook_blocks` (and in `tool_errors`, which counts every errored tool_result).
-- A commit call is a command segment (split on `;`, `&&`, `||`, `|` and newlines, heredoc bodies
-  removed first) that is `git [global options such as -C <dir>, -c <k=v>]* commit`, optionally
+- A commit call is a command segment (split on `;`, `&&`, `||`, `|` and newlines, not inside a
+  closed quote, a backslash escape or a `#` comment, heredoc bodies blanked first and a
+  backslash-newline read as a space, so a commit inside a quoted string does not count, except the
+  quoted argument of `sh`, `bash`, `zsh` or `dash -c`, which is split the same way when it holds a
+  commit) that is `git [global options such as -C <dir>, -c <k=v>]* commit`, optionally
   behind `VAR=x`, `env`, `command`, `timeout N` or `rtk [proxy]`, without `--dry-run`. So
   `--no-commit`, `cat-file commit`, `verify-commit` or `commit` in an echo or a heredoc never count.
 - Commit SHAs come from git's `[branch sha]` line; failing that (and only for a successful call)
@@ -285,7 +293,11 @@ Rules worth knowing:
   timeout, cached per cwd per pass), NULL when the directory or remote is gone. A PR's key uses
   its URL host plus `prRepository` the same way, so commits and PRs of one repo share a key. The
   salt is the config key `repo_key_salt` (an `env:VAR` value works), else a random salt created
-  (mode 0600) as `repo_key.salt` next to the state file on first use. Without the salt the recipe
+  (mode 0600) as `repo_key.salt` next to the state file on first use. A `repo_key.salt` that is
+  there but cannot be read, or is too short or not text, fails a scan or a backfill before it reads
+  anything, since NULL keys would stay for good; a dry run and other commands warn on stderr and go
+  on with NULL keys. A corrupt file is never regenerated: deleting it starts new keys, and old rows
+  no longer match new ones. Without the salt the recipe
   is not reproducible, so stored keys cannot be matched against a list of candidate repo names. Set
   the same `repo_key_salt` on every machine for their keys to match; changing it changes every new
   key. The remote URL is never stored or logged.
@@ -342,7 +354,7 @@ give no activity rows and no `turn_id` (the copy ends in a `turn_aborted` that i
 interrupt). A spawned child without `forked_from_id` can carry an ordinal too (measured: equal to its line count, with no copy): it is
 read in full. The commit rules (command segments, SHA parsing, `repo_key`) and the turn
 aggregates (`by_tool` with the MCP collapse, `max_identical_run`, `retry_flag`, `runaway_flag`)
-are the shared code in `collectors/_activity_common.py`.
+are the shared code in `collectors/commits.py`, `collectors/activity_common.py` and `repo_keys.py`.
 
 | kind | Codex | Pi |
 |---|---|---|
@@ -387,8 +399,8 @@ not written yet). A message after a summary and before the next prompt sits in n
 the chat went quiet is lost.
 
 Delivery: over `transport.pg_dsn` in the same transaction as the usage and session rows of that
-batch, `ON CONFLICT (event_id, ts) DO NOTHING` (the writer has INSERT only). The webhook skips
-them with the same one-line note as session rows. History: `aut backfill --activity-only
+batch, `ON CONFLICT (event_id, ts) DO NOTHING` (the writer has INSERT only). A webhook-only machine
+skips them with the same one-line note as session rows. History: `aut backfill --activity-only
 [--dry-run]` works exactly like `--sessions-only` (both flags may be given together) and never
 sends usage rows. For `cursor_cli` the first normal `aut scan` also sends its human rows, which no
 collector sent before.
@@ -407,12 +419,12 @@ commit's `(state, survival)` differs from its latest stored row.
 | state | rule |
 |---|---|
 | `merged` | ancestor of `origin/HEAD` (fallback `origin/main`/`master`/`develop`, never a local branch), or a single-commit patch-id twin on it, or (with `--fetch`) a merged GitHub PR that `gh pr list --search <sha>` finds; `survival` = share (0..1, 4 decimals) of its added lines that `git blame` still attributes to it (or its twin) on the default branch 14 days after the merge, first 30 files, NULL for a merge commit, a commit adding no lines or a gh-only merge |
-| `reverted` | merged, and a commit on any branch says `This reverts commit X` for it or its twin within 14 days of the merge |
+| `reverted` | merged, and a commit on any branch says `This reverts commit X` for it or its twin within 14 days after the merge (a revert before the merge does not count) |
 | `reworked` | merged and `survival < 0.5` |
 | `open` | reachable from a local or remote branch, not from the default branch |
 | `abandoned` | reachable from no branch, no twin, no merged PR; also a commit no local clone holds |
 | `superseded` | reachable from no branch and the session's next commit row was an `--amend` (the pre-amend SHA) |
-| `undecided` | under 14 days since the merge (merged) or since the commit row (everything else); also a merged commit whose default ref was last updated before merge + 14 days, and a commit gh could not answer for |
+| `undecided` | under 14 days since the merge (merged) or since the commit row (everything else); also a merged commit whose default ref was last updated before merge + 14 days, a commit gh could not answer for, and a commit whose clone git could not read or whose survival it could not measure |
 
 - `sha` is the commit row's form (often abbreviated); `repo_key` is the row's, else the key of the
   clone that holds the SHA, else `''`. A clone counts as holding a SHA only when its committer
@@ -422,18 +434,31 @@ commit's `(state, survival)` differs from its latest stored row.
   commit before merge + 14 days, only once the default ref was updated after that time (its tip
   is newer, its FETCH_HEAD is newer, or this run fetched it). It is computed once and cached by
   full SHA in `outcomes_cache.json` next to the state file (saved before the sink is written),
-  with gh answers (a "no" only once the commit is 60 days old).
+  with gh answers (a "no" only once the commit is 60 days old). A failed git read is never
+  cached or scored; the next run measures again. A cache from before that rule is measured
+  again once, keeping its gh answers. A file gone from the base commit counts as 0
+  lines alive.
 - When several clones hold a commit, the one where it is furthest along wins (on the default
-  branch, then on a branch, then unreachable).
+  branch, then on a branch, then unreachable); among equals a clone with a repo_key, then the
+  one whose default ref is freshest.
 - A commit this run cannot see or decide (no clone holds it any more, gh failed, a stale default
-  ref) never replaces a stored row of its sha: decided states stay decided.
+  ref, a failed or timed-out git read of a clone that holds or might hold it) never replaces a
+  stored row of its sha: decided states stay decided. One exception: a stored `reverted` under the
+  same `(sha, repo_key)` whose stale-ref run reads no revert after the merge becomes `undecided`,
+  since an earlier version also counted a revert from before the merge. A clone git cannot identify counts as a
+  failed read, unless git says no repository is there at all. Such a git failure is counted as
+  `repo_unreadable` or `survival_failed` in the run's report. A run with any `repo_unreadable`,
+  `fetch_failed`, `gh_failed` or `survival_failed` sends a `degraded` heartbeat with error
+  `GitReadFailed`, prints the counts on stderr and still exits 0.
 - `--fetch` (or `outcome_fetch = true`) runs `git fetch --upload-pack=git-upload-pack --quiet
   --no-tags --no-auto-maintenance --no-write-fetch-head --no-recurse-submodules origin` only in
   a clone whose origin's repo_key a commit row carries (30 s
   each, then SIGTERM so git removes its locks; failures are skipped and counted) and turns on the
-  gh lookup. Without it, a commit whose GitHub PR was squash-merged ends `abandoned`, so set
-  `outcome_fetch = true` on the machine that runs the nightly job. A dry run reads the sink and the clones and writes nothing: no rows, no
-  cache, no heartbeat. A real run sends one `agents.collector_scan` row, collector `outcomes`.
+  gh lookup. A gh answer already cached still counts without it, needing no network. Without it,
+  any other commit whose GitHub PR was squash-merged ends `abandoned`, so set
+  `outcome_fetch = true` on the machine that runs the nightly job. A dry run reads the sink and the clones as they are and changes nothing: no
+  rows, no cache, no heartbeat, no new `repo_key.salt`, no fetch and no gh even with `--fetch` or `outcome_fetch` (so a
+  squash-merged commit with no cached gh answer previews as `abandoned`). A real run sends one `agents.collector_scan` row, collector `outcomes`.
 
 - Every git command aut runs (here, and `git remote get-url origin` for repo keys) goes through
   `git_safe`: `-c core.fsmonitor= -c core.hooksPath=/dev/null -c protocol.ext.allow=never
@@ -465,7 +490,7 @@ should merge with #n -> `merge` (b = that episode's first seed session), not bui
 `reject`; `attrs` holds `repo_keys` (and `b_repo_keys`) copied from `episode_member`. It prints
 the share of reviewed episodes marked right.
 
-`aut inspect --episode ID | --day YYYY-MM-DD | --label UNIT_ID` is the read-only evidence page
+`aut inspect --episode ID | --day YYYY-MM-DD | --label UNIT_ID` is the evidence page
 for the same episodes, served the same way (127.0.0.1, random port and token, local titles and
 branch names). Per episode it shows the member sessions, the seed sessions' link keys by type
 (commit, pr, branch, ticket; a key two sessions share is what joined them), each commit's latest
@@ -473,6 +498,30 @@ branch names). Per episode it shows the member sessions, the seed sessions' link
 `label_latest` picks it, below-tau labels shown as unknown) and the `episode_correction` rows of
 its sessions. `--label` also lists every label row of that unit. Its only write is the
 `aut episodes review` form it links to, for the episodes on the page.
+
+## Episodes (sink-built): agents.episode, episode_member
+
+The schema SQL in the infrastructure repo (see [DEPLOY.md](DEPLOY.md)) defines these views and the
+linker; this repo only reads them, so a change there must be made here too. What aut relies on:
+
+| View | Columns aut reads |
+|---|---|
+| `agents.episode` | `episode_id`, `first_ts`, `last_ts`, `n_sessions`, `n_seed_sessions`, `n_commits`, `n_prs`, `n_steers`, `outcome`, `outcome_source` (`manual` when a manual outcome decided it), `confirmed` (hand-confirmed) |
+| `agents.episode_member` | `episode_id`, `session_id`, `role` (`seed`, or a non-seed member), `repo_keys` |
+
+`agents.episode_link()` sets an episode's `outcome`. The latest `aut outcome` on a seed session wins;
+otherwise the first of these that holds, in this order (`inspector.RULES` explains each on the page
+and must stay in step):
+
+1. `reworked`: a commit was reverted or reworked
+2. `shipped`: a commit merged (survival at least 0.5 where known), none reverted or reworked
+3. `open`: no commit merged or reworked, and a commit is still open
+4. `ruled_out`: every commit was abandoned
+5. `undecided`: a commit still waits for an outcome
+6. `no_code`: no commits
+
+`aut inspect --day` matches the days `agents.episode_activity_day` counts: a member session has a
+`steer`, `link`, `commit` or `pr` row that day, inside the episode's span (not span overlap).
 
 ## Active time: agents.time_interval
 
@@ -507,7 +556,8 @@ aw-server's query API (`filter_keyvals(afk, "status", ["not-afk"])`, then
 `filter_period_intersect`) over `[watermark, now - 5 min]`, at most one day per pass; the first
 scan starts a day before the window bucket's `created` (aw-server-rust writes it in local time
 labelled UTC, so it can be hours late; empty days cost one query each). The watermark is the range end, saved only after
-delivery. aw-server closed or no buckets for this host: no rows, no error.
+delivery. aw-server closed or no buckets for this host: no rows, and a `degraded` heartbeat
+naming the reason. The scan itself does not fail.
 
 Guards, all on the machine before anything is sent:
 
@@ -536,8 +586,9 @@ seam a model replaces later.
 An app in neither mapping gets the category its macOS bundle declares (rule `macos_category`):
 the collector finds the bundle with `mdfind` (`kMDItemContentType ==
 'com.apple.application-bundle' && kMDItemDisplayName == '<app>'`), reads
-`LSApplicationCategoryType` from its `Contents/Info.plist`, once per app per scan, with a 2 s
-timeout. `developer-tools` is `dev`, `business` is `comms`, `productivity` is `docs`,
+`LSApplicationCategoryType` from its `Contents/Info.plist`, once per app per process, with a
+2 s timeout; the first timeout (a stalled Spotlight) ends the lookups for that process.
+`developer-tools` is `dev`, `business` is `comms`, `productivity` is `docs`,
 `graphics-design` is `design` (all relevant); `music`, `video`, `entertainment`, every games
 category, `social-networking`, `sports`, `lifestyle`, `news` and `photography` are `media`; any
 other declared category is `other` (both not relevant). Off macOS, with no bundle, no declared
@@ -553,7 +604,7 @@ up. Limit: a browser missing from the defaults is classified by its bundle (ofte
 Delivery: over `transport.pg_dsn` in the same transaction as the usage, session and activity
 rows of the batch, `ON CONFLICT (event_id, ts) DO NOTHING`. With a webhook and a `pg_dsn`, the
 webhook carries the usage and the activity and time rows of the same batch still go over
-`pg_dsn`. A webhook-only machine skips them with the same one-line note; there is no backfill for
+`pg_dsn`, with the batch's session rows. A webhook-only machine skips them with the same one-line note; there is no backfill for
 time, so it does not send time.
 
 ## Labels: activity_event kind `label` (`aut label`)
@@ -595,6 +646,10 @@ in `label_tasks`, incrementally from a watermark in the state file (`collectors.
 sends one `agents.collector_scan` row, collector `label`. `daily_note` drafts one private note per
 past day from counts only (that day's confident labels and episode facts, never text) into
 `agents.daily_note (day, text, model_id, created_at)`, first draft kept. A dry run writes nothing.
+A task that cannot run stops only itself: its watermark stays and the run goes on to the next task.
+A stopped aw-server is retried on the next run and exits 0 (`error` = `SourceUnavailable`); a backend
+that is not ready (the extra or model missing, an encoder untrained or retrained since it was chosen)
+prints its reason and the run exits 1 once the other tasks are done (`error` = `BackendUnavailable`).
 
 ### The eval set and the bake-off (`aut label teach | review | eval | choose | train-encoder`)
 
@@ -638,7 +693,8 @@ gold, both re-weighted from the stratified sample to the silver label mix.
 
 `aut label choose --task T` takes each model's newest record and writes the smallest (`size_mb`)
 that passes the bar into `label.json`: a held-out report, `coverage` at least `label_coverage`
-(default 0.75), and no `share_error_pp` above 5. Labels without a tau stay unknown. `aut label
+(default 0.75), every label's `precision_at_tau` at least `label_precision`, and no
+`share_error_pp` above 5. Labels without a tau stay unknown. `aut label
 train-encoder --task T` fits the `encoder` backend (logistic regression over hashed word and fact
 features, stdlib only) on gold (three times the weight) and silver, never on a held-out gold unit,
 and reports its held-out accuracy; its file (`~/.local/share/aut/label/encoder/<task>.json`) holds
@@ -656,5 +712,4 @@ row with the largest `total_tokens` (the sink's `agents.usage_event_dedup`); any
 prefix of it. The collector cannot settle this per scan (which lines a scan sees is what varies)
 and cannot clean up (its role holds INSERT and SELECT only).
 
-`aut report` and `metrics.json` are retired: aggregates are the sink's private database views.
-`aut report` still runs for one release, prints that note and writes nothing.
+`metrics.json` is retired: aggregates are the sink's private database views.

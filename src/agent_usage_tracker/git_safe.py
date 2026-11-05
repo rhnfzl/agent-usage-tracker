@@ -11,7 +11,7 @@ so fetch keeps their ssh setup and gets their credential helpers back after the 
 from __future__ import annotations
 
 import os
-import subprocess
+import subprocess  # nosec B404 # one fixed argv below, no shell
 
 _CONFIG = ("core.fsmonitor=", "core.hooksPath=/dev/null", "protocol.ext.allow=never",
            "diff.external=", "core.sshCommand=ssh", "core.askPass=", "gc.auto=0",
@@ -37,9 +37,10 @@ def _credential_config() -> tuple[str, ...]:
     """An empty credential.helper clears every helper read so far (the repo's, url-scoped ones
     too), then the user's global ones go back in their order."""
     try:
-        r = subprocess.run(["git", "config", "--global", "--includes", "-z", "--get-regexp",
-                            r"^credential\..*helper$"], cwd=os.path.expanduser("~"),
-                           capture_output=True, text=True, timeout=10, env=git_env())
+        r = subprocess.run(  # nosec B603, B607 # fixed argv, no shell; git from the user's PATH
+            ["git", "config", "--global", "--includes", "-z", "--get-regexp",
+             r"^credential\..*helper$"], cwd=os.path.expanduser("~"),
+            capture_output=True, text=True, timeout=10, env=git_env())
         out = r.stdout if r.returncode == 0 else ""
     except (OSError, subprocess.SubprocessError):
         out = ""

@@ -1,7 +1,7 @@
 # AUT showcase-metrics capability — design
 
 - **Date:** 2026-07-22
-- **Status:** approved design, pre-implementation
+- **Status:** superseded. `aut report`, `report.py` and `metrics.py` were built and then retired; `metrics.json` is replaced by the sink's database views. Kept as history, it does not describe the code.
 - **Branch / worktree:** `feat/showcase-metrics` (worktree `agent-usage-tracker-showcase-metrics`), based on `human-turns`
 - **Author:** Rehan Fazal (with Claude Code)
 

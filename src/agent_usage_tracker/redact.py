@@ -1,0 +1,45 @@
+"""The privacy rule for local text that may leave the machine or reach a page: titles, steer text,
+review snippets. Owned here because every reader needs it, whichever collectors are enabled.
+"""
+
+from __future__ import annotations
+
+import re
+
+_TEXT_MAX = 300
+
+_REDACTED = "[redacted]"
+# (name, pattern, replacement). Order matters: URL credentials before emails, specific before
+# the generic long run.
+PATTERNS = (
+    # These read every word of a pasted log, so no pattern may rescan a long run from each of its
+    # characters. Anchored on "://": matching the scheme too was quadratic on dotted text.
+    ("url_credentials", re.compile(r"://[^\s/@:]+:[^\s/@]+@"), "://" + _REDACTED + "@"),
+    # no leading \b: env names (PGPASSWORD=, DB_PASSWORD=, GITHUB_TOKEN=) carry a prefix, and it
+    # stays in the text untouched, so matching it too (cubic on a word run) would add nothing
+    ("assignment", re.compile(r"(password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key)"
+                              r"(\s*[=:]\s*)\S+", re.I), r"\1\2" + _REDACTED),
+    ("bearer", re.compile(r"\b(bearer\s+)\S+", re.I), r"\1" + _REDACTED),
+    ("jwt", re.compile(r"\beyJ[\w-]+\.[\w-]+\.[\w-]+"), _REDACTED),
+    ("sk_key", re.compile(r"\bsk-[\w-]{16,}"), _REDACTED),
+    ("github_pat", re.compile(r"\bgithub_pat_\w{20,}"), _REDACTED),
+    ("github_token", re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}"), _REDACTED),
+    ("slack_token", re.compile(r"\bxox[abprs]-[\w-]{10,}"), _REDACTED),
+    ("aws_key", re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b"), _REDACTED),
+    # 64: the longest local part an address can have, so a run with no @ is never rescanned in full
+    ("email", re.compile(r"[\w.+-]{1,64}@[\w-]+\.[\w.-]*[\w-]"), _REDACTED),
+    # long hex and base64 runs; also takes long slugs and paths, which is the safe side
+    ("long_run", re.compile(r"[A-Za-z0-9+/_=-]{32,}"), _REDACTED),
+)
+
+
+def redact(text: str) -> str:
+    """The redaction alone."""
+    for _, pattern, repl in PATTERNS:
+        text = pattern.sub(repl, text)
+    return text
+
+
+def clean_text(text: str) -> str:
+    """Redacted, then cut to 300 characters."""
+    return redact(text)[:_TEXT_MAX]

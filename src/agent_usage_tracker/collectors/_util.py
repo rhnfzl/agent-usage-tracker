@@ -2,43 +2,103 @@
 
 from __future__ import annotations
 
+import copy
 import os
+import sys
+from collections import Counter
 from datetime import datetime, timezone
+from typing import Any, Callable, Iterable, Iterator, Sequence
+
+from ..event import Batch, CollectorUnavailable, Row
 
 # Cap lines read per file per scan so a huge first-scan/backfill file can't spike memory.
 # The offset is committed at the cap, so the next scan simply continues from there.
 _MAX_LINES = 50000
+MS_PER_S = 1000
+# What a malformed log record can raise while it is read. OverflowError: int(inf) from a 1e400.
+MALFORMED_RECORD = (KeyError, TypeError, ValueError, AttributeError, OverflowError)
 
 
-def safe_int(value, default: int = 0) -> int:
-    """Non-negative int() that never raises. Guards a corrupt state offset (1e400 -> inf ->
-    OverflowError) AND a negative offset (which would make fh.seek() raise and wedge the scan);
-    every caller feeds a byte offset, which is always >= 0."""
+def describe_files(cfg: object, wm: dict[str, Any]) -> str:
+    """`aut status` line of a collector whose watermark tracks files."""
+    return f"{len(wm['files'])} files tracked" if "files" in wm else "never scanned"
+
+
+def describe_full_scan(cfg: object, wm: dict[str, Any]) -> str:
+    """`aut status` line of a collector that keeps no watermark."""
+    return "full-scan each run (no watermark)"
+
+
+def str_or_none(value: object) -> str | None:
+    """A non-empty string as is; anything else is None."""
+    return value if isinstance(value, str) and value else None
+
+
+def dict_or_empty(value: object) -> dict[str, Any]:
+    """A dict as is; anything else is {}, for an untrusted nested object in a log record."""
+    return value if isinstance(value, dict) else {}
+
+
+def safe_int(value: object, default: int = 0) -> int:
+    """Non-negative int() that never raises, for untrusted counts, offsets and timestamps from
+    logs and state. A negative or unparseable value becomes `default`: a corrupt state offset
+    (1e400 -> inf -> OverflowError, or a negative one, which would make fh.seek() raise) must not
+    wedge the scan."""
+    if not isinstance(value, (int, float, str)):
+        return default
     try:
         parsed = int(value)
-    except (TypeError, ValueError, OverflowError):
+    except (ValueError, OverflowError):
         return default
     return parsed if parsed >= 0 else default
+
+
+def count_field(record: dict[str, Any], key: str) -> int:
+    """A token count from a log record; absent or null is 0. Raises on a malformed one, which the
+    caller counts as a malformed record."""
+    return int(record.get(key) or 0)
+
+
+def noop_advance() -> None:
+    """The watermark callback of a full-scan collector: it has no watermark to advance."""
+
+
+def warn_skipped(name: str, skipped: Counter[str], unaffected: str = "usage") -> None:
+    """Report a collector's skips. Skipping is best effort on purpose: a failed activity extraction
+    never blocks the usage and session rows of the same chunk, and one bad record never wedges a
+    scan at its offset. But a malformed usage record's tokens are gone, so neither stays silent.
+    Activity failures are keyed "activity:<exception type>": the type names a systematic parser
+    break and, unlike a message, cannot carry record content."""
+    failed = {k.partition(":")[2]: n for k, n in sorted(skipped.items())
+              if k.startswith("activity:") and n}
+    if failed:
+        print(f"aut: {name}: {sum(failed.values())} activity record(s) skipped (extraction failed: "
+              f"{', '.join(f'{k} x{n}' for k, n in failed.items())}); "
+              f"{unaffected} and session rows are unaffected.", file=sys.stderr)
+    if skipped["malformed"]:
+        print(f"aut: {name}: {skipped['malformed']} malformed record(s) skipped; any usage they "
+              "held is not counted.", file=sys.stderr)
+
+
+def raise_if_unreadable(name: str, skipped: Counter[str]) -> None:
+    """After a collector's last batch: files that are there but could not be read make the scan
+    degraded instead of looking like files with nothing new."""
+    if skipped["unreadable"]:
+        raise CollectorUnavailable(f"{name}: {skipped['unreadable']} file(s) could not be read, "
+                                   "left for the next scan")
 
 
 def read_new_lines(path: str, offset: int) -> tuple[list[bytes], int]:
     """Stream complete newline-terminated records added after `offset` (capped at _MAX_LINES).
 
     Iterates one line at a time (no whole-file read) and stops at a trailing partial line
-    (no newline yet), leaving it for the next scan. Resets to 0 when the file shrank below
-    the stored offset (truncation). Returns (complete_lines, new_offset).
+    (no newline yet), leaving it for the next scan. Returns (complete_lines, new_offset). A file
+    that vanished has nothing new; any other OSError (no permission, a failing disk) is the
+    caller's to report.
     """
-    try:
-        size = os.path.getsize(path)
-    except OSError:
-        return [], offset
-    if size < offset:            # truncated -> reread from the start
-        offset = 0
-    if size <= offset:
-        return [], offset
     lines: list[bytes] = []
     consumed = offset
-    try:                         # TOCTOU: the file can vanish/rotate between getsize and open
+    try:
         with open(path, "rb") as fh:
             fh.seek(offset)
             for raw in fh:
@@ -49,15 +109,15 @@ def read_new_lines(path: str, offset: int) -> tuple[list[bytes], int]:
                         break    # commit here; next scan continues from `consumed`
                 else:
                     break        # trailing partial line at EOF; picked up whole next time
-    except OSError:
-        return [], offset        # gone/unreadable now; leave the offset put, retry next scan
+    except FileNotFoundError:
+        return [], offset        # gone now; leave the offset put
     return lines, consumed
 
 
-def scan_file(path: str, fstate: dict) -> tuple[list[bytes], dict]:
-    """Inode-aware tail. `fstate` carries {'dev','ino','off'} (empty on first sight). Resets the
-    offset to 0 when the file behind the path changes (rotated/replaced) so the beginning of a
-    replacement file is never skipped. Returns (complete_lines, new_fstate).
+def same_file(fstate: dict[str, Any], st: os.stat_result) -> bool:
+    """May a tail resume from this watermark entry? False on first sight (empty entry), when the
+    file behind the path changed (rotated/replaced), and when it was truncated in place, so the
+    beginning of a replacement is never skipped.
 
     Identity is st_ino ALONE, deliberately not (st_dev, st_ino). st_dev is assigned at mount,
     not intrinsic to the volume: macOS/APFS hands out a different number after every reboot. Any
@@ -68,21 +128,57 @@ def scan_file(path: str, fstate: dict) -> tuple[list[bytes], dict]:
     What dropping it costs: an inode is only unique within a device, so a path that migrates to
     another filesystem could collide with a same-numbered inode there and be resumed mid-file.
     That needs a tracked path to change volumes AND collide, and it undercounts rather than
-    double-counts. A guaranteed re-push every reboot is the worse trade. st_dev is still recorded
-    for diagnostics. Truncation-in-place is caught separately by read_new_lines (size < offset)."""
-    try:
-        st = os.stat(path)
-    except OSError:
-        return [], fstate
-    off = safe_int(fstate.get("off"))
-    if fstate.get("ino") != st.st_ino:            # different file at this path (rotated/replaced)
-        off = 0
-    lines, new_off = read_new_lines(path, off)
-    new_fstate = dict(fstate)
-    new_fstate["dev"] = st.st_dev
-    new_fstate["ino"] = st.st_ino
-    new_fstate["off"] = new_off
-    return lines, new_fstate
+    double-counts. A guaranteed re-push every reboot is the worse trade. Entries saved by older
+    versions still hold a `dev` key; nothing reads it."""
+    return fstate.get("ino") == st.st_ino and st.st_size >= safe_int(fstate.get("off"))
+
+
+def changed_files(paths: Iterable[str], files: dict[str, Any], fresh: Callable[[os.stat_result], Any],
+                  skipped: Counter[str], revisit: Callable[[Any], bool] | None = None,
+                  ) -> Iterator[tuple[str, Any, int, list[bytes], int]]:
+    """Each file of `paths` with something to do: (path, private copy of its entry in `files`,
+    offset read from, complete new lines, new offset). That is a file with bytes past its entry,
+    one whose entry must restart (replaced or truncated: an offset left standing would skip bytes
+    if it regrew past it), and one whose entry `revisit` wants looked at with no new bytes.
+    `fresh(st)` is the entry of a file seen for the first time or replaced. The copy is deep so
+    that only the caller's watermark callback can publish a chunk's state. A file that cannot be
+    read is counted in skipped["unreadable"]."""
+    for path in paths:
+        try:
+            st = os.stat(path)
+            entry = files.get(path) or {}
+            restart = bool(entry) and not same_file(entry, st)
+            prev = fresh(st) if restart or not entry else entry
+            off = safe_int(prev.get("off"))
+            if st.st_size <= off and not restart and not (revisit and revisit(prev)):
+                continue
+            lines, new_off = read_new_lines(path, off)
+        except FileNotFoundError:   # gone since the glob: nothing to read, and no offset to lose
+            continue
+        except OSError:
+            skipped["unreadable"] += 1
+            continue
+        yield path, copy.deepcopy(prev), off, lines, new_off
+
+
+def file_batches(name: str, paths: Iterable[str], files: dict[str, Any],
+                 fresh: Callable[[os.stat_result], Any],
+                 chunk_rows: Callable[[str, Any, int, list[bytes], Counter[str]], Sequence[Row]],
+                 revisit: Callable[[Any], bool] | None = None) -> Iterator[Batch]:
+    """A tailing collector's batches over changed_files. `chunk_rows(path, cur, off, lines, skipped)`
+    makes one file's rows and updates `cur`, the private copy of its entry, whose "off" already
+    holds the new offset; the entry is published only when the batch's callback runs."""
+    skipped: Counter[str] = Counter()
+    for path, cur, off, lines, new_off in changed_files(paths, files, fresh, skipped, revisit):
+        cur["off"] = new_off
+        events = chunk_rows(path, cur, off, lines, skipped)
+
+        def advance_watermark(p: str = path, c: dict[str, Any] = cur) -> None:
+            files[p] = c
+
+        yield events, advance_watermark
+    warn_skipped(name, skipped)
+    raise_if_unreadable(name, skipped)
 
 
 def _strip_worktree(parts: list[str]) -> list[str] | None:
@@ -120,7 +216,7 @@ def _strip_worktree(parts: list[str]) -> list[str] | None:
     return None
 
 
-def basename(path) -> str | None:
+def project_name(path: object) -> str | None:
     """Last path segment only (never a full path -> safe for a public-later repo), after
     collapsing a git worktree back onto its main checkout (see _strip_worktree). Handles BOTH
     '/' and '\\' so a Windows path is reduced on POSIX too; rejects non-strings (returns None)
@@ -134,8 +230,10 @@ def basename(path) -> str | None:
     return seg.rsplit("/", 1)[-1] or None
 
 
-def epoch_ms_to_iso(ms) -> str | None:
+def epoch_ms_to_iso(ms: object) -> str | None:
+    if not isinstance(ms, (int, float, str)):
+        return None
     try:
-        return datetime.fromtimestamp(float(ms) / 1000.0, tz=timezone.utc).isoformat()
-    except (TypeError, ValueError, OSError, OverflowError):
+        return datetime.fromtimestamp(float(ms) / MS_PER_S, tz=timezone.utc).isoformat()
+    except (ValueError, OSError, OverflowError):
         return None

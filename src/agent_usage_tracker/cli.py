@@ -1,6 +1,6 @@
-"""aut CLI: scan | backfill | status.
+"""aut CLI.
 
-  aut scan              incremental: read new usage since the watermark, push, advance
+  aut scan              incremental: read new rows since the watermark, push, advance
   aut scan --dry-run    parse + normalize + AGGREGATE, print a report, send/commit nothing
   aut backfill          reset the watermark for the selected agents, then scan everything
   aut backfill --sessions-only [--dry-run]
@@ -8,6 +8,9 @@
   aut backfill --activity-only [--dry-run]
                         the same for activity rows (steers, commits, turns, ...); never usage
   aut status            show config + watermark state
+  aut export [--out F]  write all usage as CSV (bulk load, offline bridge); never the watermark
+  aut sync-prices [--out F]
+                        refresh the API-equivalent model price map
   aut time add --start <local> --end <local> | --minutes N [--at <local end>] [--not-relevant]
                         record a manual active-time interval (needs transport.pg_dsn)
   aut outcomes [--fetch] [--dry-run]
@@ -17,7 +20,8 @@
   aut episodes review [--month YYYY-MM]
                         hand-check a month's episodes on a local page -> agents.episode_correction
   aut inspect --episode ID | --day YYYY-MM-DD | --label UNIT_ID
-                        why an episode, a day's episodes or a label exist, on a local read-only page
+                        why an episode, a day's episodes or a label exist, on a local evidence page
+                        (its linked correction form writes agents.episode_correction)
   aut label run [--task T] [--since YYYY-MM-DD] [--dry-run]
                         a local model labels new units (optional extra aut[label]) -> label rows
   aut label backfill --task T --days N
@@ -36,424 +40,165 @@ sums straight from your real logs.
 from __future__ import annotations
 
 import argparse
-import json
+import os
 import sys
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, timedelta
+from typing import Sequence
 
-from . import __version__, pricing
-from .collectors import REGISTRY, activitywatch
-from .config import Config, load_config, _config_path
-from .event import ActivityEvent, TimeInterval, UsageEvent, make_event_id, valid_ts
-from .push import (_insert_pg, make_sender, scrub_error, send_activity_rows, send_scan_rows,
-                   send_session_rows)
-from .state import collector_wm, load_state, save_state
-
-BATCH = 500
-# Each collect() pass reads at most _MAX_LINES (50k) new lines per file (see collectors/_util.py).
-# One-shot commands (export/backfill) and each scan drain by re-running collect() until the
-# watermark stops advancing. Bound the loop far above any real file so a misbehaving collector
-# can't spin forever (50k lines/pass * this = an absurd ceiling, never hit in practice).
-_MAX_DRAIN_PASSES = 100_000
+from . import inspector, manual_time, outcomes, pricing, review, scan
+from .collectors import REGISTRY
+from .config import (ALL_AGENTS, LABEL_DAYS, LABEL_DECISION_TASKS, LABEL_TASK_NAMES, AutError,
+                     Config, load_config, config_path)
+from .push import is_operational_failure, redacted_error, webhook_url_allowed
+from .state import collector_wm, load_state
 
 
-def _wm_fp(wm: dict) -> str:
-    """Stable fingerprint of a collector's watermark; unchanged across a pass == fully drained.
-    Full-scan collectors (cursor, cursor_sdk) never mutate wm, so they settle after one pass."""
-    return json.dumps(wm, sort_keys=True, default=str)
+def _fail_if_partial(what: str, failed: set[str]) -> None:
+    """A one-shot command has no heartbeat, so its exit code is what stops `aut export && load`."""
+    if failed:
+        raise AutError(f"{what}: partial, could not fully read {', '.join(sorted(failed))} "
+                       "(reasons above)")
 
 
-def _blank_agg() -> dict:
-    return {"events": 0, "human": 0, "input": 0, "output": 0, "cache_read": 0,
-            "cache_write": 0, "reasoning": 0, "total": 0, "skipped_no_ts": 0,
-            "duplicates": 0, "by_model": {}, "activity": {},
-            "intervals": 0, "time": {}, "relevant_s": 0.0}    # time: category -> seconds
+def cmd_scan(cfg: Config, agents: Sequence[str], args: argparse.Namespace) -> None:
+    report = scan.run_scan(cfg, agents, dry_run=args.dry_run)
+    scan.print_scan(cfg, report, dry_run=args.dry_run)
 
 
-def _add(agg: dict, e: UsageEvent | ActivityEvent | TimeInterval) -> None:
-    if isinstance(e, TimeInterval):      # active time; no tokens, kept out of events/human
-        secs = (datetime.fromisoformat(e.end_ts) - datetime.fromisoformat(e.ts)).total_seconds()
-        agg["intervals"] += 1
-        agg["time"][e.category] = agg["time"].get(e.category, 0.0) + secs
-        agg["relevant_s"] += secs if e.work_relevant else 0.0
+def cmd_backfill(cfg: Config, agents: Sequence[str], args: argparse.Namespace) -> None:
+    if args.sessions_only or args.activity_only:
+        counts = scan.run_history_backfill(cfg, agents, dry_run=args.dry_run,
+                                           sessions=args.sessions_only, activity=args.activity_only)
+        scan.print_history_backfill(counts, dry_run=args.dry_run, sessions=args.sessions_only,
+                                    activity=args.activity_only)
+        _fail_if_partial("backfill", counts["failed"])
         return
-    if isinstance(e, ActivityEvent):     # no tokens; tallied by kind, kept out of events/human
-        agg["activity"][e.kind] = agg["activity"].get(e.kind, 0) + 1
-        return
-    if e.kind == "human":            # a user prompt: no tokens, kept out of the token/model rollup
-        agg["human"] += 1
-        return
-    agg["events"] += 1
-    agg["input"] += e.input_tokens
-    agg["output"] += e.output_tokens
-    agg["cache_read"] += e.cache_read_tokens
-    agg["cache_write"] += e.cache_write_tokens
-    agg["reasoning"] += e.reasoning_tokens or 0
-    agg["total"] += e.total_tokens
-    m = agg["by_model"].setdefault(e.model or "unknown", {"events": 0, "total": 0})
-    m["events"] += 1
-    m["total"] += e.total_tokens
+    scan.reset_watermarks(agents)
+    print(f"watermark reset for: {', '.join(agents)}")
+    cmd_scan(cfg, agents, args)
 
 
-def _deliver_scan_rows(cfg: Config, rows: list[dict]) -> None:
-    """The heartbeat is best effort: whatever goes wrong here must not touch the usage scan."""
+def cmd_export(cfg: Config, agents: Sequence[str], args: argparse.Namespace) -> None:
+    out = open(args.out, "w", newline="", encoding="utf-8") if args.out else sys.stdout
     try:
-        send_scan_rows(cfg, rows)
-    except Exception as exc:
-        print(f"aut: warning: scan heartbeat not delivered: {scrub_error(exc)}", file=sys.stderr)
+        written, skipped, failed = scan.run_export(cfg, agents, out)
+    finally:
+        if args.out:
+            out.close()
+    scan.print_export(written, skipped, args.out)
+    _fail_if_partial("export", failed)
 
 
-def run_scan(cfg: Config, agents: list[str], dry_run: bool) -> dict:
-    state = load_state()
-    sender = None if dry_run else make_sender(cfg)
-    report: dict = {}
-    scan_rows: list[dict] = []      # one heartbeat row per collector that ran (agents.collector_scan)
-
-    for name in agents:
-        collect = REGISTRY[name]
-        wm = collector_wm(state, name)
-        agg = report.setdefault(name, _blank_agg())
-        # The same session can sit at two paths -- Claude Code re-encodes a project directory
-        # (e.g. '-Users-me-proj' and 'prefix---Users-me-proj'), so one session file is globbed
-        # twice and every turn in it is emitted twice. Both copies produce the same event_id, so
-        # the sink stores one and the numbers there are right; without this set the PRINTED tally
-        # counted both and overstated the scan. Per-agent, discarded when the agent finishes.
-        seen: set[str] = set()
-        buf_events: list[UsageEvent] = []
-        buf_commits: list = []
-        started_at = datetime.now(timezone.utc)
-        status, error, newest_ts, interrupted = "ok", None, None, False
-
-        def flush() -> None:
-            if buf_events and sender is not None:   # sender is None in dry-run -> nothing sent
-                sender(buf_events)          # raises on delivery failure -> commits skipped
-            for commit in buf_commits:      # always advance the (in-memory) watermark so the
-                commit()                    # drain loop below terminates; only scan persists it
-            buf_events.clear()
-            buf_commits.clear()
-
-        try:
-            for _ in range(_MAX_DRAIN_PASSES):
-                before = _wm_fp(wm)
-                for events, commit in collect(cfg, wm):
-                    for e in events:
-                        e.machine = cfg.machine
-                        if not valid_ts(e.ts):
-                            agg["skipped_no_ts"] += 1
-                            continue
-                        try:                # heartbeat bookkeeping must never stop the scan
-                            ts = datetime.fromisoformat(e.ts.replace("Z", "+00:00"))
-                            ts = ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
-                            newest_ts = ts if newest_ts is None or ts > newest_ts else newest_ts
-                        except Exception:
-                            pass
-                        if e.event_id in seen:
-                            agg["duplicates"] += 1      # counted once, above
-                        else:
-                            seen.add(e.event_id)
-                            _add(agg, e)
-                        # Still queued for the sink either way: deduping the PUSH would mean a
-                        # copy whose batch failed could not be re-sent from the other path, and
-                        # ON CONFLICT already makes the repeat free.
-                        if not dry_run:
-                            buf_events.append(e)
-                    buf_commits.append(commit)
-                    if len(buf_events) >= BATCH:
-                        flush()
-                flush()
-                if _wm_fp(wm) == before:    # a whole pass advanced nothing -> fully drained
-                    break
-            else:                           # loop exhausted without draining (astronomically rare)
-                print(f"aut: warning: {name} hit the drain-pass cap ({_MAX_DRAIN_PASSES}); more "
-                      "usage remains and will be picked up on the next scan.", file=sys.stderr)
-            if name == activitywatch.NAME and not dry_run:     # a dry run changes nothing
-                activitywatch.purge(cfg)                       # never raises
-        except BaseException as exc:
-            status, error = "error", scrub_error(exc)
-            interrupted = not isinstance(exc, Exception)    # Ctrl-C: leave at once, send nothing
-            raise                           # unchanged: the scan still fails as before
-        finally:
-            if not dry_run:
-                save_state(state)
-                scan_rows.append({
-                    "machine": cfg.machine, "collector": name, "started_at": started_at,
-                    "finished_at": datetime.now(timezone.utc), "status": status,
-                    "events": agg["events"] + agg["intervals"], "human": agg["human"],
-                    "newest_ts": newest_ts,
-                    "error": error, "aut_version": __version__,
-                })
-                if status == "error" and not interrupted:   # the loop ends here: one delivery
-                    _deliver_scan_rows(cfg, scan_rows)
-
-    if not dry_run:
-        _deliver_scan_rows(cfg, scan_rows)
-    return report
-
-
-def _print_report(cfg: Config, report: dict, dry_run: bool) -> None:
-    mode = "DRY-RUN (nothing sent)" if dry_run else "scan"
-    print(f"\naut {mode}  machine={cfg.machine}\n" + "=" * 60)
-    grand = 0
-    for name, agg in report.items():
-        if (agg["events"] == 0 and agg["human"] == 0 and agg["skipped_no_ts"] == 0
-                and agg["duplicates"] == 0 and agg["intervals"] == 0):
-            print(f"{name:<12} -  no new usage")
-            continue
-        grand += agg["total"]
-        if agg["events"] or agg["total"]:
-            print(f"{name:<12} {agg['events']:>6} turns  {agg['total']:>12,} tokens "
-                  f"(in {agg['input']:,} / out {agg['output']:,} / "
-                  f"cacheR {agg['cache_read']:,} / cacheW {agg['cache_write']:,}"
-                  + (f" / reason {agg['reasoning']:,}" if agg['reasoning'] else "") + ")")
-            for model, mv in sorted(agg["by_model"].items(), key=lambda kv: -kv[1]["total"]):
-                print(f"    {model:<28} {mv['events']:>5} turns  {mv['total']:>12,} tokens")
-        if agg["human"]:
-            print(f"{name:<12} {agg['human']:>6} human turns (prompts you sent)")
-        if agg["intervals"]:
-            total_s = sum(agg["time"].values())
-            print(f"{name:<12} {agg['intervals']:>6} intervals  {total_s / 60:,.1f} min active "
-                  f"({agg['relevant_s'] / 60:,.1f} min work-relevant)")
-            for cat, secs in sorted(agg["time"].items(), key=lambda kv: -kv[1]):
-                print(f"    {cat:<28} {secs / 60:>9,.1f} min")
-        if agg["activity"]:
-            print(f"{name:<12} activity rows {json.dumps(agg['activity'], sort_keys=True)}")
-        if agg["skipped_no_ts"]:
-            print(f"    (skipped {agg['skipped_no_ts']} records with missing/invalid timestamp)")
-        if agg["duplicates"]:
-            print(f"    (counted once: {agg['duplicates']:,} repeat records from sessions stored "
-                  "under more than one project path)")
-    print("-" * 60)
-    print(f"{'TOTAL':<12} {grand:>32,} tokens")
-
-
-def run_export(cfg: Config, agents: list[str], out) -> tuple[int, int]:
-    """Write all normalized events (from scratch, ignoring the watermark) as CSV to `out`.
-    Column order matches push.COLUMNS / the sink table, so it loads via COPY. Useful for
-    an offline bulk backfill or a bridged load where the live transport is not wired yet.
-    Returns (written, skipped) where skipped counts records with a missing/invalid ts."""
-    import csv
-
-    from .push import COLUMNS
-
-    writer = csv.writer(out)
-    writer.writerow(COLUMNS)
-    n = skipped = 0
-    for name in agents:
-        wm: dict = {}
-        # Must dedup here, unlike the push path: this CSV is meant to be loaded with COPY, which
-        # has no ON CONFLICT to fall back on, so a session stored under two project paths would
-        # land twice in the target table. See the note in run_scan.
-        seen: set[str] = set()
-        for _ in range(_MAX_DRAIN_PASSES):    # drain past the per-file line cap (one-shot command)
-            before = _wm_fp(wm)
-            for events, commit in REGISTRY[name](cfg, wm):
-                for e in events:
-                    if not isinstance(e, UsageEvent):   # the CSV is agents.usage_event only
-                        continue
-                    e.machine = cfg.machine
-                    if not valid_ts(e.ts):
-                        skipped += 1
-                        continue
-                    if e.event_id in seen:
-                        continue
-                    seen.add(e.event_id)
-                    d = e.to_dict()
-                    writer.writerow(["" if d[c] is None else d[c] for c in COLUMNS])
-                    n += 1
-                commit()                      # advance wm so the next pass continues past the cap
-            if _wm_fp(wm) == before:
-                break
-    return n, skipped
-
-
-def run_session_backfill(cfg: Config, agents: list[str], dry_run: bool, sessions: bool = True,
-                         activity: bool = False) -> dict:
-    """Send agents.event_session rows (sessions) and/or agents.activity_event rows (activity) for
-    ALL history, never usage rows: re-reading files from byte 0 re-emits (event_id, ts) pairs that
-    can differ from the stored ones (see the ts note in collectors/claude_code.py), and those would
-    land as new duplicates. Works on a throwaway watermark, so the live one is neither read nor
-    saved. ON CONFLICT makes a re-run free."""
-    if not dry_run and not cfg.has_pg:
-        raise SystemExit("backfill --sessions-only/--activity-only needs transport.pg_dsn "
-                         "(or use --dry-run).")
-    counts: dict = {"rows": 0, "by_origin": {}, "turn_null": 0, "subagent_no_parent": 0,
-                    "activity": 0, "by_kind": {}, "via": {}, "link": {}}
-    buf: list[dict] = []
-    abuf: list[ActivityEvent] = []
-
-    def flush() -> None:
-        if buf and not dry_run:
-            send_session_rows(cfg.pg_dsn, buf)      # raises -> the command fails, nothing to undo
-        if abuf and not dry_run:
-            send_activity_rows(cfg.pg_dsn, abuf)
-        buf.clear()
-        abuf.clear()
-
-    for name in agents:
-        wm: dict = {}
-        seen: set[str] = set()                      # same session under two paths: one row
-        for _ in range(_MAX_DRAIN_PASSES):
-            before = _wm_fp(wm)
-            for events, commit in REGISTRY[name](cfg, wm):
-                for e in events:
-                    e.machine = cfg.machine
-                    if isinstance(e, TimeInterval):     # neither a session nor an activity row
-                        continue
-                    if isinstance(e, ActivityEvent):
-                        if activity and valid_ts(e.ts) and e.event_id not in seen:
-                            seen.add(e.event_id)
-                            counts["activity"] += 1
-                            counts["by_kind"][e.kind] = counts["by_kind"].get(e.kind, 0) + 1
-                            if e.kind == "steer":
-                                v = e.attrs["via"]
-                                counts["via"][v] = counts["via"].get(v, 0) + 1
-                            elif e.kind == "link":     # rows per role, and how many carry each key
-                                r = counts["link"].setdefault(e.attrs["role"], {"rows": 0})
-                                r["rows"] += 1
-                                for k, v in e.attrs.items():
-                                    if k != "role" and v:
-                                        r[k] = r.get(k, 0) + 1
-                            abuf.append(e)
-                            if len(abuf) >= BATCH:
-                                flush()
-                        continue
-                    if not sessions:
-                        continue
-                    row = e.session_row()
-                    # no row for an event the usage path drops (bad ts), or one already sent
-                    if row is None or not valid_ts(e.ts) or e.event_id in seen:
-                        continue
-                    seen.add(e.event_id)
-                    counts["rows"] += 1
-                    origin = row["run_origin"]
-                    counts["by_origin"][origin] = counts["by_origin"].get(origin, 0) + 1
-                    counts["turn_null"] += row["turn_id"] is None
-                    counts["subagent_no_parent"] += (origin == "subagent"
-                                                     and row["parent_session_id"] is None)
-                    buf.append(row)
-                    if len(buf) >= BATCH:
-                        flush()
-                        if counts["rows"] % (BATCH * 20) == 0:
-                            print(f"aut: {name}: {counts['rows']:,} session rows so far",
-                                  file=sys.stderr)
-                commit()                            # advances only the throwaway wm
-            if _wm_fp(wm) == before:
-                break
-        flush()
-        print(f"aut: {name}: {len(seen):,} {'session/activity' if activity else 'session'} rows "
-              f"{'counted' if dry_run else 'sent'}", file=sys.stderr)
-    return counts
-
-
-def cmd_status(cfg: Config, agents: tuple[str, ...]) -> None:
+def cmd_status(cfg: Config, agents: Sequence[str], args: argparse.Namespace) -> None:
     state = load_state()
     print(f"machine       : {cfg.machine}")
     print(f"agents        : {', '.join(agents)}")
     if cfg.has_webhook and not cfg.webhook_secret:
         webhook_state = "url set but SECRET MISSING (scan will refuse)"
+    elif cfg.has_webhook and not webhook_url_allowed(cfg.webhook_url or ""):
+        webhook_state = "url NOT ALLOWED: https://, or http:// to localhost (scan will refuse)"
     else:
         webhook_state = "configured" if cfg.has_webhook else "NOT set"
     print(f"webhook       : {webhook_state}")
     print(f"pg fallback   : {'configured' if cfg.has_pg else 'not set'}")
     print("watermarks    :")
     for name in agents:
-        wm = state.get("collectors", {}).get(name, {})
-        if name in ("cursor", "cursor_sdk"):
-            detail = "full-scan each run (no watermark)"
-        elif name == "cursor_api":
-            detail = ("since_ms=" + str(wm["since_ms"])) if "since_ms" in wm else \
-                     ("enabled, not yet scanned" if cfg.cursor_api else "disabled (cursor_api=false)")
-        elif "chats" in wm:
-            detail = f"{len(wm['chats'])} chats, {len(wm.get('sdk', {}))} SDK stores tracked"
-        elif name == activitywatch.NAME:
-            detail = f"read until {wm['end']}" if "end" in wm else "never scanned"
-        elif "files" in wm:
-            detail = f"{len(wm['files'])} files tracked"
-        else:
-            detail = "never scanned"
-        print(f"    {name:<12} {detail}")
+        print(f"    {name:<12} {REGISTRY[name].describe(cfg, collector_wm(state, name))}")
 
 
-_MAX_MANUAL = timedelta(hours=16)
+def cmd_time_add(cfg: Config, args: argparse.Namespace) -> None:
+    span = manual_time.ManualSpan(args.start, args.end, args.minutes, args.at)
+    manual_time.print_time_add(manual_time.run_time_add(cfg, span, not_relevant=args.not_relevant))
 
 
-def _local(value: str) -> datetime:
-    """A datetime typed by the user; no zone means this machine's local time."""
-    try:
-        dt = datetime.fromisoformat(value)
-    except ValueError:
-        raise SystemExit(f"time add: not a date and time: {value!r} (use YYYY-MM-DD HH:MM)") \
-            from None
-    return dt if dt.tzinfo else dt.astimezone()
+def cmd_outcomes(cfg: Config, args: argparse.Namespace) -> None:
+    report = outcomes.run_outcomes(cfg, refresh=args.fetch or cfg.outcome_fetch,
+                                   dry_run=args.dry_run)
+    outcomes.print_outcomes(report, dry_run=args.dry_run)
 
 
-def build_manual(cfg: Config, start: str | None = None, end: str | None = None,
-                 minutes: int | None = None, at: str | None = None, not_relevant: bool = False,
-                 now: datetime | None = None) -> TimeInterval:
-    """One manual agents.time_interval row, or SystemExit with the reason it was refused."""
-    now = now or datetime.now(timezone.utc)
-    if minutes is not None:
-        if start or end:
-            raise SystemExit("time add: use --start/--end or --minutes, not both")
-        end_dt = _local(at) if at else now
-        start_dt = end_dt - timedelta(minutes=minutes)
-    elif start and end and not at:
-        start_dt, end_dt = _local(start), _local(end)
+def cmd_outcome(cfg: Config, args: argparse.Namespace) -> None:
+    dsn = cfg.require_pg("outcome")
+    row = outcomes.build_manual_outcome(cfg, args.outcome, os.getcwd(), args.session)
+    outcomes.insert_manual_outcome(dsn, row)
+    print(f"marked session {row['session_id'][:8]} {row['outcome']}")
+
+
+def cmd_inspect(cfg: Config, args: argparse.Namespace) -> None:
+    selected: tuple[inspector.Selector, str] = (
+        ("episode", args.episode) if args.episode is not None else
+        ("day", args.day) if args.day is not None else ("label", args.label))
+    inspector.print_inspect(inspector.run_inspect(cfg, *selected))
+
+
+def cmd_episodes(cfg: Config, args: argparse.Namespace) -> None:
+    review.print_review(review.run_episode_review(cfg, args.month))
+
+
+# The label modules are imported where used, so every other command skips loading their code (a
+# test holds the CLI to that). The collectors load regardless, for scan and REGISTRY above.
+def _label_run(cfg: Config, args: argparse.Namespace) -> None:
+    """run | backfill: label new units, or one task over the last N days."""
+    from .label import run as label_run
+    from .label.core import local_midnight
+    tasks: list[str] | None
+    if args.label_cmd == "backfill":
+        since = date.today() - timedelta(days=args.days)
+        tasks, dry = [args.task], False
     else:
-        raise SystemExit("time add: give --start and --end, or --minutes [--at]")
-    if end_dt <= start_dt:
-        raise SystemExit("time add: the end must be after the start")
-    if end_dt - start_dt > _MAX_MANUAL:
-        raise SystemExit("time add: an interval can span at most 16 hours")
-    if end_dt > now:                    # hours not yet worked are not active time
-        raise SystemExit("time add: the end is in the future")
-    s_iso = start_dt.astimezone(timezone.utc).isoformat()
-    e_iso = end_dt.astimezone(timezone.utc).isoformat()
-    return TimeInterval(event_id=make_event_id("manual", cfg.machine, s_iso, e_iso), ts=s_iso,
-                        end_ts=e_iso, source="manual", app=None, title=None, category=None,
-                        work_relevant=not not_relevant, attrs={}, machine=cfg.machine)
+        since, tasks, dry = args.since, [args.task] if args.task else None, args.dry_run
+    report = label_run.run_label(cfg, tasks, local_midnight(since) if since else None,
+                                 dry_run=dry)
+    label_run.print_report(report, dry_run=dry)
+    failed = [name for name, c in report.items() if c["failed"]]
+    if failed:
+        raise AutError(f"label: could not run {', '.join(failed)} (reasons above)")
 
 
-def cmd_time_add(cfg: Config, args) -> None:
-    row = build_manual(cfg, args.start, args.end, args.minutes, args.at, args.not_relevant)
-    if not cfg.has_pg:
-        raise SystemExit("time add needs transport.pg_dsn")
-    _insert_pg(cfg.pg_dsn, [row])
-    s, e = (datetime.fromisoformat(x).astimezone() for x in (row.ts, row.end_ts))
-    mins = (e - s).total_seconds() / 60
-    print(f"added manual interval {s:%Y-%m-%d %H:%M} -> {e:%Y-%m-%d %H:%M} ({mins:.0f} min, "
-          f"{'relevant' if row.work_relevant else 'not relevant'})")
+def _label_bakeoff(cfg: Config, args: argparse.Namespace) -> None:
+    """eval | choose | train-encoder: the bake-off on the gold labels."""
+    from .label import bakeoff
+    if args.label_cmd == "eval":
+        bakeoff.print_eval(args.task, bakeoff.run_eval(cfg, args.task, args.days))
+    elif args.label_cmd == "choose":
+        bakeoff.print_choose(args.task, bakeoff.choose(cfg, args.task))
+    else:
+        bakeoff.print_train_encoder(args.task, bakeoff.train_encoder(cfg, args.task, args.days))
 
 
-def cmd_label_eval(cfg: Config, args) -> int:
-    """teach | review | eval | choose | train-encoder: the gold and silver labels on this machine."""
-    if args.label_cmd == "teach":
+def cmd_label(cfg: Config, args: argparse.Namespace) -> None:
+    if args.label_cmd in ("run", "backfill"):
+        _label_run(cfg, args)
+    elif args.label_cmd == "teach":
         from .label import teach
-        teach.print_teach(args.task, teach.run_teach(cfg, args.task, args.n, args.budget_usd,
-                                                     args.days), args.budget_usd)
+        teach.print_teach(args.task, teach.run_teach(cfg, args.task, args.n,
+                                                     budget_usd=args.budget_usd, days=args.days),
+                          args.budget_usd)
     elif args.label_cmd == "review":
         from .label import gold
-        gold.run_review(cfg, args.task, args.days)
+        gold.print_review(gold.run_gold_review(cfg, args.task, args.days))
     else:
-        from .label import bakeoff
-        if args.label_cmd == "eval":
-            for r in bakeoff.run_eval(cfg, args.task, args.days):
-                print(f"label eval {args.task} {r['model_id']}: macro-F1 {r['macro_f1']}, kappa "
-                      f"{r['kappa']}, ECE {r['ece_raw']} -> {r['ece_cal']}, coverage "
-                      f"{r['coverage']}, n {r['n']} (held out {r['n_held']}), "
-                      f"{r['s_per_decision']} s per decision")
-        elif args.label_cmd == "choose":
-            c = bakeoff.choose(cfg, args.task)
-            print(f"label choose {args.task}: {c['backend']} {c['model_id']} (T "
-                  f"{c['temperature']}, tau {json.dumps(c['tau'])})")
-        else:
-            r = bakeoff.train_encoder(cfg, args.task, args.days)
-            print(f"label train-encoder {args.task}: {json.dumps(r)}")
-    return 0
+        _label_bakeoff(cfg, args)
 
 
-def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="aut", description="coding-agent token usage tracker")
-    parser.add_argument("--agents", help="comma-separated subset override (default: config)")
+def cmd_sync_prices(args: argparse.Namespace) -> None:
+    out = args.out or str(config_path().parent / "model_prices.json")
+    n = pricing.sync_prices(out, litellm_url=args.litellm_url, models_dev_url=args.models_dev_url,
+                            genai_prices_url=args.genai_prices_url)
+    print(f"synced {n} model prices -> {out}", file=sys.stderr)
+
+
+_NO_CONFIG_COMMANDS = {"sync-prices": cmd_sync_prices}
+_AGENT_COMMANDS = {"scan": cmd_scan, "backfill": cmd_backfill, "export": cmd_export,
+                   "status": cmd_status}
+_COMMANDS = {"time": cmd_time_add, "outcomes": cmd_outcomes, "outcome": cmd_outcome,
+             "inspect": cmd_inspect, "episodes": cmd_episodes, "label": cmd_label}
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="aut", description="passive coding-agent usage, activity, active-time and outcome tracker")
+    agents_help = "comma-separated subset override (default: config)"
+    parser.add_argument("--agents", help=f"{agents_help}; for scan, backfill, export and status")
     sub = parser.add_subparsers(dest="cmd", required=True)
     p_scan = sub.add_parser("scan", help="push new usage since the watermark")
     p_scan.add_argument("--dry-run", action="store_true", help="parse + report, send nothing")
@@ -465,17 +210,16 @@ def main(argv: list[str] | None = None) -> int:
                         help="send only activity rows for all history; watermark untouched")
     p_back.add_argument("--dry-run", action="store_true",
                         help="with --sessions-only/--activity-only: counts only")
-    p_back.add_argument("--agents", default=argparse.SUPPRESS, help=argparse.SUPPRESS)
-    sub.add_parser("status", help="show config + watermark state")
+    p_status = sub.add_parser("status", help="show config + watermark state")
     p_export = sub.add_parser("export", help="write all usage as CSV (bulk load / offline bridge)")
     p_export.add_argument("--out", help="output CSV file (default: stdout)")
+    for sp in (p_scan, p_back, p_status, p_export):     # accepted after the subcommand too
+        sp.add_argument("--agents", default=argparse.SUPPRESS, help=agents_help)
     p_sync = sub.add_parser("sync-prices", help="refresh the API-equivalent model price map")
     p_sync.add_argument("--out", help="output JSON (default: <config-dir>/model_prices.json)")
     p_sync.add_argument("--litellm-url", default=pricing.LITELLM_URL)
     p_sync.add_argument("--models-dev-url", default=pricing.MODELS_DEV_URL)
-    p_report = sub.add_parser("report", help="retired: replaced by the database views")
-    for flag in ("--out", "--prices", "--idle-gap"):   # still accepted, so old crons only warn
-        p_report.add_argument(flag, help=argparse.SUPPRESS)
+    p_sync.add_argument("--genai-prices-url", default=pricing.GENAI_PRICES_URL)
     p_time = sub.add_parser("time", help="manual active time")
     time_sub = p_time.add_subparsers(dest="time_cmd", required=True)
     p_tadd = time_sub.add_parser("add", help="record one manual interval (local times)")
@@ -488,7 +232,7 @@ def main(argv: list[str] | None = None) -> int:
     p_outs = sub.add_parser("outcomes", help="score commit rows against the local clones")
     p_outs.add_argument("--fetch", action="store_true",
                         help="git fetch the clones and ask gh first (config: outcome_fetch)")
-    p_outs.add_argument("--dry-run", action="store_true", help="count states, write nothing")
+    p_outs.add_argument("--dry-run", action="store_true", help="count states, write nothing, no fetch or gh")
     p_out = sub.add_parser("outcome", help="mark this project's newest session's outcome")
     p_out.add_argument("outcome", choices=["shipped", "ruled-out", "open"])
     p_out.add_argument("--session", help="the session id (default: newest interactive here)")
@@ -501,151 +245,72 @@ def main(argv: list[str] | None = None) -> int:
     ins.add_argument("--episode", help="episode id (a prefix is enough)")
     ins.add_argument("--day", help="local YYYY-MM-DD: the episodes with a member row that day")
     ins.add_argument("--label", help="a label's unit_id (steer event id, <episode>:<date>, ...)")
-    from .label.tasks import TASK_NAMES
     p_lab = sub.add_parser("label", help="local model labels (optional extra aut[label])")
     lab_sub = p_lab.add_subparsers(dest="label_cmd", required=True)
     p_lrun = lab_sub.add_parser("run", help="label new units since the watermark")
-    p_lrun.add_argument("--task", choices=TASK_NAMES, help="one task (default: label_tasks)")
+    p_lrun.add_argument("--task", choices=LABEL_TASK_NAMES, help="one task (default: label_tasks)")
     p_lrun.add_argument("--since", type=date.fromisoformat,
                         help="local YYYY-MM-DD to start from instead of the watermark")
     p_lrun.add_argument("--dry-run", action="store_true", help="score and count, write nothing")
     p_lback = lab_sub.add_parser("backfill", help="label one task over the last N days")
-    p_lback.add_argument("--task", choices=TASK_NAMES, required=True)
+    p_lback.add_argument("--task", choices=LABEL_TASK_NAMES, required=True)
     p_lback.add_argument("--days", type=int, required=True)
-    from .label.evalset import DAYS
-    from .label.tasks import TASKS
     p_teach = lab_sub.add_parser("teach", help="teacher (silver) labels for a stratified sample")
-    p_teach.add_argument("--task", choices=list(TASKS), required=True)
+    p_teach.add_argument("--task", choices=LABEL_DECISION_TASKS, required=True)
     p_teach.add_argument("--n", type=int, required=True, help="units to label this run")
     p_teach.add_argument("--budget-usd", type=float, default=5.0,
                          help="cap on this run's Sonnet spend (default 5)")
     p_lrev = lab_sub.add_parser("review", help="label gold answers on a local page")
-    p_lrev.add_argument("--task", choices=list(TASKS))
+    p_lrev.add_argument("--task", choices=LABEL_DECISION_TASKS)
     for name, text in (("eval", "score every backend on the gold labels"),
                        ("choose", "write the smallest backend that passes into label.json"),
                        ("train-encoder", "fit the small encoder on gold + silver")):
-        lab_sub.add_parser(name, help=text).add_argument("--task", choices=list(TASKS),
+        lab_sub.add_parser(name, help=text).add_argument("--task", choices=LABEL_DECISION_TASKS,
                                                          required=True)
     for sp in (p_teach, p_lrev, lab_sub.choices["eval"], lab_sub.choices["train-encoder"]):
-        sp.add_argument("--days", type=int, default=DAYS,
-                        help=f"window of whole past days the units come from (default {DAYS})")
+        sp.add_argument("--days", type=int, default=LABEL_DAYS,
+                        help=f"window of whole past days the units come from (default {LABEL_DAYS})")
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = _build_parser()
     args = parser.parse_args(argv)
+    try:
+        _dispatch(parser, args)
+    except AutError as exc:
+        print(exc, file=sys.stderr)
+        return 1
+    except Exception as exc:
+        if not is_operational_failure(exc):     # a bug keeps its traceback
+            raise
+        print(f"aut: {redacted_error(exc)}", file=sys.stderr)
+        return 1
+    return 0
 
-    if args.cmd == "sync-prices":
-        out = args.out or str(_config_path().parent / "model_prices.json")
-        n = pricing.sync_prices(out, litellm_url=args.litellm_url,
-                                models_dev_url=args.models_dev_url)
-        print(f"synced {n} model prices -> {out}", file=sys.stderr)
-        return 0
 
-    if args.cmd == "report":
-        # shortcut: kept one release so old crons only warn; delete the subcommand after that
-        print("aut report is retired: metrics.json is replaced by the agents database views "
-              "(Grafana on the LAN). Nothing was written.", file=sys.stderr)
-        return 0
+def _dispatch(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
+    if args.agents and args.cmd not in _AGENT_COMMANDS:     # it would run over everything
+        parser.error(f"--agents does not apply to {args.cmd}")
+    if args.cmd in _NO_CONFIG_COMMANDS:
+        _NO_CONFIG_COMMANDS[args.cmd](args)
+        return
 
     cfg = load_config()
+    if args.cmd in _COMMANDS:
+        _COMMANDS[args.cmd](cfg, args)
+        return
     agents = cfg.agents
     if args.agents:
         agents = tuple(a.strip() for a in args.agents.split(",") if a.strip())
-        bad = [a for a in agents if a not in REGISTRY]
+        bad = [a for a in agents if a not in ALL_AGENTS]
         if bad:
-            parser.error(f"unknown agent(s): {bad}; valid = {list(REGISTRY)}")
-
-    if args.cmd == "status":
-        cmd_status(cfg, agents)
-        return 0
-
-    if args.cmd == "time":
-        cmd_time_add(cfg, args)
-        return 0
-
-    if args.cmd == "outcomes":
-        from . import outcomes
-        st = outcomes.run_outcomes(cfg, args.fetch or cfg.outcome_fetch, args.dry_run)
-        states = {k[6:]: v for k, v in sorted(st.items()) if k.startswith("state_")}
-        rest = {k: v for k, v in sorted(st.items()) if not k.startswith("state_")}
-        print(f"outcomes {'DRY-RUN (nothing written)' if args.dry_run else 'written'}: "
-              f"states {json.dumps(states)}, {json.dumps(rest)}")
-        return 0
-
-    if args.cmd == "outcome":
-        import os
-
-        from . import outcomes
-        if not cfg.has_pg:
-            raise SystemExit("outcome needs transport.pg_dsn")
-        row = outcomes.build_manual_outcome(cfg, args.outcome, os.getcwd(), args.session)
-        outcomes.insert_manual(cfg.pg_dsn, row)
-        print(f"marked session {row['session_id'][:8]} {row['outcome']}")
-        return 0
-
-    if args.cmd == "inspect":
-        from . import inspector
-        inspector.run_inspect(cfg, episode=args.episode, day=args.day, label=args.label)
-        return 0
-
-    if args.cmd == "episodes":
-        from . import review
-        review.run_review(cfg, args.month)
-        return 0
-
-    if args.cmd == "label" and args.label_cmd not in ("run", "backfill"):
-        return cmd_label_eval(cfg, args)
-
-    if args.cmd == "label":
-        from .label import run as label_run
-        if args.label_cmd == "backfill":
-            since = date.today() - timedelta(days=args.days)
-            tasks, dry = [args.task], False
-        else:
-            since, tasks, dry = args.since, [args.task] if args.task else None, args.dry_run
-        report = label_run.run_label(cfg, tasks, label_run.local_midnight(since) if since
-                                     else None, dry)
-        label_run.print_report(report, dry)
-        return 0
-
-    if args.cmd == "export":
-        out = open(args.out, "w", newline="", encoding="utf-8") if args.out else sys.stdout
-        try:
-            n, skipped = run_export(cfg, list(agents), out)
-        finally:
-            if args.out:
-                out.close()
-        dest = f" -> {args.out}" if args.out else ""
-        skip_note = f" ({skipped} skipped: missing/invalid ts)" if skipped else ""
-        print(f"exported {n} events{skip_note}{dest}", file=sys.stderr)
-        return 0
-
-    if args.cmd == "backfill" and (args.sessions_only or args.activity_only):
-        c = run_session_backfill(cfg, list(agents), args.dry_run, sessions=args.sessions_only,
-                                 activity=args.activity_only)
-        mode = "DRY-RUN (nothing sent)" if args.dry_run else "sent"
-        if args.sessions_only:
-            print(f"sessions-only backfill {mode}: {c['rows']} rows, by run_origin "
-                  f"{json.dumps(c['by_origin'], sort_keys=True)}, turn_id NULL {c['turn_null']}, "
-                  f"subagent rows without a parent {c['subagent_no_parent']}")
-        if args.activity_only:
-            print(f"activity-only backfill {mode}: {c['activity']} rows, by kind "
-                  f"{json.dumps(c['by_kind'], sort_keys=True)}, steer via "
-                  f"{json.dumps(c['via'], sort_keys=True)}, link rows with each key by role "
-                  f"{json.dumps(c['link'], sort_keys=True)}")
-        return 0
-    if args.cmd == "backfill" and args.dry_run:
+            parser.error(f"unknown agent(s): {bad}; valid = {list(ALL_AGENTS)}")
+    if args.cmd == "backfill" and args.dry_run and not (args.sessions_only or args.activity_only):
         parser.error("backfill --dry-run needs --sessions-only or --activity-only (a plain "
                      "backfill resets the watermark; preview it with `aut scan --dry-run`)")
 
-    if args.cmd == "backfill":
-        state = load_state()
-        for name in agents:
-            state.get("collectors", {}).pop(name, None)
-        save_state(state)
-        print(f"watermark reset for: {', '.join(agents)}")
-
-    dry = getattr(args, "dry_run", False)
-    report = run_scan(cfg, list(agents), dry)
-    _print_report(cfg, report, dry)
-    return 0
+    _AGENT_COMMANDS[args.cmd](cfg, agents, args)
 
 
 if __name__ == "__main__":

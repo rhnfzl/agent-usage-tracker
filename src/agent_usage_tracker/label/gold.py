@@ -5,7 +5,7 @@ item shows its local, redacted text and the candidates; keys 1-9 answer, s skips
 ends. The teachers' (silver) answers show only after the item is answered. Items come stratified
 by silver label (rare labels and teacher disagreement come up as often as common ones), and the
 page shows gold per label against the floor and target. Answers append to <task>.jsonl at once
-(unit_id, gold, labeller, date, task_ver; never text), so a session can stop any time and the
+(unit_id, gold, labeller, date, task_ver; never text), so a sitting can stop any time and the
 next one resumes with what is left.
 """
 
@@ -13,31 +13,20 @@ from __future__ import annotations
 
 import html
 import json
-import secrets
-import sys
-import threading
-import webbrowser
 from collections import Counter
-from datetime import date
-from http.server import BaseHTTPRequestHandler, HTTPServer
-from urllib.parse import parse_qs
+from datetime import date, datetime, timezone
+from typing import Any, Callable
 
-from ..config import Config
-from .core import Request
-from .evalset import (DAYS, FLOORS, append_jsonl, gold_latest, path, read_jsonl, silver_by_unit,
-                      stratified, stratum, window_units, write_jsonl)
+from .. import local_page
+from ..config import LABEL_DAYS, Config
+from .core import Request, top_label
+from .evalset import (FLOORS, append_jsonl, eval_path, gold_latest, read_jsonl,
+                      silver_by_unit, stratified, stratum, window_units, write_jsonl)
 from .tasks import TASKS, Source
 
 LABELLER = "human"
-_MAX_BODY = 1 << 16
 _KEYS = "123456789"
-_CSS = """:root { color-scheme: light dark; --bg: #fafafa; --fg: #1a1a1a; --mut: #666;
-  --line: #ddd; --acc: #2b5fd9; }
-@media (prefers-color-scheme: dark) { :root { --bg: #161616; --fg: #eee; --mut: #aaa;
-  --line: #333; --acc: #7aa2ff; } }
-body { background: var(--bg); color: var(--fg); font: 15px/1.45 system-ui, sans-serif;
-  max-width: 52rem; margin: 0 auto; padding: 1rem; }
-pre { white-space: pre-wrap; word-break: break-word; background: transparent;
+_CSS = """pre { white-space: pre-wrap; word-break: break-word; background: transparent;
   border: 1px solid var(--line); border-radius: 6px; padding: .5rem; margin: .2rem 0 .6rem; }
 .mut { color: var(--mut); font-size: 13px; } dt { font-weight: 600; }
 button { font: inherit; display: block; width: 100%; text-align: left; margin: .25rem 0;
@@ -53,10 +42,10 @@ _JS = """document.addEventListener('keydown', e => {
   if (b) { e.preventDefault(); b.click(); } });"""
 
 
-def _facts(state: dict) -> str:
+def _facts(facts: dict[str, Any]) -> str:
     e = html.escape
     parts = ["<dl>"]
-    for k, v in state.items():
+    for k, v in facts.items():
         if isinstance(v, str) and v:
             parts.append(f"<dt>{e(k)}</dt><dd><pre>{e(v)}</pre></dd>")
         elif isinstance(v, list) and v and all(isinstance(x, str) for x in v):
@@ -77,15 +66,13 @@ def _progress(task: str, gold: dict[str, str]) -> str:
             f"<table>{rows}</table></details>")
 
 
-def render(task: str, token: str, item: Request | None, gold: dict, last: dict | None,
-           left: int, session: Counter) -> str:
+def render(task: str, token: str, item: Request | None, gold: dict[str, Any], last: dict[str, Any] | None,
+           left: int, counts: Counter[str]) -> str:
     e = html.escape
-    head = (f'<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" '
-            f'content="width=device-width, initial-scale=1"><title>Gold labels</title>'
-            f"<style>{_CSS}</style></head><body><h1>{e(task)}</h1>"
+    head = (local_page.head("Gold labels", "52rem", _CSS) + f"<h1>{e(task)}</h1>"
             "<p class=mut>Private page on this machine only. Only your answer (a label and the "
-            f"unit id) is saved, on this machine. This session: {session['answered']} answered, "
-            f"{session['skipped']} skipped; {left} left.</p>")
+            f"unit id) is saved, on this machine. This session: {counts['answered']} answered, "
+            f"{counts['skipped']} skipped; {left} left.</p>")
     parts = [head]
     if last:
         said = ", ".join(f"{e(t)}: {e(lab)} ({p:.0%})" for t, lab, p in last["teachers"]) \
@@ -98,7 +85,7 @@ def render(task: str, token: str, item: Request | None, gold: dict, last: dict |
     else:
         parts.append(f'<input type=hidden name=u value="{e(item.unit_id)}">'
                      f"<p><b>{e(item.question)}</b> <span class=mut>({e(item.unit)})</span></p>"
-                     + _facts(item.state))
+                     + _facts(item.facts))
         for i, c in enumerate(item.candidates):
             k = _KEYS[i] if i < len(_KEYS) else ""
             parts.append(f'<button name=a value="{e(c["id"])}" data-key="{k}">{k}. '
@@ -110,14 +97,14 @@ def render(task: str, token: str, item: Request | None, gold: dict, last: dict |
     return "".join(parts)
 
 
-def _teachers(silver: dict | None) -> list[tuple[str, str, float]]:
-    return [(t, max(d, key=d.get), max(d.values())) for t, d in sorted((silver or {}).items())
+def _teachers(silver: dict[str, Any] | None) -> list[tuple[str, str, float]]:
+    return [(t, top_label(d), max(d.values())) for t, d in sorted((silver or {}).items())
             if d]
 
 
 def _drop_last(task: str, unit_id: str) -> None:
     """Undo: remove the newest gold row of the unit (the file is otherwise append-only)."""
-    p = path(task, "gold")
+    p = eval_path(task, "gold")
     rows = read_jsonl(p)
     for i in range(len(rows) - 1, -1, -1):
         if rows[i].get("unit_id") == unit_id:
@@ -126,108 +113,97 @@ def _drop_last(task: str, unit_id: str) -> None:
     write_jsonl(p, rows)
 
 
-def serve(task: str, reqs: dict[str, Request], open_browser: bool = True, on_ready=None,
-          today: date | None = None) -> Counter:
-    """Serve the page until q (or Ctrl-C). Returns {answered, skipped} of this session."""
-    token = secrets.token_urlsafe(16)
-    silver, gold = silver_by_unit(task), gold_latest(task)
-    queue = stratified([r for u, r in reqs.items() if u not in gold],
-                       lambda r: stratum(silver.get(r.unit_id)), seed=task)
-    st: dict = {"pos": 0, "hist": [], "last": None}
-    session: Counter = Counter(answered=0, skipped=0)
-    ids = {c for c, _d in TASKS[task].candidates}
-    day = (today or date.today()).isoformat()
+class _Sitting:
+    """One sitting of the gold page: the queue, the position in it, and what can be undone."""
 
-    def page() -> bytes:
-        item = queue[st["pos"]] if st["pos"] < len(queue) else None
-        return render(task, token, item, gold, st["last"], len(queue) - st["pos"],
-                      session).encode()
+    def __init__(self, task: str, reqs: dict[str, Request], today: date | None) -> None:
+        self.task, self.silver, self.gold = task, silver_by_unit(task), gold_latest(task)
+        self.queue = stratified([r for u, r in reqs.items() if u not in self.gold],
+                                lambda r: stratum(self.silver.get(r.unit_id)), seed=task)
+        self.pos = 0
+        self.hist: list[tuple[str, str]] = []
+        self.last: dict[str, Any] | None = None
+        self.counts: Counter[str] = Counter(answered=0, skipped=0)
+        self.ids = {c for c, _d in TASKS[task].candidates}
+        self.day = (today or date.today()).isoformat()
 
-    def act(form: dict) -> bool:
-        """Apply one answer; True when the session ends."""
+    def _item(self) -> Request | None:
+        return self.queue[self.pos] if self.pos < len(self.queue) else None
+
+    def page(self, token: str) -> bytes:
+        return render(self.task, token, self._item(), self.gold, self.last,
+                      len(self.queue) - self.pos, self.counts).encode()
+
+    def _undo(self) -> None:
+        kind, uid = self.hist.pop()
+        self.pos -= 1
+        self.last = None
+        if kind == "gold":
+            _drop_last(self.task, uid)
+            self.gold.pop(uid, None)
+            self.counts["answered"] -= 1
+        else:
+            self.counts["skipped"] -= 1
+
+    def _answer(self, u: str, a: str) -> None:
+        append_jsonl(eval_path(self.task, "gold"), {"unit_id": u, "gold": a, "labeller": LABELLER,
+                                                    "date": self.day,
+                                                    "task_ver": TASKS[self.task].ver})
+        self.gold[u] = a
+        self.hist.append(("gold", u))
+        self.pos += 1
+        self.last = {"gold": a, "teachers": _teachers(self.silver.get(u))}
+        self.counts["answered"] += 1
+
+    def act(self, form: dict[str, Any]) -> bool:
+        """Apply one answer; True when the sitting ends."""
         a, u = (form.get("a") or [""])[0], (form.get("u") or [""])[0]
-        item = queue[st["pos"]] if st["pos"] < len(queue) else None
+        item = self._item()
         if a == ":quit":
             return True
-        if a == ":undo" and st["hist"]:
-            kind, uid = st["hist"].pop()
-            st["pos"] -= 1
-            st["last"] = None
-            if kind == "gold":
-                _drop_last(task, uid)
-                gold.pop(uid, None)
-                session["answered"] -= 1
-            else:
-                session["skipped"] -= 1
+        if a == ":undo" and self.hist:
+            self._undo()
         elif item is None or u != item.unit_id:
             pass                              # a stale page (another tab, a double press)
         elif a == ":skip":
-            st["hist"].append(("skip", u))
-            st["pos"] += 1
-            session["skipped"] += 1
-        elif a in ids:
-            append_jsonl(path(task, "gold"), {"unit_id": u, "gold": a, "labeller": LABELLER,
-                                              "date": day, "task_ver": TASKS[task].ver})
-            gold[u] = a
-            st["hist"].append(("gold", u))
-            st["pos"] += 1
-            st["last"] = {"gold": a, "teachers": _teachers(silver.get(u))}
-            session["answered"] += 1
+            self.hist.append(("skip", u))
+            self.pos += 1
+            self.counts["skipped"] += 1
+        elif a in self.ids:
+            self._answer(u, a)
         return False
 
-    class Handler(BaseHTTPRequestHandler):
-        def log_message(self, *a):          # keep unit text out of the terminal
-            pass
 
-        def _reply(self, code: int, body: bytes, location: str | None = None) -> None:
-            self.send_response(code)
-            if location:
-                self.send_header("Location", location)
-            self.send_header("Content-Type", "text/html; charset=utf-8")
-            self.send_header("Content-Length", str(len(body)))
-            self.send_header("Cache-Control", "no-store")
-            self.end_headers()
-            self.wfile.write(body)
+def serve(task: str, reqs: dict[str, Request], *, open_browser: bool = True,
+          on_ready: Callable[[str], None] | None = None, today: date | None = None) -> Counter[str]:
+    """Serve the page until q (or Ctrl-C). Returns {answered, skipped} of this sitting."""
+    token = local_page.new_token()
+    sitting = _Sitting(task, reqs, today)
 
-        def do_GET(self):
-            ok = self.path == f"/{token}"
-            self._reply(200 if ok else 404, page() if ok else b"not found")
+    def on_post(form: dict[str, Any]) -> bytes | None:
+        if sitting.act(form):
+            return f"<p>Saved {sitting.counts['answered']} answers. You can close this tab.</p>".encode()
+        return None
 
-        def do_POST(self):
-            n = int(self.headers.get("Content-Length") or 0)
-            if self.path != f"/{token}" or not 0 < n <= _MAX_BODY:
-                self._reply(404, b"not found")
-                return
-            if act(parse_qs(self.rfile.read(n).decode("utf-8", "replace"))):
-                self._reply(200, f"<p>Saved {session['answered']} answers. You can close this "
-                                 "tab.</p>".encode())
-                threading.Thread(target=self.server.shutdown).start()
-            else:
-                self._reply(303, b"", f"/{token}")      # post, redirect, get: reload is safe
-
-    srv = HTTPServer(("127.0.0.1", 0), Handler)
-    url = f"http://127.0.0.1:{srv.server_address[1]}/{token}"
-    if on_ready:
-        on_ready(url)
-    if open_browser:
-        print(f"aut: gold page at {url} (q on the page, or Ctrl-C, to stop; answers are already "
-              "saved)", file=sys.stderr)
-        webbrowser.open(url)
-    try:
-        srv.serve_forever()
-    except KeyboardInterrupt:
-        pass
-    finally:
-        srv.server_close()
-    return session
+    local_page.serve(token, lambda tail: sitting.page(token) if tail == "" else None, on_post,
+                     "gold page at {url} (q on the page, or Ctrl-C, to stop; answers are already "
+                     "saved)", open_browser=open_browser, on_ready=on_ready)
+    return sitting.counts
 
 
-def run_review(cfg: Config, task: str | None, days: int = DAYS, src: Source | None = None,
-               open_browser: bool = True, on_ready=None) -> Counter:
+def run_gold_review(cfg: Config, task: str | None, days: int = LABEL_DAYS, *, src: Source | None = None,
+                    open_browser: bool = True,
+                    on_ready: Callable[[str], None] | None = None,
+                    now: datetime | None = None) -> dict[str, Any]:
     task = task or next((t for t in cfg.label_tasks if t in TASKS), "steer_intent")
-    session = serve(task, window_units(cfg, task, days, src), open_browser, on_ready)
+    today = (now or datetime.now(timezone.utc)).astimezone().date()
+    counts = serve(task, window_units(cfg, task, days, src, today), open_browser=open_browser,
+                   on_ready=on_ready, today=today)
     n = Counter(gold_latest(task).values())
-    print(f"label review {task}: {session['answered']} answered, {session['skipped']} skipped; "
-          f"gold per label {json.dumps({c: n[c] for c, _d in TASKS[task].candidates})} "
-          f"(floor {FLOORS[task][0]})")
-    return session
+    return {**counts, "task": task, "gold": {c: n[c] for c, _d in TASKS[task].candidates}}
+
+
+def print_review(report: dict[str, Any]) -> None:
+    task = report["task"]
+    print(f"label review {task}: {report['answered']} answered, {report['skipped']} skipped; "
+          f"gold per label {json.dumps(report['gold'])} (floor {FLOORS[task][0]})")

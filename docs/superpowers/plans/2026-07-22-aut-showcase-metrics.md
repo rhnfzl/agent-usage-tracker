@@ -1,5 +1,7 @@
 # AUT Showcase-Metrics Implementation Plan
 
+> **Superseded.** `aut report`, `report.py` and `metrics.py` were built and then retired; `metrics.json` is replaced by the sink's database views. Kept as history, it does not describe the code.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Add a read-side capability that turns the tracker's per-turn sink data into a small, honest `metrics.json` for a personal-site showcase, priced by a synced API-equivalent rate map.

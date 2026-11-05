@@ -67,7 +67,7 @@ inspect pages read titles from this machine's logs and keep them in the page.
 | When | Call |
 |---|---|
 | `cursor_api = true` | Cursor's dashboard API, with your local session token, scoped to your own user |
-| `aut sync-prices` | the LiteLLM and models.dev price lists |
+| `aut sync-prices` | the LiteLLM, models.dev and pydantic/genai-prices price lists |
 | `aut outcomes --fetch` or `outcome_fetch = true` | `git fetch` in your clones and `gh pr list` |
 | `activitywatch` in `agents` | the ActivityWatch server at `activitywatch_url` (default `http://localhost:5600`). With `activitywatch_title_days` above 0, every real scan also sends `DELETE` requests there for its window events older than that |
 | `aut label teach` | Claude Sonnet through your local `claude -p`, for Claude Code text only (that text already lives with Anthropic); capped by `--budget-usd` |
@@ -120,8 +120,9 @@ watermark only advances after a push succeeds, and the sink drops re-sends by `e
 
 ## Commands
 
-`--agents a,b` (before the subcommand) overrides the configured agent list for one run, for
-example `aut --agents codex,pi scan --dry-run`.
+`--agents a,b` (before or after the subcommand) overrides the configured agent list for one run
+of `scan`, `backfill`, `export` or `status`, for example `aut --agents codex,pi scan --dry-run`. Any
+other command refuses it.
 
 | Command | What it does | Needs |
 |---|---|---|
@@ -130,22 +131,21 @@ example `aut --agents codex,pi scan --dry-run`.
 | `aut backfill --sessions-only [--dry-run]` | re-read all history and send only session rows; the watermark is untouched | `pg_dsn` (not with `--dry-run`) |
 | `aut backfill --activity-only [--dry-run]` | the same for activity rows (steers, commits, turns, links, ...); never usage. Both flags may be given together | `pg_dsn` (not with `--dry-run`) |
 | `aut status` | show machine, agents, transports and watermarks | |
-| `aut export [--out FILE]` | write all usage rows as CSV (stdout by default), deduplicated, columns in sink order for `COPY` | |
-| `aut sync-prices [--out FILE] [--litellm-url URL] [--models-dev-url URL]` | build the API-equivalent price map, `model_prices.json` in the config dir by default | network |
+| `aut export [--out FILE]` | write all usage rows as CSV (stdout by default), deduplicated, columns in sink order for `COPY`. Exits 1 if a collector that feeds the CSV could not fully read a source, so the CSV is partial (`activitywatch` has no usage rows, so it never does); `backfill --sessions-only`/`--activity-only` do the same for the collectors with those rows | |
+| `aut sync-prices [--out FILE] [--litellm-url URL] [--models-dev-url URL] [--genai-prices-url URL]` | build the API-equivalent price map, `model_prices.json` in the config dir by default; the URLs must be http(s) | network |
 | `aut time add --start T --end T` | record a manual active-time interval in local time, e.g. `--start "2026-11-03 09:00"` | `pg_dsn` |
 | `aut time add --minutes N [--at T] [--not-relevant]` | the same as a length ending at `--at` (default now); `--not-relevant` marks it not work time. At most 16 hours, never in the future | `pg_dsn` |
-| `aut outcomes [--fetch] [--dry-run]` | score every commit row against your local clones and write `agents.commit_outcome`. `--fetch` fetches first and asks `gh` | `pg_dsn`, clones under `outcome_repo_roots` |
+| `aut outcomes [--fetch] [--dry-run]` | score every commit row against your local clones and write `agents.commit_outcome`. `--fetch` fetches first and asks `gh`. `--dry-run` writes nothing and never fetches or asks `gh`, even with `--fetch` | `pg_dsn`, clones under `outcome_repo_roots` |
 | `aut outcome shipped\|ruled-out\|open [--session ID]` | your verdict on this project's newest interactive Claude Code session (or `--session`) | `pg_dsn` |
 | `aut episodes review [--month YYYY-MM]` | hand-check a sample of 30 of a month's episodes (default: last completed month) on a local page; writes `agents.episode_correction` | `pg_dsn` |
-| `aut inspect --episode ID \| --day YYYY-MM-DD \| --label UNIT_ID` | read-only local page: why an episode (id or prefix), a day's episodes, or a label exists | `pg_dsn` |
+| `aut inspect --episode ID \| --day YYYY-MM-DD \| --label UNIT_ID` | local evidence page: why an episode (id or prefix), a day's episodes, or a label exists. Its linked correction form writes `agents.episode_correction` | `pg_dsn` |
 | `aut label run [--task T] [--since YYYY-MM-DD] [--dry-run]` | label new units since the watermark, for `label_tasks` or one task | `label` extra, `pg_dsn`, the model in the HF cache |
-| `aut label backfill --task T --days N` | label one task over the last N days; the nightly watermark is not moved back | same |
+| `aut label backfill --task T --days N` | label one task over the last N days; the nightly watermark is not moved back. `soft_outcome` always covers the last 14 days, whatever `--days` or `--since` say (it notes this on stderr) | same |
 | `aut label teach --task T --n N [--budget-usd X] [--days D]` | teacher (silver) labels for a stratified sample of up to N units (default spend cap 5 USD, window 90 days) | same, plus `claude` on `PATH` |
 | `aut label review [--task T] [--days D]` | answer gold labels one unit at a time on a local page | `pg_dsn` |
 | `aut label eval --task T [--days D]` | score every backend on your gold labels | same as `run` |
 | `aut label choose --task T` | write the smallest backend that passes the bar into `label.json` | an eval record |
 | `aut label train-encoder --task T [--days D]` | fit the small stdlib encoder on gold and silver labels | gold or silver labels |
-| `aut report` | retired: prints a note and writes nothing. Aggregates are the sink's views | |
 
 Label tasks: `steer_intent`, `work_category`, `soft_outcome`, `aw_title_relevance`, and
 `daily_note` (for `run` and `backfill` only).
@@ -172,8 +172,8 @@ matter:
 | `agents` | every collector except `activitywatch` | which collectors run (see below). The default turns on `cursor`, `cursor_sdk` and `cursor_api` together, so set `agents` yourself before `cursor_api = true`, or Cursor tokens count twice |
 | `[transport] webhook_url` | unset | n8n ingest webhook. `https://` only (or `http://` to localhost) |
 | `[transport] webhook_secret` | unset | sent as `X-AUT-Secret`; a webhook without it is refused |
-| `[transport] cf_access_client_id`, `cf_access_client_secret` | unset | Cloudflare Access service token, to push from any network without a VPN |
-| `[transport] pg_dsn` | unset | direct Postgres. The webhook carries usage only, so this is also how activity, time, outcome, label and heartbeat rows arrive. Session rows are the exception: with both transports set and the webhook working, `aut scan` does not send them. Run `aut backfill --sessions-only` from time to time to fill them. A scan sends them only when `pg_dsn` is the only transport or the webhook fails |
+| `[transport] cf_access_client_id`, `cf_access_client_secret` | unset | Cloudflare Access service token, to push from any network without a VPN. With only one of the two set, aut warns and sends no Access headers |
+| `[transport] pg_dsn` | unset | direct Postgres. The webhook carries usage only, so this is also how activity, time, outcome, label and heartbeat rows arrive. It also carries session rows, and usage when the webhook fails. Add `sslmode=require` when the host is remote: without it aut warns on each run, because libpq can fall back to plaintext. `sslmode=disable` states that a private link such as Tailscale is intended and silences the warning |
 | `repo_key_salt` | random `repo_key.salt` next to the state file | HMAC key for repo, branch, ticket, PR and SHA keys. Set the same value on every machine so keys match |
 | `cursor_api` | `false` | opt-in accurate Cursor usage from the dashboard API |
 | `cursor_api_lookback_days` | `90` | how far back the first `cursor_api` scan reaches. Older history is never fetched |
@@ -197,8 +197,9 @@ Files aut keeps on this machine:
 |---|---|
 | watermarks | `~/.local/state/agent-usage-tracker/state.json` (`$XDG_STATE_HOME`, `AUT_STATE` overrides) |
 | `repo_key.salt`, `outcomes_cache.json` | next to the state file |
-| `state.corrupt` | next to the state file: a copy of an unreadable `state.json`, kept before aut starts clean |
-| `model_prices.json`, `label.json` | next to `config.toml`. Nothing in aut reads `model_prices.json` today |
+| `state.corrupt` | next to the state file: a copy of a corrupt `state.json`, kept before aut starts clean. A `state.json` aut has no permission to read stops the run instead and is left as it is |
+| `state.lock` | next to the state file: an empty file, the advisory lock for one short watermark save, so overlapping `scan` and `label` runs keep each other's watermarks |
+| `model_prices.json`, `label.json` | next to `config.toml`. Nothing in aut reads `model_prices.json`; it is kept for readers outside aut |
 | label gold, silver and eval files; the trained encoder; the label run cache | `~/.local/share/aut/eval/`, `~/.local/share/aut/label/encoder/`, `~/.local/share/aut/label/cache.json` (`$XDG_DATA_HOME`) |
 | `scan.env`, `scan.log`, `retry-pending`, `outcomes-day`, `label-day` | `~/.config/agent-usage-tracker/`, used by the timer wrapper. The wrapper hard-codes this path, so it ignores `$XDG_CONFIG_HOME` and `AUT_CONFIG` |
 | `/tmp/aut.log`, `/tmp/aut.err` | scan output from the shipped launchd plists. `/tmp` can be read by other users; change the paths in the plists if that matters |
@@ -266,7 +267,9 @@ they belong in `config.toml`.
 With a tunnel, point `pg_dsn` at `localhost` and the local port.
 
 **Heartbeats.** Every real scan writes one `agents.collector_scan` row per collector over
-`pg_dsn`, so a dead collector does not look like a quiet week. `aut outcomes` and
+`pg_dsn`, so a dead collector does not look like a quiet week: `status` is `degraded` when a
+collector could not read its source (an expired Cursor token, a stopped aw-server), stored as
+`error` on a sink whose CHECK has no `degraded`. `aut outcomes` and
 `aut label run` write their own rows (collector `outcomes` and `label`). A heartbeat that
 fails to send prints a warning and never fails the scan.
 
@@ -299,8 +302,9 @@ self-calibration (`time_params`, `app_learned`) all live there, not in aut. It n
   `agents.episode` and `episode_member`, which the review and inspect commands read. Labels are
   read from `activity_event` rows with `kind = 'label'`.
 
-Every table, column and key is in [CONTRACT.md](CONTRACT.md). A deploy walkthrough is in
-[DEPLOY.md](DEPLOY.md).
+Every table, column and key this client writes is in [CONTRACT.md](CONTRACT.md), along with the
+columns it reads from the sink-built episode views. Those views and `episode_link()` are defined
+only in the infrastructure repo. A deploy walkthrough is in [DEPLOY.md](DEPLOY.md).
 
 ## How it stays correct
 
@@ -327,7 +331,7 @@ A download stopped half way fails the same check: run it again until it finishes
 the cache somewhere else (`HF_HOME`), the timer does not see your shell's value: add
 `export HF_HOME=...` to `scan.env`.
 
-**`No module named 'psycopg'`** (or `scan heartbeat not delivered: ModuleNotFoundError`). You
+**`this needs the Postgres driver`** (also inside `scan heartbeat not delivered: ...`). You
 set `pg_dsn` but installed aut without the extra. Reinstall with the `[postgres]` (or
 `[label]`) install line above, adding `--reinstall`.
 
@@ -335,10 +339,17 @@ set `pg_dsn` but installed aut without the extra. Reinstall with the `[postgres]
 only. Set `pg_dsn` as well, then fill history with
 `aut backfill --sessions-only --activity-only`. Time rows have no backfill.
 
-**Session rows are missing although `pg_dsn` is set** (`note: session rows not sent over the
-webhook`). With both transports set and the webhook working, a scan sends activity and time rows
-over `pg_dsn` but not session rows. Run `aut backfill --sessions-only` to fill them, for example
-from the same timer.
+**Session rows are missing for old scans although `pg_dsn` is set.** Older versions did not send
+session rows while the webhook worked. New scans do. Run `aut backfill --sessions-only` once to
+fill the history.
+
+**`webhook delivery failed, using transport.pg_dsn`.** The webhook is broken (often a rejected
+secret or an expired Cloudflare Access token) and usage is going over Postgres instead. Nothing is
+lost, but fix the webhook. The warning prints once per scan and names the failure.
+
+**`transport.pg_dsn reaches <host> without requiring TLS`.** A warning only: the connection still
+goes ahead, and libpq may fall back to plaintext. Add `sslmode=require` to the DSN. On a private
+link such as Tailscale, `sslmode=disable` says that is intended and silences it.
 
 **The tunnel.** `AUT_TUNNEL_HOST` without `AUT_TUNNEL_SPEC` makes the wrapper refuse to scan
 (exit 2, logged in `scan.log`). An unreachable host is not a failure: the wrapper arms

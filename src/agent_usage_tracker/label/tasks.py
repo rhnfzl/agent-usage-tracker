@@ -8,19 +8,20 @@ Changing a candidate or a definition bumps that task's `ver`.
 
 from __future__ import annotations
 
-import glob
-import json
 from collections import Counter, defaultdict
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
-from pathlib import Path
-from typing import Callable
+from datetime import date, datetime, timezone
+from typing import Any, Callable
 
 from ..collectors import activitywatch as aw
-from ..collectors._activity_common import RepoKeys, text_of
-from ..config import Config
-from ..event import make_event_id
-from .core import Request
+from ..collectors import claude_code
+from ..config import AutError, Config
+from ..episode_store import Episode, load_since
+from ..event import CollectorUnavailable, make_event_id
+from ..redact import redact
+from ..repo_keys import RepoKeys
+from ..sink import connect
+from .core import Request, local_days
 
 TEXT_MAX = 1500              # chars of one steer text a prompt carries
 AW_BLOCK_MIN_S = 300
@@ -40,10 +41,10 @@ class Task:
     #                                                 | recent: the last OUTCOME_DAYS, no watermark
     cached: bool = False                            # skip a unit_id already labelled (aw titles)
 
-    def request(self, unit: str, unit_id: str, ts: datetime, state: dict,
+    def request(self, unit: str, unit_id: str, ts: datetime, facts: dict[str, Any],
                 rev: str | None = None) -> Request:
         return Request(task=self.name, task_ver=self.ver, unit=unit, unit_id=unit_id,
-                       ts=ts.astimezone(timezone.utc).isoformat(), state=state,
+                       ts=ts.astimezone(timezone.utc).isoformat(), facts=facts,
                        question=self.question, decision=self.decision,
                        candidates=[{"id": i, "desc": d} for i, d in self.candidates],
                        none_fits=self.none_fits, rev=rev)
@@ -85,18 +86,15 @@ TASKS: dict[str, Task] = {t.name: t for t in (
         ("relevant", "building, learning or collaboration work, employer or personal"),
         ("not_relevant", "leisure or private admin")), None, "day", cached=True),
 )}
-NOTE = "daily_note"          # generative, private: one draft per day (run.py), not a decision
-TASK_NAMES = (*TASKS, NOTE)
 
 
-class SourceUnavailable(RuntimeError):
-    """A source the units need could not be read: the task's watermark must not move."""
+class SourceUnavailable(AutError):
+    """aw-server could not be read: the task's watermark must not move. A sink read's own error
+    (a raw psycopg one) is not this: the sink being down stops the whole run."""
 
 
-def _sql(dsn: str, sql: str, params: tuple) -> list[tuple]:
-    import psycopg  # optional dependency; install with the [postgres] extra
-
-    with psycopg.connect(dsn, connect_timeout=15) as conn:
+def _sql(dsn: str, sql: str, params: tuple[Any, ...]) -> list[tuple[Any, ...]]:
+    with connect(dsn) as conn:
         return conn.execute(sql, params).fetchall()
 
 
@@ -106,83 +104,53 @@ class Source:
     def __init__(self, cfg: Config) -> None:
         self.cfg, self.keys = cfg, RepoKeys(cfg.repo_key_salt)
 
-    def steers(self, since: datetime) -> list[dict]:
-        """Every steer of each session that has one since `since` (for index and previous)."""
-        rows = _sql(self.cfg.pg_dsn,
+    def steers(self, since: datetime) -> list[dict[str, Any]]:
+        """Every steer of each session that has one since `since` (for index and previous), in ts
+        order: the unit builders rely on it."""
+        rows = _sql(self.cfg.require_pg("label"),
                     "SELECT event_id, ts, agent, session_id, attrs FROM agents.activity_event "
                     "WHERE kind = 'steer' AND session_id IN (SELECT session_id FROM "
                     "agents.activity_event WHERE kind = 'steer' AND ts >= %s) ORDER BY ts",
                     (since,))
         return [dict(zip(("event_id", "ts", "agent", "session_id", "attrs"), r)) for r in rows]
 
-    def episodes(self, since: datetime) -> list[dict]:
-        rows = _sql(self.cfg.pg_dsn,
-                    "SELECT e.episode_id::text, e.first_ts, e.last_ts, e.n_sessions, e.n_steers, "
-                    "e.n_commits, e.outcome, array_agg(m.session_id) FROM agents.episode e "
-                    "JOIN agents.episode_member m USING (episode_id) WHERE e.last_ts >= %s "
-                    "GROUP BY e.episode_id", (since,))
-        return [dict(zip(("episode_id", "first_ts", "last_ts", "n_sessions", "n_steers",
-                          "n_commits", "outcome", "sessions"), r)) for r in rows]
+    def episodes(self, since: datetime) -> list[Episode]:
+        return load_since(self.cfg.require_pg("label"), since)
 
-    def activity(self, sessions: list[str], since: datetime, until: datetime) -> list[dict]:
-        rows = _sql(self.cfg.pg_dsn,
+    def activity(self, sessions: list[str], since: datetime, until: datetime) -> list[dict[str, Any]]:
+        rows = _sql(self.cfg.require_pg("label"),
                     "SELECT session_id, ts, kind, attrs FROM agents.activity_event WHERE kind IN "
                     "('turn', 'interrupt', 'rejection', 'commit') AND session_id = ANY(%s) "
                     "AND ts >= %s AND ts < %s", (sessions, since, until))
         return [dict(zip(("session_id", "ts", "kind", "attrs"), r)) for r in rows]
 
-    def labels(self, since: datetime, until: datetime) -> list[dict]:
-        rows = _sql(self.cfg.pg_dsn, "SELECT attrs FROM agents.activity_event WHERE kind = "
-                    "'label' AND ts >= %s AND ts < %s ORDER BY ts", (since, until))
-        return [r[0] for r in rows]
+    def labels(self, since: datetime, until: datetime) -> list[tuple[Any, ...]]:
+        """(event_id, ts, attrs) of each label row: what core.current_labels reads."""
+        return _sql(self.cfg.require_pg("label"), "SELECT event_id, ts, attrs FROM "
+                    "agents.activity_event WHERE kind = 'label' AND ts >= %s AND ts < %s ORDER BY ts",
+                    (since, until))
 
-    def texts(self, steers: list[dict]) -> dict[str, str]:
+    def texts(self, steers: list[dict[str, Any]]) -> dict[str, str]:
         """steer event_id -> its redacted text, from this machine's Claude Code logs.
-        shortcut: Claude Code only (its steer id is the record uuid); Codex and Pi seed theirs
-        from position, so their steers stay unlabelled. Upgrade when they carry many steers."""
+        shortcut: Claude Code only; Codex and Pi seed theirs from position, so their steers stay
+        unlabelled. Upgrade when they carry many steers."""
         want = {s["event_id"] for s in steers if s["agent"] == "claude_code"}
         sessions = {s["session_id"] for s in steers if s["agent"] == "claude_code"}
-        out: dict[str, str] = {}
-        base = Path(self.cfg.home) / ".claude" / "projects"
-        for f in glob.glob(str(base / "*" / "*.jsonl")):
-            if Path(f).stem not in sessions:
-                continue
-            with open(f, encoding="utf-8", errors="replace") as fh:
-                for line in fh:
-                    if '"user"' not in line:
-                        continue
-                    try:
-                        o = json.loads(line)
-                    except ValueError:
-                        continue
-                    uid = o.get("uuid") if isinstance(o, dict) else None
-                    if not isinstance(uid, str):
-                        continue
-                    eid = make_event_id("claude_code", "steer", uid)
-                    m = o.get("message")
-                    if eid in want and isinstance(m, dict):
-                        out[eid] = aw.redact(text_of(m.get("content")))[:TEXT_MAX]
-        return out
+        return {eid: redact(text)[:TEXT_MAX]
+                for eid, text in claude_code.steer_texts(self.cfg.home, sessions, want).items()}
 
-    def windows(self, since: datetime, until: datetime) -> list[dict]:
+    def windows(self, since: datetime, until: datetime) -> list[dict[str, Any]]:
         """This machine's ActivityWatch window rows in [since, until), through the collector's own
-        guards (idle, deny-list, redaction, title settings), one day per query. None where
-        activitywatch is not enabled; SourceUnavailable when it is but aw-server stops short."""
+        guards (idle, deny-list, redaction, title settings), one day per query. No rows where
+        activitywatch is not enabled; SourceUnavailable when it is but aw-server cannot be read."""
         if aw.NAME not in self.cfg.agents:
             return []
-        out, wm = [], {"end": since.astimezone(timezone.utc).isoformat()}
-        while datetime.fromisoformat(wm["end"]) < until:
-            before = wm["end"]
-            for rows, commit in aw.collect(self.cfg, wm):
-                out += rows
-                commit()
-            if wm["end"] == before:
-                break
-        # collect stops on its own short of now - lag; anything earlier means it skipped
-        if datetime.fromisoformat(wm["end"]) < min(until, aw._now() - aw._LAG) - 2 * aw._MIN_RANGE:
-            raise SourceUnavailable("activitywatch: aw-server not readable for the label window")
+        try:
+            rows = aw.intervals(self.cfg, since, until)
+        except CollectorUnavailable as exc:
+            raise SourceUnavailable(str(exc)) from exc
         res = []
-        for t in out:
+        for t in rows:
             s, e = datetime.fromisoformat(t.ts), min(datetime.fromisoformat(t.end_ts), until)
             if s < until and e > s:
                 res.append({"start": s, "end": e, "app": t.app or "", "title": t.title,
@@ -190,23 +158,14 @@ class Source:
         return sorted(res, key=lambda w: w["start"])
 
 
-def _days(since: datetime, until: datetime):
-    d, end = since.astimezone().date(), until.astimezone().date()
-    while d < end:
-        start = datetime(d.year, d.month, d.day).astimezone()
-        yield d, start, start + timedelta(days=1)
-        d += timedelta(days=1)
-
-
-def _steer_units(task: Task, src: Source, since: datetime, until: datetime | None) -> list:
+def _steer_units(task: Task, src: Source, since: datetime, until: datetime | None) -> list[Request]:
     rows = src.steers(since)
     text = src.texts(rows)
-    by_session: dict[str, list[dict]] = defaultdict(list)
+    by_session: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for r in rows:
         by_session[r["session_id"]].append(r)
     out = []
     for rs in by_session.values():
-        rs.sort(key=lambda r: r["ts"])
         for i, r in enumerate(rs):
             prev = rs[i - 1] if i else None
             if r["event_id"] not in text or r["ts"] < since or (until and r["ts"] >= until):
@@ -222,11 +181,11 @@ def _steer_units(task: Task, src: Source, since: datetime, until: datetime | Non
     return out
 
 
-def _aw_blocks(task: Task, wins: list[dict], steer_ts: list[datetime]) -> list:
+def _aw_blocks(task: Task, wins: list[dict[str, Any]], steer_ts: list[datetime]) -> list[Request]:
     """Contiguous same-category window time of AW_BLOCK_MIN_S or more with no steer inside.
     shortcut: 'no steer inside' stands in for 'overlaps no steer interval'; upgrade by reading
     agents.steer_interval once the writer may."""
-    blocks: list[list[dict]] = []
+    blocks: list[list[dict[str, Any]]] = []
     for w in wins:
         b = blocks[-1] if blocks else None
         if b and b[-1]["category"] == w["category"] \
@@ -248,27 +207,16 @@ def _aw_blocks(task: Task, wins: list[dict], steer_ts: list[datetime]) -> list:
     return out
 
 
-def _claude(steers: list[dict]) -> list[dict]:
+def _claude_steers(steers: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Claude Code steers only: an episode unit's facts may reach Sonnet (teach), and Sonnet
     inputs are built only from Claude Code fields."""
     return [r for r in steers if r["agent"] == "claude_code"]
 
 
-def _category_units(task: Task, src: Source, since: datetime, until: datetime | None) -> list:
-    until = until or datetime.now(timezone.utc)
-    steers = [r for r in src.steers(since) if r["ts"] < until]
-    text = src.texts(steers)
-    mine = _claude(steers)
-    claude_sessions = {r["session_id"] for r in mine}
-    eps = src.episodes(since)
-    of_session: dict[str, list[str]] = defaultdict(list)
-    for ep in eps:
-        for sid in ep["sessions"]:
-            of_session[sid].append(ep["episode_id"])
-    sids = sorted(claude_sessions & set(of_session))
-    acts = src.activity(sids, since, until) if sids else []
-    day_of = {d for d, _s, _e in _days(since, until)}
-    days: dict[tuple, dict] = {}
+def _episode_days(mine: list[dict[str, Any]], acts: list[dict[str, Any]], of_session: dict[str, list[str]],
+                  day_of: set[date]) -> dict[tuple[str, date], dict[str, Any]]:
+    """(episode, local day) -> its steers, sessions and activity rows that day."""
+    days: dict[tuple[str, date], dict[str, Any]] = {}
     for r in mine:
         d = r["ts"].astimezone().date()
         if d not in day_of:
@@ -282,55 +230,78 @@ def _category_units(task: Task, src: Source, since: datetime, until: datetime | 
         for ep in of_session.get(a["session_id"], ()):
             if (ep, d) in days:
                 days[(ep, d)]["acts"].append(a)
-    out = []
-    for (ep, d), u in days.items():
-        st = sorted(u["steers"], key=lambda r: r["ts"])
-        said = [text[r["event_id"]] for r in st if r["event_id"] in text]
-        if not said:
-            continue
-        tools: Counter = Counter()
-        kinds = Counter(a["kind"] for a in u["acts"])
-        for a in u["acts"]:
-            if a["kind"] == "turn":
-                tools.update((a["attrs"] or {}).get("by_tool") or {})
-        out.append(task.request("episode_day", f"{ep}:{d.isoformat()}", st[0]["ts"], {
-            "first_steer": said[0], "last_steers": said[1:][-3:], "steers": len(st),
-            "sessions": len(u["sessions"]), "tool_calls_by_tool": dict(tools),
-            "tool_errors": sum((a["attrs"] or {}).get("tool_errors") or 0 for a in u["acts"]
-                               if a["kind"] == "turn"),
-            "interrupts": kinds["interrupt"], "rejections": kinds["rejection"],
-            "commits": kinds["commit"]}))
+    return days
+
+
+def _episode_day_unit(task: Task, ep: str, d: date, u: dict[str, Any], text: dict[str, str]) -> Request | None:
+    """The unit of one episode day; None when none of its steers has local text."""
+    st = u["steers"]
+    said = [text[r["event_id"]] for r in st if r["event_id"] in text]
+    if not said:
+        return None
+    tools: Counter[str] = Counter()
+    kinds = Counter(a["kind"] for a in u["acts"])
+    for a in u["acts"]:
+        if a["kind"] == "turn":
+            tools.update((a["attrs"] or {}).get("by_tool") or {})
+    return task.request("episode_day", f"{ep}:{d.isoformat()}", st[0]["ts"], {
+        "first_steer": said[0], "last_steers": said[1:][-3:], "steers": len(st),
+        "sessions": len(u["sessions"]), "tool_calls_by_tool": dict(tools),
+        "tool_errors": sum((a["attrs"] or {}).get("tool_errors") or 0 for a in u["acts"]
+                           if a["kind"] == "turn"),
+        "interrupts": kinds["interrupt"], "rejections": kinds["rejection"],
+        "commits": kinds["commit"]})
+
+
+def _category_units(task: Task, src: Source, since: datetime, until: datetime | None) -> list[Request]:
+    until = until or datetime.now(timezone.utc)
+    steers = [r for r in src.steers(since) if r["ts"] < until]
+    text = src.texts(steers)
+    mine = _claude_steers(steers)
+    claude_sessions = {r["session_id"] for r in mine}
+    eps = src.episodes(since)
+    of_session: dict[str, list[str]] = defaultdict(list)
+    for episode in eps:
+        for m in episode["members"]:
+            of_session[m["session_id"]].append(episode["id"])
+    sids = sorted(claude_sessions & set(of_session))
+    acts = src.activity(sids, since, until) if sids else []
+    day_of = set(local_days(since, until))
+    days = _episode_days(mine, acts, of_session, day_of)
+    built = (_episode_day_unit(task, ep, d, u, text) for (ep, d), u in days.items())
+    out = [r for r in built if r]
     wins = src.windows(since, until)
     out += _aw_blocks(task, wins, [r["ts"] for r in steers])
     return out
 
 
-def _outcome_units(task: Task, src: Source, since: datetime, until: datetime | None) -> list:
-    """Episodes without commits (git outcome no_code) touched in the last OUTCOME_DAYS."""
+def _outcome_units(task: Task, src: Source, since: datetime, until: datetime | None) -> list[Request]:
+    """Episodes without commits (git outcome no_code) touched in the last OUTCOME_DAYS, as they
+    stood at `until`: started before it, and only what was said before it."""
     now = until or datetime.now(timezone.utc)
-    eps = [e for e in src.episodes(since) if e["outcome"] == "no_code"]
-    steers = _claude(src.steers(since)) if eps else []
+    eps = [e for e in src.episodes(since) if e["outcome"] == "no_code" and e["first_ts"] < now]
+    steers = [r for r in _claude_steers(src.steers(since)) if r["ts"] < now] if eps else []
     text = src.texts(steers)
     out = []
     for ep in eps:
-        mine = set(ep["sessions"])
-        st = [r for r in sorted(steers, key=lambda r: r["ts"]) if r["session_id"] in mine]
+        mine = {m["session_id"] for m in ep["members"]}
+        st = [r for r in steers if r["session_id"] in mine]
         said = [text[r["event_id"]] for r in st if r["event_id"] in text]
         if not said:
             continue
         # ts = the episode start, so the row's day (and its held-out side) never moves; rev =
         # its last activity, so a changed episode is re-asked and an unchanged one is a no-op
-        out.append(task.request("episode", ep["episode_id"], ep["first_ts"], {
-            "last_steers": said[-5:], "days_idle": (now - ep["last_ts"]).days,
+        out.append(task.request("episode", ep["id"], ep["first_ts"], {
+            "last_steers": said[-5:], "days_idle": max((now - ep["last_ts"]).days, 0),
             "sessions": len({r["session_id"] for r in st}), "steers": len(st)},
             rev=ep["last_ts"].astimezone(timezone.utc).isoformat()))
     return out
 
 
-def _title_units(task: Task, src: Source, since: datetime, until: datetime | None) -> list:
+def _title_units(task: Task, src: Source, since: datetime, until: datetime | None) -> list[Request]:
     """One unit per distinct browser (app, title); unit_id is an HMAC under the install salt, so
     it cannot confirm a guessed title. None without a salt: then nothing is labelled."""
-    seen: dict[str, dict] = {}
+    seen: dict[str, dict[str, Any]] = {}
     for w in src.windows(since, until or datetime.now(timezone.utc)):
         if not w["title"] or not w["rule"].startswith("browser_"):
             continue
@@ -345,12 +316,13 @@ def _title_units(task: Task, src: Source, since: datetime, until: datetime | Non
         "minutes": round(u["s"] / 60, 1)}) for k, u in seen.items()]
 
 
-UNITS: dict[str, Callable] = {
+UNITS: dict[str, Callable[[Task, Source, datetime, datetime | None], list[Request]]] = {
     "steer_intent": _steer_units, "work_category": _category_units,
     "soft_outcome": _outcome_units, "aw_title_relevance": _title_units,
 }
 
 
 def units(name: str, src: Source, since: datetime, until: datetime | None) -> list[Request]:
-    """The task's requests in [since, until), oldest first."""
+    """The task's requests in [since, until), oldest first. An episode unit belongs by its
+    activity, so its ts (the episode start) can be before `since`."""
     return sorted(UNITS[name](TASKS[name], src, since, until), key=lambda r: (r.ts, r.unit_id))

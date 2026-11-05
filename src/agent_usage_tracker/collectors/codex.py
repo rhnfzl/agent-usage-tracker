@@ -14,25 +14,70 @@ persisted so resuming from a byte offset keeps the right attribution across scan
 
 from __future__ import annotations
 
-import copy
 import glob
-import json
 import os
-import sys
-from typing import Callable, Iterator
+from collections import Counter
+from pathlib import Path
+from typing import Any, Iterator, NamedTuple, TypedDict
 
 from ..config import Config
-from ..event import ActivityEvent, EventSession, UsageEvent, make_event_id
-from ._activity_common import (Link, RepoKeys, add_call, blank_agg, commit_call, commit_dir,
-                               commit_repo, commit_shas, first_record, ms_between, repo_identity,
-                               text_of, turn_attrs)
-from ._util import basename, read_new_lines, safe_int
+from ..event import Row, ActivityKind, Batch, ActivityEvent, EventSession, RunOrigin, UsageEvent, make_event_id
+from ..repo_keys import RepoKeys, repo_identity
+from ..state import parse_record
+from .activity_common import (Link, TurnAgg, add_call, best_effort, blank_tool_tally, drop_raw_shas,
+                              first_record, human_event, ms_between, record_commits, text_of,
+                              turn_attrs)
+from .commits import commit_call, commit_dir, commit_shas
+from ._util import (MALFORMED_RECORD, count_field, dict_or_empty, file_batches, project_name,
+                    safe_int, str_or_none)
 
 NAME = "codex"
+# The watermark's format. Older state is upgraded once by _upgrade_state; delete a step from there
+# once no machine can still hold state that old.
+_STATE_V = 2
 
 
-def _fresh_state(dev: int | None = None, ino: int | None = None) -> dict:
-    return {"off": 0, "dev": dev, "ino": ino, "model": None, "provider": "openai",
+class FileState(TypedDict, total=False):
+    """One file's watermark entry. An entry saved by an older version also holds an unread `dev`."""
+    off: int
+    ino: int
+    model: str | None
+    provider: str | None
+    session_id: str | None    # the usage event_id seed; see _note_session_meta
+    cwd: str | None
+    tc_ord: int               # token_count records so far
+    um_ord: int               # kept user messages so far
+    meta: dict[str, Any]      # identity from the first session_meta; see _set_meta
+    turn: str | None
+    has_um: bool              # the file has user_message records
+    skip: int                 # copied lines of a fork still unread; see parsed_records
+    act: dict[str, Any]       # _Activity's carried state
+
+
+def sessions_dir(home: Path) -> Path:
+    return home / ".codex" / "sessions"
+
+
+def session_files(home: Path) -> list[str]:
+    return glob.glob(str(sessions_dir(home) / "**" / "rollout-*.jsonl"), recursive=True)
+
+
+def thread_names(home: Path) -> dict[str, str]:
+    """session id -> the name Codex gave the thread (session_index.jsonl). Best effort."""
+    names: dict[str, str] = {}
+    try:
+        with open(home / ".codex" / "session_index.jsonl", encoding="utf-8") as fh:
+            for line in fh:
+                o = parse_record(line)
+                if o and isinstance(o.get("id"), str) and isinstance(o.get("thread_name"), str):
+                    names[o["id"]] = o["thread_name"]
+    except (OSError, ValueError):       # no index, or a bad byte: threads show what it had so far
+        return names
+    return names
+
+
+def _fresh_state(st: os.stat_result) -> FileState:
+    return {"off": 0, "ino": st.st_ino, "model": None, "provider": "openai",
             "session_id": None, "cwd": None, "tc_ord": 0, "um_ord": 0}
 
 
@@ -43,7 +88,7 @@ def _fresh_state(dev: int | None = None, ino: int | None = None) -> dict:
 _PROGRAM_SOURCES = {"exec", "mcp"}
 
 
-def _run_origin(p: dict) -> str:
+def run_origin(p: dict[str, Any]) -> RunOrigin:
     """run_origin from the thread's FIRST session_meta. Structural signals only: originator,
     source and thread_source are recorded by codex itself.
 
@@ -62,7 +107,7 @@ def _run_origin(p: dict) -> str:
     return "interactive" if src in ("vscode", "cli") else "unknown"
 
 
-def _is_scheduled_automation(message: object) -> bool:
+def is_scheduled_automation(message: object) -> bool:
     """True for the preamble older Codex Desktop files put on a scheduled automation run (newer
     files flag it structurally with thread_source). Both markers are required so an ordinary
     message that merely opens with the word 'Automation' is not swallowed."""
@@ -72,28 +117,24 @@ def _is_scheduled_automation(message: object) -> bool:
     return head.startswith("Automation:") and "Automation ID:" in head
 
 
-def _str(v: object) -> str | None:
-    return v if isinstance(v, str) and v else None
-
-
-def _set_meta(cur: dict, p: dict, keys: RepoKeys) -> None:
+def _set_meta(cur: FileState, p: dict[str, Any], keys: RepoKeys) -> None:
     """Identity, origin and cwd from the FIRST session_meta only: a forked file repeats its
     parent's meta on a later line. Its git block gives the link fields every turn carries: the
     repo from the cwd, else the remote URL (hashed, never kept), and the branch, as keys."""
-    cur["meta"] = {"id": _str(p.get("id")), "parent": _str(p.get("parent_thread_id")),
-                   "origin": _run_origin(p)}
+    cur["meta"] = {"id": str_or_none(p.get("id")), "parent": str_or_none(p.get("parent_thread_id")),
+                   "origin": run_origin(p)}
     cur["cwd"] = p.get("cwd") or cur.get("cwd")
     cur["meta"]["link"] = _meta_link(p, keys)
 
 
-def _meta_link(p: dict, keys: RepoKeys) -> dict:
-    g = p.get("git") if isinstance(p.get("git"), dict) else {}
+def _meta_link(p: dict[str, Any], keys: RepoKeys) -> dict[str, Any]:
+    g = dict_or_empty(p.get("git"))
     rk = keys.of_cwd(p.get("cwd"))
     if not rk and isinstance(g.get("repository_url"), str):
         try:
             rk = keys.of(repo_identity(g["repository_url"]))
-        except ValueError:
-            pass
+        except ValueError:      # a malformed URL names no repo: the key stays NULL
+            rk = None
     # shortcut: a later turn_context cwd in another repo keeps the first meta's repo; take the
     # turn's cwd if Codex threads start moving between repos
     link = Link(keys, {})
@@ -101,13 +142,13 @@ def _meta_link(p: dict, keys: RepoKeys) -> dict:
     return link.s
 
 
-def _session(cur: dict, path: str) -> EventSession:
+def _session(cur: FileState, path: str) -> EventSession:
     m = cur.get("meta") or {}
     return EventSession(m.get("id") or cur.get("session_id") or os.path.basename(path),
                         m.get("parent"), m.get("origin") or "unknown", cur.get("turn"))
 
 
-def _script(cmd: object) -> str | None:
+def script_of(cmd: object) -> str | None:
     """The shell script of a CommandExecution: codex runs `[shell, -c|-lc, script]`."""
     if isinstance(cmd, str):
         return cmd
@@ -116,273 +157,320 @@ def _script(cmd: object) -> str | None:
     return None
 
 
-def _prompt(t: object, p: dict, has_um: bool) -> tuple[str, int] | None:
+def prompt_of(rtype: object, payload: dict[str, Any], has_um: bool) -> tuple[str, int] | None:
     """(text, images) when the record is a prompt: a user_message, or a UserMessage item in a
     file that has no user_message (older files carry both for one prompt)."""
-    if t != "event_msg":
+    if rtype != "event_msg":
         return None
-    if p.get("type") == "user_message":
-        imgs = p.get("local_images")
-        msg = p.get("message")
+    if payload.get("type") == "user_message":
+        imgs = payload.get("local_images")
+        msg = payload.get("message")
         return (msg if isinstance(msg, str) else ""), len(imgs) if isinstance(imgs, list) else 0
-    it = p.get("item")
-    if p.get("type") == "item_completed" and isinstance(it, dict) \
+    it = payload.get("item")
+    if payload.get("type") == "item_completed" and isinstance(it, dict) \
             and it.get("type") == "UserMessage" and not has_um:
-        c = it.get("content")
-        blocks = [b for b in c if isinstance(b, dict)] if isinstance(c, list) else []
-        return text_of(c), sum(b.get("type") != "text" for b in blocks)
+        content = it.get("content")
+        blocks = [b for b in content if isinstance(b, dict)] if isinstance(content, list) else []
+        return text_of(content), sum(b.get("type") != "text" for b in blocks)
     return None
 
 
-def _activity(o: dict, t: object, p: dict, a: dict, sess: EventSession, keys: RepoKeys,
-              out: list, cur: dict) -> None:
-    """Non-prompt activity of one record: tool aggregates, interrupt, turn, commit, compaction,
-    link."""
-    ts = o.get("timestamp")
-    link = Link(keys, a.setdefault("link", {}))
+class _Activity:
+    """Per-file activity extractor over `cur`, the private copy of the file's watermark entry."""
 
-    def emit(kind: str, seed: str, attrs: dict) -> None:
-        out.append(ActivityEvent(event_id=make_event_id(NAME, kind, f"{sess.session_id}|{seed}"),
-                                 ts=ts, agent=NAME, kind=kind, session_id=sess.session_id,
-                                 turn_id=sess.turn_id, attrs=attrs))
+    # the record being read, set by record()
+    sess: EventSession
+    link: Link
+    agg: TurnAgg
 
-    agg = a.setdefault("agg", blank_agg())
-    if t == "response_item":
-        link.text(p.get("output"))           # a tool call's output
-        name = p.get("name")
-        if p.get("type") in ("function_call", "custom_tool_call") and isinstance(name, str):
+    def __init__(self, cur: FileState, path: str, keys: RepoKeys) -> None:
+        self.cur, self.path, self.keys = cur, path, keys
+        self.carried: dict[str, Any] = cur.setdefault("act", {})
+        self.events: list[ActivityEvent] = []
+        self.errors: Counter[str] = Counter()      # records whose extraction raised (skipped)
+
+    def _emit(self, kind: ActivityKind, ts: object, seed: str, attrs: dict[str, Any]) -> None:
+        sess = self.sess
+        self.events.append(ActivityEvent(
+            event_id=make_event_id(NAME, kind, f"{sess.session_id}|{seed}"), ts=str_or_none(ts),
+            agent=NAME, kind=kind, session_id=sess.session_id, turn_id=sess.turn_id, attrs=attrs))
+
+    def record(self, o: dict[str, Any]) -> None:
+        """Non-prompt activity of one record: tool aggregates, interrupt, turn, commit, compaction,
+        link."""
+        record_type, payload = o.get("type"), dict_or_empty(o.get("payload"))
+        ts = o.get("timestamp")
+        self.sess = _session(self.cur, self.path)
+        self.link = Link(self.keys, self.carried.setdefault("link", {}))
+        self.agg = self.carried.setdefault("agg", blank_tool_tally())
+        if record_type == "response_item":
+            self.link.note_text(payload.get("output"))           # a tool call's output
+            self._tool_call(payload)
+        elif record_type == "event_msg":
+            self._event_msg(payload, ts)
+
+    def _event_msg(self, payload: dict[str, Any], ts: object) -> None:
+        kind, item = payload.get("type"), payload.get("item")
+        turn_seed = str(payload.get("turn_id") or ts)
+        if kind in ("task_complete", "turn_aborted"):
+            self._close_link(ts, turn_seed)
+        if kind == "agent_message":
+            self.link.note_text(payload.get("message"))
+        elif kind == "task_started":
+            self.carried["agg"], self.carried["start"] = blank_tool_tally(), ts
+        elif kind == "turn_aborted" and payload.get("reason") == "interrupted":
+            self.carried["intr"] = True
+            self._emit("interrupt", ts, turn_seed, {})
+        elif kind == "task_complete":
+            self._turn(payload.get("duration_ms"), ts, turn_seed)
+        elif kind == "item_completed" and isinstance(item, dict):
+            self._item(item, ts)
+
+    def _close_link(self, ts: object, seed: str) -> None:
+        self.link.merge((self.cur.get("meta") or {}).get("link") or {})
+        self._emit("link", ts, seed, self.link.attrs(self.sess.run_origin))
+        self.link.reset()
+
+    def _turn(self, d: object, ts: object, seed: str) -> None:
+        dur = d if isinstance(d, int) and not isinstance(d, bool) \
+            else ms_between(self.carried.get("start"), ts)
+        self._emit("turn", ts, seed, {"duration_ms": dur, **turn_attrs(self.agg)})
+        self.carried["agg"] = blank_tool_tally()
+        self.carried.pop("start", None)
+
+    def _tool_call(self, payload: dict[str, Any]) -> None:
+        name = payload.get("name")
+        if payload.get("type") in ("function_call", "custom_tool_call") and isinstance(name, str):
             # an MCP namespace is a server label (free text); other namespaces are codex's own.
             # Older CLI files name MCP tools `<server>__<tool>` with no namespace; codex's own
             # tool names never contain `__`.
-            ns = p.get("namespace")
+            ns = payload.get("namespace")
             mcp = (isinstance(ns, str) and ns.startswith("mcp__")) or "__" in name
             if mcp:     # Desktop may log the same call again as an McpToolCall item
-                agg.setdefault("mcp_ids", []).append(p.get("call_id"))
-            add_call(agg, "mcp" if mcp else name, p.get("arguments", p.get("input")))
-        return
-    if t != "event_msg":
-        return
-    pt, it = p.get("type"), p.get("item")
-    if pt in ("task_complete", "turn_aborted"):
-        link.merge((cur.get("meta") or {}).get("link") or {})
-        emit("link", str(p.get("turn_id") or ts), link.attrs(sess.run_origin))
-        link.reset()
-    if pt == "agent_message":
-        link.text(p.get("message"))
-    elif pt == "task_started":
-        a["agg"], a["start"] = blank_agg(), ts
-    elif pt == "turn_aborted" and p.get("reason") == "interrupted":
-        a["intr"] = True
-        emit("interrupt", str(p.get("turn_id") or ts), {})
-    elif pt == "task_complete":
-        d = p.get("duration_ms")
-        dur = d if isinstance(d, int) and not isinstance(d, bool) else ms_between(a.get("start"), ts)
-        emit("turn", str(p.get("turn_id") or ts), {"duration_ms": dur, **turn_attrs(agg)})
-        a["agg"] = blank_agg()
-        a.pop("start", None)
-    elif pt == "item_completed" and isinstance(it, dict):
-        typ = it.get("type")
+                self.agg.setdefault("mcp_ids", []).append(payload.get("call_id"))
+            add_call(self.agg, "mcp" if mcp else name, payload.get("arguments", payload.get("input")))
+
+    def _item(self, item: dict[str, Any], ts: object) -> None:
+        typ = item.get("type")
         if typ == "CommandExecution":
-            code = it.get("exit_code")
+            code = item.get("exit_code")
             err = isinstance(code, int) and code != 0
-            agg["errors"] += err
-            script = _script(it.get("command"))
+            self.agg["errors"] += err
+            script = script_of(item.get("command"))
             call = commit_call(script) if script else None
-            out_text = it.get("aggregated_output")
+            out_text = item.get("aggregated_output")
             out_text = out_text if isinstance(out_text, str) else ""
-            link.text(out_text)
-            if call:
+            self.link.note_text(out_text)
+            if call and script:
                 found = commit_shas(out_text, err, call[1])
-                key = commit_repo(keys, it.get("cwd"), commit_dir(script), None) if found else None
-                if found:
-                    link.commit(key, out_text, found)
-                for sha in found:
-                    emit("commit", f"{it.get('id')}|{sha}",
-                         {"sha": sha, "repo_key": key, "amend": call[0]})
+                for sha, attrs in record_commits(self.link, item.get("cwd"), commit_dir(script),
+                                                 out_text, found, amend=call[0]):
+                    self._emit("commit", ts, f"{item.get('id')}|{sha}", attrs)
         elif typ == "McpToolCall":
             # Desktop logs most MCP calls only as this item; one that pairs (same id) with an
             # MCP function_call of the turn was already counted
-            if it.get("id") not in agg.get("mcp_ids", ()):
-                add_call(agg, "mcp", it.get("arguments"))
-            agg["errors"] += it.get("status") == "failed"
+            if item.get("id") not in self.agg.get("mcp_ids", ()):
+                add_call(self.agg, "mcp", item.get("arguments"))
+            self.agg["errors"] += item.get("status") == "failed"
         elif typ == "ContextCompaction":
-            emit("compaction", str(it.get("id") or ts), {})
+            self._emit("compaction", ts, str(item.get("id") or ts), {})
 
 
-def collect(cfg: Config, wm: dict) -> Iterator[tuple[list, Callable[[], None]]]:
-    base = cfg.home / ".codex" / "sessions"
-    if not base.exists():
+def _upgrade_state(wm: dict[str, Any], keys: RepoKeys) -> None:
+    """Bring state saved by an older version to the current shape, once. An entry from before
+    um_ord existed is dropped, so the file is re-read from 0 and user_message ordinals (and thus
+    their event_ids) stay consistent if it is later reset and re-read; that is safe because
+    event_id is content-deterministic and re-emitted rows dedup at the sink. An entry from before
+    identity (or its link fields) was kept takes them from the file's first record. Link SHAs
+    saved before they were keyed are dropped. Each step is safe on state already upgraded."""
+    if wm.get("state_v") == _STATE_V:
         return
-    files: dict = wm.setdefault("files", {})
-    keys = RepoKeys(cfg.repo_key_salt)
-    act_errors = 0
-
-    for path in glob.glob(str(base / "**" / "rollout-*.jsonl"), recursive=True):
-        try:
-            st = os.stat(path)
-        except OSError:
+    files = wm.setdefault("files", {})
+    for path, entry in list(files.items()):
+        if "um_ord" not in entry:
+            del files[path]
             continue
-        prev = files.get(path)
-        # New/rotated file (or a state-format upgrade whose old state lacks 'ino') -> reset and
-        # re-read. Safe because event_id is content-deterministic: re-emitted rows dedup at the
-        # sink. Identity is st_ino ALONE, deliberately not (st_dev, st_ino) -- st_dev is assigned
-        # at mount, so macOS/APFS renumbers it on reboot and every file would look rotated. See
-        # the long note in _util.scan_file; this collector keeps its own copy of the check because
-        # it also tracks per-session ordinals, so keep the two rules in step.
-        if (not prev or prev.get("ino") != st.st_ino
-                or "um_ord" not in prev):   # state saved before um_ord existed -> re-read from
-            prev = _fresh_state(st.st_dev, st.st_ino)   # offset 0 so user_message ordinals (and
-            #                                            thus their event_ids) stay consistent if
-            #                                            the file is later reset and re-read.
-        off = safe_int(prev.get("off"))
-        if st.st_size < off:                            # truncated
-            prev = _fresh_state(st.st_dev, st.st_ino)
-            off = 0
-        if st.st_size <= off:
-            continue
-
-        lines, new_off = read_new_lines(path, off)
-        # A deep copy: only commit() may publish this chunk's state into the watermark.
-        cur = copy.deepcopy(prev)
-        # resumed from a state saved before identity (or its link fields) was kept
-        if off and "link" not in (cur.get("meta") or {}):
+        drop_raw_shas(entry.get("act"))
+        if safe_int(entry.get("off")) and "link" not in (entry.get("meta") or {}):
             first = first_record(path)
             if first and first.get("type") == "session_meta" \
                     and isinstance(first.get("payload"), dict):
-                if cur.get("meta"):           # identity stays as it was first read
-                    cur["meta"]["link"] = _meta_link(first["payload"], keys)
+                if entry.get("meta"):           # identity stays as it was first read
+                    entry["meta"]["link"] = _meta_link(first["payload"], keys)
                 else:
-                    _set_meta(cur, first["payload"], keys)
-        recs = []
-        # A forked child's file opens with a copy of its parent's history: lines before the first
-        # meta's subagent_history_start_ordinal (0-based). `skip` is how many copied lines are
-        # still unread. Only a fork: a spawned child can carry an ordinal too, with no copy.
-        skip = cur.pop("skip", 0)
-        for i, raw in enumerate(lines):
-            copied, skip = skip > 0, max(skip - 1, 0)
-            try:
-                o = json.loads(raw)
-            except (json.JSONDecodeError, UnicodeDecodeError):
-                continue
-            p = o.get("payload") if isinstance(o, dict) else None
-            if isinstance(p, dict):
-                if not off and not i and o.get("type") == "session_meta" \
-                        and p.get("forked_from_id"):
-                    skip = max(safe_int(p.get("subagent_history_start_ordinal")) - 1, 0)
-                    copied = True
-                recs.append((o, o.get("type"), p, copied))
-        if skip:
-            cur["skip"] = skip
-        # shortcut: judged per chunk (plus earlier chunks of the file), so an older-format turn
-        # split exactly between its UserMessage item and its user_message counts twice; older
-        # files are complete on disk and read in one chunk, upgrade if that changes.
-        if any(t == "event_msg" and p.get("type") == "user_message" for _o, t, p, _c in recs):
-            cur["has_um"] = True
-        a: dict = cur.setdefault("act", {})
-        events: list = []
-        for o, t, p, copied in recs:
-            if t == "session_meta":
-                # the usage event_id seed keeps its old rule (payload.session_id, any meta line),
-                # so stored usage rows never change id; session rows use the thread id instead
-                cur["session_id"] = p.get("session_id") or p.get("id") or cur["session_id"]
-                cur["provider"] = p.get("model_provider") or cur["provider"]
-                if "meta" not in cur:
-                    _set_meta(cur, p, keys)
-            elif t == "turn_context":
-                if p.get("model"):
-                    cur["model"] = p.get("model")
-                if p.get("cwd"):
-                    cur["cwd"] = p.get("cwd")
-            elif t == "event_msg" and p.get("type") == "task_started" and not copied:
-                cur["turn"] = _str(p.get("turn_id")) or cur.get("turn")
-            elif t == "event_msg" and p.get("type") == "token_count":
-                try:
-                    info = p.get("info")
-                    last = info.get("last_token_usage") if isinstance(info, dict) else None
-                    if not isinstance(last, dict):
-                        continue
-                    inp = int(last.get("input_tokens") or 0)
-                    cached = int(last.get("cached_input_tokens") or 0)
-                    out = int(last.get("output_tokens") or 0)
-                    rea = int(last.get("reasoning_output_tokens") or 0)
-                    total = int(last.get("total_tokens") or (inp + out))
-                except (ValueError, TypeError, AttributeError, OverflowError):
-                    continue
-                cur["tc_ord"] += 1
-                # Known gap: some Desktop rows carry only total_tokens (input and output 0) and
-                # no model; they are dropped here. See CONTRACT.md.
-                if inp + out + rea == 0:
-                    continue
-                ts = o.get("timestamp")
-                sid = cur["session_id"] or os.path.basename(path)
-                # content hash, not position; only fall back to the ordinal if ts is absent.
-                tiebreak = "" if ts else cur["tc_ord"]
-                events.append(UsageEvent(
-                    event_id=make_event_id(NAME, sid, ts or "", inp, cached, out, rea, total, tiebreak),
-                    ts=ts,
-                    agent=NAME,
-                    model=cur["model"],
-                    provider=cur["provider"] or "openai",
-                    input_tokens=max(inp - cached, 0),
-                    output_tokens=out,
-                    cache_read_tokens=cached,
-                    cache_write_tokens=0,
-                    reasoning_tokens=rea,
-                    total_tokens=total,
-                    project=basename(cur["cwd"]),
-                    session=_session(cur, path),
-                ))
+                    _set_meta(entry, first["payload"], keys)
+    wm["state_v"] = _STATE_V
+
+
+class ParsedRecord(NamedTuple):
+    record: dict[str, Any]
+    type: object
+    payload: dict[str, Any]
+    copied: bool
+
+
+def parsed_records(lines: list[bytes], off: int, cur: FileState,
+                   skipped: Counter[str]) -> list[ParsedRecord]:
+    """Each new line that has a payload. A forked child's file
+    opens with a copy of its parent's history: lines before the first meta's
+    subagent_history_start_ordinal (0-based). `skip` is how many copied lines are still unread.
+    Only a fork: a spawned child can carry an ordinal too, with no copy."""
+    recs = []
+    skip = cur.pop("skip", 0)
+    for i, raw in enumerate(lines):
+        copied, skip = skip > 0, max(skip - 1, 0)
+        o = parse_record(raw)
+        if o is None:
+            skipped["malformed"] += 1
+            continue
+        p = o.get("payload")
+        if isinstance(p, dict):
+            if not off and not i and o.get("type") == "session_meta" and p.get("forked_from_id"):
+                skip = max(safe_int(p.get("subagent_history_start_ordinal")) - 1, 0)
+                copied = True
+            recs.append(ParsedRecord(o, o.get("type"), p, copied))
+    if skip:
+        cur["skip"] = skip
+    return recs
+
+
+def _note_session_meta(payload: dict[str, Any], cur: FileState, keys: RepoKeys) -> None:
+    # the usage event_id seed keeps its old rule (payload.session_id, any meta line),
+    # so stored usage rows never change id; session rows use the thread id instead
+    cur["session_id"] = payload.get("session_id") or payload.get("id") or cur["session_id"]
+    cur["provider"] = str_or_none(payload.get("model_provider")) or cur["provider"]
+    if "meta" not in cur:
+        _set_meta(cur, payload, keys)
+
+
+def _note_context(rtype: object, payload: dict[str, Any], copied: bool, cur: FileState, keys: RepoKeys) -> None:
+    """Streaming state from a record: session identity, model, cwd, the current turn."""
+    if rtype == "session_meta":
+        _note_session_meta(payload, cur, keys)
+    elif rtype == "turn_context":
+        cur["model"] = str_or_none(payload.get("model")) or cur["model"]
+        if payload.get("cwd"):
+            cur["cwd"] = payload.get("cwd")
+    elif rtype == "event_msg" and payload.get("type") == "task_started" and not copied:
+        cur["turn"] = str_or_none(payload.get("turn_id")) or cur.get("turn")
+
+
+def _token_event(o: dict[str, Any], payload: dict[str, Any], cur: FileState, path: str) -> UsageEvent | None:
+    """The usage row of a token_count record, None if it has no tokens. Raises on malformed counts."""
+    info = payload.get("info")
+    last = info.get("last_token_usage") if isinstance(info, dict) else None
+    if not isinstance(last, dict):
+        return None
+    inp = count_field(last, "input_tokens")
+    cached = count_field(last, "cached_input_tokens")
+    out = count_field(last, "output_tokens")
+    rea = count_field(last, "reasoning_output_tokens")
+    total = int(last.get("total_tokens") or (inp + out))
+    cur["tc_ord"] += 1
+    # Known gap: some Desktop rows carry only total_tokens (input and output 0) and
+    # no model; they are dropped here. See CONTRACT.md.
+    if inp + out + rea == 0:
+        return None
+    ts = o.get("timestamp")
+    sid = cur["session_id"] or os.path.basename(path)
+    # content hash, not position; only fall back to the ordinal if ts is absent.
+    tiebreak = "" if ts else cur["tc_ord"]
+    return UsageEvent(
+        event_id=make_event_id(NAME, sid, ts or "", inp, cached, out, rea, total, tiebreak),
+        ts=ts,
+        agent=NAME,
+        model=cur["model"],
+        provider=cur["provider"] or "openai",
+        input_tokens=max(inp - cached, 0),
+        output_tokens=out,
+        cache_read_tokens=cached,
+        cache_write_tokens=0,
+        reasoning_tokens=rea,
+        total_tokens=total,
+        project=project_name(cur["cwd"]),
+        session=_session(cur, path),
+    )
+
+
+def _prompt_rows(o: dict[str, Any], prompt: tuple[str, int], cur: FileState, path: str, act: _Activity) -> list[Row]:
+    """The human and steer rows of a prompt someone typed. Threads a program drives (subagents,
+    `codex exec`, MCP calls, another agent's integration, scheduled automations) are not human
+    turns, and get none."""
+    after_intr = bool(act.carried.pop("intr", False))
+    text, images = prompt
+    Link(act.keys, act.carried.setdefault("link", {})).note_text(text)
+    sess = _session(cur, path)
+    if sess.run_origin in ("subagent", "automated") or is_scheduled_automation(text):
+        return []
+    # No tokens; a stable per-session ordinal makes the id deterministic so a
+    # re-read (file reset) re-emits the same id and the sink dedups it. The ordinal
+    # advances only for kept messages, which is fine: it just has to be stable for a
+    # given file, and the screening above is deterministic from the same bytes.
+    cur["um_ord"] += 1
+    ts = o.get("timestamp")
+    sid = cur["session_id"] or os.path.basename(path)
+    return [
+        human_event(NAME, (sid, ts or "", cur["um_ord"]), ts, sess, project_name(cur["cwd"])),
+        ActivityEvent(
+            event_id=make_event_id(NAME, "steer", sid, ts or "", cur["um_ord"]),
+            ts=str_or_none(ts), agent=NAME, kind="steer", session_id=sess.session_id,
+            turn_id=sess.turn_id, attrs={"via": "typed", "words": len(text.split()),
+                                         "chars": len(text), "images": images,
+                                         "after_interrupt": after_intr}),
+    ]
+
+
+def _chunk_rows(path: str, recs: list[ParsedRecord], cur: FileState, keys: RepoKeys, skipped: Counter[str]) -> list[Row]:
+    """All rows of one file's new records; updates `cur`, the private copy of its watermark entry."""
+    # shortcut: judged per chunk (plus earlier chunks of the file), so an older-format turn
+    # split exactly between its UserMessage item and its user_message counts twice; older
+    # files are complete on disk and read in one chunk, upgrade if that changes.
+    if any(t == "event_msg" and p.get("type") == "user_message" for _o, t, p, _c in recs):
+        cur["has_um"] = True
+    act = _Activity(cur, path, keys)
+    events: list[Row] = []
+    for o, t, p, copied in recs:
+        try:
+            _note_context(t, p, copied, cur, keys)
+            if t == "event_msg" and p.get("type") == "token_count":
+                event = _token_event(o, p, cur, path)
+                if event:
+                    events.append(event)
                 continue
             if copied:      # the parent's turns, not this thread's (usage above is unchanged)
                 continue
-            prompt = _prompt(t, p, bool(cur.get("has_um")))
+            prompt = prompt_of(t, p, bool(cur.get("has_um")))
             if prompt is not None:
-                after_intr = bool(a.pop("intr", False))
-                text, images = prompt
-                Link(keys, a.setdefault("link", {})).text(text)
-                sess = _session(cur, path)
-                # A prompt someone typed. Threads a program drives (subagents, `codex exec`, MCP
-                # calls, another agent's integration, scheduled automations) are not human turns.
-                if sess.run_origin in ("subagent", "automated") or _is_scheduled_automation(text):
-                    continue
-                # No tokens; a stable per-session ordinal makes the id deterministic so a
-                # re-read (file reset) re-emits the same id and the sink dedups it. The ordinal
-                # advances only for kept messages, which is fine: it just has to be stable for a
-                # given file, and the screening above is deterministic from the same bytes.
-                cur["um_ord"] = cur.get("um_ord", 0) + 1
-                ts = o.get("timestamp")
-                sid = cur["session_id"] or os.path.basename(path)
-                events.append(UsageEvent(
-                    event_id=make_event_id(NAME, "human", sid, ts or "", cur["um_ord"]),
-                    ts=ts, agent=NAME, model=None, provider=None,
-                    kind="human", project=basename(cur["cwd"]), session=sess,
-                ))
-                events.append(ActivityEvent(
-                    event_id=make_event_id(NAME, "steer", sid, ts or "", cur["um_ord"]),
-                    ts=ts, agent=NAME, kind="steer", session_id=sess.session_id,
-                    turn_id=sess.turn_id, attrs={"via": "typed", "words": len(text.split()),
-                                                 "chars": len(text), "images": images,
-                                                 "after_interrupt": after_intr}))
+                events.extend(_prompt_rows(o, prompt, cur, path, act))
                 continue
-            # Best effort: a record whose activity extraction raises is counted and skipped, so
-            # activity never blocks the usage and session rows of the same chunk.
-            try:
-                _activity(o, t, p, a, _session(cur, path), keys, events, cur)
-            except Exception:
-                act_errors += 1
-        cur["off"] = new_off
-        agg = a.get("agg")
-        if agg is not None and not (agg["calls"] or agg["errors"]):
-            del a["agg"]
-        if not a.get("link"):
-            a.pop("link", None)
-        if not any(a.values()):
-            cur.pop("act", None)
+            best_effort(act.errors, act.record, o)
+        except MALFORMED_RECORD:    # one bad line must not wedge every later scan at this offset
+            skipped["malformed"] += 1
+    skipped.update(act.errors)
+    return events + act.events
 
-        def commit(p: str = path, c: dict = cur) -> None:
-            files[p] = c
 
-        yield events, commit
-    if act_errors:
-        print(f"aut: {NAME}: {act_errors} activity record(s) skipped (extraction failed); usage "
-              "and session rows are unaffected.", file=sys.stderr)
+def _trim_state(cur: FileState) -> None:
+    carried = cur["act"]
+    agg = carried.get("agg")
+    if agg is not None and not (agg["calls"] or agg["errors"]):
+        del carried["agg"]
+    if not carried.get("link"):
+        carried.pop("link", None)
+    if not any(carried.values()):
+        cur.pop("act", None)
+
+
+def collect(cfg: Config, wm: dict[str, Any]) -> Iterator[Batch]:
+    if not sessions_dir(cfg.home).exists():
+        return
+    keys = RepoKeys(cfg.repo_key_salt)
+    _upgrade_state(wm, keys)
+
+    def chunk_rows(path: str, cur: FileState, off: int, lines: list[bytes],
+                   skipped: Counter[str]) -> list[Row]:
+        events = _chunk_rows(path, parsed_records(lines, off, cur, skipped), cur, keys, skipped)
+        _trim_state(cur)
+        return events
+
+    yield from file_batches(NAME, session_files(cfg.home), wm["files"], _fresh_state, chunk_rows)
