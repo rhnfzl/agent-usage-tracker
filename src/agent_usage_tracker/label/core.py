@@ -1,8 +1,9 @@
 """The decision interface every label task uses, its calibration, and the stored label row.
 
-A backend returns a raw distribution over the request's candidates. Temperature scaling (one
-scalar per task and model, fitted on gold labels) turns it into the calibrated distribution, and a
-per-label threshold tau decides whether the top answer counts: below tau the row is still written,
+A backend returns a raw distribution over the request's candidates. Calibration (temperature
+scaling, or Platt scaling on a yes/no task, fitted per task and model on gold labels, and only
+when it helps) turns it into the calibrated distribution, and a per-label threshold tau decides
+whether the top answer counts: below tau the row is still written,
 with below_tau = true, and readers treat it as unknown. "Unknown" is never a candidate.
 """
 
@@ -20,7 +21,7 @@ from typing import Any, Callable, Iterable, Iterator, Protocol, runtime_checkabl
 from ..config import config_path
 from ..event import ActivityEvent, make_event_id
 
-PROMPT_VER = 1               # bump when render_prompt() changes; task_ver covers candidates/definitions
+PROMPT_VER = 2               # bump when render_prompt() or the chat prompt changes; task_ver covers candidates/definitions
 LETTERS = "ABCDEFGHIJ"
 TAU_FLOOR = 0.5
 
@@ -82,10 +83,11 @@ class Response:
 @dataclass(slots=True)
 class Choice:
     """One task's winner. The default is uncalibrated: T = 1 and no tau, so nothing passes."""
-    backend: str = "mlx_letter"
+    backend: str | None = None      # None: nothing recorded, the model table decides
     model_id: str | None = None
     model_rev: str | None = None
     temperature: float = 1.0
+    platt: dict[str, Any] | None = None     # {"yes", "a", "b"}: replaces the temperature
     # label -> tau; a missing or null label never passes
     tau: dict[str, float | None] = field(default_factory=dict)
     calib_ver: str = "none"
@@ -93,7 +95,11 @@ class Choice:
 
 class Backend(Protocol):
     """What a decision reads. model_rev and size_mb may only be final after the first distribution
-    call, and model_rev goes into the label row's event_id: read them after scoring."""
+    call, and model_rev goes into the label row's event_id: read them after scoring. A backend may
+    add prepare() (find the weights and fix model_rev without loading; the bake-off calls it first,
+    because saved scores are keyed on model_rev), peak_memory_mb(), close(), and a `protocol`
+    string for the saved-scores key."""
+    backend: str                # what `aut label choose` writes, what make_backend reads
     model_id: str
     model_rev: str
     size_mb: float | None
@@ -132,6 +138,10 @@ def _check_entry(task: str, c: object) -> None:
         raise ValueError(f"the temperature of {task} is not a positive number")
     if not isinstance(tau, dict) or not all(v is None or _is_number(v) for v in tau.values()):
         raise ValueError(f"the tau of {task} is not a table of numbers")
+    platt = c.get("platt")
+    if platt is not None and not (isinstance(platt, dict) and isinstance(platt.get("yes"), str)
+                                  and _is_number(platt.get("a")) and _is_number(platt.get("b"))):
+        raise ValueError(f"the platt of {task} is not a table of yes, a and b")
 
 
 def load_choice(task: str) -> Choice:
@@ -213,29 +223,88 @@ def fit_temperature(dists: list[dict[str, Any]], golds: list[str], lo: float = 0
     return round(math.exp((a + b) / 2), 4)
 
 
+def _sigmoid(x: float) -> float:
+    return 1 / (1 + math.exp(-max(min(x, 35.0), -35.0)))
+
+
+def _log_odds(p: float) -> float:
+    p = min(max(p, 1e-6), 1 - 1e-6)
+    return math.log(p / (1 - p))
+
+
+def platt_scale(dist: dict[str, float], platt: dict[str, Any]) -> dict[str, float]:
+    """Platt scaling of a yes/no distribution: sigmoid(a * log-odds of "yes" + b)."""
+    q = _sigmoid(platt["a"] * _log_odds(dist[platt["yes"]]) + platt["b"])
+    return {k: q if k == platt["yes"] else 1 - q for k in dist}
+
+
+def calibrate(raw: dict[str, float], temperature: float = 1.0,
+              platt: dict[str, Any] | None = None) -> dict[str, float]:
+    return platt_scale(raw, platt) if platt else temper(raw, temperature)
+
+
+def fit_platt(dists: list[dict[str, float]], golds: list[str], yes: str,
+              l2: float = 1e-3) -> dict[str, Any]:
+    """The a and b that minimise the gold labels' NLL on the log-odds of `yes` (damped Newton; a
+    small pull towards a = 1, b = 0 keeps separable data finite). The identity without data."""
+    xy = [(_log_odds(d[yes]), float(g == yes)) for d, g in zip(dists, golds)]
+
+    def loss(a: float, b: float) -> float:
+        return l2 / 2 * ((a - 1) ** 2 + b ** 2) - sum(
+            math.log(max(q if y else 1 - q, 1e-12))
+            for x, y in xy for q in [_sigmoid(a * x + b)])
+
+    a, b = 1.0, 0.0
+    for _ in range(50 if xy else 0):
+        ga, gb, haa, hab, hbb = l2 * (a - 1), l2 * b, l2, 0.0, l2
+        for x, y in xy:
+            q = _sigmoid(a * x + b)
+            w = q * (1 - q)
+            ga, gb = ga + (q - y) * x, gb + q - y
+            haa, hab, hbb = haa + w * x * x, hab + w * x, hbb + w
+        det = haa * hbb - hab * hab
+        da, db = (hbb * ga - hab * gb) / det, (haa * gb - hab * ga) / det
+        step, base = 1.0, loss(a, b)
+        while step > 1e-4 and loss(a - step * da, b - step * db) > base:
+            step /= 2
+        a, b = a - step * da, b - step * db
+        if abs(step * da) + abs(step * db) < 1e-6:
+            break
+    return {"yes": yes, "a": round(a, 4), "b": round(b, 4)}
+
+
 def fit_tau(items: list[tuple[str, float, str]], precision: float = 0.90,
-            floor: float = TAU_FLOOR) -> dict[str, float | None]:
-    """items: (chosen, p_cal, gold). Per chosen label: the smallest p at which the items chosen as
-    that label with p >= it reach `precision` (cuts only between distinct p), raised to `floor`;
-    None when no cut reaches it (the label never passes)."""
+            floor: float = TAU_FLOOR, recall: float = 0.0) -> dict[str, float | None]:
+    """items: (chosen, p_cal, gold). Per chosen label: of the cuts between distinct p, no lower than
+    `floor`, the one with the best F1 among those that reach `precision` and `recall` on the items
+    chosen as that label with p >= it, the lowest on a tie. None when no cut does: the floors are
+    never relaxed, and the label never passes."""
     by: dict[str, list[tuple[float, bool]]] = {}
+    true: dict[str, int] = {}
     for chosen, p, gold in items:
         by.setdefault(chosen, []).append((p, chosen == gold))
+        true[gold] = true.get(gold, 0) + 1
     out: dict[str, float | None] = {}
     for label, rows in by.items():
         rows.sort(key=lambda r: -r[0])
-        best, ok = None, 0
+        n_true = true.get(label, 0)
+        best, top, ok = None, -1.0, 0
         for i, (p, hit) in enumerate(rows):
+            if p < floor:
+                break
             ok += hit
-            if (i + 1 == len(rows) or rows[i + 1][0] < p) and ok / (i + 1) >= precision:
-                best = p
-        out[label] = None if best is None else max(best, floor)
+            below = rows[i + 1][0] if i + 1 < len(rows) else None
+            f1 = 2 * ok / (i + 1 + n_true)
+            if (below is None or below < p) and ok / (i + 1) >= precision \
+                    and ok / max(n_true, 1) >= recall and f1 >= top:
+                best, top = (floor if below is not None and below < floor else p), f1
+        out[label] = best
     return out
 
 
 def decide(req: Request, raw: dict[str, float], choice: Choice, model_id: str,
            model_rev: str) -> Response:
-    dist = temper(raw, choice.temperature)
+    dist = calibrate(raw, choice.temperature, choice.platt)
     chosen = max(dist, key=dist.__getitem__)
     tau = choice.tau.get(chosen)
     return Response(dist=dist, chosen=chosen, prob=dist[chosen],

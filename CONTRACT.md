@@ -607,6 +607,15 @@ webhook carries the usage and the activity and time rows of the same batch still
 `pg_dsn`, with the batch's session rows. A webhook-only machine skips them with the same one-line note; there is no backfill for
 time, so it does not send time.
 
+## Steer estimates: activity_event kind `steer_estimate` (`aut history-steers`)
+
+Session logs are gone for Claude Code from 2 March to 19 April 2026 and for most Codex days from
+11 February to 2 October 2026. One row per local day and agent holds an estimate from
+`~/.claude/history.jsonl` or `~/.codex/history.jsonl`: `attrs` `count`, `source` (`history`), no
+text, no session. A day with counted steers from that agent gets no estimate. Slash and shell
+commands are left out, so this is not the steer rule. No view counts it as a steer. To remove it,
+delete the rows of this kind.
+
 ## Labels: activity_event kind `label` (`aut label`)
 
 `aut label run [--task T] [--since YYYY-MM-DD] [--dry-run]` and `aut label backfill --task T
@@ -635,10 +644,16 @@ denominator).
 Backends return a distribution over the supplied candidates: `mlx_letter` reads an instruct model
 (default `label_model`, from the local Hugging Face cache only) through the logits of the answer
 letters, scoring the original and the reversed candidate order and averaging them; `encoder` is
-the slot for a small classifier trained on the labels. The choice per task (backend, model,
-temperature, tau per label) is `label.json` next to `config.toml`; without one a task runs
-uncalibrated and every row is `below_tau`. tau = the smallest calibrated p at which the label
-reaches `label_precision` (default 0.90) on the gold labels, at least 0.5.
+the slot for a small classifier trained on the labels. The decision models use one candidate order
+and the protocol of their own card: `mlx_elephant`, `mlx_card`, `mlx_pplx`, `mlx_clef` on MLX, and
+`llama_server` over `POST /v1/systemone` on a `llama-server` that aut starts on 127.0.0.1 and stops
+at the end of the run. A boolean task's first candidate is the "true" answer. The eval records,
+`label.json` and the label rows hold the repo as `model_id`; `--model` takes the short name too.
+The choice per task (backend, model,
+temperature or Platt scale, tau per label) is `label.json` next to `config.toml`; without one a
+task runs uncalibrated and every row is `below_tau`. tau = the cut on calibrated p, at least 0.5,
+with the best F1 among those that reach `label_precision` (default 0.90) and `label_recall` (default
+0.60) on the gold labels, and null (the label never passes) when none does.
 
 The nightly run (`aut-scan.sh`, once a day after `outcomes`, where `AUT_LABEL=1`) labels the tasks
 in `label_tasks`, incrementally from a watermark in the state file (`collectors.label`), inside
@@ -653,7 +668,7 @@ prints its reason and the run exits 1 once the other tasks are done (`error` = `
 
 ### The eval set and the bake-off (`aut label teach | review | eval | choose | train-encoder`)
 
-Three local files per task under `~/.local/share/aut/eval/` (`$XDG_DATA_HOME/aut/eval/`), never
+These local files per task under `~/.local/share/aut/eval/` (`$XDG_DATA_HOME/aut/eval/`), never
 sent and never holding text; a unit's text is rebuilt from this machine's logs when needed:
 
 | file | row |
@@ -661,6 +676,8 @@ sent and never holding text; a unit's text is rebuilt from this machine's logs w
 | `<task>.silver.jsonl` | `unit_id`, `teacher` (a model id), `dist` (probability per candidate), `date`, `task_ver` |
 | `<task>.jsonl` (gold) | `unit_id`, `gold` (a candidate), `labeller` (`human`), `date`, `task_ver`; a later row for a unit wins |
 | `<task>.eval.jsonl` | one bake-off record per backend (below), with its `ts` |
+| `<task>.final.jsonl` | one record per `aut label eval --final`; only that command reads or writes it |
+| `scores/<task>.<model>.<hash>.jsonl` | one file per task, `model_id`, `model_rev`, `prompt_ver` and decision protocol: `unit_id`, `dist` (the raw distribution) |
 
 `aut label teach --task T --n N [--budget-usd X] [--days D]` gives up to N units of the last D
 days (default 90; stratified by unit type and day) the local model's raw distribution, and, for
@@ -677,28 +694,67 @@ stratum (the teachers' common top label, `disagree`, or `unlabelled`), so rare l
 disagreement come up as often as common labels; the page shows gold per label against the floor
 (30 per label; `soft_outcome` 30; `aw_title_relevance` 150 per class; target 50 where it differs).
 
-`aut label eval --task T [--days D]` scores every backend (each local model with an official MLX
-build, and the encoder once trained) on the gold units. Gold is split once by the unit's local
-day: one half fits the temperature and tau, the other half reports. The record (in
-`<task>.eval.jsonl`, and as one `agents.activity_event` row per backend, `agent = 'label'`,
-`kind = 'eval'`, `ts` = the eval time) holds numbers and model ids only:
+`aut label eval --task T [--days D]` scores every backend (each model of the README's table that is
+on disk, and the encoder once trained) on the gold units. A model that cannot run here is left out
+with a line that says why, and the others go on. Saved scores are re-used: the model is
+called only for gold units it has no score for, and tuning needs no model. A new `model_rev`,
+`prompt_ver` or decision protocol starts a new score file.
 
-`task`, `task_ver`, `backend`, `model_id`, `model_rev`, `size_mb`, `prompt_ver`, `calib_ver`,
-`temperature`, `n`, `n_cal`, `n_held`, `macro_f1`, `kappa` (Cohen's, vs gold), `ece_raw`, `ece_cal`
-(before and after temperature scaling), `coverage` (share of reported units at or above their
-label's tau), `s_per_decision`, and `per_label: {<label>: {n, precision, recall, f1, tau, coverage,
-precision_at_tau, precision_lb, share_error_pp}}`. `precision_lb` is the 95% Wilson lower bound at
-tau; `share_error_pp` compares the label's share among units at or above tau with its share in
-gold, both re-weighted from the stratified sample to the silver label mix.
+- **Final test days.** About 20% of the days (by a stable hash; a title is its own group, by
+  `unit_id`) are kept out. No fold, tau, calibration, encoder fit or choice reads them.
+- **Folds.** The other days hash into five folds, the same for every model. Whole days stay
+  together, so folds are not stratified by label. Calibration and tau fit on four folds and report
+  on the fifth; every reported number is pooled out of fold. The saved calibration and tau then
+  fit on all five. The encoder's training days stay out of its folds.
+- **Floors.** A tau must reach `label_precision` and `label_recall` on the training folds. When none
+  does, the label has no tau in that fold (`no_threshold_folds`) and never passes there: a floor is
+  never relaxed. A model is marked as failing when, out of fold at tau, a label is under a floor
+  (a label with no gold has no recall to judge), `coverage` is under `label_coverage`, or a
+  `share_error_pp` is above 5.
+- **Calibration.** Out-of-fold Brier without calibration (T = 1) and with a temperature, and on a
+  yes/no task with Platt scaling on the log-odds (clipped to 1e-6) of the first candidate. The lowest
+  wins, to four decimals; a tie keeps T = 1. `calibration`, `temperature` and `platt` save it.
 
-`aut label choose --task T` takes each model's newest record and writes the smallest (`size_mb`)
-that passes the bar into `label.json`: a held-out report, `coverage` at least `label_coverage`
-(default 0.75), every label's `precision_at_tau` at least `label_precision`, and no
-`share_error_pp` above 5. Labels without a tau stay unknown. `aut label
-train-encoder --task T` fits the `encoder` backend (logistic regression over hashed word and fact
-features, stdlib only) on gold (three times the weight) and silver, never on a held-out gold unit,
-and reports its held-out accuracy; its file (`~/.local/share/aut/label/encoder/<task>.json`) holds
-bucket ids and weights, no words.
+The record (in `<task>.eval.jsonl`, and as one `agents.activity_event` row per backend, `agent =
+'label'`, `kind = 'eval'`, `ts` = the eval time) holds numbers, label names and model ids only:
+
+`task`, `task_ver`, `backend`, `model_id`, `model_rev`, `size_mb` (disk), `prompt_ver`, `calib_ver`,
+`calibration` (`none`, `temperature`, `platt`), `temperature`, `platt` (`{yes, a, b}` or null),
+`brier_by_calibration`, `n`, `n_cal` and `n_held` (both now the units reported out of fold), `folds`
+(units per fold), `no_threshold_folds` (fold -> labels), `macro_f1` (top answer, no threshold),
+`macro_f1_tuned` (at tau), `macro_f1_default` (raw scores at the default threshold of 0.5), `kappa`
+(Cohen's, vs gold), `brier` (squared error summed over candidates, 0 to 2), `nll`, `ece_raw`,
+`ece_cal`, `coverage` (share of reported units at or above their label's tau), `reliability_raw`
+and `reliability_cal` (`[{n, p, right}]`: groups of about 20 units by top probability, with mean p
+and share right), `s_per_decision` (warm: after one warm-up call), `load_s` (the warm-up call: load
+plus one decision), `n_timed`, `peak_mb` (from the backend's optional `peak_memory_mb()`, else
+null; the speed fields stay from an earlier run when this one timed no more calls), and `per_label:
+{<label>: {n, precision, recall, f1, tau, coverage, precision_at_tau, recall_at_tau, f1_at_tau,
+precision_default, recall_default, precision_lb, share_error_pp}}`. `precision`, `recall` and `f1`
+are of the top answer with no threshold; `tau` is the saved one. `precision_lb` is the 95% Wilson
+lower bound at tau; `share_error_pp` compares the label's share among units at or above tau with
+its share in gold, both re-weighted from the stratified sample to the silver label mix. Records are
+keyed on `model_id`, `model_rev` and `prompt_ver`, the newest of each counts, and records from
+before the five folds (no `brier`) are ignored.
+
+`aut label eval` prints one table per task: quality, speed and memory per model, `*` on the Pareto
+frontier (tuned macro-F1, `s_per_decision`, `peak_mb`; a null axis is not compared) of the models
+that pass, `!` on those that fail, then the per-label and reliability numbers of the models just
+scored. `aut label choose --task T` prints the table and a recommendation (best tuned macro-F1 to
+two decimals on that frontier, then the fastest) and writes nothing. `aut label choose --task T
+--model M` writes the newest record of M into `label.json`, with a warning when it fails the bar.
+Labels without a tau stay unknown.
+
+`aut label eval --task T --final --model M [--days D]` scores M on the final test days with its
+saved calibration and tau, fits nothing, and appends the result (numbers, as in the record, and no
+`eval` row to the sink) to `<task>.final.jsonl`. It warns when a label has under its gold floor (30,
+150 per class for titles) there, and when M has seen those days before.
+
+`aut label train-encoder --task T` fits the `encoder` backend (logistic regression over hashed word
+and fact features, stdlib only) on the gold (three times the weight) and silver of half the open
+days, never on a final test day or a day eval calibrates it with, and reports accuracy on the gold
+of those other days; its file (`~/.local/share/aut/label/encoder/<task>.json`) holds bucket ids and
+weights, no words.
 
 ## Re-logged messages: one event_id, several rows (read-side rule)
 

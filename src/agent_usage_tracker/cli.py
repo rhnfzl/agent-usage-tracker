@@ -17,6 +17,8 @@
                         score every commit row against the local clones -> agents.commit_outcome
   aut outcome <shipped|ruled-out|open> [--session ID]
                         the manual outcome of this project's newest interactive session
+  aut history-steers [--dry-run]
+                        daily steer estimates for lost 2026 logs, from the CLI history files
   aut episodes review [--month YYYY-MM]
                         hand-check a month's episodes on a local page -> agents.episode_correction
   aut inspect --episode ID | --day YYYY-MM-DD | --label UNIT_ID
@@ -30,8 +32,10 @@
                         teacher (silver) labels for a stratified sample -> eval/<task>.silver.jsonl
   aut label review [--task T]
                         label gold answers on a local page -> eval/<task>.jsonl (never text)
-  aut label eval --task T | choose --task T | train-encoder --task T
-                        bake-off on gold -> eval record; the winner -> label.json; the encoder
+  aut label eval --task T [--final --model M]
+                        bake-off on gold -> saved scores, eval record, one table per task
+  aut label choose --task T [--model M] | train-encoder --task T
+                        the table, or M's saved result -> label.json; the encoder
 
 The dry-run report doubles as the accuracy check: it prints per-agent, per-model token
 sums straight from your real logs.
@@ -40,6 +44,7 @@ sums straight from your real logs.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 from datetime import date, timedelta
@@ -159,9 +164,16 @@ def _label_bakeoff(cfg: Config, args: argparse.Namespace) -> None:
     """eval | choose | train-encoder: the bake-off on the gold labels."""
     from .label import bakeoff
     if args.label_cmd == "eval":
-        bakeoff.print_eval(args.task, bakeoff.run_eval(cfg, args.task, args.days))
+        if args.final or args.model:
+            if not (args.final and args.model):
+                raise AutError("label eval: --final and --model go together")
+            bakeoff.print_final(bakeoff.run_final(cfg, args.task, args.model, args.days))
+        else:
+            bakeoff.print_eval(cfg, args.task, bakeoff.run_eval(cfg, args.task, args.days))
     elif args.label_cmd == "choose":
-        bakeoff.print_choose(args.task, bakeoff.choose(cfg, args.task))
+        chosen = bakeoff.choose(cfg, args.task, args.model)
+        if chosen:
+            bakeoff.print_choose(args.task, chosen)
     else:
         bakeoff.print_train_encoder(args.task, bakeoff.train_encoder(cfg, args.task, args.days))
 
@@ -181,6 +193,13 @@ def cmd_label(cfg: Config, args: argparse.Namespace) -> None:
         _label_bakeoff(cfg, args)
 
 
+def cmd_history_steers(cfg: Config, args: argparse.Namespace) -> None:
+    from . import history_steers
+    c = history_steers.run(cfg, args.dry_run)
+    print(f"history-steers {'DRY-RUN (nothing written)' if args.dry_run else 'written'}: "
+          f"{json.dumps(dict(c))}")
+
+
 def cmd_sync_prices(args: argparse.Namespace) -> None:
     out = args.out or str(config_path().parent / "model_prices.json")
     n = pricing.sync_prices(out, litellm_url=args.litellm_url, models_dev_url=args.models_dev_url,
@@ -192,7 +211,8 @@ _NO_CONFIG_COMMANDS = {"sync-prices": cmd_sync_prices}
 _AGENT_COMMANDS = {"scan": cmd_scan, "backfill": cmd_backfill, "export": cmd_export,
                    "status": cmd_status}
 _COMMANDS = {"time": cmd_time_add, "outcomes": cmd_outcomes, "outcome": cmd_outcome,
-             "inspect": cmd_inspect, "episodes": cmd_episodes, "label": cmd_label}
+             "inspect": cmd_inspect, "episodes": cmd_episodes, "label": cmd_label,
+             "history-steers": cmd_history_steers}
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -233,6 +253,9 @@ def _build_parser() -> argparse.ArgumentParser:
     p_outs.add_argument("--fetch", action="store_true",
                         help="git fetch the clones and ask gh first (config: outcome_fetch)")
     p_outs.add_argument("--dry-run", action="store_true", help="count states, write nothing, no fetch or gh")
+    p_hist = sub.add_parser("history-steers",
+                            help="daily steer estimates for lost 2026 logs, from CLI history")
+    p_hist.add_argument("--dry-run", action="store_true", help="count, write nothing")
     p_out = sub.add_parser("outcome", help="mark this project's newest session's outcome")
     p_out.add_argument("outcome", choices=["shipped", "ruled-out", "open"])
     p_out.add_argument("--session", help="the session id (default: newest interactive here)")
@@ -262,14 +285,18 @@ def _build_parser() -> argparse.ArgumentParser:
                          help="cap on this run's Sonnet spend (default 5)")
     p_lrev = lab_sub.add_parser("review", help="label gold answers on a local page")
     p_lrev.add_argument("--task", choices=LABEL_DECISION_TASKS)
-    for name, text in (("eval", "score every backend on the gold labels"),
-                       ("choose", "write the smallest backend that passes into label.json"),
+    for name, text in (("eval", "score every backend on the gold labels; print the table"),
+                       ("choose", "print the table, or write --model's result to label.json"),
                        ("train-encoder", "fit the small encoder on gold + silver")):
         lab_sub.add_parser(name, help=text).add_argument("--task", choices=LABEL_DECISION_TASKS,
                                                          required=True)
     for sp in (p_teach, p_lrev, lab_sub.choices["eval"], lab_sub.choices["train-encoder"]):
         sp.add_argument("--days", type=int, default=LABEL_DAYS,
                         help=f"window of whole past days the units come from (default {LABEL_DAYS})")
+    lab_sub.choices["eval"].add_argument("--final", action="store_true",
+                                         help="score --model on the final test days")
+    for name in ("eval", "choose"):
+        lab_sub.choices[name].add_argument("--model", help="a name from the eval table")
     return parser
 
 

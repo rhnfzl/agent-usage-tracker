@@ -289,7 +289,7 @@ def _outcome_units(task: Task, src: Source, since: datetime, until: datetime | N
         said = [text[r["event_id"]] for r in st if r["event_id"] in text]
         if not said:
             continue
-        # ts = the episode start, so the row's day (and its held-out side) never moves; rev =
+        # ts = the episode start, so the row's day (and its fold) never moves; rev =
         # its last activity, so a changed episode is re-asked and an unchanged one is a no-op
         out.append(task.request("episode", ep["id"], ep["first_ts"], {
             "last_steers": said[-5:], "days_idle": max((now - ep["last_ts"]).days, 0),

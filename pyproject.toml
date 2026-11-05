@@ -13,15 +13,18 @@ dependencies = []
 # Only needed if you use the direct-Postgres fallback transport (transport.pg_dsn).
 postgres = ["psycopg[binary]>=3.1"]
 # `aut label`: a local model through mlx-lm, Apple silicon only (every test runs without it),
-# and psycopg, since every label command reads the sink.
+# and psycopg, since every label command reads the sink. Tested on mlx-lm 0.32 for Gemma and every
+# Qwen3.5 decider; the deciders reach into its text model, so a new minor is a re-test.
 label = [
     "psycopg[binary]>=3.1",
     # Floors proven by a real load and generate of a Gemma 4 build: mlx-lm 0.31.2 has the module
     # but cannot load the weights, 0.31.3 can. huggingface_hub 1.3 brings the `hf` command.
-    "mlx-lm>=0.31.3; sys_platform == 'darwin' and platform_machine == 'arm64'",
+    "mlx-lm>=0.32.2,<0.33; sys_platform == 'darwin' and platform_machine == 'arm64'",
     "mlx>=0.31.2; sys_platform == 'darwin' and platform_machine == 'arm64'",
     "huggingface_hub>=1.3; sys_platform == 'darwin' and platform_machine == 'arm64'",
 ]
+# Once, in its own environment: `python -m agent_usage_tracker.label.merge evalengine-4b`.
+merge = ["torch>=2.14", "peft>=0.21", "transformers>=5.17", "huggingface_hub>=1.3"]
 
 # Run the suite: pip install -e '.[test]' && pytest -q
 test = ["pytest"]
@@ -52,5 +55,5 @@ disallow_any_generics = true
 
 # Optional extras: the base install, and CI's lint job, have none of them.
 [[tool.mypy.overrides]]
-module = ["psycopg.*", "mlx.*", "mlx_lm.*", "huggingface_hub.*"]
+module = ["psycopg.*", "mlx.*", "mlx_lm.*", "huggingface_hub.*", "transformers.*", "torch.*", "peft.*"]
 ignore_missing_imports = true

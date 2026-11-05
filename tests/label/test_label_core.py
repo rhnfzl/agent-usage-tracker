@@ -12,6 +12,7 @@ Locks the rules:
 from __future__ import annotations
 
 import json
+import math
 import sys
 import types
 from datetime import date, datetime
@@ -77,7 +78,19 @@ def test_temperature_and_tau():
     assert tau["a"] == 0.6          # 4 of 5 right at p >= 0.6
     assert tau["b"] is None         # never right
     assert tau["c"] == 0.55
-    assert core.fit_tau([("c", 0.3, "c")])["c"] == core.TAU_FLOOR
+    assert core.fit_tau([("c", 0.3, "c"), ("c", 0.6, "c")])["c"] == core.TAU_FLOOR
+    assert core.fit_tau([("c", 0.3, "c")])["c"] is None     # no unit at the floor: nothing measured
+    # the best F1 among the cuts that reach both floors, not simply the lowest cut:
+    # a last miss still reaches 0.9 precision but adds no recall
+    assert core.fit_tau([("a", 0.95, "a")] * 9 + [("a", 0.85, "b")], 0.9)["a"] == 0.95
+    # a cut above the floor qualifies though the cut at the floor does not
+    items = [("a", 0.95, "a")] * 9 + [("a", 0.75, "b")] * 5 + [("a", 0.6, "a")] * 20
+    assert core.fit_tau(items, 0.9, floor=0.7)["a"] == 0.95
+    # the recall floor wins over F1: 0.9 has F1 .75 and recall .6, 0.8 has F1 .7 and recall .7
+    items = [("a", 0.9, "a")] * 6 + [("a", 0.8, "a")] + [("a", 0.8, "b")] * 3 + [("b", 0.9, "a")] * 3
+    assert core.fit_tau(items, 0.7)["a"] == 0.9
+    assert core.fit_tau(items, 0.7, recall=0.65)["a"] == 0.8
+    assert core.fit_tau(items, 0.7, recall=0.8)["a"] is None
 
 
 def test_decide_below_tau():
@@ -127,11 +140,20 @@ def test_choice_file_and_backend_slots(tmp_path, monkeypatch):
     c = core.load_choice("steer_intent")
     assert c.temperature == 1.4 and c.tau == {"stop": 0.7}
     b = backends.make_backend("steer_intent", c, "unused")
-    assert isinstance(b, backends.MlxLetter) and b.model_id == backends.MODELS["gemma-4-31b"]
-    with pytest.raises(backends.BackendUnavailable):
-        backends.make_backend("x", core.Choice(model_id="pplx-decider-flash-v1.2"), "m")
+    assert type(b) is backends.MlxLetter and b.model_id == backends.MODELS["gemma-4-31b"].repo
     with pytest.raises(backends.BackendUnavailable):
         backends.Encoder("steer_intent").distribution(_req())
+
+
+def test_a_bad_platt_in_label_json_runs_uncalibrated(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("AUT_CONFIG", str(tmp_path / "config.toml"))
+    for bad in ("yes", {"yes": "a"}, {"a": 1.0, "b": 0.0}, {"yes": "a", "a": "1", "b": 0.0}):
+        (tmp_path / "label.json").write_text(json.dumps({"tasks": {"steer_intent": {"platt": bad}}}))
+        assert core.load_choice("steer_intent") == core.Choice()
+        assert "the platt of steer_intent" in capsys.readouterr().err
+    good = {"yes": "a", "a": 1.0, "b": 0.0}
+    (tmp_path / "label.json").write_text(json.dumps({"tasks": {"steer_intent": {"platt": good}}}))
+    assert core.load_choice("steer_intent").platt == good
 
 
 def _two_options(**kw) -> core.Request:
@@ -270,6 +292,9 @@ def test_a_backend_load_failure_of_any_kind_stops_only_that_backend(monkeypatch,
     def bad_load(_path):
         raise ValueError("Model type gemma99 not supported")
     monkeypatch.setitem(sys.modules, "mlx_lm", types.SimpleNamespace(load=bad_load))
+    mlx = types.SimpleNamespace(set_cache_limit=lambda n: None)     # every load caps the cache
+    monkeypatch.setitem(sys.modules, "mlx", types.SimpleNamespace(core=mlx))
+    monkeypatch.setitem(sys.modules, "mlx.core", mlx)
     monkeypatch.setitem(sys.modules, "huggingface_hub",
                         types.SimpleNamespace(try_to_load_from_cache=lambda *a, **k: None))
     monkeypatch.setattr(backends, "cached_snapshot", lambda *a: tmp_path)
@@ -284,3 +309,22 @@ def test_a_corrupt_encoder_says_retrain_not_untrained(monkeypatch, tmp_path, bod
     monkeypatch.setattr(backends, "encoder_path", lambda task: path)
     with pytest.raises(backends.BackendUnavailable, match="unreadable or corrupt"):
         backends.Encoder("steer_intent")._load()
+
+
+def test_fit_platt():
+    ds = [{"y": p, "n": 1 - p} for p in (0.1, 0.1, 0.2, 0.3, 0.6, 0.7, 0.8, 0.9, 0.9, 0.0, 1.0)]
+    gs = list("nnynnyynyny")
+    fit = core.fit_platt(ds, gs, "y")
+    # the optimum of a convex loss: its gradient is about zero (l2 included)
+    xy = [(core._log_odds(d["y"]), g == "y") for d, g in zip(ds, gs)]
+    qs = [core._sigmoid(fit["a"] * x + fit["b"]) for x, _y in xy]
+    assert abs(sum(q - y for q, (_x, y) in zip(qs, xy)) + 1e-3 * fit["b"]) < 1e-3
+    assert abs(sum((q - y) * x for q, (x, y) in zip(qs, xy)) + 1e-3 * (fit["a"] - 1)) < 1e-3
+    assert core.fit_platt([], [], "y") == {"yes": "y", "a": 1.0, "b": 0.0}
+    sep = core.fit_platt([{"y": 0.9, "n": 0.1}, {"y": 0.1, "n": 0.9}] * 5, list("yn") * 5, "y")
+    assert sep["a"] > 1 and math.isfinite(sep["a"])     # separable stays finite
+    q = core.calibrate({"n": 0.5, "y": 0.5}, 1.0, {"yes": "y", "a": 1.0, "b": 1.0})
+    assert q["y"] > 0.7 and abs(q["y"] + q["n"] - 1) < 1e-9
+    assert core.calibrate({"a": 0.7, "b": 0.3}) == pytest.approx({"a": 0.7, "b": 0.3})
+    # a label.json from before Platt still loads and decides as it did
+    assert core.Choice().platt is None

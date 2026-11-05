@@ -111,7 +111,9 @@ class Config:
     # the precision bar for tau and the coverage gate, and the run's time budget.
     label_tasks: tuple[str, ...] = ()
     label_model: str = DEFAULT_LABEL_MODEL
+    label_llama_server: str = "llama-server"
     label_precision: float = 0.90
+    label_recall: float = 0.60
     label_coverage: float = 0.75
     label_budget_s: int = 3600
 
@@ -212,12 +214,13 @@ def _label_tasks(data: dict[str, Any]) -> tuple[str, ...]:
     return tuple(tasks)
 
 
-def _label_bars(data: dict[str, Any]) -> tuple[float, float]:
-    precision, coverage = (float(data.get(k, d)) for k, d in
-                           (("label_precision", 0.90), ("label_coverage", 0.75)))
-    if not (0 < precision <= 1 and 0 <= coverage <= 1):
-        raise AutError("config: label_precision and label_coverage must lie in 0..1")
-    return precision, coverage
+def _label_bars(data: dict[str, Any]) -> tuple[float, float, float]:
+    precision, recall, coverage = (float(data.get(k, d)) for k, d in
+                                   (("label_precision", 0.90), ("label_recall", 0.60),
+                                    ("label_coverage", 0.75)))
+    if not (0 < precision <= 1 and 0 <= recall <= 1 and 0 <= coverage <= 1):
+        raise AutError("config: label_precision, label_recall and label_coverage must lie in 0..1")
+    return precision, recall, coverage
 
 
 def _warn_if_secrets_written(path: Path, transport: dict[str, Any], data: dict[str, Any]) -> None:
@@ -237,7 +240,7 @@ def _config_from(data: dict[str, Any], path: Path) -> Config:
     roots = _repo_roots(data)
     aw_days = _aw_title_days(data)
     label_tasks = _label_tasks(data)
-    label_precision, label_coverage = _label_bars(data)
+    label_precision, label_recall, label_coverage = _label_bars(data)
     _warn_if_secrets_written(path, transport, data)
 
     return Config(
@@ -267,7 +270,9 @@ def _config_from(data: dict[str, Any], path: Path) -> Config:
         outcome_fetch=_as_bool(data.get("outcome_fetch", False)),
         label_tasks=label_tasks,
         label_model=str(data.get("label_model") or DEFAULT_LABEL_MODEL),
+        label_llama_server=str(data.get("label_llama_server") or "llama-server"),
         label_precision=label_precision,
+        label_recall=label_recall,
         label_coverage=label_coverage,
         label_budget_s=int(data.get("label_budget_s") or 3600),
     )

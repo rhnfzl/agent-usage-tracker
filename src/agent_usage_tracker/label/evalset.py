@@ -2,9 +2,11 @@
 share.
 
 Under core.data_dir() / "eval": <task>.silver.jsonl (teacher distributions: unit_id, teacher,
-dist, date, task_ver), <task>.jsonl (gold: unit_id, gold, labeller, date, task_ver) and
-<task>.eval.jsonl (one bake-off record per backend, numbers only). No row holds text: a unit's
-text is rebuilt from this machine's logs (tasks.units) whenever it is needed.
+dist, date, task_ver), <task>.jsonl (gold: unit_id, gold, labeller, date, task_ver),
+<task>.eval.jsonl (one bake-off record per backend, numbers only), <task>.final.jsonl (results on
+the final test days) and scores/ (one file per task, model, revision and prompt: unit_id and raw
+dist). No row holds text: a unit's text is rebuilt from this machine's logs (tasks.units) whenever
+it is needed.
 """
 
 from __future__ import annotations
@@ -14,6 +16,7 @@ import itertools
 import json
 import os
 import random
+import re
 from collections import defaultdict
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -28,11 +31,22 @@ T = TypeVar("T")
 # Gold per label, (floor, target), as the gold page shows them. AW titles: 150 per class.
 FLOORS = {"work_category": (30, 50), "steer_intent": (30, 50), "soft_outcome": (30, 30),
           "aw_title_relevance": (150, 150)}
+FOLDS = 5
+FINAL_PCT = 20               # share of the days kept for `aut label eval --final`
 
 
 def eval_path(task: str, kind: str) -> Path:
-    """kind: silver | gold | eval."""
+    """kind: silver | gold | eval | final."""
     return data_dir() / "eval" / (f"{task}.jsonl" if kind == "gold" else f"{task}.{kind}.jsonl")
+
+
+def scores_path(task: str, model_id: str, model_rev: str, prompt_ver: str,
+                protocol: str = "") -> Path:
+    """The saved raw scores of one task, model, revision, prompt and decision protocol."""
+    parts = (task, model_id, model_rev, prompt_ver) + ((protocol,) if protocol else ())
+    key = hashlib.sha256("\0".join(parts).encode()).hexdigest()
+    name = re.sub(r"[^\w.-]+", "-", model_id)
+    return data_dir() / "eval" / "scores" / f"{task}.{name}.{key[:12]}.jsonl"
 
 
 def read_jsonl(p: Path) -> list[dict[str, Any]]:
@@ -100,21 +114,33 @@ def unit_day(req: Request) -> date:
     return datetime.fromisoformat(req.ts).astimezone().date()
 
 
-def _side(key: str) -> int:
-    return int(hashlib.sha256(key.encode()).hexdigest(), 16) % 2
+def _hash(key: str) -> int:
+    return int(hashlib.sha256(key.encode()).hexdigest(), 16)
 
 
-def held_out(req: Request) -> bool:
-    """Gold is split once, by the unit's local day: about half the days calibrate and choose, the
-    other half report. A day never changes sides, so a held-out answer never tunes anything. A
-    title's ts is its first sight inside the window read, which moves, so it splits by unit_id."""
-    return _side(req.unit_id if req.unit == "aw_title" else unit_day(req).isoformat()) == 1
+def _group(req: Request) -> str:
+    """What must stay together in a split: the unit's local day. A title's ts is its first sight
+    inside the window read, which moves, so a title is its own group."""
+    return req.unit_id if req.unit == "aw_title" else unit_day(req).isoformat()
+
+
+def final_test(req: Request) -> bool:
+    """The stable part of the days only `aut label eval --final` reads: no fold, tau, temperature,
+    encoder fit or choice sees them."""
+    return _hash("final|" + _group(req)) % 100 < FINAL_PCT
+
+
+def fold(req: Request) -> int:
+    """The unit's fold, the same for every model and across runs. shortcut: whole days hash to a
+    fold, so folds are not stratified by label and a rare label can sit in few folds; upgrade by
+    assigning days to folds by their gold label mix once gold is large enough to care."""
+    return _hash("fold|" + _group(req)) % FOLDS
 
 
 def in_encoder_train_split(req: Request) -> bool:
-    """Of the non-held-out gold, the half the encoder trains on; the other half fits its
-    temperature and tau in eval, so they are never fitted on the encoder's own training data."""
-    return _side("encoder|" + req.unit_id) == 1
+    """The half of the days the encoder trains on; the other half fits its temperature and tau in
+    eval, so they are never fitted on the encoder's own training data."""
+    return _hash("encoder|" + _group(req)) % 2 == 1
 
 
 def window_units(cfg: Config, task: str, days: int = LABEL_DAYS, src: Source | None = None,

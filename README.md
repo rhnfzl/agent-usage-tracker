@@ -72,7 +72,8 @@ inspect pages read titles from this machine's logs and keep them in the page.
 | `activitywatch` in `agents` | the ActivityWatch server at `activitywatch_url` (default `http://localhost:5600`). With `activitywatch_title_days` above 0, every real scan also sends `DELETE` requests there for its window events older than that |
 | `aut label teach` | Claude Sonnet through your local `claude -p`, for Claude Code text only (that text already lives with Anthropic); capped by `--budget-usd` |
 
-`aut label` runs the model on this machine. aut never downloads the model.
+`aut label` runs the model on this machine. aut never downloads a model. `llama-server`, for the
+models that use it, listens on 127.0.0.1 only and stops with the run.
 
 Every git command aut runs ignores a clone's own hooks, fsmonitor, external diff, textconv,
 credential helper and ssh command, so a cloned repo cannot make git run its code.
@@ -85,12 +86,13 @@ Python 3.11 to 3.15. macOS, Linux and Windows. The base install has zero runtime
 uv tool install git+https://github.com/rhnfzl/agent-usage-tracker
 ```
 
-Two optional extras:
+Three optional extras:
 
 | Extra | Adds | Needed for |
 |---|---|---|
 | `postgres` | `psycopg[binary]` | anything that uses `transport.pg_dsn`: sessions, activity, time, heartbeats, `outcomes`, `outcome`, `episodes review`, `inspect`, `time add`, `backfill --sessions-only/--activity-only` |
-| `label` | `psycopg[binary]`, and on Apple silicon `mlx-lm` and `huggingface_hub` | `aut label` (the model backend runs on Apple silicon only) |
+| `label` | `psycopg[binary]`, and on Apple silicon `mlx-lm` and `huggingface_hub` | `aut label` (the MLX backends run on Apple silicon only) |
+| `merge` | `torch`, `peft`, `transformers`, `huggingface_hub` | one command, once, for `evalengine-4b`: see [The models](#the-models) |
 
 ```bash
 uv tool install "agent-usage-tracker[postgres] @ git+https://github.com/rhnfzl/agent-usage-tracker"
@@ -140,11 +142,13 @@ other command refuses it.
 | `aut episodes review [--month YYYY-MM]` | hand-check a sample of 30 of a month's episodes (default: last completed month) on a local page; writes `agents.episode_correction` | `pg_dsn` |
 | `aut inspect --episode ID \| --day YYYY-MM-DD \| --label UNIT_ID` | local evidence page: why an episode (id or prefix), a day's episodes, or a label exists. Its linked correction form writes `agents.episode_correction` | `pg_dsn` |
 | `aut label run [--task T] [--since YYYY-MM-DD] [--dry-run]` | label new units since the watermark, for `label_tasks` or one task | `label` extra, `pg_dsn`, the model in the HF cache |
+| `aut history-steers [--dry-run]` | daily steer estimates for the lost 2026 logs, from the CLI history files (rows of kind `steer_estimate`, a count and no text) | `pg_dsn` |
 | `aut label backfill --task T --days N` | label one task over the last N days; the nightly watermark is not moved back. `soft_outcome` always covers the last 14 days, whatever `--days` or `--since` say (it notes this on stderr) | same |
 | `aut label teach --task T --n N [--budget-usd X] [--days D]` | teacher (silver) labels for a stratified sample of up to N units (default spend cap 5 USD, window 90 days) | same, plus `claude` on `PATH` |
 | `aut label review [--task T] [--days D]` | answer gold labels one unit at a time on a local page | `pg_dsn` |
-| `aut label eval --task T [--days D]` | score every backend on your gold labels | same as `run` |
-| `aut label choose --task T` | write the smallest backend that passes the bar into `label.json` | an eval record |
+| `aut label eval --task T [--days D]` | score every backend on your gold labels (saved scores are re-used) and print one table: quality, speed, memory | same as `run` |
+| `aut label eval --task T --final --model M [--days D]` | score M on the final test days, which nothing else reads | an eval record of M |
+| `aut label choose --task T [--model M]` | with `--model`, write M's saved result into `label.json`; without it, print the table and a recommendation and write nothing | an eval record |
 | `aut label train-encoder --task T [--days D]` | fit the small stdlib encoder on gold and silver labels | gold or silver labels |
 
 Label tasks: `steer_intent`, `work_category`, `soft_outcome`, `aw_title_relevance`, and
@@ -185,8 +189,9 @@ matter:
 | `outcome_repo_roots` | `["~/projects"]` | where `aut outcomes` looks for clones (6 levels deep) |
 | `outcome_fetch` | `false` | fetch and ask `gh` before scoring. Turn it on where the nightly job runs, or squash-merged PRs count as abandoned |
 | `label_tasks` | `[]` | the tasks the nightly `aut label run` labels. Empty means it labels nothing |
-| `label_model` | `mlx-community/gemma-4-31b-it-4bit` | Hugging Face model id, read from the local cache only |
-| `label_precision`, `label_coverage`, `label_budget_s` | `0.90`, `0.75`, `3600` | precision bar for each label's threshold, coverage gate for `choose`, time budget of one run in seconds |
+| `label_model` | `mlx-community/gemma-4-31b-it-4bit` | a short name from [The models](#the-models) or a Hugging Face model id, read from the local cache only. `daily_note` needs an instruct model, so leave it on Gemma if you use that task |
+| `label_llama_server` | `llama-server` | the binary for `aurelis-2b` and `kev-4b`. Use a full path if the nightly job's `PATH` lacks it |
+| `label_precision`, `label_recall`, `label_coverage`, `label_budget_s` | `0.90`, `0.60`, `0.75`, `3600` | floors per label (a model that misses one is marked as failing), coverage bar, time budget of one run in seconds |
 
 Keys outside `[transport]` must come before the `[transport]` line in the file, or TOML puts
 them inside that table and aut never sees them.
@@ -200,7 +205,7 @@ Files aut keeps on this machine:
 | `state.corrupt` | next to the state file: a copy of a corrupt `state.json`, kept before aut starts clean. A `state.json` aut has no permission to read stops the run instead and is left as it is |
 | `state.lock` | next to the state file: an empty file, the advisory lock for one short watermark save, so overlapping `scan` and `label` runs keep each other's watermarks |
 | `model_prices.json`, `label.json` | next to `config.toml`. Nothing in aut reads `model_prices.json`; it is kept for readers outside aut |
-| label gold, silver and eval files; the trained encoder; the label run cache | `~/.local/share/aut/eval/`, `~/.local/share/aut/label/encoder/`, `~/.local/share/aut/label/cache.json` (`$XDG_DATA_HOME`) |
+| label gold, silver, eval and final files; saved raw scores; the trained encoder; merged models; the label run cache | `~/.local/share/aut/eval/`, `~/.local/share/aut/eval/scores/`, `~/.local/share/aut/label/encoder/`, `~/.local/share/aut/label/models/`, `~/.local/share/aut/label/cache.json` (`$XDG_DATA_HOME`) |
 | `scan.env`, `scan.log`, `retry-pending`, `outcomes-day`, `label-day` | `~/.config/agent-usage-tracker/`, used by the timer wrapper. The wrapper hard-codes this path, so it ignores `$XDG_CONFIG_HOME` and `AUT_CONFIG` |
 | `/tmp/aut.log`, `/tmp/aut.err` | scan output from the shipped launchd plists. `/tmp` can be read by other users; change the paths in the plists if that matters |
 
@@ -278,16 +283,71 @@ fails to send prints a warning and never fails the scan.
 Optional, Apple silicon. The model reads the text on this machine and only the label is sent.
 `daily_note` is the exception: it sends the short note the model writes from a day's counts.
 
-1. Fetch the model into the local Hugging Face cache once (see
-   [Troubleshooting](#troubleshooting)).
+1. Fetch the models you want to compare once (see [The models](#the-models)).
 2. `aut label teach --task steer_intent --n 200` writes silver labels.
 3. `aut label review --task steer_intent` lets you answer gold labels on a local page.
-4. `aut label eval --task steer_intent`, then `aut label choose --task steer_intent`, writes the
-   winner and its thresholds into `label.json`. Without it a task runs uncalibrated and every
-   row is marked below threshold.
-5. Add the task to `label_tasks` and set `AUT_LABEL=1` in `scan.env` for the nightly run.
+4. `aut label eval --task steer_intent` scores every model that is on disk, says which it left out
+   and how to fetch them, and prints a table of quality, speed and memory, with a mark on the Pareto
+   frontier and on models that fail a floor. Scores are saved, so a rerun calls a model only for new
+   gold and tuning needs no model.
+5. `aut label choose --task steer_intent --model kev-4b` writes your pick, with its calibration and
+   thresholds, into `label.json`. Without `--model` it prints the table and a recommendation and
+   writes nothing. Without a choice a task runs uncalibrated and every row is marked below
+   threshold. `aut label eval --task steer_intent --final --model M` is the last check, on days
+   nothing else has read.
+6. Add the task to `label_tasks` and set `AUT_LABEL=1` in `scan.env` for the nightly run.
 
 Details and the stored row: [CONTRACT.md](CONTRACT.md#labels-activity_event-kind-label-aut-label).
+
+### The models
+
+`--model` and `label_model` take these names. Any other name is read as an MLX repo through answer
+letters, the way Gemma is.
+
+| Name | Weights | Runs on | Size | s/item | Memory | Right of 20 | Licence |
+|---|---|---|---|---|---|---|---|
+| `elephant-1` | community: 0x36's 4-bit port of baselabs/elephant-1 | MLX | 5.1 GB | 0.29 to 0.60 | 5.5 GB | 20 | MIT |
+| `evalengine-4b` | official LoRA merged on official Qwen3.5-4B, bf16 | MLX | 8.4 GB | 0.19 to 0.35 | 8.8 GB | 20 | Apache-2.0 |
+| `clef-flash` | community: mlx-community's 4-bit port of Cloudflare/clef-flash | MLX | 6.2 GB | 0.36 to 0.62 | 5.9 GB | 20 | Apache-2.0 |
+| `aurelis-2b` | official q8_0 GGUF | `llama-server` | 2.7 GB | 0.09 to 0.43 | 3.1 GB | 20 | Apache-2.0 |
+| `pplx-decider-flash` | official bf16 | MLX | 9.1 GB | 0.13 to 0.33 | 8.6 GB | 19 | Apache-2.0 |
+| `kev-4b` | community: ggml-org's q8_0 conversion of jaredpalmer/kev-4b | `llama-server` | 4.5 GB | 0.12 to 0.28 | 5.1 GB | 20 | Apache-2.0 |
+| `gemma-4-31b` | community: mlx-community's 4-bit build | MLX | 18.4 GB | 2.75 | 17.7 GB | 20 | Apache-2.0, per its card |
+
+Measured on one Apple silicon Mac, on 20 easy synthetic cases, one model at a time. The low s/item
+is aut's own backend after a warm-up; the high one is an earlier run on a busier machine. These
+numbers are not a ranking: which model is best on your work is what `aut label eval` is for. Memory
+of the two `llama-server` models is the server's RSS, which can miss Metal buffers.
+`gemma-4-31b` scored 7 until aut turned thinking off: its chat template opens a thinking channel by
+default, and the answer letters were then read at a position where the model expects `<|channel>`.
+
+Fetch once, one at a time. A nightly run never downloads:
+
+```bash
+hf download mlx-community/gemma-4-31b-it-4bit
+hf download 0x36/elephant-1-9B-MLX-4bit --revision 16de0e500eea4e44fc7db79928c03c53e324bcb0
+hf download mlx-community/clef-flash-4bit --revision b5adbe2c3a95200d4bf04a0727c8ec457157d5e1
+hf download perplexity-ai/pplx-decider-flash-v1.2 --revision 9ff7cf9838e59df461c276b7699d56b244d2af58
+hf download Leptos-ai/Aurelis-2B aurelis-2b-q8_0.gguf --revision 1b56513618a9de9378440d3bca5e4e163f142279
+hf download ggml-org/Kev-4B-GGUF Kev-4B-Q8_0.gguf --revision f4624b6bb7072f1bab726a622c1cad3f96030b9e
+```
+
+`evalengine-4b` is a LoRA, so it is merged once onto its base and saved under
+`~/.local/share/aut/label/models/`. This loads the 9 GB base on the CPU and needs torch for this
+command only. After it, the model needs only `mlx-lm`, and you can delete the base from the cache:
+
+```bash
+hf download evalengine/decision-4b --revision aadc55517ae8bfb1264fd5932ec452b939361e47
+hf download Qwen/Qwen3.5-4B --revision 851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a
+# from a checkout:
+uv run --isolated --no-project --with ".[merge]" python -m agent_usage_tracker.label.merge evalengine-4b
+```
+
+`aurelis-2b` and `kev-4b` need `llama-server` from llama.cpp, build 11669 or newer
+(`brew install llama.cpp`; `llama-server --version` shows the build). The official GGUF of
+`pplx-decider-flash` does not run on it (HTTP 501), so that model runs on MLX from the official
+weights. The `clef-flash` GGUF does run, but its probabilities differ from the MLX build's by up to
+0.27 on the same top answers, so aut uses the MLX build.
 
 ## What the sink needs
 
@@ -318,6 +378,11 @@ only in the infrastructure repo. A deploy walkthrough is in [DEPLOY.md](DEPLOY.m
   accurate Cursor numbers.
 
 ## Troubleshooting
+
+**`label: no llama-server at ...` or `too old for /v1/systemone`.** `aurelis-2b` and `kev-4b` need
+`llama-server` build 11669 or newer. `brew install llama.cpp` or `brew upgrade llama.cpp`, and set
+`label_llama_server` to its full path if the nightly job's `PATH` lacks it. A `label eval` leaves
+those two out and goes on with the others.
 
 **`label: <model> is not fully in the local Hugging Face cache`.** aut reads the model from the
 cache only and needs its config and every weight file. Fetch it once with the `hf` CLI that
