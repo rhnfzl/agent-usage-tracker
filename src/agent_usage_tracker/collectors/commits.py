@@ -14,14 +14,16 @@ _SHELL_TOKEN = re.compile(r"""\\.|'[^']*'|"(?:[^"\\]|\\.)*"|(?<![^\s;|&()])#[^\n
                           r"""|(?P<sep>&&|\|\||[;|\n])""", re.S)
 _HEREDOC = re.compile(r"""<<-?\s*\\?(['"]?)([\w.-]+)\1([^\n]*)\n.*?\n\s*\2[ \t]*(?=\n|$)""", re.S)
 _ARG = r"""(?:[^\s"']|"[^"]*"|'[^']*')+"""
-_WRAPPER = rf"(?:\w+={_ARG}|(?:\S*/)?env|command|timeout\s+\S+|rtk(?:\s+proxy)?)\s+"
+# no text can match two alternatives of a repeated group here, and the loops below are possessive:
+# a log line is untrusted, and overlap made matching time double with every extra wrapper
+_WRAPPER = rf"(?:\w+={_ARG}|(?:[^\s=]*/)?env|command|timeout\s+\S+|rtk(?:\s+proxy)?)\s+"
 # optional wrappers (VAR=x, env, command, timeout N, rtk [proxy]), then `git`, then only global
 # options (-C <dir>, -c <k=v>, --flag[=v]), then the commit subcommand itself
 GIT_COMMIT = re.compile(
-    rf"^\s*[({{]?\s*(?:{_WRAPPER})*"
-    rf"(?:\S*/)?git(?:\s+(?:-[Cc]\s+{_ARG}|--[\w-]+(?:={_ARG})?|-\w+))*\s+commit(?:\s|$)")
+    rf"^\s*[({{]?\s*(?:{_WRAPPER})*+"
+    rf"(?:\S*/)?git(?:\s+(?:-[Cc]\s+{_ARG}|--[\w-]+(?:={_ARG})?|-\w+))*+\s+commit(?:\s|$)")
 # `sh -c '...'`: its quoted argument is commands, unlike any other command's quoted argument
-_SHELL_C = re.compile(rf"""^\s*[({{]?\s*(?:{_WRAPPER}|uv\s+run\s+)*(?:\S*/)?(?:ba|z|da)?sh\s+"""
+_SHELL_C = re.compile(rf"""^\s*[({{]?\s*(?:{_WRAPPER}|uv\s+run\s+)*+(?:\S*/)?(?:ba|z|da)?sh\s+"""
                       rf"""(?:-[\w-]+\s+)*?-\w*c\s+('[^']*'|"(?:[^"\\]|\\.)*")""", re.S)
 # segments that print nothing, so a commit after only these still owns the output's first line
 _SILENT = re.compile(rf"^\s*(?:(?:cd|pushd|set|export|true|mkdir|rm)\b|cat\s+>|\w+={_ARG}\s*$"

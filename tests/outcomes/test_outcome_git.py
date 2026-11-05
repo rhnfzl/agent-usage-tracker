@@ -355,3 +355,12 @@ def test_a_failed_origin_read_is_an_unreadable_clone_not_a_clone_without_origin(
     monkeypatch.setattr(og, "run_git", lambda path, *a, **kw: "upstream\n" if a[0] == "remote" else None)
     clone = og._clone_at(str(tmp_path), str(tmp_path), RepoKeys("s" * 40))
     assert clone.readable and clone.key is None, "no origin at all is still readable"
+
+
+def test_a_folder_marked_by_an_empty_git_file_is_not_an_unreadable_clone(tmp_path):
+    """uv's cache keeps an empty .git file in each sdist. Counted as unreadable, one such folder
+    held every commit without its own clone undecided on every run."""
+    marked = tmp_path / "cache" / "sdists-v9"
+    marked.mkdir(parents=True)
+    (marked / ".git").write_text("")
+    assert og.find_clones([str(tmp_path)], RepoKeys("s" * 32)) == []

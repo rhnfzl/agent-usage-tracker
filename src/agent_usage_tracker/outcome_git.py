@@ -83,7 +83,9 @@ def _common_dir(path: str) -> str | None:
         return None
     if r.returncode == 0:
         return r.stdout.strip()
-    return "" if "not a git repository" in r.stderr else None
+    # an invalid .git file marks a folder and holds no repository (uv's cache keeps one in each sdist)
+    return "" if ("not a git repository" in r.stderr
+                  or "invalid gitfile format" in r.stderr) else None
 
 
 def _origin_ids(url: str, keys: RepoKeys) -> tuple[str | None, str | None]:

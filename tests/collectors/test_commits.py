@@ -2,10 +2,16 @@
 
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
 import tempfile
 import time
 from pathlib import Path
 
+import pytest
+
+from agent_usage_tracker.collectors import commits as c
 from agent_usage_tracker.collectors import session_digest
 from agent_usage_tracker.collectors.commits import (GIT_COMMIT, commit_args_at, commit_call,
                                                     commit_dir)
@@ -108,3 +114,24 @@ def test_commit_regex_is_linear() -> None:
     assert GIT_COMMIT.search("git " + "--no-pager " * 40 + "status --short") is None
     assert GIT_COMMIT.search("git --no-pager -C x commit -m y")
     assert time.perf_counter() - t < 0.5
+
+
+@pytest.mark.parametrize("unit", ["a=/env ", "-C ", "--x=a ", "timeout 1 ", "env ", "/env ", "a=b ",
+                                  "rtk proxy ", "command ", "uv run ", "git -C ", "a=' "])
+def test_a_crafted_command_cannot_hang_the_commit_regexes(unit):
+    # a child with a timeout: exponential matching would otherwise hang the test run itself
+    code = ("import sys\nfrom agent_usage_tracker.collectors import commits as c\n"
+            "s = sys.argv[1]\n"
+            "for p in (c.GIT_COMMIT, c._SHELL_C, c._SILENT): p.match(s)\n"
+            "c.commit_call(s); c.commit_dir(s)\n")
+    src = str(Path(c.__file__).parents[2])
+    subprocess.run([sys.executable, "-c", code, unit * 200 + "x"], check=True, timeout=20,
+                   env={**os.environ, "PYTHONPATH": src})
+
+
+def test_wrappers_still_reach_the_commit():
+    for cmd in ("a=/env git commit -m x", "/usr/bin/env git commit -m x", "A=1 B='c d' git commit -m x",
+                "timeout 5 rtk proxy git -C /r -c a=b --no-pager commit -m x", "command git commit",
+                "git -C a -C b commit -m x", "git -v commit"):
+        assert c.commit_call(cmd) is not None, cmd
+    assert c.commit_call("uv run env bash -c 'git commit -m x'") is not None
