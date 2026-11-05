@@ -1,4 +1,4 @@
-"""Hermetic tests for `aut inspect` (the evidence inspector) and the retired `aut report`.
+"""Hermetic tests for `aut inspect` (the evidence inspector).
 
 Locks the rules:
   - anchors come from seed sessions only and from their own repo's unit; a key two sessions
@@ -6,8 +6,7 @@ Locks the rules:
   - the outcome rule shown is the linker's, manual first;
   - the current label per unit is picked as agents.label_latest picks it, below tau is unknown;
   - local text is escaped, the page is served only under its token, and its one write is its
-    correction link, which opens the existing review form;
-  - `aut report` writes nothing and says it is retired.
+    correction link, which opens the existing review form.
 """
 
 from __future__ import annotations
@@ -226,14 +225,10 @@ def test_day_bounds_are_local_midnights():
         raise AssertionError("bad day accepted")
 
 
-def test_report_is_retired_and_writes_nothing(monkeypatch):
-    with tempfile.TemporaryDirectory() as d:
-        out = Path(d) / "metrics.json"
-        err = io.StringIO()
-        monkeypatch.setenv("AUT_CONFIG", str(Path(d) / "missing.toml"))
-        with contextlib.redirect_stderr(err):
-            assert cli.main(["report", "--out", str(out), "--idle-gap", "60"]) == 0
-        assert not out.exists() and "retired" in err.getvalue()
+def test_report_is_gone():
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["report"])
+    assert exc.value.code == 2
 
 
 def test_day_bounds_are_local_midnights_and_refuse_another_format():

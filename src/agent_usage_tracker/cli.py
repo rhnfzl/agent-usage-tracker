@@ -11,7 +11,6 @@
   aut export [--out F]  write all usage as CSV (bulk load, offline bridge); never the watermark
   aut sync-prices [--out F]
                         refresh the API-equivalent model price map
-  aut report            retired: warns and writes nothing
   aut time add --start <local> --end <local> | --minutes N [--at <local end>] [--not-relevant]
                         record a manual active-time interval (needs transport.pg_dsn)
   aut outcomes [--fetch] [--dry-run]
@@ -187,13 +186,7 @@ def cmd_sync_prices(args: argparse.Namespace) -> None:
     print(f"synced {n} model prices -> {out}", file=sys.stderr)
 
 
-def cmd_report(args: argparse.Namespace) -> None:
-    # shortcut: kept one release so old crons only warn; delete the subcommand after that
-    print("aut report is retired: metrics.json is replaced by the agents database views "
-          "(Grafana on the LAN). Nothing was written.", file=sys.stderr)
-
-
-_NO_CONFIG_COMMANDS = {"sync-prices": cmd_sync_prices, "report": cmd_report}
+_NO_CONFIG_COMMANDS = {"sync-prices": cmd_sync_prices}
 _AGENT_COMMANDS = {"scan": cmd_scan, "backfill": cmd_backfill, "export": cmd_export,
                    "status": cmd_status}
 _COMMANDS = {"time": cmd_time_add, "outcomes": cmd_outcomes, "outcome": cmd_outcome,
@@ -225,9 +218,6 @@ def _build_parser() -> argparse.ArgumentParser:
     p_sync.add_argument("--litellm-url", default=pricing.LITELLM_URL)
     p_sync.add_argument("--models-dev-url", default=pricing.MODELS_DEV_URL)
     p_sync.add_argument("--genai-prices-url", default=pricing.GENAI_PRICES_URL)
-    p_report = sub.add_parser("report", help="retired: replaced by the database views")
-    for flag in ("--out", "--prices", "--idle-gap"):   # still accepted, so old crons only warn
-        p_report.add_argument(flag, help=argparse.SUPPRESS)
     p_time = sub.add_parser("time", help="manual active time")
     time_sub = p_time.add_subparsers(dest="time_cmd", required=True)
     p_tadd = time_sub.add_parser("add", help="record one manual interval (local times)")

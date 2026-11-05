@@ -222,7 +222,7 @@ def test_a_failed_collector_counts_only_where_its_rows_are_kept(world, monkeypat
 
 def test_agents_is_refused_where_it_would_be_ignored_and_taken_on_both_sides(world, capsys):
     for argv in (["--agents", "codex", "outcomes"], ["--agents", "codex", "label", "run"],
-                 ["--agents", "codex", "report"], ["--agents", "codex", "sync-prices"]):
+                 ["--agents", "codex", "sync-prices"]):
         with pytest.raises(SystemExit) as exc:
             cli.main(argv)
         assert exc.value.code == 2

@@ -700,5 +700,4 @@ row with the largest `total_tokens` (the sink's `agents.usage_event_dedup`); any
 prefix of it. The collector cannot settle this per scan (which lines a scan sees is what varies)
 and cannot clean up (its role holds INSERT and SELECT only).
 
-`aut report` and `metrics.json` are retired: aggregates are the sink's private database views.
-`aut report` still runs for one release, prints that note and writes nothing.
+`metrics.json` is retired: aggregates are the sink's private database views.

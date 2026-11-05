@@ -146,7 +146,6 @@ other command refuses it.
 | `aut label eval --task T [--days D]` | score every backend on your gold labels | same as `run` |
 | `aut label choose --task T` | write the smallest backend that passes the bar into `label.json` | an eval record |
 | `aut label train-encoder --task T [--days D]` | fit the small stdlib encoder on gold and silver labels | gold or silver labels |
-| `aut report` | retired: prints a note and writes nothing. Aggregates are the sink's views | |
 
 Label tasks: `steer_intent`, `work_category`, `soft_outcome`, `aw_title_relevance`, and
 `daily_note` (for `run` and `backfill` only).
