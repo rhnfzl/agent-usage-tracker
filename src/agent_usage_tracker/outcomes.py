@@ -16,7 +16,8 @@ States (a commit moves through them by new rows; readers take the latest):
   undecided   younger than 14 days (from the merge, or from the commit row when not merged), or
               not decidable this run (default ref older than merge + 14 days, gh failed, a git
               read of the clone failed)
-A run that cannot see or decide a commit never replaces its stored state.
+A run that cannot see or decide a commit never replaces its stored state, except a stored
+"reverted" that a stale default ref's reads show no revert for: that row goes to undecided.
 
 `aut outcome <shipped|ruled-out|open>`: the manual outcome of the newest interactive session of
 the current project, written to agents.manual_outcome.
@@ -63,6 +64,7 @@ class Outcome(TypedDict):
     state: OutcomeState
     survival: float | None
     sticky: NotRequired[bool]     # this run could not see or decide it: keep any stored state
+    no_revert: NotRequired[bool]  # sticky, but its reads found no revert after the merge
 
 
 class _Candidate(NamedTuple):
@@ -188,7 +190,7 @@ def _decide_merged(o: Outcome, pick: _Pick, target: str, now_ts: float, cache: d
     # shortcut: the default ref was last updated before merge + 14 d, so survival
     # cannot be measured yet; a repo nobody fetches stays undecided. Upgrade with a
     # per-repo "inactive" signal if that holds months back.
-    o["sticky"] = True
+    o["sticky"] = o["no_revert"] = True
     stats["stale_default"] += 1
     return None
 
@@ -313,9 +315,16 @@ def evaluate(rows: list[dict[str, Any]], clones: list[Clone], now_ts: float, cac
 def pending(outs: list[Outcome], stored: dict[tuple[str, str], tuple[str, float | None]]) -> list[Outcome]:
     """The outcomes whose (state, survival) differs from the latest stored row. A sticky outcome
     (this run could not see the commit or decide it) never replaces a stored row of its sha,
-    under any repo_key: readers match on the sha alone."""
+    under any repo_key: readers match on the sha alone. The exception is a stored 'reverted' the
+    run's reads contradict: an earlier bug counted a revert from before the merge."""
     have = {sha for sha, _ in stored}
-    return [o for o in outs if not (o.get("sticky") and o["sha"] in have)
+
+    def holds(o: Outcome) -> bool:
+        latest = stored.get((o["sha"], o["repo_key"]))
+        wrong = o.get("no_revert") and latest is not None and latest[0] == "reverted"
+        return bool(o.get("sticky")) and o["sha"] in have and not wrong
+
+    return [o for o in outs if not holds(o)
             and stored.get((o["sha"], o["repo_key"])) != (o["state"], o["survival"])]
 
 

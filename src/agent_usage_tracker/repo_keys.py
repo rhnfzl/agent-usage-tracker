@@ -28,19 +28,33 @@ def repo_identity(url: str) -> str:
     return f"{host}/{path.strip('/').removesuffix('.git')}".lower()
 
 
+def _salt_text(raw: bytes) -> str:
+    """The salt a salt file holds; "" when it is not text or too short to be one."""
+    try:
+        text = raw.decode("utf-8").strip()
+    except UnicodeDecodeError:
+        return ""
+    return text if len(text) >= 32 else ""
+
+
 def require_readable_salt(configured: str | None) -> None:
-    """Raises before a run that sends rows, when the salt file is there but cannot be read: NULL
-    keys are permanent once the watermark moves on and the sink's ON CONFLICT DO NOTHING applies."""
+    """Raises before a run that sends rows, when the salt file is there but cannot be read or is
+    corrupt: NULL keys are permanent once the watermark moves on and the sink's ON CONFLICT DO
+    NOTHING applies. A corrupt file is never replaced here: a new salt changes every key."""
     if configured:
         return
     p = state_path().parent / "repo_key.salt"
     try:
-        p.read_bytes()
+        raw = p.read_bytes()
     except FileNotFoundError:
-        pass
+        return
     except OSError as exc:
         raise AutError(f"aut: could not read {p} ({exc}); fix its owner or mode, or every repo_key "
                        "of this run would be NULL for good") from exc
+    if not _salt_text(raw):
+        raise AutError(f"aut: {p} is too short or not text, so every repo_key of this run would be "
+                       "NULL for good; restore it, or delete it to start new keys (old rows will "
+                       "no longer match new ones)")
 
 
 def _load_salt(configured: str | None, create: bool = True) -> bytes:
@@ -67,15 +81,13 @@ def _load_salt(configured: str | None, create: bool = True) -> bytes:
                 pass
             finally:
                 tmp.unlink(missing_ok=True)
-        salt = p.read_text().strip()
+        salt = _salt_text(p.read_bytes())
         warn_if_group_readable(p)
     except OSError as exc:
         print(f"aut: warning: could not read or create {p} ({exc}); repo_key stays NULL until it "
               "is fixed", file=sys.stderr)
         return b""
-    except UnicodeDecodeError:          # corrupt: the warning below
-        salt = ""
-    if len(salt) < 32:
+    if not salt:
         print(f"aut: warning: {p} is too short or not text; repo_key stays NULL until it is fixed",
               file=sys.stderr)
         return b""

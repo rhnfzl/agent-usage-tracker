@@ -265,8 +265,9 @@ Rules worth knowing:
 - `after_interrupt`: the previous non-meta user record in the file was an interrupt.
 - Hook denials (`PreToolUse:... hook error`) are not rejections; they count in the turn's
   `hook_blocks` (and in `tool_errors`, which counts every errored tool_result).
-- A commit call is a command segment (split on `;`, `&&`, `||`, `|` and newlines, heredoc bodies
-  removed first) that is `git [global options such as -C <dir>, -c <k=v>]* commit`, optionally
+- A commit call is a command segment (split on `;`, `&&`, `||`, `|` and newlines, not inside a
+  closed quote, a backslash escape or a `#` comment, heredoc bodies blanked first, so a commit
+  inside a quoted string such as `bash -c '...; git commit'` does not count) that is `git [global options such as -C <dir>, -c <k=v>]* commit`, optionally
   behind `VAR=x`, `env`, `command`, `timeout N` or `rtk [proxy]`, without `--dry-run`. So
   `--no-commit`, `cat-file commit`, `verify-commit` or `commit` in an echo or a heredoc never count.
 - Commit SHAs come from git's `[branch sha]` line; failing that (and only for a successful call)
@@ -289,8 +290,10 @@ Rules worth knowing:
   its URL host plus `prRepository` the same way, so commits and PRs of one repo share a key. The
   salt is the config key `repo_key_salt` (an `env:VAR` value works), else a random salt created
   (mode 0600) as `repo_key.salt` next to the state file on first use. A `repo_key.salt` that is
-  there but cannot be read fails a scan or a backfill before it reads anything, since NULL keys
-  would stay for good; other commands warn on stderr and go on with NULL keys. Without the salt the recipe
+  there but cannot be read, or is too short or not text, fails a scan or a backfill before it reads
+  anything, since NULL keys would stay for good; a dry run and other commands warn on stderr and go
+  on with NULL keys. A corrupt file is never regenerated: deleting it starts new keys, and old rows
+  no longer match new ones. Without the salt the recipe
   is not reproducible, so stored keys cannot be matched against a list of candidate repo names. Set
   the same `repo_key_salt` on every machine for their keys to match; changing it changes every new
   key. The remote URL is never stored or logged.
@@ -435,7 +438,9 @@ commit's `(state, survival)` differs from its latest stored row.
   branch, then on a branch, then unreachable).
 - A commit this run cannot see or decide (no clone holds it any more, gh failed, a stale default
   ref, a failed or timed-out git read of a clone that holds or might hold it) never replaces a
-  stored row of its sha: decided states stay decided. A clone git cannot identify counts as a
+  stored row of its sha: decided states stay decided. One exception: a stored `reverted` under the
+  same `(sha, repo_key)` whose stale-ref run reads no revert after the merge becomes `undecided`,
+  since an earlier version also counted a revert from before the merge. A clone git cannot identify counts as a
   failed read, unless git says no repository is there at all. Such a git failure is counted as
   `repo_unreadable` or `survival_failed` in the run's report. A run with any `repo_unreadable`,
   `fetch_failed`, `gh_failed` or `survival_failed` sends a `degraded` heartbeat with error

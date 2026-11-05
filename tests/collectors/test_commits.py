@@ -6,7 +6,9 @@ import tempfile
 import time
 from pathlib import Path
 
-from agent_usage_tracker.collectors.commits import GIT_COMMIT
+from agent_usage_tracker.collectors import session_digest
+from agent_usage_tracker.collectors.commits import (GIT_COMMIT, commit_args_at, commit_call,
+                                                    commit_dir)
 from agent_usage_tracker.event import make_event_id
 from test_activity import (NAME, _acts, _collect, _result, _tools, _use, _user,
                            _write_jsonl)
@@ -51,6 +53,27 @@ def test_commit_detection() -> None:
         want = {make_event_id(NAME, "commit", f"k{i}|{s}"): s for i, (_c, _o, s) in
                 enumerate(cases) if s}
         assert got == want, (got, want)
+
+
+def test_segments_follow_shell_quoting() -> None:
+    cases = [   # (command, the message of the commit it runs)
+        ("echo 'a; git commit -m no' && git commit -m 'yes'", "yes"),
+        ("cat > n.md <<'EOF'\ndon't\nEOF\ngit add n.md && git commit -m 'x'", "x"),
+        ("# don't lint\ngit commit -m 'x'", "x"),
+        ("echo it\\'s; git commit -m 'x'", "x"),
+        ("echo don't\ngit commit -m \"x\"", "x"),
+        ("git commit -m \"$(cat <<'EOF'\nmsg\nEOF\n)\"", "msg"),
+        ('git commit -m "a; b"', "a; b"),
+    ]
+    for cmd, want in cases:
+        assert commit_call(cmd) and commit_args_at(cmd) is not None, cmd
+        d = session_digest.Digest("x")
+        d.note_shell(cmd, "", False)
+        assert d.view()["commits"] == [want], (cmd, d.view())
+    for cmd in ("echo 'a; git commit -m no'", 'echo "x && git commit -m no"',
+                "ls # it's; git commit -m no"):
+        assert commit_call(cmd) is None and commit_args_at(cmd) is None, cmd
+    assert commit_dir("cd 'a;b' && git commit -m x") == "a;b"
 
 
 def test_commit_regex_is_linear() -> None:

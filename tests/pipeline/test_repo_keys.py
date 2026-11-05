@@ -62,11 +62,24 @@ def test_repo_key_salt(monkeypatch) -> None:
             assert "too short" in err.getvalue()
 
 
-def test_a_binary_salt_file_means_null_keys_not_a_crash(tmp_path, monkeypatch, capsys) -> None:
+@pytest.mark.parametrize("corrupt", [b"\xff\xfe" * 40, b"short", b""])
+def test_a_corrupt_salt_warns_and_stops_a_scan(tmp_path, monkeypatch, capsys, corrupt) -> None:
     monkeypatch.setenv("AUT_STATE", str(tmp_path / "state.json"))
-    (tmp_path / "repo_key.salt").write_bytes(b"\xff\xfe" * 40)
+    salt = tmp_path / "repo_key.salt"
+    salt.write_bytes(corrupt)
     assert RepoKeys(None).of("github.com/o/r") is None
     assert "repo_key stays NULL" in capsys.readouterr().err
+    monkeypatch.setattr(scan, "make_sender", lambda cfg: [].extend)
+    cfg = Config(machine="m", agents=("pi",), webhook_url=None, webhook_secret=None, pg_dsn="pg://x",
+                 home=tmp_path)
+    for run in (lambda: scan.run_scan(cfg, ["pi"], dry_run=False),
+                lambda: scan.run_history_backfill(cfg, ["pi"], dry_run=False)):
+        with pytest.raises(AutError, match="delete it to start new keys") as exc:
+            run()
+        assert str(salt) in str(exc.value) and "no longer match" in str(exc.value)
+    assert salt.read_bytes() == corrupt                 # never regenerated
+    assert not (tmp_path / "state.json").exists()
+    scan.run_scan(cfg, ["pi"], dry_run=True)            # a dry run warns and goes on
 
 
 def test_an_unreadable_salt_warns_and_stops_a_scan(tmp_path, monkeypatch, capsys) -> None:

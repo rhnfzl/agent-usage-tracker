@@ -8,7 +8,10 @@ import re
 
 from ..repo_keys import RepoKeys
 
-_SEGMENTS = re.compile(r"&&|\|\||[;|\n]")
+# what a shell reads as a unit, so a separator inside it splits nothing: an escape, a closed quote,
+# a comment at a word start; a quote that never closes matches nothing and stays literal text
+_SHELL_TOKEN = re.compile(r"""\\.|'[^']*'|"(?:[^"\\]|\\.)*"|(?<![^\s;|&()])#[^\n]*"""
+                          r"""|(?P<sep>&&|\|\||[;|\n])""", re.S)
 _HEREDOC = re.compile(r"""<<-?\s*(['"]?)(\w+)\1([^\n]*)\n.*?\n\s*\2[ \t]*(?=\n|$)""", re.S)
 _ARG = r"""(?:[^\s"']|"[^"]*"|'[^']*')+"""
 # optional wrappers (VAR=x, env, command, timeout N, rtk [proxy]), then `git`, then only global
@@ -31,12 +34,25 @@ _CD = re.compile(rf"^\s*[({{]?\s*(?:cd|pushd)\s+({_ARG})\s*$")
 _DASH_C = re.compile(rf"\s-C\s+({_ARG})")
 
 
+def _segments(cmd: str) -> list[tuple[int, str]]:
+    """The non-blank command segments of `cmd`, each with where it starts. A heredoc body is data
+    (a file, a commit message), not commands: it is blanked, not dropped, so offsets hold in `cmd`."""
+    text = _HEREDOC.sub(lambda m: " " * (m.start(3) - m.start()) + m[3]
+                        + " " * (m.end() - m.end(3)), cmd)
+    segs, start = [], 0
+    for m in _SHELL_TOKEN.finditer(text):
+        if m["sep"]:
+            segs.append((start, text[start:m.start()]))
+            start = m.end()
+    segs.append((start, text[start:]))
+    return [s for s in segs if s[1].strip()]
+
+
 def commit_call(cmd: str) -> tuple[bool, bool] | None:
     """(is_amend, printed_before) when a command segment runs `git commit` (not --dry-run);
     printed_before: a segment ahead of the commit may have printed, so the output's first line is
     not necessarily the commit's."""
-    # a heredoc body is data (a file, a commit message), not commands: drop it before splitting
-    segs = [x for x in _SEGMENTS.split(_HEREDOC.sub(r"\3", cmd)) if x.strip()]
+    segs = [x for _, x in _segments(cmd)]
     hits = [i for i, x in enumerate(segs) if GIT_COMMIT.match(x) and "--dry-run" not in x.split()]
     if not hits:
         return None
@@ -45,12 +61,8 @@ def commit_call(cmd: str) -> tuple[bool, bool] | None:
 
 
 def commit_args_at(cmd: str) -> int | None:
-    """Where the arguments of the segment commit_call found start in `cmd`. Heredoc bodies are
-    blanked, not dropped, so the offset also holds in the original text."""
-    text = _HEREDOC.sub(lambda m: " " * (m.start(3) - m.start()) + m[3]
-                        + " " * (m.end() - m.end(3)), cmd)
-    starts = [0, *(m.end() for m in _SEGMENTS.finditer(text))]
-    for at, x in zip(starts, _SEGMENTS.split(text)):
+    """Where the arguments of the segment commit_call found start in `cmd`."""
+    for at, x in _segments(cmd):
         g = GIT_COMMIT.match(x)
         if g and "--dry-run" not in x.split():
             return at + g.end() - 1     # the space GIT_COMMIT ate; a -m search needs it
@@ -62,7 +74,7 @@ def commit_dir(cmd: str) -> str | None:
     `git -C X commit`), relative to the record's cwd unless absolute; None when it does not move
     or the move is not knowable (a variable, a command substitution)."""
     d = None
-    for x in [x for x in _SEGMENTS.split(_HEREDOC.sub(r"\3", cmd)) if x.strip()]:
+    for _, x in _segments(cmd):
         m, g = _CD.match(x), GIT_COMMIT.match(x)
         # a cd moves the shell for the segments after it; a -C only the commit itself
         if m:

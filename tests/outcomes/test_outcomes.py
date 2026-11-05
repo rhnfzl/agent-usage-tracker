@@ -632,6 +632,58 @@ def test_only_a_revert_after_the_merge_counts():
         == {full: [100, 200]}
 
 
+def test_a_stored_revert_from_before_the_merge_is_corrected(tmp_path, monkeypatch):
+    # an earlier bug stored 'reverted' for a commit backed out on a branch before it merged
+    origin, work = tmp_path / "origin.git", tmp_path / "projects" / "work"
+    subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(origin)], check=True)
+    work.mkdir(parents=True)
+    _g(work, "init", "-q", "-b", "main")
+    _g(work, "remote", "add", "origin", str(origin))
+    _commit(work, "base.txt", "base\n", 60)
+    _g(work, "checkout", "-q", "-b", "topic")
+    x = _commit(work, "x.txt", _lines("x"), 30)
+    _g(work, "checkout", "-q", "-b", "side")
+    _g(work, "revert", "--no-edit", x, age=29)
+    _g(work, "push", "-q", "origin", "side")
+    _g(work, "checkout", "-q", "main")
+    _g(work, "merge", "-q", "--no-ff", "-m", "land x", "topic", age=20)
+    _g(work, "push", "-q", "origin", "main")
+    _g(work, "remote", "set-head", "origin", "main")
+    key = _key(str(origin))
+    stored = {(x[:9], key): ("reverted", None)}
+    written: list = []
+    cache_file = tmp_path / "st" / oc.CACHE_NAME
+    monkeypatch.setenv("AUT_STATE", str(tmp_path / "st" / "state.json"))
+    monkeypatch.setattr(oc, "load_rows", lambda dsn: [_row(x, key, 30)])
+    monkeypatch.setattr(oc, "load_stored", lambda dsn: stored)
+    monkeypatch.setattr(oc, "insert_outcomes", lambda dsn, rows: written.extend(rows))
+    monkeypatch.setattr(push, "send_scan_rows", lambda dsn, rows: None)
+
+    def run(cache=None):
+        written.clear()
+        cache_file.unlink(missing_ok=True)
+        if cache:
+            cache_file.parent.mkdir(exist_ok=True)
+            cache_file.write_text(json.dumps({"v": oc._CACHE_V, **cache}))
+        oc.run_outcomes(_cfg(tmp_path, (str(tmp_path / "projects"),)), refresh=False, dry_run=False,
+                        now=NOW_DT)
+        return [(r["state"], r["survival"]) for r in written]
+
+    assert run({x: 0.25}) == [("reworked", 0.25)]     # a cached survival never blocks the new state
+    # the default ref is older than merge + 14 days: survival cannot be measured, but the reads
+    # show no revert after the merge, so the wrong row goes; a true decision is left alone
+    assert run() == [("undecided", None)]
+    stored = {(x[:9], key): ("merged", 1.0)}
+    assert run() == []
+    stored = {(x[:9], key): ("reverted", None)}
+    # a run that could not read the clone corrects nothing: it knows nothing about the revert
+    sticky = {"sha": x[:9], "repo_key": key, "state": "undecided", "survival": None, "sticky": True}
+    assert oc.pending([sticky], stored) == []
+    _commit(work, "later.txt", "later\n", 1)
+    _g(work, "push", "-q", "origin", "main")
+    assert run() == [("merged", 1.0)]
+
+
 def test_a_dry_run_creates_no_salt(tmp_path, monkeypatch):
     monkeypatch.setenv("AUT_STATE", str(tmp_path / "st" / "state.json"))
     repo = tmp_path / "root" / "w"
