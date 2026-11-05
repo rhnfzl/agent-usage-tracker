@@ -135,3 +135,24 @@ def test_wrappers_still_reach_the_commit():
                 "git -C a -C b commit -m x", "git -v commit"):
         assert c.commit_call(cmd) is not None, cmd
     assert c.commit_call("uv run env bash -c 'git commit -m x'") is not None
+
+
+def test_a_commit_after_an_assignment_with_nested_quotes_is_detected():
+    py = """python -c 'import shutil;print(shutil.which("pre-commit"))'"""
+    for cmd in (f'PATH="$(dirname "$({py})"):$PATH" \\\ngit commit -q -F - <<\'EOF\'\nmsg\nEOF',
+                f'cd /r\nPATH="$(dirname "$({py})"):$PATH" git commit -m x',
+                'A="$(echo "b c")" git commit -m x', 'A="$(echo "$(echo "d e")")" git commit -m x',
+                'A="a b" git commit -m x', "A='a b' git commit -m x", 'A="$HOME/x" git commit -m x'):
+        assert commit_call(cmd) is not None, cmd
+    assert commit_call('A="$(echo "git commit -m no")" true') is None
+
+
+@pytest.mark.parametrize("unit", ['A="$(', 'A="$(echo "', '"$(', '$( ', '"$("$(', 'A="$(x)" '])
+def test_nested_quote_rules_cannot_hang(unit):
+    code = ("import sys\nfrom agent_usage_tracker.collectors import commits as c\n"
+            "s = sys.argv[1]\n"
+            "for p in (c.GIT_COMMIT, c._SHELL_C, c._SILENT): p.match(s)\n"
+            "c.commit_call(s); c.commit_dir(s)\n")
+    src = str(Path(c.__file__).parents[2])
+    subprocess.run([sys.executable, "-c", code, unit * 200 + "x"], check=True, timeout=20,
+                   env={**os.environ, "PYTHONPATH": src})

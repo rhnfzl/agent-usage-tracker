@@ -13,7 +13,12 @@ from ..repo_keys import RepoKeys
 _SHELL_TOKEN = re.compile(r"""\\.|'[^']*'|"(?:[^"\\]|\\.)*"|(?<![^\s;|&()])#[^\n]*"""
                           r"""|(?P<sep>&&|\|\||[;|\n])""", re.S)
 _HEREDOC = re.compile(r"""<<-?\s*\\?(['"]?)([\w.-]+)\1([^\n]*)\n.*?\n\s*\2[ \t]*(?=\n|$)""", re.S)
-_ARG = r"""(?:[^\s"']|"[^"]*"|'[^']*')+"""
+# a double-quoted string that can hold "$(...)" with its own quotes: PATH="$(dirname "$(which x)")"
+_DQ = r'"(?:[^"\\]|\\.)*"'
+for _ in range(3):      # shortcut: three levels of nesting; deeper falls back to the plain quote rule
+    _SUB = rf"""\$\((?:[^()'"\\]|\\.|'[^']*'|{_DQ}|\((?:[^()]|\([^()]*\))*\))*+\)"""
+    _DQ = rf'"(?:[^"\\$]|\\.|{_SUB}|\$)*+"'
+_ARG = rf"""(?:[^\s"']|{_DQ}|"[^"]*"|'[^']*')++"""
 # no text can match two alternatives of a repeated group here, and the loops below are possessive:
 # a log line is untrusted, and overlap made matching time double with every extra wrapper
 _WRAPPER = rf"(?:\w+={_ARG}|(?:[^\s=]*/)?env|command|timeout\s+\S+|rtk(?:\s+proxy)?)\s+"
