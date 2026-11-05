@@ -595,3 +595,21 @@ def test_the_keyed_anchor_wins_a_duplicate_whatever_the_row_order(monkeypatch):
     for rows in ([keyed, null], [null, keyed]):
         outs, _ = oc.evaluate(rows, [], NOW, cache={})
         assert [o["state"] for o in outs] == ["merged"], rows
+
+
+def test_a_read_failure_sends_a_degraded_heartbeat(monkeypatch, capsys):
+    with tempfile.TemporaryDirectory() as d:
+        work, s = _world(Path(d))
+        key = _key(str(Path(d) / "origin.git"))
+        monkeypatch.setenv("AUT_STATE", str(Path(d) / "state" / "state.json"))
+        scan: list = []
+        monkeypatch.setattr(oc, "load_rows", lambda dsn: [_row(s["A"], key, 30)])
+        monkeypatch.setattr(oc, "load_stored", lambda dsn: {})
+        monkeypatch.setattr(oc, "insert_outcomes", lambda dsn, rows: None)
+        monkeypatch.setattr(push, "send_scan_rows", lambda dsn, rows: scan.extend(rows))
+        real = oc.evaluate
+        monkeypatch.setattr(oc, "evaluate", lambda *a, **k: (real(*a, **k)[0], {"survival_failed": 1}))
+        oc.run_outcomes(_cfg(Path(d), (str(Path(d) / "projects"),)), refresh=False, dry_run=False,
+                        now=NOW_DT)
+        assert [(r["status"], r["error"]) for r in scan] == [("degraded", "GitReadFailed")], scan
+        assert '"survival_failed": 1' in capsys.readouterr().err

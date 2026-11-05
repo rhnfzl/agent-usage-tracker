@@ -344,24 +344,27 @@ def _chunk_rows(path: str, base: Path, lines: list[bytes], from_start: bool, cur
         if o is None:
             skipped["malformed"] += 1
             continue
-        typ = o.get("type")
-        if typ == "user":
-            turn = _next_turn(o, ident.subagent, turn)
-        sess = _session_of(o, ident, turn)
-        best_effort(act.errors, act.record, o, sess)
-        if typ == "user":
-            text = human_text(o)
-            if text is None:
-                continue
-            if is_old_loop(o, text):
-                old_loops += 1
-                if old_loops > 1:        # you typed the first; the rest are firings
+        try:
+            typ = o.get("type")
+            if typ == "user":
+                turn = _next_turn(o, ident.subagent, turn)
+            sess = _session_of(o, ident, turn)
+            best_effort(act.errors, act.record, o, sess)
+            if typ == "user":
+                text = human_text(o)
+                if text is None:
                     continue
-            row, steer = _human_row(o, text, path, sess, act)
-            human.append(row)
-            steers.append(steer)
-        elif typ == "assistant":
-            _keep_fuller(best, o, path, ident, turn, skipped)
+                if is_old_loop(o, text):
+                    old_loops += 1
+                    if old_loops > 1:        # you typed the first; the rest are firings
+                        continue
+                row, steer = _human_row(o, text, path, sess, act)
+                human.append(row)
+                steers.append(steer)
+            elif typ == "assistant":
+                _keep_fuller(best, o, path, ident, turn, skipped)
+        except MALFORMED_RECORD:    # one bad line must not wedge every later scan at this offset
+            skipped["malformed"] += 1
     if _is_fully_read(path, cur["off"]):
         act.finish()
     if _only_ran_usage(from_start, best, steers):

@@ -136,3 +136,42 @@ def test_cli_sync_prices(monkeypatch) -> None:
         rc = cli.main(["sync-prices", "--out", out])
         assert rc == 0
         assert pricing.load_prices(out)["claude-opus-4"]["output_cost"] == 7.5e-05
+
+
+def test_genai_prices_fills_only_gaps_at_todays_base_price() -> None:
+    data = [{"id": "p", "models": [
+        {"id": "a", "prices": {"output_mtok": 99}},                           # LiteLLM has it
+        {"id": "flat", "prices": {"input_mtok": 2, "output_mtok": 8, "cache_read_mtok": 1,
+                                    "cache_write_mtok": 3, "web_searches_kcount": 10}},
+        {"id": "tiered", "prices": {"input_mtok": {"base": 5, "tiers": [{"start": 9, "price": 10}]},
+                                      "output_mtok": {"base": 25, "tiers": []}}},
+        {"id": "dated", "prices": [
+            {"prices": {"output_mtok": 1}},
+            {"constraint": {"start_date": "2026-03-01"}, "prices": {"output_mtok": 2}},
+            {"constraint": {"start_date": "2999-01-01"}, "prices": {"output_mtok": 3}},
+        ]},
+        {"id": "hourly", "prices": [
+            {"prices": {"output_mtok": 4}},
+            {"constraint": {"start_time": "16:30:00Z", "end_time": "00:30:00Z"},
+             "prices": {"output_mtok": 1}},
+        ]},
+        {"id": "no-output", "prices": {"input_mtok": 1}},
+        {"prices": {"output_mtok": 1}}, "not-a-model",
+    ]}, "not-a-provider"]
+    rates = pricing.build_rate_map({"a": {"output_cost_per_token": 1e-06}}, None, data)
+    m = 1_000_000
+    assert rates["a"] == {"output_cost": 1e-06}
+    assert rates["flat"] == {"output_cost": 8 / m, "input_cost": 2 / m, "cache_read_cost": 1 / m,
+                             "cache_write_cost": 3 / m}
+    assert rates["tiered"] == {"output_cost": 25 / m, "input_cost": 5 / m}
+    assert rates["dated"] == {"output_cost": 2 / m}
+    assert rates["hourly"] == {"output_cost": 4 / m}
+    assert "no-output" not in rates
+
+
+def test_sync_survives_a_missing_genai_prices_list() -> None:
+    sample = {"m": {"output_cost_per_token": 1e-06}}
+    with tempfile.TemporaryDirectory() as d:
+        n = pricing.sync_prices(Path(d) / "p.json",
+                                fetch=lambda url: sample if url == pricing.LITELLM_URL else None)
+    assert n == 1

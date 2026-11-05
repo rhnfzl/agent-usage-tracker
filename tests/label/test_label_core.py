@@ -12,6 +12,8 @@ Locks the rules:
 from __future__ import annotations
 
 import json
+import sys
+import types
 from datetime import date, datetime
 
 import pytest
@@ -262,3 +264,23 @@ def test_label_event_rounds_its_numbers_and_keeps_the_given_time():
     assert (ev.session_id, ev.turn_id, ev.agent) == (None, None, "label")
     other_calib = core.decide(req, {"a": 2 / 3, "b": 1 / 3}, core.Choice(calib_ver="c2"), "m", "r")
     assert core.label_event(req, other_calib).event_id != ev.event_id
+
+
+def test_a_backend_load_failure_of_any_kind_stops_only_that_backend(monkeypatch, tmp_path):
+    def bad_load(_path):
+        raise ValueError("Model type gemma99 not supported")
+    monkeypatch.setitem(sys.modules, "mlx_lm", types.SimpleNamespace(load=bad_load))
+    monkeypatch.setitem(sys.modules, "huggingface_hub",
+                        types.SimpleNamespace(try_to_load_from_cache=lambda *a, **k: None))
+    monkeypatch.setattr(backends, "cached_snapshot", lambda *a: tmp_path)
+    with pytest.raises(backends.BackendUnavailable, match=r"could not be loaded \(ValueError\)"):
+        backends.MlxLetter("some/model")._load()
+
+
+@pytest.mark.parametrize("body", ["[]", "{}", '{"w": 1, "labels": []}', "not json"])
+def test_a_corrupt_encoder_says_retrain_not_untrained(monkeypatch, tmp_path, body):
+    path = tmp_path / "enc.json"
+    path.write_text(body)
+    monkeypatch.setattr(backends, "encoder_path", lambda task: path)
+    with pytest.raises(backends.BackendUnavailable, match="unreadable or corrupt"):
+        backends.Encoder("steer_intent")._load()

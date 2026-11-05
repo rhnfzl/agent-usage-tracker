@@ -182,7 +182,8 @@ def cmd_label(cfg: Config, args: argparse.Namespace) -> None:
 
 def cmd_sync_prices(args: argparse.Namespace) -> None:
     out = args.out or str(config_path().parent / "model_prices.json")
-    n = pricing.sync_prices(out, litellm_url=args.litellm_url, models_dev_url=args.models_dev_url)
+    n = pricing.sync_prices(out, litellm_url=args.litellm_url, models_dev_url=args.models_dev_url,
+                            genai_prices_url=args.genai_prices_url)
     print(f"synced {n} model prices -> {out}", file=sys.stderr)
 
 
@@ -223,6 +224,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p_sync.add_argument("--out", help="output JSON (default: <config-dir>/model_prices.json)")
     p_sync.add_argument("--litellm-url", default=pricing.LITELLM_URL)
     p_sync.add_argument("--models-dev-url", default=pricing.MODELS_DEV_URL)
+    p_sync.add_argument("--genai-prices-url", default=pricing.GENAI_PRICES_URL)
     p_report = sub.add_parser("report", help="retired: replaced by the database views")
     for flag in ("--out", "--prices", "--idle-gap"):   # still accepted, so old crons only warn
         p_report.add_argument(flag, help=argparse.SUPPRESS)

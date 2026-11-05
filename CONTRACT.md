@@ -435,7 +435,9 @@ commit's `(state, survival)` differs from its latest stored row.
   ref, a failed or timed-out git read of a clone that holds or might hold it) never replaces a
   stored row of its sha: decided states stay decided. A clone git cannot identify counts as a
   failed read, unless git says no repository is there at all. Such a git failure is counted as
-  `repo_unreadable` or `survival_failed` in the run's report.
+  `repo_unreadable` or `survival_failed` in the run's report. A run with any `repo_unreadable`,
+  `fetch_failed`, `gh_failed` or `survival_failed` sends a `degraded` heartbeat with error
+  `GitReadFailed`, prints the counts on stderr and still exits 0.
 - `--fetch` (or `outcome_fetch = true`) runs `git fetch --upload-pack=git-upload-pack --quiet
   --no-tags --no-auto-maintenance --no-write-fetch-head --no-recurse-submodules origin` only in
   a clone whose origin's repo_key a commit row carries (30 s

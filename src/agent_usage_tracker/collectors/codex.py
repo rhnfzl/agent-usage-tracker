@@ -430,23 +430,22 @@ def _chunk_rows(path: str, recs: list[ParsedRecord], cur: FileState, keys: RepoK
     act = _Activity(cur, path, keys)
     events: list[Row] = []
     for o, t, p, copied in recs:
-        _note_context(t, p, copied, cur, keys)
-        if t == "event_msg" and p.get("type") == "token_count":
-            try:
+        try:
+            _note_context(t, p, copied, cur, keys)
+            if t == "event_msg" and p.get("type") == "token_count":
                 event = _token_event(o, p, cur, path)
-            except MALFORMED_RECORD:
-                skipped["malformed"] += 1
+                if event:
+                    events.append(event)
                 continue
-            if event:
-                events.append(event)
-            continue
-        if copied:      # the parent's turns, not this thread's (usage above is unchanged)
-            continue
-        prompt = prompt_of(t, p, bool(cur.get("has_um")))
-        if prompt is not None:
-            events.extend(_prompt_rows(o, prompt, cur, path, act))
-            continue
-        best_effort(act.errors, act.record, o)
+            if copied:      # the parent's turns, not this thread's (usage above is unchanged)
+                continue
+            prompt = prompt_of(t, p, bool(cur.get("has_um")))
+            if prompt is not None:
+                events.extend(_prompt_rows(o, prompt, cur, path, act))
+                continue
+            best_effort(act.errors, act.record, o)
+        except MALFORMED_RECORD:    # one bad line must not wedge every later scan at this offset
+            skipped["malformed"] += 1
     skipped.update(act.errors)
     return events + act.events
 

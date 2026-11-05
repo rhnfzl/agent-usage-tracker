@@ -90,7 +90,11 @@ class MlxLetter(LetterBackend):
             self.model_rev = path.name
             self.size_mb = round(sum(f.stat().st_size for f in Path(path).rglob("*")
                                      if f.is_file()) / 1e6)
-            self._m = load(str(path))
+            try:
+                self._m = load(str(path))
+            except Exception as exc:    # an unsupported model type or a broken snapshot: any kind
+                raise BackendUnavailable(f"label: {self.model_id} could not be loaded "
+                                         f"({type(exc).__name__})") from exc
         return self._m
 
     def _chat(self, tok: Any, prompt: str) -> str:
@@ -149,20 +153,36 @@ class Encoder:
         self.task, self.model_id = task, model_id or f"encoder/{task}"
         self._m: dict[str, Any] | None = None
         p = encoder_path(task)
-        rev = hashlib.sha256(p.read_bytes()).hexdigest()[:12] if p.exists() else ""
+        try:
+            data = p.read_bytes()
+        except FileNotFoundError:
+            data = None
+        except OSError as exc:
+            raise self._unusable() from exc
+        rev = hashlib.sha256(data).hexdigest()[:12] if data is not None else ""
         if model_rev and rev and model_rev != rev:
             raise BackendUnavailable(f"label: the {task} encoder was retrained after it was "
                                      "chosen; run `aut label eval` and `aut label choose` again")
         self.model_rev = rev or model_rev or ""
-        self.size_mb = round(p.stat().st_size / 1e6, 3) if p.exists() else None
+        self.size_mb = round(len(data) / 1e6, 3) if data is not None else None
+
+    def _unusable(self) -> BackendUnavailable:
+        return BackendUnavailable(f"label: the {self.task} encoder is unreadable or corrupt; "
+                                  "run `aut label train-encoder` again")
 
     def _load(self) -> dict[str, Any]:
         if self._m is None:
             try:
-                self._m = json.loads(encoder_path(self.task).read_text())
-            except (OSError, ValueError):
+                m = json.loads(encoder_path(self.task).read_text())
+            except FileNotFoundError:
                 raise BackendUnavailable(f"label: no encoder is trained for {self.task} yet") \
                     from None
+            except (OSError, ValueError) as exc:
+                raise self._unusable() from exc
+            if not (isinstance(m, dict) and isinstance(m.get("w"), dict)
+                    and isinstance(m.get("labels"), list)):
+                raise self._unusable()
+            self._m = m
         return self._m
 
     def distribution(self, req: Request) -> dict[str, float]:

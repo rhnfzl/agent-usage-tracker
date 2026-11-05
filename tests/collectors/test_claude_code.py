@@ -5,6 +5,8 @@ Locks the rule: Claude Code captures all four token classes (the "undercount" tr
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import tempfile
 from pathlib import Path
@@ -248,3 +250,17 @@ def test_is_interactive_survives_a_line_that_is_no_record():
         p = Path(t) / "s.jsonl"
         p.write_text('["entrypoint"]\n')
         assert claude_code.is_interactive(p) is False
+
+
+def test_an_unhashable_field_skips_one_line_and_does_not_wedge_the_file():
+    with tempfile.TemporaryDirectory() as d:
+        home = Path(d)
+        _write_jsonl(home / ".claude/projects/-Users-x-myproj/s1.jsonl", [
+            {"type": "system", "entrypoint": []},
+            {"type": "assistant", "uuid": "u1", "timestamp": "2026-07-18T10:00:00Z",
+             "message": {"model": "claude-opus-4-8", "usage": {"input_tokens": 2, "output_tokens": 5}}},
+        ])
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            ev = _drain(claude_code.collect, _cfg(home))
+        assert [e.input_tokens for e in ev if e.kind != "human"][:1] == [2], ev
+        assert "malformed" in err.getvalue(), err.getvalue()

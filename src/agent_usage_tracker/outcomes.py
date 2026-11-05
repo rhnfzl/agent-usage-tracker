@@ -29,6 +29,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import sys
 from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -357,6 +358,9 @@ def insert_outcomes(dsn: str, rows: list[dict[str, Any]]) -> None:
                 for r in rows])
 
 
+_READ_FAILURES = ("repo_unreadable", "fetch_failed", "gh_failed", "survival_failed")
+
+
 def run_outcomes(cfg: Config, *, refresh: bool, dry_run: bool,
                  now: datetime | None = None) -> dict[str, Any]:
     """Score every commit row and write the changed states. refresh (--fetch, outcome_fetch) git
@@ -382,6 +386,11 @@ def run_outcomes(cfg: Config, *, refresh: bool, dry_run: bool,
         outs, ev = evaluate(rows, clones, decided.timestamp(), cache, use_gh=refresh)
         stats.update(ev)
         stats["states"] = Counter(o["state"] for o in outs)
+        failed = {k: stats[k] for k in _READ_FAILURES if stats.get(k)}
+        if failed:      # the run still writes what it could decide
+            beat.status, beat.error = "degraded", "GitReadFailed"
+            print(f"aut: outcomes: some reads failed, those commits stay undecided: "
+                  f"{json.dumps(failed, sort_keys=True)}", file=sys.stderr)
         if not dry_run:
             atomic_write_text(_cache_path(), json.dumps(cache))     # before the sink: a failing write never redoes the blame
         todo = pending(outs, load_stored(dsn))

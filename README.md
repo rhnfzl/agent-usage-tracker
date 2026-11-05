@@ -67,7 +67,7 @@ inspect pages read titles from this machine's logs and keep them in the page.
 | When | Call |
 |---|---|
 | `cursor_api = true` | Cursor's dashboard API, with your local session token, scoped to your own user |
-| `aut sync-prices` | the LiteLLM and models.dev price lists |
+| `aut sync-prices` | the LiteLLM, models.dev and pydantic/genai-prices price lists |
 | `aut outcomes --fetch` or `outcome_fetch = true` | `git fetch` in your clones and `gh pr list` |
 | `activitywatch` in `agents` | the ActivityWatch server at `activitywatch_url` (default `http://localhost:5600`). With `activitywatch_title_days` above 0, every real scan also sends `DELETE` requests there for its window events older than that |
 | `aut label teach` | Claude Sonnet through your local `claude -p`, for Claude Code text only (that text already lives with Anthropic); capped by `--budget-usd` |
@@ -132,7 +132,7 @@ other command refuses it.
 | `aut backfill --activity-only [--dry-run]` | the same for activity rows (steers, commits, turns, links, ...); never usage. Both flags may be given together | `pg_dsn` (not with `--dry-run`) |
 | `aut status` | show machine, agents, transports and watermarks | |
 | `aut export [--out FILE]` | write all usage rows as CSV (stdout by default), deduplicated, columns in sink order for `COPY`. Exits 1 if a collector that feeds the CSV could not fully read a source, so the CSV is partial (`activitywatch` has no usage rows, so it never does); `backfill --sessions-only`/`--activity-only` do the same for the collectors with those rows | |
-| `aut sync-prices [--out FILE] [--litellm-url URL] [--models-dev-url URL]` | build the API-equivalent price map, `model_prices.json` in the config dir by default; the URLs must be http(s) | network |
+| `aut sync-prices [--out FILE] [--litellm-url URL] [--models-dev-url URL] [--genai-prices-url URL]` | build the API-equivalent price map, `model_prices.json` in the config dir by default; the URLs must be http(s) | network |
 | `aut time add --start T --end T` | record a manual active-time interval in local time, e.g. `--start "2026-11-03 09:00"` | `pg_dsn` |
 | `aut time add --minutes N [--at T] [--not-relevant]` | the same as a length ending at `--at` (default now); `--not-relevant` marks it not work time. At most 16 hours, never in the future | `pg_dsn` |
 | `aut outcomes [--fetch] [--dry-run]` | score every commit row against your local clones and write `agents.commit_outcome`. `--fetch` fetches first and asks `gh`. `--dry-run` writes nothing and never fetches or asks `gh`, even with `--fetch` | `pg_dsn`, clones under `outcome_repo_roots` |
@@ -200,7 +200,7 @@ Files aut keeps on this machine:
 | `repo_key.salt`, `outcomes_cache.json` | next to the state file |
 | `state.corrupt` | next to the state file: a copy of an unreadable `state.json`, kept before aut starts clean |
 | `state.lock` | next to the state file: an empty file, the advisory lock for one short watermark save, so overlapping `scan` and `label` runs keep each other's watermarks |
-| `model_prices.json`, `label.json` | next to `config.toml`. Nothing in aut reads `model_prices.json` today |
+| `model_prices.json`, `label.json` | next to `config.toml`. Nothing in aut reads `model_prices.json`; it is kept for readers outside aut |
 | label gold, silver and eval files; the trained encoder; the label run cache | `~/.local/share/aut/eval/`, `~/.local/share/aut/label/encoder/`, `~/.local/share/aut/label/cache.json` (`$XDG_DATA_HOME`) |
 | `scan.env`, `scan.log`, `retry-pending`, `outcomes-day`, `label-day` | `~/.config/agent-usage-tracker/`, used by the timer wrapper. The wrapper hard-codes this path, so it ignores `$XDG_CONFIG_HOME` and `AUT_CONFIG` |
 | `/tmp/aut.log`, `/tmp/aut.err` | scan output from the shipped launchd plists. `/tmp` can be read by other users; change the paths in the plists if that matters |

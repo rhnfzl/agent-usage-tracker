@@ -243,3 +243,18 @@ def test_codex_activity_errors_never_block_usage(monkeypatch) -> None:
         assert len(_usage(evs)) == 5 and len(_usage(evs, "human")) == 4
         assert "activity record(s) skipped" in err.getvalue(), err.getvalue()
     _run(check)
+
+
+def test_an_unhashable_source_skips_one_line_and_later_files_still_deliver() -> None:
+    with tempfile.TemporaryDirectory() as d:
+        home = Path(d)
+        root = home / ".codex/sessions/2026/07/18"
+        _write_jsonl(root / "rollout-a.jsonl", [_meta("s1", source=[])])
+        _write_jsonl(root / "rollout-b.jsonl", [
+            _meta("s2", source="cli"),
+            {"type": "event_msg", "timestamp": T(1), "payload": {"type": "user_message",
+                                                                 "message": "fix it"}},
+        ])
+        with contextlib.redirect_stderr(io.StringIO()):
+            rows = _collect(codex, home)
+        assert any(getattr(r, "kind", None) == "human" for r in rows), rows

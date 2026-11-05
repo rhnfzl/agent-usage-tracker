@@ -15,6 +15,7 @@ build/
 .mypy_cache/
 
 # local state / scratch
+.agent-harness/
 state.json
 *.log
 .DS_Store
