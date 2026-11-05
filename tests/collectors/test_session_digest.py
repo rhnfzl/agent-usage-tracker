@@ -18,7 +18,10 @@ from test_cursor_cli import A, _calls, _prompt, _result, _store
 
 def test_commit_message_comes_from_the_commit_segment():
     for cmd in ("git commit -m 'real'", "git add commit.py && git commit -m 'real'",
-                "git log --grep commit -1; git commit -m 'real'"):
+                "git log --grep commit -1; git commit -m 'real'",
+                "cat > n.md <<'EOF'\ndon't\nEOF\ngit add n.md && git commit -m 'real'",
+                "# don't lint\ngit commit -m 'real'", "echo it\\'s; git commit -m 'real'",
+                "git commit -m \"$(cat <<'EOF'\nreal\n\nbody; don't\nEOF\n)\""):
         d = session_digest.Digest("claude_code")
         d.note_shell(cmd, "ok abc1234", False)
         assert d.commits == ["real"], cmd

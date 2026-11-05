@@ -50,13 +50,16 @@ def _warn_unusable(path: Path, reason: str) -> None:
 
 
 def load_state() -> dict[str, Any]:
-    """The watermarks. A read error (a root-owned file, EIO) raises: the file may be fine, and
-    starting clean would end with save_state replacing it."""
+    """The watermarks. A read error (a root-owned file, EIO) raises AutError: the file may be fine,
+    and starting clean would end with save_state replacing it."""
     path = state_path()
     try:
         obj = json.loads(path.read_text())
     except FileNotFoundError:
         return {"collectors": {}}       # first run on this machine: genuinely nothing yet
+    except OSError as exc:
+        from .config import AutError    # here because config imports this module
+        raise AutError(f"aut: could not read {path} ({exc}); fix its owner or mode") from exc
     except ValueError as exc:           # JSONDecodeError and UnicodeDecodeError are ValueErrors
         _warn_unusable(path, str(exc))
         return {"collectors": {}}

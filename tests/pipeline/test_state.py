@@ -166,8 +166,9 @@ def test_a_read_error_keeps_a_good_state_file(monkeypatch) -> None:
                 raise PermissionError(13, "denied", str(p))
             return real(self, *a, **k)
         monkeypatch.setattr(Path, "read_text", refuse)
-        with pytest.raises(PermissionError):
+        with pytest.raises(AutError) as stop:
             load_state()
+        assert f"could not read {p} " in str(stop.value) and "fix its owner or mode" in str(stop.value)
         with pytest.raises(PermissionError):
             save_state({"collectors": {"pi": {}}}, ["pi"])
         monkeypatch.setattr(Path, "read_text", real)

@@ -44,6 +44,19 @@ def commit_call(cmd: str) -> tuple[bool, bool] | None:
             not all(_SILENT.match(x) for x in segs[:hits[0]]))
 
 
+def commit_args_at(cmd: str) -> int | None:
+    """Where the arguments of the segment commit_call found start in `cmd`. Heredoc bodies are
+    blanked, not dropped, so the offset also holds in the original text."""
+    text = _HEREDOC.sub(lambda m: " " * (m.start(3) - m.start()) + m[3]
+                        + " " * (m.end() - m.end(3)), cmd)
+    starts = [0, *(m.end() for m in _SEGMENTS.finditer(text))]
+    for at, x in zip(starts, _SEGMENTS.split(text)):
+        g = GIT_COMMIT.match(x)
+        if g and "--dry-run" not in x.split():
+            return at + g.end() - 1     # the space GIT_COMMIT ate; a -m search needs it
+    return None
+
+
 def commit_dir(cmd: str) -> str | None:
     """Where the first commit call runs when the command moves there itself (`cd X && git commit`,
     `git -C X commit`), relative to the record's cwd unless absolute; None when it does not move

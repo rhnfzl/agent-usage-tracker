@@ -24,7 +24,7 @@ from ..state import parse_record
 from . import claude_code, codex, cursor, cursor_cli, pi
 from ._util import dict_or_empty, epoch_ms_to_iso
 from .activity_common import first_record, text_of
-from .commits import COMMIT_LINE, GIT_COMMIT, commit_call
+from .commits import COMMIT_LINE, commit_args_at, commit_call
 
 _TITLE = re.compile(r'"(?:aiTitle|customTitle)":\s*"((?:[^"\\]|\\.)*)"')
 _BRANCH = re.compile(r'"(?:gitBranch|worktreeBranch)":\s*"((?:[^"\\]|\\.)*)"')
@@ -99,16 +99,6 @@ class SessionView(TypedDict, total=False):
     branches: list[str]
 
 
-def _commit_message(cmd: str) -> str | None:
-    """The -m of the first segment that runs `git commit`, the rule commit_call uses."""
-    for seg in _SEGMENT.finditer(cmd):
-        g = GIT_COMMIT.match(seg[0])
-        if g and "--dry-run" not in seg[0].split():
-            # GIT_COMMIT ate the space after `commit`; _MSG needs it
-            return _quoted(_MSG, cmd, seg.start() + g.end() - 1)
-    return None
-
-
 class Digest:
     """What one session's local log says, for the page only."""
 
@@ -140,7 +130,8 @@ class Digest:
         out = out if isinstance(out, str) else ""
         if commit_call(cmd):
             subj = [m["subj"] for m in COMMIT_LINE.finditer(out)]
-            msg = _commit_message(cmd) if not subj else None
+            at = commit_args_at(cmd) if not subj else None
+            msg = _quoted(_MSG, cmd, at) if at is not None else None
             self.commits += subj or ([msg] if msg else [])
         i = cmd.find("gh pr create")
         title = _quoted(_PR_TITLE, cmd, i) if i >= 0 else None
