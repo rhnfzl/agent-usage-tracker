@@ -238,3 +238,53 @@ def test_a_failed_state_save_does_not_replace_the_pass_own_failure(capsys) -> No
         with pytest.raises(RuntimeError, match="boom"):
             scan.run_scan(_cfg(pg_dsn="postgresql://x"), ["bad"], dry_run=False)
     assert calls[0][0]["error"] == "RuntimeError" and "disk full" in capsys.readouterr().err
+
+
+class CheckViolation(Exception):
+    """Stands in for psycopg.errors.CheckViolation: the code goes by the name."""
+
+
+def _scan_rows() -> list[dict]:
+    started = datetime(2026, 7, 18, tzinfo=timezone.utc)
+    return [push.scan_row(_cfg(), "aw", started, status="degraded", error="OSError"),
+            push.scan_row(_cfg(), "pi", started)]
+
+
+def _statuses(sent: list) -> list[str]:
+    return [row[push.SCAN_COLUMNS.index("status")] for row in sent]
+
+
+def test_a_check_that_refuses_degraded_keeps_the_scan_rows_as_error(monkeypatch) -> None:
+    calls: list[list] = []
+
+    def write_many(dsn, sql, rows, timeout):
+        calls.append(rows)
+        if "degraded" in _statuses(rows):
+            raise CheckViolation("collector_scan_status_check")
+
+    monkeypatch.setattr(push, "write_many", write_many)
+    push.send_scan_rows("postgresql://x", _scan_rows())
+    assert [_statuses(c) for c in calls] == [["degraded", "ok"], ["error", "ok"]]
+    assert calls[1][0][push.SCAN_COLUMNS.index("error")] == "OSError"
+
+
+def test_a_sink_that_allows_degraded_stores_it_as_is(monkeypatch) -> None:
+    calls: list[list] = []
+    monkeypatch.setattr(push, "write_many", lambda dsn, sql, rows, timeout: calls.append(rows))
+    push.send_scan_rows("postgresql://x", _scan_rows())
+    assert [_statuses(c) for c in calls] == [["degraded", "ok"]]
+
+
+@pytest.mark.parametrize("exc,rows", [(OSError("down"), _scan_rows()),
+                                      (CheckViolation("other"), _scan_rows()[1:])])
+def test_any_other_refusal_still_raises_without_a_second_write(monkeypatch, exc, rows) -> None:
+    calls: list[list] = []
+
+    def write_many(dsn, sql, batch, timeout):
+        calls.append(batch)
+        raise exc
+
+    monkeypatch.setattr(push, "write_many", write_many)
+    with pytest.raises(type(exc)):
+        push.send_scan_rows("postgresql://x", rows)
+    assert len(calls) == 1

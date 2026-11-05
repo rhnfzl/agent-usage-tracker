@@ -278,8 +278,18 @@ def scan_row(cfg: Config, collector: str, started_at: datetime, *, status: ScanS
 
 def send_scan_rows(dsn: str, rows: list[dict[str, Any]]) -> None:
     """Scan heartbeat rows. Idempotent on (machine, collector, finished_at); raises on failure."""
-    # 5 s, not 15: usage is already delivered, so an unreachable sink should not hold the exit.
-    write_many(dsn, _SCAN_SQL, [_params(r, SCAN_COLUMNS) for r in rows], timeout=5)
+    def write(batch: list[dict[str, Any]]) -> None:
+        # 5 s, not 15: usage is already delivered, so an unreachable sink should not hold the exit.
+        write_many(dsn, _SCAN_SQL, [_params(r, SCAN_COLUMNS) for r in batch], timeout=5)
+
+    try:
+        write(rows)
+    except Exception as exc:
+        # A CHECK with only ok and error refuses a degraded row, and with it the whole delivery:
+        # every collector of the scan would look dead. By name: the driver is an optional extra.
+        if type(exc).__name__ != "CheckViolation" or all(r["status"] != "degraded" for r in rows):
+            raise
+        write([{**r, "status": "error"} if r["status"] == "degraded" else r for r in rows])
 
 
 def deliver_scan_rows(cfg: Config, rows: list[dict[str, Any]], what: str = "scan") -> None:

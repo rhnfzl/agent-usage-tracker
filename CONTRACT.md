@@ -160,7 +160,9 @@ it ran, after the usage for that collector has been delivered:
 
 All rows of a scan go out in one `INSERT ... ON CONFLICT (machine, collector, finished_at) DO
 NOTHING` over `transport.pg_dsn`, also when a collector raised. A webhook-only config skips it
-with one stderr note. The heartbeat **never blocks usage delivery**: any failure sending it
+with one stderr note. A sink whose `status` CHECK does not allow `degraded` (the deployed
+`ok`/`error` one) refuses that delivery, so it is sent again once with each `degraded` row as
+`error`, same `error` type: the other collectors' rows are kept. The heartbeat **never blocks usage delivery**: any failure sending it
 prints one warning (type and redacted message, on local stderr) and is swallowed, so usage rows,
 the watermark and the exit status are the same as without it. Ctrl-C leaves at once and sends no
 heartbeat, in `aut scan`, `aut outcomes` and `aut label` alike.

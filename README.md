@@ -268,7 +268,8 @@ With a tunnel, point `pg_dsn` at `localhost` and the local port.
 
 **Heartbeats.** Every real scan writes one `agents.collector_scan` row per collector over
 `pg_dsn`, so a dead collector does not look like a quiet week: `status` is `degraded` when a
-collector could not read its source (an expired Cursor token, a stopped aw-server). `aut outcomes` and
+collector could not read its source (an expired Cursor token, a stopped aw-server), stored as
+`error` on a sink whose CHECK has no `degraded`. `aut outcomes` and
 `aut label run` write their own rows (collector `outcomes` and `label`). A heartbeat that
 fails to send prints a warning and never fails the scan.
 

@@ -3,10 +3,12 @@
 Run: `AUT_TEST_PG_DSN=postgresql://... pytest tests/pipeline/test_sink_sql.py`. The DSN must be a scratch
 database: the tests create the `agents` schema, and refuse to touch a database that already has one.
 
-STAND_IN_SCHEMA is this file's own, written from CONTRACT.md and the columns the code names: the
-deployed DDL lives in the infrastructure repo (DEPLOY.md). So this catches invalid SQL, a wrong
-column and an ON CONFLICT target with no matching key against the stand-in. It proves nothing about
-the deployed schema; tests/pipeline/test_sink.py only checks the stand-in names what CONTRACT.md names.
+STAND_IN_SCHEMA is this file's own copy of the tables the code touches, with the keys, NOT NULLs and
+CHECKs of the deployed DDL in the infrastructure repo (DEPLOY.md), checked against it on 2026-11-05.
+It leaves out Timescale, the views, column defaults, numeric precision and event_session.first_seen.
+So this catches invalid SQL, a wrong column, a refused value and an ON CONFLICT target with no
+matching key. It cannot notice the deployed DDL changing later; tests/pipeline/test_sink.py only
+checks the stand-in names what CONTRACT.md names.
 """
 
 from __future__ import annotations
@@ -32,37 +34,53 @@ pytestmark = pytest.mark.skipif(not DSN, reason="AUT_TEST_PG_DSN is not set")
 STAND_IN_SCHEMA = """
 CREATE SCHEMA agents;
 CREATE TABLE agents.usage_event (
-    event_id text, ts timestamptz, machine text, agent text, kind text, model text, provider text,
-    input_tokens bigint, output_tokens bigint, cache_read_tokens bigint, cache_write_tokens bigint,
-    reasoning_tokens bigint, total_tokens bigint, est_cost_usd numeric, project text,
-    PRIMARY KEY (event_id, ts));
+    event_id text, ts timestamptz, machine text NOT NULL, agent text NOT NULL, kind text NOT NULL,
+    model text, provider text, input_tokens bigint NOT NULL, output_tokens bigint NOT NULL,
+    cache_read_tokens bigint NOT NULL, cache_write_tokens bigint NOT NULL, reasoning_tokens bigint,
+    total_tokens bigint NOT NULL, est_cost_usd numeric, project text, PRIMARY KEY (event_id, ts));
 CREATE TABLE agents.event_session (
-    event_id text PRIMARY KEY, machine text, agent text, session_id text, parent_session_id text,
-    run_origin text, turn_id text);
+    event_id text PRIMARY KEY, machine text NOT NULL, agent text NOT NULL, session_id text NOT NULL,
+    parent_session_id text, run_origin text NOT NULL, turn_id text);
 CREATE TABLE agents.activity_event (
-    event_id text, ts timestamptz, machine text, agent text, kind text, session_id text,
-    turn_id text, attrs jsonb, PRIMARY KEY (event_id, ts));
+    event_id text, ts timestamptz, machine text NOT NULL, agent text NOT NULL, kind text NOT NULL,
+    session_id text, turn_id text, attrs jsonb NOT NULL, PRIMARY KEY (event_id, ts));
 CREATE TABLE agents.time_interval (
-    event_id text, ts timestamptz, end_ts timestamptz, machine text, source text, app text,
-    title text, category text, work_relevant boolean, attrs jsonb, PRIMARY KEY (event_id, ts));
+    event_id text, ts timestamptz, end_ts timestamptz NOT NULL, machine text NOT NULL,
+    source text NOT NULL, app text, title text, category text, work_relevant boolean NOT NULL,
+    attrs jsonb NOT NULL, PRIMARY KEY (event_id, ts));
 CREATE TABLE agents.collector_scan (
-    machine text, collector text, started_at timestamptz, finished_at timestamptz, status text,
-    events integer, human integer, newest_ts timestamptz, error text, aut_version text,
-    PRIMARY KEY (machine, collector, finished_at));
+    machine text, collector text, started_at timestamptz NOT NULL, finished_at timestamptz,
+    status text NOT NULL, events integer NOT NULL, human integer NOT NULL, newest_ts timestamptz,
+    error text, aut_version text, PRIMARY KEY (machine, collector, finished_at));
 CREATE TABLE agents.commit_outcome (
     sha text, repo_key text, state text, survival numeric, decided_at timestamptz,
-    PRIMARY KEY (sha, repo_key, decided_at));
-CREATE TABLE agents.manual_outcome (session_id text, outcome text, ts timestamptz, repo_key text);
+    PRIMARY KEY (sha, repo_key, state, decided_at));
+CREATE TABLE agents.manual_outcome (
+    session_id text, outcome text NOT NULL, ts timestamptz, repo_key text,
+    PRIMARY KEY (session_id, ts));
 CREATE TABLE agents.episode (
-    episode_id uuid PRIMARY KEY, first_ts timestamptz, last_ts timestamptz, n_sessions integer,
-    n_seed_sessions integer, n_steers integer, n_commits integer, n_prs integer, outcome text,
-    outcome_source text, confirmed boolean);
+    episode_id uuid PRIMARY KEY, first_ts timestamptz NOT NULL, last_ts timestamptz NOT NULL,
+    n_sessions integer NOT NULL, n_seed_sessions integer NOT NULL, n_steers integer NOT NULL,
+    n_commits integer NOT NULL, n_prs integer NOT NULL, outcome text NOT NULL,
+    outcome_source text NOT NULL, confirmed boolean NOT NULL);
 CREATE TABLE agents.episode_member (
-    episode_id uuid, session_id text, role text, repo_keys text[]);
+    episode_id uuid REFERENCES agents.episode (episode_id) ON DELETE CASCADE, session_id text,
+    role text NOT NULL, repo_keys text[] NOT NULL, PRIMARY KEY (episode_id, session_id));
 CREATE TABLE agents.episode_correction (
-    id uuid PRIMARY KEY, ts timestamptz, action text, a_session text, b_session text, attrs jsonb);
+    id uuid PRIMARY KEY, ts timestamptz NOT NULL, action text NOT NULL, a_session text NOT NULL,
+    b_session text, attrs jsonb NOT NULL);
 CREATE TABLE agents.daily_note (
-    day date PRIMARY KEY, text text, model_id text, created_at timestamptz);
+    day date PRIMARY KEY, text text NOT NULL, model_id text NOT NULL, created_at timestamptz NOT NULL);
+ALTER TABLE agents.event_session ADD CHECK (run_origin IN ('interactive', 'automated', 'subagent', 'unknown'));
+ALTER TABLE agents.time_interval ADD CHECK (source IN ('aw', 'manual')), ADD CHECK (end_ts > ts);
+ALTER TABLE agents.collector_scan ADD CHECK (status IN ('ok', 'error'));
+ALTER TABLE agents.commit_outcome ADD CHECK (survival BETWEEN 0 AND 1), ADD CHECK (state IN (
+    'merged', 'reverted', 'reworked', 'open', 'abandoned', 'superseded', 'undecided'));
+ALTER TABLE agents.manual_outcome ADD CHECK (outcome IN ('shipped', 'ruled_out', 'open'));
+ALTER TABLE agents.episode ADD CHECK (outcome_source IN ('git', 'manual')), ADD CHECK (outcome IN (
+    'shipped', 'reworked', 'open', 'ruled_out', 'no_code', 'undecided'));
+ALTER TABLE agents.episode_member ADD CHECK (role IN ('seed', 'child'));
+ALTER TABLE agents.episode_correction ADD CHECK (action IN ('merge', 'split', 'confirm', 'reject'));
 """
 
 T0 = datetime(2026, 6, 15, 12, tzinfo=timezone.utc)
@@ -120,6 +138,17 @@ def test_heartbeat_inserts(dsn):
     assert _rows(dsn, "collector_scan") == 1
 
 
+def test_a_degraded_heartbeat_does_not_lose_the_scan_on_the_deployed_check(dsn):
+    cfg = Config(machine="deg", agents=(), webhook_url=None, webhook_secret=None, pg_dsn=dsn,
+                 home=Path("."))
+    push.send_scan_rows(dsn, [push.scan_row(cfg, "aw", T0, status="degraded", error="OSError"),
+                              push.scan_row(cfg, "pi", T0)])
+    with connect(dsn) as conn:
+        assert conn.execute("SELECT collector, status, error FROM agents.collector_scan WHERE "
+                            "machine = 'deg' ORDER BY 1").fetchall() \
+            == [("aw", "error", "OSError"), ("pi", "ok", None)]
+
+
 def test_outcome_reads_and_writes(dsn):
     push.send_activity_rows(dsn, [_activity("c1", "commit", sha="abcdef1234", repo_key="k1",
                                             amend=False)])
@@ -137,7 +166,7 @@ def test_outcome_reads_and_writes(dsn):
 @pytest.fixture(scope="module")
 def episode(dsn):
     with connect(dsn) as conn:
-        conn.execute("INSERT INTO agents.episode VALUES (%s, %s, %s, 1, 1, 1, 1, 0, 'merged', "
+        conn.execute("INSERT INTO agents.episode VALUES (%s, %s, %s, 1, 1, 1, 1, 0, 'shipped', "
                      "'git', false)", (EPISODE, T0, T0 + timedelta(hours=1)))
         conn.execute("INSERT INTO agents.episode_member VALUES (%s, 's1', 'seed', %s)",
                      (EPISODE, ["k1"]))
