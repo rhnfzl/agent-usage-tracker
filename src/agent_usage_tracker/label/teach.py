@@ -110,7 +110,7 @@ def run_teach(cfg: Config, task: str, n: int, *, budget_usd: float = 5.0, days: 
     t = TASKS[task]
     today = (now or datetime.now(timezone.utc)).astimezone().date()
     reqs = window_units(cfg, task, days, src, today)
-    local = make_backend(task, Choice(), cfg.label_model)
+    local = make_backend(task, Choice(), cfg.label_model, cfg.label_llama_server)
     out = eval_path(task, "silver")
     have = {(r.get("unit_id"), r.get("teacher")) for r in read_jsonl(out)
             if r.get("task_ver") == t.ver}

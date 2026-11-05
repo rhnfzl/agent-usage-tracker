@@ -101,12 +101,13 @@ LABELS = [c for c, _d in tasks.TASKS[TASK].candidates]
 WORD = "zanzibarquill"
 
 
-# Fixed local noon: held_out hashes a unit's local day, so a moving clock would change the split
+# Fixed local noon: the folds hash a unit's local day, so a moving clock would change the split
 # and every number that follows from it. Every run below gets this clock.
 BASE = datetime(2026, 6, 15, 12).astimezone()
 
 
 TODAY = BASE.date()
+FIXED = datetime(2026, 1, 15, 12, tzinfo=timezone.utc)      # days that hash the same on every run
 
 
 class Oracle(backends.LetterBackend):
@@ -125,7 +126,7 @@ class Oracle(backends.LetterBackend):
         return [5.0 if shown[x] == want else 0.0 for x in letters]
 
 
-def _steers(home: Path, golds: list[str], days: int = 20):
+def _steers(home: Path, golds: list[str], days: int = 60):
     """One Claude Code steer per item, spread over `days` past days; text = its gold label, then
     a word no stored row may hold."""
     recs = [(f"u{i}", f"{g} {WORD}") for i, g in enumerate(golds)]

@@ -216,7 +216,7 @@ def run_label(cfg: Config, tasks: list[str] | None = None, since: datetime | Non
         k = (task if choice.backend == "encoder" else None, choice.backend,
              choice.model_id or cfg.label_model, choice.model_rev)
         if k not in loaded:
-            loaded[k] = make_backend(task, choice, cfg.label_model)
+            loaded[k] = make_backend(task, choice, cfg.label_model, cfg.label_llama_server)
         return loaded[k]
 
     backend_for = backend_for or default_backend
@@ -227,11 +227,16 @@ def run_label(cfg: Config, tasks: list[str] | None = None, since: datetime | Non
                cache=load_json_dict(_cache_path()), labelled_at=labelled_at)
     report: dict[str, TaskReport] = {}
     with job_heartbeat(cfg, NAME, started, dry_run=dry_run) as beat:
-        for name in tasks if tasks is not None else cfg.label_tasks:
-            report[name], stopped = _label_one(run, name, since, now, load_choice(name), backend_for)
-            beat.events += report[name]["rows"] + report[name]["notes"]
-            if stopped:
-                beat.fail(stopped)
+        try:
+            for name in tasks if tasks is not None else cfg.label_tasks:
+                report[name], stopped = _label_one(run, name, since, now, load_choice(name),
+                                                   backend_for)
+                beat.events += report[name]["rows"] + report[name]["notes"]
+                if stopped:
+                    beat.fail(stopped)
+        finally:
+            for b in loaded.values():        # a llama-server stops with the run
+                getattr(b, "close", lambda: None)()
     return report
 
 

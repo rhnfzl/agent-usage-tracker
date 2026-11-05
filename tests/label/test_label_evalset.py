@@ -10,9 +10,12 @@ import pytest
 from agent_usage_tracker.config import AutError
 from agent_usage_tracker.label import evalset
 from agent_usage_tracker.label import tasks
-from label_helpers import BASE, TASK
+from label_helpers import BASE, FIXED, TASK
 from agent_usage_tracker.label import core
 from label_helpers import FakeSource, _cfg, _env
+
+
+FOLDS_OF_FIXED_DAYS = [3, 3, 0, 3, 2, 0, 3, 3]
 
 
 def test_stratified_and_split():
@@ -20,16 +23,23 @@ def test_stratified_and_split():
     order = evalset.stratified(items, lambda x: x, "seed")
     assert set(order[:3]) == {"a", "b", "c"} and sorted(order) == sorted(items)
     assert order == evalset.stratified(items, lambda x: x, "seed")
-    r = tasks.TASKS[TASK].request("steer", "u", BASE, {})
-    later = tasks.TASKS[TASK].request("steer", "v", BASE + timedelta(minutes=1), {})
-    assert evalset.held_out(r) == evalset.held_out(later)        # same day, same side
-    sides = {evalset.held_out(tasks.TASKS[TASK].request("steer", "u", BASE - timedelta(days=d),
-                                                         {})) for d in range(20)}
-    assert sides == {True, False}
-    # a title's ts moves with the window read: its side follows the unit_id, not the day
-    t = tasks.TASKS["aw_title_relevance"]
-    assert {evalset.held_out(t.request("aw_title", "k1", BASE - timedelta(days=d), {}))
-            for d in range(20)} == {evalset.held_out(t.request("aw_title", "k1", BASE, {}))}
+    t = tasks.TASKS[TASK]
+    r = t.request("steer", "u", FIXED, {})
+    later = t.request("steer", "v", FIXED + timedelta(hours=1), {})
+    assert evalset.fold(r) == evalset.fold(later)                # same day, same fold
+    assert evalset.final_test(r) == evalset.final_test(later)
+    assert evalset.in_encoder_train_split(r) == evalset.in_encoder_train_split(later)
+    many = [t.request("steer", "u", FIXED - timedelta(days=d), {}) for d in range(400)]
+    assert {evalset.fold(q) for q in many} == set(range(evalset.FOLDS))
+    assert 0.12 < sum(evalset.final_test(q) for q in many) / 400 < 0.28
+    assert {evalset.in_encoder_train_split(q) for q in many} == {True, False}
+    # the hash is the contract: every model and every run gets these same folds
+    assert [evalset.fold(q) for q in many[:8]] == FOLDS_OF_FIXED_DAYS
+    # a title's ts moves with the window read: its groups follow the unit_id, not the day
+    a = tasks.TASKS["aw_title_relevance"]
+    for fn in (evalset.fold, evalset.final_test, evalset.in_encoder_train_split):
+        assert len({fn(a.request("aw_title", "k1", FIXED - timedelta(days=d), {}))
+                    for d in range(20)}) == 1
     assert evalset.stratum(None) == "unlabelled"
     assert evalset.stratum({"x": {"a": 0.6, "b": 0.4}, "y": {"a": 0.9, "b": 0.1}}) == "a"
     assert evalset.stratum({"x": {"a": 0.6, "b": 0.4}, "y": {"a": 0.1, "b": 0.9}}) == "disagree"
@@ -106,13 +116,14 @@ def test_unit_day_is_the_local_day_of_the_unit():
     assert evalset.unit_day(r) == BASE.date()
 
 
-def test_encoder_split_follows_the_unit_alone():
-    reqs = [tasks.TASKS[TASK].request("steer", f"u{i}", BASE, {}) for i in range(40)]
-    sides = [evalset.in_encoder_train_split(r) for r in reqs]
+def test_encoder_split_follows_the_day():
+    days = [BASE - timedelta(days=d) for d in range(40)]
+    sides = [evalset.in_encoder_train_split(tasks.TASKS[TASK].request("steer", "u", d, {}))
+             for d in days]
     assert set(sides) == {True, False}
-    later = [tasks.TASKS[TASK].request("steer", f"u{i}", BASE - timedelta(days=9), {})
-             for i in range(40)]
-    assert [evalset.in_encoder_train_split(r) for r in later] == sides
+    other = [evalset.in_encoder_train_split(tasks.TASKS[TASK].request("steer", "v", d, {}))
+             for d in days]
+    assert other == sides       # the day alone decides: a day's units never straddle the split
 
 
 def test_window_units_needs_the_sink_unless_given_a_source(tmp_path):

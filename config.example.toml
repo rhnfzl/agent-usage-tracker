@@ -96,8 +96,10 @@ agents = ["claude_code", "codex", "cursor_api", "cursor_cli", "pi"]
 # nightly run (AUT_LABEL=1 in scan.env) labels only the tasks listed here; `aut label run --task T`
 # runs any one by hand. Tasks: steer_intent work_category soft_outcome aw_title_relevance daily_note
 # label_tasks = ["steer_intent"]
-# label_model = "mlx-community/gemma-4-31b-it-4bit"   # a local Hugging Face snapshot; never downloaded by aut
-# label_precision = 0.90       # per-label tau is set for this precision on your gold labels
+# label_model = "mlx-community/gemma-4-31b-it-4bit"   # a short name from README "The models", or a local Hugging Face snapshot; never downloaded by aut
+# label_llama_server = "llama-server"   # the binary for aurelis-2b and kev-4b; a full path if the nightly job's PATH lacks it
+# label_precision = 0.90       # per-label floors on your gold labels: tau is set to reach both,
+# label_recall = 0.60          # out of fold; a model that misses one is marked as failing
 # label_coverage = 0.75        # a module below this share of known labels is not exported
 # label_budget_s = 3600        # time budget of one run; the rest waits for the next night
 

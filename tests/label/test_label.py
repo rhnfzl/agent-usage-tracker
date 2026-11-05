@@ -347,6 +347,13 @@ def test_cli_and_config(tmp_path, monkeypatch):
     p.write_text('label_tasks = ["steer_intent", "daily_note"]\nlabel_precision = 0.95\n')
     c = config.load_config()
     assert c.label_tasks == ("steer_intent", "daily_note") and c.label_precision == 0.95
+    assert c.label_recall == 0.60 and c.label_llama_server == "llama-server"
+    p.write_text('label_recall = 0.8\nlabel_llama_server = "/opt/llama-server"\n')
+    c = config.load_config()
+    assert c.label_recall == 0.8 and c.label_llama_server == "/opt/llama-server"
+    p.write_text("label_recall = 1.5\n")
+    with pytest.raises(AutError):
+        config.load_config()
     p.write_text('label_tasks = ["vibes"]\n')
     with pytest.raises(AutError):
         config.load_config()
@@ -406,18 +413,28 @@ def test_cli_wiring(tmp_path, monkeypatch):
     monkeypatch.setattr(gold, "run_gold_review", lambda cfg, t, d: seen.append(("review", t, d)) or {
         "task": TASK, "answered": 0, "skipped": 0, "gold": {}})
     monkeypatch.setattr(bakeoff, "run_eval", lambda cfg, t, d: seen.append(("eval", t, d)) or [])
-    monkeypatch.setattr(bakeoff, "choose", lambda cfg, t: seen.append(("choose", t)) or {
-        "backend": "encoder", "model_id": "m", "temperature": 1.0, "tau": {}})
+    monkeypatch.setattr(bakeoff, "run_final", lambda cfg, t, m, d: seen.append(("final", t, m, d))
+                        or {"task": t, "model_id": m, "n": 1, "macro_f1_tuned": 1.0,
+                            "macro_f1_default": 1.0, "brier": 0.0, "nll": 0.0, "coverage": 1.0,
+                            "fails": []})
+    monkeypatch.setattr(bakeoff, "choose", lambda cfg, t, m: seen.append(("choose", t, m)) or (
+        {"backend": "encoder", "model_id": m, "temperature": 1.0, "platt": None, "tau": {}}
+        if m else None))
     monkeypatch.setattr(bakeoff, "train_encoder", lambda cfg, t, d: seen.append(("train", t))
                         or {})
     with _env(tmp_path):
         assert cli.main(["label", "teach", "--task", TASK, "--n", "5"]) == 0
         assert cli.main(["label", "review"]) == 0
         assert cli.main(["label", "eval", "--task", TASK, "--days", "30"]) == 0
+        assert cli.main(["label", "eval", "--task", TASK, "--final", "--model", "M"]) == 0
+        for half in (["--final"], ["--model", "M"]):       # one without the other is refused
+            assert cli.main(["label", "eval", "--task", TASK, *half]) == 1
         assert cli.main(["label", "choose", "--task", TASK]) == 0
+        assert cli.main(["label", "choose", "--task", TASK, "--model", "M"]) == 0
         assert cli.main(["label", "train-encoder", "--task", TASK]) == 0
     assert seen == [("teach", TASK, 5, 5.0, LABEL_DAYS), ("review", None, LABEL_DAYS),
-                    ("eval", TASK, 30), ("choose", TASK), ("train", TASK)]
+                    ("eval", TASK, 30), ("final", TASK, "M", LABEL_DAYS),
+                    ("choose", TASK, None), ("choose", TASK, "M"), ("train", TASK)]
     with pytest.raises(SystemExit):
         cli.main(["label", "teach", "--task", "daily_note", "--n", "1"])
 
@@ -437,9 +454,23 @@ def test_two_encoder_tasks_do_not_share_a_backend(tmp_path, monkeypatch):
 
         def distribution(self, req):
             return {}
-    monkeypatch.setattr(run, "make_backend", lambda task, c, m: built.append(task) or Fake())
+    monkeypatch.setattr(run, "make_backend", lambda task, c, m, llama: built.append(task) or Fake())
     monkeypatch.setattr(run, "load_choice", lambda name: core.Choice(backend="encoder"))
     with _env(tmp_path):
         run.run_label(_cfg(tmp_path), ["steer_intent", "work_category"], dry_run=True,
                       src=FakeSource(_cfg(tmp_path)), now=NOW)
     assert built == ["steer_intent", "work_category"]
+
+
+def test_a_run_closes_the_backends_it_made(tmp_path, monkeypatch):
+    closed = []
+
+    class Closing(ById):
+        def close(self):
+            closed.append(self.model_id)
+
+    cfg = _cfg(tmp_path)
+    monkeypatch.setattr(run, "make_backend", lambda *a: Closing())
+    with _env(tmp_path):
+        run.run_label(cfg, ["steer_intent"], dry_run=True, src=FakeSource(cfg), now=NOW)
+    assert closed == ["fake/byid"]

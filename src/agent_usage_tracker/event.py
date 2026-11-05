@@ -22,7 +22,7 @@ RunOrigin = Literal["interactive", "automated", "subagent", "unknown"]
 UsageKind = Literal["agent", "human"]    # agent: an assistant turn with tokens; human: a user prompt
 TimeSource = Literal["aw", "manual"]
 ActivityKind = Literal["steer", "interrupt", "rejection", "commit", "pr", "turn", "compaction",
-                       "invoke", "link", "label", "eval"]
+                       "invoke", "link", "label", "eval", "steer_estimate"]
 
 
 def parse_ts(ts: object) -> datetime | None:
