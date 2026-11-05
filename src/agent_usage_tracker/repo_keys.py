@@ -11,6 +11,7 @@ import subprocess  # nosec B404 # one git_argv call below, no shell
 import sys
 from urllib.parse import urlparse
 
+from .config import AutError
 from .git_safe import git_argv, git_env
 from .state import state_path, warn_if_group_readable
 
@@ -27,14 +28,32 @@ def repo_identity(url: str) -> str:
     return f"{host}/{path.strip('/').removesuffix('.git')}".lower()
 
 
-def _load_salt(configured: str | None) -> bytes:
+def require_readable_salt(configured: str | None) -> None:
+    """Raises before a run that sends rows, when the salt file is there but cannot be read: NULL
+    keys are permanent once the watermark moves on and the sink's ON CONFLICT DO NOTHING applies."""
+    if configured:
+        return
+    p = state_path().parent / "repo_key.salt"
+    try:
+        p.read_bytes()
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        raise AutError(f"aut: could not read {p} ({exc}); fix its owner or mode, or every repo_key "
+                       "of this run would be NULL for good") from exc
+
+
+def _load_salt(configured: str | None, create: bool = True) -> bytes:
     """The config's repo_key_salt, else a random salt kept next to the state file (created 0600 on
-    first use). b"" when neither can be had: repo keys are then NULL, never an unsalted hash."""
+    first use, unless not `create`). b"" when neither can be had: repo keys are then NULL, never an
+    unsalted hash."""
     if configured:
         return configured.encode("utf-8")
     p = state_path().parent / "repo_key.salt"
     try:
         if not p.exists():
+            if not create:
+                return b""
             # Written in full to a temp file, then linked into place: a crash or a second process
             # never sees a half-written salt, and the first link wins a race.
             p.parent.mkdir(parents=True, exist_ok=True)
@@ -50,7 +69,9 @@ def _load_salt(configured: str | None) -> bytes:
                 tmp.unlink(missing_ok=True)
         salt = p.read_text().strip()
         warn_if_group_readable(p)
-    except OSError:
+    except OSError as exc:
+        print(f"aut: warning: could not read or create {p} ({exc}); repo_key stays NULL until it "
+              "is fixed", file=sys.stderr)
         return b""
     except UnicodeDecodeError:          # corrupt: the warning below
         salt = ""
@@ -63,16 +84,17 @@ def _load_salt(configured: str | None) -> bytes:
 
 class RepoKeys:
     """repo_key = HMAC-SHA256(salt, host/owner/repo), so a list of candidate repo names cannot be
-    tested against stored keys without the salt. Cached per cwd for one collect() pass."""
+    tested against stored keys without the salt. Cached per cwd for one collect() pass. With
+    create False a missing salt file stays missing and the keys are NULL (a dry run)."""
 
-    def __init__(self, salt: str | None) -> None:
-        self._configured = salt
+    def __init__(self, salt: str | None, *, create: bool = True) -> None:
+        self._configured, self._create = salt, create
         self._salt: bytes | None = None
         self._cwd: dict[object, str | None] = {}
 
     def of(self, identity: str) -> str | None:
         if self._salt is None:
-            self._salt = _load_salt(self._configured)
+            self._salt = _load_salt(self._configured, self._create)
         if not self._salt:
             return None
         return hmac.new(self._salt, identity.encode("utf-8"), hashlib.sha256).hexdigest()

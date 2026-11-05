@@ -346,5 +346,5 @@ def run_inspect(cfg: Config, kind: Selector, value: str) -> dict[str, int]:
 
 
 def print_inspect(summary: dict[str, Any]) -> None:
-    if summary["reviewed"]:
-        print(f"inspect: {summary['reviewed']} corrections saved")
+    if summary["saved"]:
+        print(f"inspect: {summary['saved']} corrections saved")

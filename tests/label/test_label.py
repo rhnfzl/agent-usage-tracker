@@ -427,3 +427,19 @@ def test_a_recent_task_says_since_does_not_apply(capsys):
     start, until = run._window("soft_outcome", {}, now - timedelta(days=90), now)
     assert start == now - timedelta(days=14) and until is None
     assert "do not apply" in capsys.readouterr().err
+
+
+def test_two_encoder_tasks_do_not_share_a_backend(tmp_path, monkeypatch):
+    built = []
+
+    class Fake:
+        model_id, model_rev = "encoder", None
+
+        def distribution(self, req):
+            return {}
+    monkeypatch.setattr(run, "make_backend", lambda task, c, m: built.append(task) or Fake())
+    monkeypatch.setattr(run, "load_choice", lambda name: core.Choice(backend="encoder"))
+    with _env(tmp_path):
+        run.run_label(_cfg(tmp_path), ["steer_intent", "work_category"], dry_run=True,
+                      src=FakeSource(_cfg(tmp_path)), now=NOW)
+    assert built == ["steer_intent", "work_category"]

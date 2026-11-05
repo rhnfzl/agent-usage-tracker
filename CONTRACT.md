@@ -288,7 +288,9 @@ Rules worth knowing:
   timeout, cached per cwd per pass), NULL when the directory or remote is gone. A PR's key uses
   its URL host plus `prRepository` the same way, so commits and PRs of one repo share a key. The
   salt is the config key `repo_key_salt` (an `env:VAR` value works), else a random salt created
-  (mode 0600) as `repo_key.salt` next to the state file on first use. Without the salt the recipe
+  (mode 0600) as `repo_key.salt` next to the state file on first use. A `repo_key.salt` that is
+  there but cannot be read fails a scan or a backfill before it reads anything, since NULL keys
+  would stay for good; other commands warn on stderr and go on with NULL keys. Without the salt the recipe
   is not reproducible, so stored keys cannot be matched against a list of candidate repo names. Set
   the same `repo_key_salt` on every machine for their keys to match; changing it changes every new
   key. The remote URL is never stored or logged.
@@ -410,7 +412,7 @@ commit's `(state, survival)` differs from its latest stored row.
 | state | rule |
 |---|---|
 | `merged` | ancestor of `origin/HEAD` (fallback `origin/main`/`master`/`develop`, never a local branch), or a single-commit patch-id twin on it, or (with `--fetch`) a merged GitHub PR that `gh pr list --search <sha>` finds; `survival` = share (0..1, 4 decimals) of its added lines that `git blame` still attributes to it (or its twin) on the default branch 14 days after the merge, first 30 files, NULL for a merge commit, a commit adding no lines or a gh-only merge |
-| `reverted` | merged, and a commit on any branch says `This reverts commit X` for it or its twin within 14 days of the merge |
+| `reverted` | merged, and a commit on any branch says `This reverts commit X` for it or its twin within 14 days after the merge (a revert before the merge does not count) |
 | `reworked` | merged and `survival < 0.5` |
 | `open` | reachable from a local or remote branch, not from the default branch |
 | `abandoned` | reachable from no branch, no twin, no merged PR; also a commit no local clone holds |
@@ -445,7 +447,7 @@ commit's `(state, survival)` differs from its latest stored row.
   gh lookup. A gh answer already cached still counts without it, needing no network. Without it,
   any other commit whose GitHub PR was squash-merged ends `abandoned`, so set
   `outcome_fetch = true` on the machine that runs the nightly job. A dry run reads the sink and the clones as they are and changes nothing: no
-  rows, no cache, no heartbeat, no fetch and no gh even with `--fetch` or `outcome_fetch` (so a
+  rows, no cache, no heartbeat, no new `repo_key.salt`, no fetch and no gh even with `--fetch` or `outcome_fetch` (so a
   squash-merged commit with no cached gh answer previews as `abandoned`). A real run sends one `agents.collector_scan` row, collector `outcomes`.
 
 - Every git command aut runs (here, and `git remote get-url origin` for repo keys) goes through

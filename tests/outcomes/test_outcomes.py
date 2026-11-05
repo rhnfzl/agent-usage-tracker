@@ -613,3 +613,35 @@ def test_a_read_failure_sends_a_degraded_heartbeat(monkeypatch, capsys):
                         now=NOW_DT)
         assert [(r["status"], r["error"]) for r in scan] == [("degraded", "GitReadFailed")], scan
         assert '"survival_failed": 1' in capsys.readouterr().err
+
+
+def test_only_a_revert_after_the_merge_counts():
+    clone = og.Clone("/x", "k", None, "refs/remotes/origin/main", int(NOW), True)
+    day, full, twin = 86400, "f" * 40, "e" * 40
+    merge = int(NOW) - 30 * day
+
+    def state(reverted):
+        read = og.CloneRead(True, int(NOW), {twin: merge}, set(), {full: twin}, reverted)
+        o = {"sha": "f", "repo_key": "k", "state": "undecided", "survival": None}
+        oc._decide_merged(o, oc._Pick(clone, read, full), twin, NOW, {}, oc.Counter())
+        return o["state"]
+    assert state({full: [merge - day]}) == "undecided"          # backed out, then re-landed
+    assert state({full: [merge + 20 * day], twin: [merge + day]}) == "reverted"
+    assert state({full: [merge - day, merge + day]}) == "reverted"      # re-landed, reverted again
+    assert og._reverted(f"100\nThis reverts commit {full}.\x00200\nThis reverts commit {full}.\x00") \
+        == {full: [100, 200]}
+
+
+def test_a_dry_run_creates_no_salt(tmp_path, monkeypatch):
+    monkeypatch.setenv("AUT_STATE", str(tmp_path / "st" / "state.json"))
+    repo = tmp_path / "root" / "w"
+    repo.mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(["git", "-C", str(repo), "remote", "add", "origin",
+                    "https://github.com/o/r.git"], check=True)
+    monkeypatch.setattr(oc, "load_rows", lambda dsn: [])
+    monkeypatch.setattr(oc, "load_stored", lambda dsn: {})
+    cfg = Config(machine="t", agents=(), webhook_url=None, webhook_secret=None, pg_dsn="pg://x",
+                 home=tmp_path, outcome_repo_roots=(str(repo.parent),))
+    oc.run_outcomes(cfg, refresh=False, dry_run=True)
+    assert not (tmp_path / "st").exists()

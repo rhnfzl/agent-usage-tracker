@@ -50,12 +50,14 @@ def _warn_unusable(path: Path, reason: str) -> None:
 
 
 def load_state() -> dict[str, Any]:
+    """The watermarks. A read error (a root-owned file, EIO) raises: the file may be fine, and
+    starting clean would end with save_state replacing it."""
     path = state_path()
-    if not path.exists():
-        return {"collectors": {}}       # first run on this machine: genuinely nothing yet
     try:
         obj = json.loads(path.read_text())
-    except (ValueError, OSError) as exc:    # JSONDecodeError and UnicodeDecodeError are ValueErrors
+    except FileNotFoundError:
+        return {"collectors": {}}       # first run on this machine: genuinely nothing yet
+    except ValueError as exc:           # JSONDecodeError and UnicodeDecodeError are ValueErrors
         _warn_unusable(path, str(exc))
         return {"collectors": {}}
     if not isinstance(obj, dict) or not isinstance(obj.get("collectors"), dict):
@@ -86,10 +88,16 @@ def save_state(state: dict[str, Any], names: Iterable[str]) -> None:
     """Write the named collectors' watermarks (a name gone from `state` is dropped) over what is on
     disk now. A scan and a long `aut label run` each hold a copy from when they started; writing
     that copy back whole would roll the other's watermarks back. Two runs of one collector still
-    race on its own entry, which costs a re-read at most: the sink dedups on event_id."""
+    race on its own entry, which costs a re-read at most: the sink dedups on event_id. A read error
+    raises, because the file may hold other collectors' good watermarks."""
     path = state_path()
     with _locked(path):
-        disk = load_json_dict(path)
+        try:
+            disk = json.loads(path.read_text(encoding="utf-8"))
+        except (FileNotFoundError, ValueError):
+            disk = {}
+        if not isinstance(disk, dict):
+            disk = {}
         if not isinstance(disk.get("collectors"), dict):
             disk["collectors"] = {}
         for name in names:

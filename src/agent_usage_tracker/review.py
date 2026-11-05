@@ -106,14 +106,15 @@ _ANSWERS = (("skip", "don't know"), ("right", "right"), ("split", "should split"
 
 
 def render(episodes: list[Episode], info: dict[str, SessionView], token: str, heading: str,
-           shown: list[int] | None = None, answered: int = 0) -> str:
+           shown: list[int] | None = None, answered: int = 0, kind: str = "episodes") -> str:
     """The page. `shown`: indices of the episodes on it (default all); form fields keep each
-    episode's index in `episodes`, so the sample and the full page post the same answers."""
+    episode's index in `episodes`, so the sample and the full page post the same answers. `kind`
+    names them in the note."""
     e = html.escape
     shown = list(range(len(episodes))) if shown is None else shown
     whole = len(shown) == len(episodes)
-    note = (f"All {len(episodes)} open episodes." if whole else
-            f"A sample of {len(shown)} of {len(episodes)} open episodes, spread over outcome "
+    note = (f"All {len(episodes)} {kind}." if whole else
+            f"A sample of {len(shown)} of {len(episodes)} {kind}, spread over outcome "
             f'and size. <a href="/{e(token)}?all=1">Show all</a>.')
     if answered:
         note += f" {answered} already answered (not shown)."
@@ -170,7 +171,8 @@ def _answer_rows(form: dict[str, list[str]], i: int, episodes: list[Episode],
 
 def corrections(form: dict[str, list[str]], episodes: list[Episode],
                 now: datetime) -> tuple[list[dict[str, Any]], dict[str, int]]:
-    """episode_correction rows for the answers, and {reviewed, right}. Answers that name a
+    """episode_correction rows for the answers, and {reviewed, right, saved}: saved counts the rows,
+    since a split writes one per session. Answers that name a
     session or episode the page did not show are dropped."""
     rows: list[dict[str, Any]] = []
     reviewed = right = 0
@@ -179,15 +181,15 @@ def corrections(form: dict[str, list[str]], episodes: list[Episode],
         rows += new
         reviewed += bool(new)
         right += bool(new) and _field(form, f"a{i}") == "right"
-    return rows, {"reviewed": reviewed, "right": right}
+    return rows, {"reviewed": reviewed, "right": right, "saved": len(rows)}
 
 
 def month_pages(episodes: list[Episode], info: dict[str, SessionView], heading: str,
                 answered: int = 0) -> Callable[[str], dict[str, str]]:
     """The sample at /<token>, every episode at /<token>?all=1."""
     return lambda token: {
-        "": render(episodes, info, token, heading, sample(episodes), answered),
-        "?all=1": render(episodes, info, token, heading, None, answered)}
+        "": render(episodes, info, token, heading, sample(episodes), answered, "open episodes"),
+        "?all=1": render(episodes, info, token, heading, None, answered, "open episodes")}
 
 
 def serve(episodes: list[Episode], write: Callable[[list[dict[str, Any]]], None],
@@ -195,10 +197,10 @@ def serve(episodes: list[Episode], write: Callable[[list[dict[str, Any]]], None]
           on_ready: Callable[[str], None] | None = None,
           now: datetime | None = None) -> dict[str, int]:
     """Serve pages(token) (what follows /<token> in the path -> html) until the answers are posted;
-    write(rows) stores them. Returns {reviewed, right}."""
+    write(rows) stores them. Returns {reviewed, right, saved}."""
     token = local_page.new_token()
     built = {k: v.encode() for k, v in pages(token).items()}
-    result = {"reviewed": 0, "right": 0}
+    result = {"reviewed": 0, "right": 0, "saved": 0}
 
     def on_post(form: dict[str, list[str]]) -> bytes:
         rows, summary = corrections(form, episodes, now or datetime.now(timezone.utc))

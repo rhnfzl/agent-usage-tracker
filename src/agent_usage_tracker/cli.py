@@ -49,7 +49,7 @@ from . import inspector, manual_time, outcomes, pricing, review, scan
 from .collectors import REGISTRY
 from .config import (ALL_AGENTS, LABEL_DAYS, LABEL_DECISION_TASKS, LABEL_TASK_NAMES, AutError,
                      Config, load_config, config_path)
-from .push import is_operational_failure, redacted_error
+from .push import is_operational_failure, redacted_error, webhook_url_allowed
 from .state import collector_wm, load_state
 
 
@@ -95,6 +95,8 @@ def cmd_status(cfg: Config, agents: Sequence[str], args: argparse.Namespace) -> 
     print(f"agents        : {', '.join(agents)}")
     if cfg.has_webhook and not cfg.webhook_secret:
         webhook_state = "url set but SECRET MISSING (scan will refuse)"
+    elif cfg.has_webhook and not webhook_url_allowed(cfg.webhook_url or ""):
+        webhook_state = "url NOT ALLOWED: https://, or http:// to localhost (scan will refuse)"
     else:
         webhook_state = "configured" if cfg.has_webhook else "NOT set"
     print(f"webhook       : {webhook_state}")

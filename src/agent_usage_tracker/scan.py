@@ -18,6 +18,7 @@ from .event import (ActivityEvent, Batch, CollectorUnavailable, Row, TimeInterva
                     parse_ts, valid_ts)
 from .push import (COLUMNS, ScanStatus, deliver_scan_rows, error_type_name, make_sender,
                    redacted_error, scan_row, send_activity_rows, send_session_rows)
+from .repo_keys import require_readable_salt
 from .state import collector_wm, load_state, save_state
 
 BATCH = 500
@@ -154,6 +155,8 @@ class _CollectorPass:
 def run_scan(cfg: Config, agents: Sequence[str], *, dry_run: bool) -> dict[str, AgentTally]:
     state = load_state()
     sender = None if dry_run else make_sender(cfg)
+    if not dry_run:
+        require_readable_salt(cfg.repo_key_salt)
     report: dict[str, AgentTally] = {}
     scan_rows: list[dict[str, Any]] = []      # one heartbeat row per collector that ran (agents.collector_scan)
 
@@ -382,6 +385,8 @@ def run_history_backfill(cfg: Config, agents: Sequence[str], *, dry_run: bool,
     saved. ON CONFLICT makes a re-run free."""
     dsn = "" if dry_run else cfg.require_pg("backfill --sessions-only/--activity-only without "
                                             "--dry-run")
+    if not dry_run:
+        require_readable_salt(cfg.repo_key_salt)
     history = _History(dsn, dry_run, sessions=sessions, activity=activity)
     keeps = {kind for kind, on in (("session", sessions), ("activity", activity)) if on}
     for name in agents:

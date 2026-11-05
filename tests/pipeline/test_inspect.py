@@ -349,7 +349,12 @@ def test_pages_serve_the_evidence_and_the_correction_form():
 
 
 def test_print_inspect_is_quiet_when_nothing_was_saved(capsys):
-    inspector.print_inspect({"reviewed": 0})
+    inspector.print_inspect({"saved": 0})
     assert capsys.readouterr().out == ""
-    inspector.print_inspect({"reviewed": 2})
+    inspector.print_inspect({"saved": 2})
     assert capsys.readouterr().out == "inspect: 2 corrections saved\n"
+
+
+def test_the_correction_form_does_not_call_its_episodes_open():
+    page = inspector.pages(inspector.build(_raw()), {}, "Episode X")("tok")["/correct"]
+    assert "open episodes" not in page and " episodes." in page

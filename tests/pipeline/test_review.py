@@ -56,11 +56,11 @@ def test_answers_become_key_only_corrections():
                    ("confirm", "s4", None, {"repo_keys": [K1]}),
                    ("reject", "s5", None, {"repo_keys": [K2]})], got
     assert all(len(r["id"]) == 36 and r["ts"] == T0 for r in rows)
-    assert summary == {"reviewed": 4, "right": 1}, summary
+    assert summary == {"reviewed": 4, "right": 1, "saved": 4}, summary
     bad = {"a0": ["merge"], "merge0": ["0"], "a1": ["merge"], "merge1": ["99"],
            "a2": ["split"], "a3": ["bogus"]}
     rows, summary = review.corrections(bad, _episodes(), T0)
-    assert rows == [] and summary == {"reviewed": 0, "right": 0}, (rows, summary)
+    assert rows == [] and summary == {"reviewed": 0, "right": 0, "saved": 0}, (rows, summary)
     # one odd merge answer drops only itself: isdigit() takes these, int() does not
     odd = {"a0": ["merge"], "merge0": ["\u00b2"], "a1": ["merge"], "merge1": ["9" * 5000],
            "a2": ["right"]}
@@ -105,7 +105,7 @@ def test_server_serves_under_token_and_stops_on_submit():
     t.join(10)
     assert not t.is_alive()
     assert [w["action"] for w in written] == ["confirm", "reject"], written
-    assert box["summary"] == {"reviewed": 2, "right": 1}
+    assert box["summary"] == {"reviewed": 2, "right": 1, "saved": 2}
 
 
 def test_post_with_a_bad_content_length_is_a_404_not_a_crash():
@@ -145,7 +145,7 @@ def test_ctrl_c_ends_the_page_quietly():
     with patch("http.server.HTTPServer.serve_forever", side_effect=KeyboardInterrupt):
         got = review.serve(_episodes(), [].extend, review.month_pages(_episodes(), {}, "2001-01"),
                            open_browser=False)
-    assert got == {"reviewed": 0, "right": 0}
+    assert got == {"reviewed": 0, "right": 0, "saved": 0}
 
 
 def test_month_bounds():
@@ -160,7 +160,7 @@ def test_dont_know_is_the_default_and_writes_nothing():
     assert page.count('value="skip" checked') == 4 and page.count(" checked") == 4
     assert "not building work (admin, personal, a quick question)" in page
     rows, summary = review.corrections({f"a{i}": ["skip"] for i in range(4)}, _episodes(), T0)
-    assert rows == [] and summary == {"reviewed": 0, "right": 0}
+    assert rows == [] and summary == {"reviewed": 0, "right": 0, "saved": 0}
 
 
 def test_sample_is_30_spread_over_outcome_and_size():
@@ -226,3 +226,10 @@ def test_a_failed_save_answers_500_and_keeps_the_page_serving(capsys):
     assert not t.is_alive()
     err = capsys.readouterr().err
     assert "save failed" in err and "hunter2" not in err
+
+
+def test_a_split_counts_every_row_it_saves():
+    eps = [{**_episodes()[0], "members": [{"session_id": s, "role": "seed", "repo_keys": [K1]}
+                                          for s in ("s1", "s2", "s3")]}]
+    rows, summary = review.corrections({"a0": ["split"], "split0": ["s1", "s2", "s3"]}, eps, T0)
+    assert len(rows) == 3 and summary == {"reviewed": 1, "right": 0, "saved": 3}

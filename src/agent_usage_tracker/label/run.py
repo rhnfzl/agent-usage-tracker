@@ -209,11 +209,13 @@ def run_label(cfg: Config, tasks: list[str] | None = None, since: datetime | Non
     labelled_at = started.isoformat(timespec="milliseconds")
     now = now or started
     src = src or Source(cfg)
-    loaded: dict[tuple[str | None, str | None, str | None], Backend] = {}
+    loaded: dict[tuple[str | None, str | None, str | None, str | None], Backend] = {}
 
     def default_backend(task: str, choice: Choice) -> Backend:
-        k = (choice.backend, choice.model_id or cfg.label_model, choice.model_rev)
-        if k not in loaded:                  # one model load per run, shared across tasks
+        # one model load per run, shared across tasks; an encoder is trained for one task alone
+        k = (task if choice.backend == "encoder" else None, choice.backend,
+             choice.model_id or cfg.label_model, choice.model_rev)
+        if k not in loaded:
             loaded[k] = make_backend(task, choice, cfg.label_model)
         return loaded[k]
 

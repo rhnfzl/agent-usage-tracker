@@ -154,3 +154,21 @@ def test_a_save_never_rolls_back_another_process_watermark() -> None:
         del scan_copy["collectors"]["codex"]
         save_state(scan_copy, ["codex"])                        # a name gone from state is dropped
         assert json.loads(p.read_text())["collectors"] == {"label": {"t": "new"}}
+
+
+def test_a_read_error_keeps_a_good_state_file(monkeypatch) -> None:
+    good = json.dumps({"collectors": {"label": {"steer_intent": "x"}}})
+    with _state_file(good) as p:
+        real = Path.read_text
+
+        def refuse(self, *a, **k):
+            if self == p:
+                raise PermissionError(13, "denied", str(p))
+            return real(self, *a, **k)
+        monkeypatch.setattr(Path, "read_text", refuse)
+        with pytest.raises(PermissionError):
+            load_state()
+        with pytest.raises(PermissionError):
+            save_state({"collectors": {"pi": {}}}, ["pi"])
+        monkeypatch.setattr(Path, "read_text", real)
+        assert p.read_text() == good and not p.with_suffix(".corrupt").exists()

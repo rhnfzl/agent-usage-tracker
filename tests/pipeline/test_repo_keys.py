@@ -10,6 +10,10 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+import pytest
+
+from agent_usage_tracker import scan
+from agent_usage_tracker.config import AutError, Config
 from agent_usage_tracker.repo_keys import RepoKeys
 from agent_usage_tracker.repo_keys import repo_identity
 from test_activity import SALT, _key
@@ -63,3 +67,26 @@ def test_a_binary_salt_file_means_null_keys_not_a_crash(tmp_path, monkeypatch, c
     (tmp_path / "repo_key.salt").write_bytes(b"\xff\xfe" * 40)
     assert RepoKeys(None).of("github.com/o/r") is None
     assert "repo_key stays NULL" in capsys.readouterr().err
+
+
+def test_an_unreadable_salt_warns_and_stops_a_scan(tmp_path, monkeypatch, capsys) -> None:
+    monkeypatch.setenv("AUT_STATE", str(tmp_path / "state.json"))
+    salt = tmp_path / "repo_key.salt"
+    salt.write_text("s" * 40)
+
+    def refuse(self, *a, **k):
+        raise PermissionError(13, "denied", str(self))
+    monkeypatch.setattr(Path, "read_text", refuse)
+    monkeypatch.setattr(Path, "read_bytes", refuse)
+    assert RepoKeys(None).of("github.com/o/r") is None
+    assert "repo_key stays NULL" in capsys.readouterr().err
+    monkeypatch.undo()
+    monkeypatch.setenv("AUT_STATE", str(tmp_path / "state.json"))
+    monkeypatch.setattr(scan, "make_sender", lambda cfg: [].extend)
+    real = Path.read_bytes
+    monkeypatch.setattr(Path, "read_bytes", lambda self: refuse(self) if self == salt else real(self))
+    cfg = Config(machine="m", agents=("pi",), webhook_url=None, webhook_secret=None, pg_dsn=None,
+                 home=tmp_path)
+    with pytest.raises(AutError, match="repo_key"):
+        scan.run_scan(cfg, ["pi"], dry_run=False)
+    assert not (tmp_path / "state.json").exists()

@@ -239,11 +239,11 @@ class CloneRead:
     on_default: dict[str, int] = field(default_factory=dict)  # commit -> when it landed
     on_branch: set[str] = field(default_factory=set)
     twin: dict[str, str] = field(default_factory=dict)        # off-default full sha -> twin on default
-    reverted: dict[str, int] = field(default_factory=dict)    # reverted sha -> earliest revert time
+    reverted: dict[str, list[int]] = field(default_factory=dict)  # reverted sha -> revert times
 
-    def revert_time(self, full: str) -> int | None:
-        hits = [t for x, t in self.reverted.items() if full.startswith(x)]
-        return min(hits) if hits else None
+    def reverted_between(self, full: str, start: float, end: float) -> bool:
+        return any(start <= t <= end for x, times in self.reverted.items()
+                   if full.startswith(x) for t in times)
 
 
 def _landings(log: str) -> tuple[int, dict[str, int]]:
@@ -281,13 +281,13 @@ def _twins(path: str, default: str, since: int, off: list[str]) -> dict[str, str
     return {c: by_pid[p] for c, p in theirs.items() if p in by_pid and by_pid[p] != c}
 
 
-def _reverted(log: str) -> dict[str, int]:
-    """From `git log --format=%ct%n%B%x00`: reverted sha -> its earliest revert time."""
-    reverted: dict[str, int] = {}
+def _reverted(log: str) -> dict[str, list[int]]:
+    """From `git log --format=%ct%n%B%x00`: reverted sha -> every time it was reverted."""
+    reverted: dict[str, list[int]] = {}
     for chunk in log.split("\0"):
         head, _, body = chunk.strip().partition("\n")
         for x in _REVERTS.findall(body) if head.isdigit() else ():
-            reverted[x] = min(reverted.get(x, int(head)), int(head))
+            reverted.setdefault(x, []).append(int(head))
     return reverted
 
 

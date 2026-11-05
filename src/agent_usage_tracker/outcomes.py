@@ -8,7 +8,7 @@ States (a commit moves through them by new rows; readers take the latest):
   merged      ancestor of origin/HEAD, a single-commit patch-id twin on it, or (network on) a
               merged GitHub PR found by gh; survival = share of its added lines still there
               14 days after the merge
-  reverted    "This reverts commit X" for it or its twin within 14 days of the merge
+  reverted    "This reverts commit X" for it or its twin within 14 days after the merge
   reworked    merged, but under half of its added lines survive 14 days
   open        reachable from a branch only
   abandoned   unreachable, no twin, no merged PR
@@ -177,10 +177,10 @@ def _decide_merged(o: Outcome, pick: _Pick, target: str, now_ts: float, cache: d
     measures its survival, if it needs one."""
     c, read, full = pick
     merge_t = read.on_default[target]            # when it landed on the default branch
-    rv = read.revert_time(full) or read.revert_time(target)
     if now_ts - merge_t < DECIDE_S:
         return None
-    if rv is not None and rv - merge_t <= DECIDE_S:
+    window = (merge_t, merge_t + DECIDE_S)
+    if read.reverted_between(full, *window) or read.reverted_between(target, *window):
         o["state"] = "reverted"
         return None
     if target in cache or max(read.tip_t, c.fetched_at) >= merge_t + DECIDE_S:
@@ -371,7 +371,7 @@ def run_outcomes(cfg: Config, *, refresh: bool, dry_run: bool,
     decided = (now or started).astimezone(timezone.utc)
     with job_heartbeat(cfg, "outcomes", started, dry_run=dry_run) as beat:
         rows = load_rows(dsn)
-        clones = find_clones(list(cfg.outcome_repo_roots), RepoKeys(cfg.repo_key_salt))
+        clones = find_clones(list(cfg.outcome_repo_roots), RepoKeys(cfg.repo_key_salt, create=not dry_run))
         stats: dict[str, Any] = {"clones": len(clones)}
         if refresh and dry_run:
             stats["fetch_skipped_dry_run"] = 1

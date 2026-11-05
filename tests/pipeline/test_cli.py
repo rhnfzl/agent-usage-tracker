@@ -289,7 +289,16 @@ def test_print_scan_shows_active_time(world, capsys):
 def test_inspect_passes_the_chosen_selector(world, monkeypatch, capsys, flag, kind):
     seen = []
     monkeypatch.setattr(inspector, "run_inspect",
-                        lambda cfg, k, v: seen.append((k, v)) or {"reviewed": 2})
+                        lambda cfg, k, v: seen.append((k, v)) or {"saved": 2})
     assert cli.main(["inspect", flag, "x"]) == 0
     assert seen == [(kind, "x")]
     assert "inspect: 2 corrections saved" in capsys.readouterr().out
+
+
+def test_status_says_scan_will_refuse_a_remote_http_webhook(world, capsys, monkeypatch):
+    (world / "config.toml").write_text('agents = ["codex"]\n[transport]\n'
+                                       'webhook_url = "http://ingest.example.com/hook"\n'
+                                       'webhook_secret = "env:AUT_TEST_SECRET"\n')
+    monkeypatch.setenv("AUT_TEST_SECRET", "s")
+    assert cli.main(["status"]) == 0
+    assert "scan will refuse" in capsys.readouterr().out

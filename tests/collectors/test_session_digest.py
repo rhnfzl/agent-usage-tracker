@@ -16,6 +16,14 @@ from agent_usage_tracker.collectors import session_digest
 from test_cursor_cli import A, _calls, _prompt, _result, _store
 
 
+def test_commit_message_comes_from_the_commit_segment():
+    for cmd in ("git commit -m 'real'", "git add commit.py && git commit -m 'real'",
+                "git log --grep commit -1; git commit -m 'real'"):
+        d = session_digest.Digest("claude_code")
+        d.note_shell(cmd, "ok abc1234", False)
+        assert d.commits == ["real"], cmd
+
+
 def test_local_info_reads_claude_and_codex_logs():
     with tempfile.TemporaryDirectory() as d:
         home = Path(d)

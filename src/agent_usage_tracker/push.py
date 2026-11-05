@@ -147,6 +147,17 @@ def send_session_rows(dsn: str, events: list[UsageEvent]) -> None:
     write_many(dsn, _SESSION_SQL, _session_rows(events))
 
 
+def webhook_url_allowed(url: str) -> bool:
+    """Allowlist, not blocklist: only https, or http to localhost for testing. Anything else
+    (http to a remote host, or ftp:/file:/no-scheme) could leak the secret or misfire."""
+    try:
+        parsed = urlparse(url)
+        return parsed.scheme.lower() == "https" or (
+            parsed.scheme.lower() == "http" and (parsed.hostname or "").lower() in LOCAL_HOSTS)
+    except ValueError:
+        return False
+
+
 def _check_webhook(cfg: Config) -> None:
     """Raises if a configured webhook is missing its secret or would leak it."""
     url = cfg.webhook_url or ""
@@ -158,9 +169,7 @@ def _check_webhook(cfg: Config) -> None:
     parsed = urlparse(url)
     scheme = parsed.scheme.lower()
     host = (parsed.hostname or "").lower()
-    # Allowlist, not blocklist: only https, or http to localhost for testing. Anything else
-    # (http to a remote host, or ftp:/file:/no-scheme) could leak the secret or misfire.
-    if not (scheme == "https" or (scheme == "http" and host in LOCAL_HOSTS)):
+    if not webhook_url_allowed(url):
         raise AutError(
             f"refusing to send the webhook secret to host '{host}': only https:// "
             f"(or http:// to localhost for testing) is allowed, not '{scheme or 'no'}-scheme'."

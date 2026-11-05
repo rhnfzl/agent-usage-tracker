@@ -53,6 +53,20 @@ def test_steer_units_read_local_redacted_text(tmp_path):
     assert len(reqs[1].facts["text"]) <= tasks.TEXT_MAX
 
 
+def test_soft_outcome_stops_at_until(tmp_path):
+    _claude_log(tmp_path, "s1", [("u1", "before the end"), ("u2", "after the end")])
+    _claude_log(tmp_path, "s2", [("u3", "started late")])
+    late = NOW + timedelta(hours=2)
+    steers = [_steer("u1", "s1", DAY1), _steer("u2", "s1", late), _steer("u3", "s2", late)]
+    ep = {"n_sessions": 1, "n_steers": 1, "n_commits": 0, "outcome": "no_code", "last_ts": late}
+    eps = [{**ep, "id": "active", "first_ts": DAY1, "members": [_member("s1")]},
+           {**ep, "id": "late", "first_ts": late, "members": [_member("s2")]}]
+    reqs = tasks.units("soft_outcome", FakeSource(_cfg(tmp_path), steers, eps),
+                       NOW - timedelta(days=14), NOW)
+    assert [r.unit_id for r in reqs] == ["active"]
+    assert reqs[0].facts["last_steers"] == ["before the end"] and reqs[0].facts["days_idle"] == 0
+
+
 def _member(session_id):
     return {"session_id": session_id, "role": "seed", "repo_keys": []}
 

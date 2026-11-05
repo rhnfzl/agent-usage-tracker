@@ -276,10 +276,11 @@ def _category_units(task: Task, src: Source, since: datetime, until: datetime | 
 
 
 def _outcome_units(task: Task, src: Source, since: datetime, until: datetime | None) -> list[Request]:
-    """Episodes without commits (git outcome no_code) touched in the last OUTCOME_DAYS."""
+    """Episodes without commits (git outcome no_code) touched in the last OUTCOME_DAYS, as they
+    stood at `until`: started before it, and only what was said before it."""
     now = until or datetime.now(timezone.utc)
-    eps = [e for e in src.episodes(since) if e["outcome"] == "no_code"]
-    steers = _claude_steers(src.steers(since)) if eps else []
+    eps = [e for e in src.episodes(since) if e["outcome"] == "no_code" and e["first_ts"] < now]
+    steers = [r for r in _claude_steers(src.steers(since)) if r["ts"] < now] if eps else []
     text = src.texts(steers)
     out = []
     for ep in eps:
@@ -291,7 +292,7 @@ def _outcome_units(task: Task, src: Source, since: datetime, until: datetime | N
         # ts = the episode start, so the row's day (and its held-out side) never moves; rev =
         # its last activity, so a changed episode is re-asked and an unchanged one is a no-op
         out.append(task.request("episode", ep["id"], ep["first_ts"], {
-            "last_steers": said[-5:], "days_idle": (now - ep["last_ts"]).days,
+            "last_steers": said[-5:], "days_idle": max((now - ep["last_ts"]).days, 0),
             "sessions": len({r["session_id"] for r in st}), "steers": len(st)},
             rev=ep["last_ts"].astimezone(timezone.utc).isoformat()))
     return out
@@ -322,5 +323,6 @@ UNITS: dict[str, Callable[[Task, Source, datetime, datetime | None], list[Reques
 
 
 def units(name: str, src: Source, since: datetime, until: datetime | None) -> list[Request]:
-    """The task's requests in [since, until), oldest first."""
+    """The task's requests in [since, until), oldest first. An episode unit belongs by its
+    activity, so its ts (the episode start) can be before `since`."""
     return sorted(UNITS[name](TASKS[name], src, since, until), key=lambda r: (r.ts, r.unit_id))

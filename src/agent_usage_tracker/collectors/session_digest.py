@@ -24,7 +24,7 @@ from ..state import parse_record
 from . import claude_code, codex, cursor, cursor_cli, pi
 from ._util import dict_or_empty, epoch_ms_to_iso
 from .activity_common import first_record, text_of
-from .commits import COMMIT_LINE, commit_call
+from .commits import COMMIT_LINE, GIT_COMMIT, commit_call
 
 _TITLE = re.compile(r'"(?:aiTitle|customTitle)":\s*"((?:[^"\\]|\\.)*)"')
 _BRANCH = re.compile(r'"(?:gitBranch|worktreeBranch)":\s*"((?:[^"\\]|\\.)*)"')
@@ -32,11 +32,10 @@ _TEXT_MAX = 200
 _TAG = re.compile(r"</?[\w:-]+[^<>]{0,200}>")
 _WS = re.compile(r"\s+")
 _Q = r"""(?:"((?:[^"\\]|\\.)*)"|'([^']*)'|(\S+))"""
-_GIT_COMMIT = re.compile(r"\bgit\b[^\n;&|]*?\scommit\b")
 _MSG = re.compile(rf"\s(?:-m|--message)(?:=|\s+){_Q}")
 _PR_TITLE = re.compile(rf"\s(?:-t|--title)(?:=|\s+){_Q}")
 # a command up to its first unquoted `&&`, `||`, `;`, `|` or newline
-_SEGMENT = re.compile(r"""(?:"(?:[^"\\]|\\.)*"|'[^']*'|&(?!&)|[^"'&;|\n])*""")
+_SEGMENT = re.compile(r"""(?:"(?:[^"\\]|\\.)*"|'[^']*'|(?<!&)&(?!&)|[^"'&;|\n])*""")
 # Cursor text with no <user_query>: every tagged block in it is harness context
 _BLOCK = re.compile(r"<([\w-]+)[^<>]*>.*?</\1>", re.S)
 _EDIT_TOOLS = {"Edit", "MultiEdit", "Write", "NotebookEdit", "StrReplace", "edit", "write"}
@@ -100,6 +99,16 @@ class SessionView(TypedDict, total=False):
     branches: list[str]
 
 
+def _commit_message(cmd: str) -> str | None:
+    """The -m of the first segment that runs `git commit`, the rule commit_call uses."""
+    for seg in _SEGMENT.finditer(cmd):
+        g = GIT_COMMIT.match(seg[0])
+        if g and "--dry-run" not in seg[0].split():
+            # GIT_COMMIT ate the space after `commit`; _MSG needs it
+            return _quoted(_MSG, cmd, seg.start() + g.end() - 1)
+    return None
+
+
 class Digest:
     """What one session's local log says, for the page only."""
 
@@ -131,8 +140,7 @@ class Digest:
         out = out if isinstance(out, str) else ""
         if commit_call(cmd):
             subj = [m["subj"] for m in COMMIT_LINE.finditer(out)]
-            g = _GIT_COMMIT.search(cmd)
-            msg = _quoted(_MSG, cmd, g.end()) if g and not subj else None
+            msg = _commit_message(cmd) if not subj else None
             self.commits += subj or ([msg] if msg else [])
         i = cmd.find("gh pr create")
         title = _quoted(_PR_TITLE, cmd, i) if i >= 0 else None
