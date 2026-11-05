@@ -680,6 +680,7 @@ sent and never holding text; a unit's text is rebuilt from this machine's logs w
 | `<task>.silver.jsonl` | `unit_id`, `teacher` (a model id), `dist` (probability per candidate), `date`, `task_ver` |
 | `<task>.jsonl` (gold) | `unit_id`, `gold` (a candidate), `labeller` (`human`), `date`, `task_ver`; a later row for a unit wins |
 | `<task>.eval.jsonl` | one bake-off record per backend (below), with its `ts` |
+| `<task>.ensemble.jsonl` | one record per ensemble row tried, and one selection row per run (below) |
 | `<task>.final.jsonl` | one record per `aut label eval --final`; only that command reads or writes it |
 | `scores/<task>.<model>.<hash>.jsonl` | one file per task, `model_id`, `model_rev`, `prompt_ver` and decision protocol: `unit_id`, `dist` (the raw distribution) |
 
@@ -745,7 +746,7 @@ before the five folds (no `brier`) are ignored.
 frontier (tuned macro-F1, `s_per_decision`, `peak_mb`; a null axis is not compared) of the models
 that pass, `!` on those that fail, then the per-label and reliability numbers of the models just
 scored. `aut label choose --task T` prints the table and a recommendation (best tuned macro-F1 to
-two decimals on that frontier, then the fastest) and writes nothing. `aut label choose --task T
+two decimals among the models that pass, then the fastest, unknown speed or memory last) and writes nothing. `aut label choose --task T
 --model M` writes the newest record of M into `label.json`, with a warning when it fails the bar.
 Labels without a tau stay unknown.
 
@@ -753,6 +754,53 @@ Labels without a tau stay unknown.
 saved calibration and tau, fits nothing, and appends the result (numbers, as in the record, and no
 `eval` row to the sink) to `<task>.final.jsonl`. It warns when a label has under its gold floor (30,
 150 per class for titles) there, and when M has seen those days before.
+
+`aut label ensemble --task T [--days D] [--models A,B,C]` combines models from saved scores, calls no
+model, and appends its records to `<task>.ensemble.jsonl` (local: no `eval` row goes to the sink).
+
+- **Candidates.** The newest eval record per model on the current task and prompt version, at least
+  3, or the models `--models` names. Groups have 3, 5 or 7 members.
+- **Same items.** Every row, each model alone included, uses the tuning gold units that every
+  candidate has a score for, and `n` says how many. A model that lacks some units is named on stderr;
+  those units leave every row, and `--models` can leave the model out instead. The encoder's training
+  days always leave, because its scores there are in-sample.
+- **Methods.** Each member first gets a temperature. `majority`: the share of members whose top
+  answer a label is, a tie broken by the mean probability. `soft`: the mean. `weighted`: the mean,
+  weighted by each member's macro-F1. `confident`: the member with the highest top probability.
+  `stack`: softmax of one coefficient per member on its log probability plus a bias per label, pulled
+  towards the equal pool (one coefficient per member and label would overfit gold this small).
+- **Folds.** Member temperatures, weights and the stacked model fit on four folds. The output then
+  goes through the same code as a single model (`bakeoff.tune`): calibration and tau fit on those four
+  folds, numbers pooled out of fold, and the same floors and bar. As for a single model, the one pick
+  of `none`, `temperature` or `platt` compares Briers over all folds. Saved values fit on all five.
+- **Selection.** The last row of a run has `kind = selection`: `n`, `n_tried`, `n_pass`, `best_f1`
+  (the best ensemble row, flattered by the number of tries), `nested_f1` (each fold answered by the
+  ensemble row that did best with that fold gone, every row refit without it, floors first),
+  `best_single_f1`, `nested_single_f1` (the same pick among single models) and `picks`. Both nested
+  numbers are null when one fold holds every item. As for a single model, the way to calibrate is
+  still picked over all folds, and nothing else there reads the held-out fold.
+- **Recommendation.** As for `aut label choose`, over all rows. When `nested_f1` beats
+  `nested_single_f1` by under 0.01 (a rule of thumb, not measured), over the single models instead,
+  unless none passes the floors. A single model's row is on the shared items; `choose` writes its own
+  eval record, and the output gives that record's `n`, F1 and floors when they differ.
+- **Records.** As in `<task>.eval.jsonl`, plus `method` (`single` or one above), `members` (model
+  ids) and, on a combination, `ensemble`: `{id, method, members: [{backend, model_id, model_rev,
+  temperature}], weights, stack}`, with `backend` = `ensemble`, `model_id` = `ensemble/<id>`,
+  `model_rev` = a hash of that recipe, and `size_mb`, `s_per_decision`, `load_s`, `peak_mb` the
+  members' sums (null when any member's is unknown). The table shows each model alone, the frontier
+  and the ten best others, with the same marks.
+
+`aut label choose --task T --model ensemble:<id>` writes the newest record of that id into `label.json`,
+with `ensemble` beside the usual fields. The id names the method and members; a later run can refit it
+under the same id with another `model_rev`. `temperature`, `platt` and `tau` apply to the combined output.
+The nightly run uses it as any backend: each member loads once for the run, shared between tasks, and
+one that is missing or at another revision fails the task with `BackendUnavailable`, naming it, before
+any member loads. Memory is the sum of the members: `MLX_CACHE_LIMIT` caps MLX's buffer cache, which all
+MLX members share, and does not cap their weights. A label row holds `model_id` = `ensemble/<id>`. `aut
+label eval --task T --final --model ensemble:<id>` scores only the ensemble chosen in `label.json`, and
+only when the newest record of that id is what `label.json` holds. It refuses another ensemble or
+another revision of it once one has been scored on those days for that task, since a second one would
+make them part of the selection. The members' scores on those days are not saved, only the combined one.
 
 `aut label train-encoder --task T` fits the `encoder` backend (logistic regression over hashed word
 and fact features, stdlib only) on the gold (three times the weight) and silver of half the open

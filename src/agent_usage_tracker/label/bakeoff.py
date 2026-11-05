@@ -22,7 +22,7 @@ import sys
 import time
 from collections import Counter
 from datetime import date, datetime, timezone
-from typing import Any, Iterable, NamedTuple, Sequence
+from typing import Any, NamedTuple, Sequence
 
 from ..config import LABEL_DAYS, AutError, Config
 from ..event import ActivityEvent, make_event_id
@@ -31,7 +31,7 @@ from ..state import atomic_write_text
 from .backends import (MODELS, BackendUnavailable, Encoder, encoder_path, features, find_model,
                        make_backend, short_name)
 from .core import (Backend, Choice, Request, calibrate, choice_path, fit_platt, fit_tau,
-                   fit_temperature, read_choices, softmax, top_label)
+                   fit_temperature, load_choice, read_choices, softmax, top_label)
 from .evalset import (FLOORS, FOLDS, append_jsonl, eval_path, final_test, fold, gold_latest,
                       in_encoder_train_split, read_jsonl, scores_path, silver_by_unit, stratum,
                       window_units)
@@ -217,6 +217,74 @@ def _fit_calibration(kind: str, raws: list[Dist], golds: list[str], yes: str) ->
     return {"temperature": 1.0, "platt": fit_platt(raws, golds, yes) if kind == "platt" else None}
 
 
+def tune(task: str, by_fold: Sequence[Sequence[Dist]], full: Sequence[Dist], golds: list[str],
+         w: list[float], folds: list[int], precision: float,
+         recall: float) -> tuple[dict[str, Any], list[str | None]]:
+    """The calibration, tau and out-of-fold numbers of one scorer, and its decision per item.
+    by_fold[k][i]: item i's raw distribution from whatever was fitted without fold k (one backend's
+    saved scores are the same for every k); full: the same, fitted on every fold."""
+    labels = [c for c, _d in TASKS[task].candidates]
+    every = range(len(golds))
+    split = [([i for i in every if folds[i] != k], [i for i in every if folds[i] == k])
+             for k in range(FOLDS)]
+    raws = [by_fold[folds[i]][i] for i in every]
+    fits: dict[tuple[str, int], dict[str, Any]] = {}
+
+    def fit(kind: str, k: int) -> dict[str, Any]:
+        if (kind, k) not in fits:
+            train = split[k][0]
+            fits[kind, k] = _fit_calibration(kind, [by_fold[k][i] for i in train],
+                                             [golds[i] for i in train], labels[0])
+        return fits[kind, k]
+
+    def out_of_fold(kind: str) -> list[Dist]:
+        out: list[Dist] = [{}] * len(golds)
+        for k, (_train, test) in enumerate(split):
+            c = fit(kind, k)
+            for i in test:
+                out[i] = calibrate(by_fold[k][i], **c)
+        return out
+
+    # T = 1 unless a fit lowers the out-of-fold Brier. shortcut: the way to calibrate is picked on
+    # the folds it reports on (one pick of at most three), upgrade by nesting it if gold grows.
+    kinds = ("none", "temperature") + (("platt",) if TASKS[task].decision == "boolean" else ())
+    briers = {k: _round4(brier(list(zip(out_of_fold(k), golds)))) or 0.0 for k in kinds}
+    kind = min(kinds, key=briers.__getitem__)
+    dists = out_of_fold(kind)
+    preds: list[str | None] = [None] * len(golds)
+    no_threshold: dict[str, list[str]] = {}
+    for k, (train, test) in enumerate(split):
+        c = fit(kind, k)
+        tau = fit_tau([(top_label(d), d[top_label(d)], golds[i]) for i in train
+                       for d in [calibrate(by_fold[k][i], **c)]], precision, recall=recall)
+        missing = sorted(lab for lab in set(golds) if tau.get(lab) is None)
+        if test and missing:
+            no_threshold[str(k)] = missing
+        for i in test:
+            preds[i] = _decide(dists[i], tau)
+    saved_cal = _fit_calibration(kind, list(full), golds, labels[0])
+    fitted = [calibrate(r, **saved_cal) for r in full]
+    tau = fit_tau([(top_label(d), d[top_label(d)], g) for d, g in zip(fitted, golds)], precision,
+                  recall=recall)
+    rep = _report(raws, dists, preds, golds, labels)
+    tops = [top_label(d) for d in dists]
+    passed = [i for i in every if preds[i]]
+    for lab, v in rep["per_label"].items():
+        v.update(_label_metrics(lab, list(every), tops, dict(enumerate(golds)), passed,
+                                dict(enumerate(w)), tau.get(lab)))
+    return {"calibration": kind, **saved_cal, "brier_by_calibration": briers, "n_cal": len(golds),
+            "n_held": len(golds), "folds": {str(k): len(test) for k, (_t, test) in enumerate(split)},
+            "no_threshold_folds": no_threshold, **rep,
+            "ece_raw": _round4(ece([(max(r.values()), top_label(r) == g)
+                                    for r, g in zip(raws, golds)])),
+            "ece_cal": _round4(ece([(max(d.values()), top_label(d) == g)
+                                    for d, g in zip(dists, golds)])),
+            "reliability_raw": reliability([(max(r.values()), top_label(r) == g)
+                                            for r, g in zip(raws, golds)]),
+            "reliability_cal": reliability([(max(d.values()), top_label(d) == g)
+                                            for d, g in zip(dists, golds)])}, preds
+
+
 def evaluate(task: str, backend: Backend, items: Sequence[_Item], precision: float, recall: float,
              today: date, prev: dict[str, Any] | None = None) -> dict[str, Any] | None:
     """Items never come from a final test day. The eval record of one backend (numbers), out of
@@ -228,70 +296,15 @@ def evaluate(task: str, backend: Backend, items: Sequence[_Item], precision: flo
     if not items:
         return None
     reqs = [it.req for it in items]
-    golds = [it.gold for it in items]
-    w = [it.weight for it in items]
     saved, speed = _score(backend, reqs, prev)
     raws = [{lab: saved[r.unit_id].get(lab, 0.0) for lab in labels} for r in reqs]
-    folds = [fold(r) for r in reqs]
-    every = range(len(reqs))
-    split = [([i for i in every if folds[i] != k], [i for i in every if folds[i] == k])
-             for k in range(FOLDS)]
-
-    def fit(kind: str, on: Iterable[int]) -> dict[str, Any]:
-        on = list(on)
-        return _fit_calibration(kind, [raws[i] for i in on], [golds[i] for i in on], labels[0])
-
-    def out_of_fold(kind: str) -> list[Dist]:
-        out: list[Dist] = [{}] * len(reqs)
-        for train, test in split:
-            c = fit(kind, train)
-            for i in test:
-                out[i] = calibrate(raws[i], **c)
-        return out
-
-    # T = 1 unless a fit lowers the out-of-fold Brier. shortcut: the way to calibrate is picked on
-    # the folds it reports on (one pick of at most three), upgrade by nesting it if gold grows.
-    kinds = ("none", "temperature") + (("platt",) if TASKS[task].decision == "boolean" else ())
-    briers = {k: _round4(brier(list(zip(out_of_fold(k), golds)))) or 0.0 for k in kinds}
-    kind = min(kinds, key=briers.__getitem__)
-    dists = out_of_fold(kind)
-    preds: list[str | None] = [None] * len(reqs)
-    no_threshold: dict[str, list[str]] = {}
-    for k, (train, test) in enumerate(split):
-        c = fit(kind, train)
-        tau = fit_tau([(top_label(d), d[top_label(d)], golds[i]) for i in train
-                       for d in [calibrate(raws[i], **c)]], precision, recall=recall)
-        missing = sorted(lab for lab in set(golds) if tau.get(lab) is None)
-        if test and missing:
-            no_threshold[str(k)] = missing
-        for i in test:
-            preds[i] = _decide(dists[i], tau)
-    saved_cal = fit(kind, every)
-    full = [calibrate(r, **saved_cal) for r in raws]
-    tau = fit_tau([(top_label(d), d[top_label(d)], g) for d, g in zip(full, golds)], precision,
-                  recall=recall)
-    rep = _report(raws, dists, preds, golds, labels)
-    tops = [top_label(d) for d in dists]
-    passed = [i for i in every if preds[i]]
-    for lab, v in rep["per_label"].items():
-        v.update(_label_metrics(lab, list(every), tops, dict(enumerate(golds)), passed,
-                                dict(enumerate(w)), tau.get(lab)))
+    fields, _preds = tune(task, [raws] * FOLDS, raws, [it.gold for it in items],
+                          [it.weight for it in items], [fold(r) for r in reqs], precision, recall)
     ver = TASKS[task].ver
     return {"task": task, "task_ver": ver, "backend": backend.backend,
             "model_id": backend.model_id, "model_rev": backend.model_rev,
             "size_mb": backend.size_mb, "prompt_ver": reqs[0].prompt_ver,
-            "calib_ver": f"{task}@{ver}/{today.isoformat()}", "calibration": kind, **saved_cal,
-            "brier_by_calibration": briers, "n_cal": len(reqs), "n_held": len(reqs),
-            "folds": {str(k): len(test) for k, (_t, test) in enumerate(split)},
-            "no_threshold_folds": no_threshold, **rep, **speed,
-            "ece_raw": _round4(ece([(max(r.values()), top_label(r) == g)
-                                    for r, g in zip(raws, golds)])),
-            "ece_cal": _round4(ece([(max(d.values()), top_label(d) == g)
-                                    for d, g in zip(dists, golds)])),
-            "reliability_raw": reliability([(max(r.values()), top_label(r) == g)
-                                            for r, g in zip(raws, golds)]),
-            "reliability_cal": reliability([(max(d.values()), top_label(d) == g)
-                                            for d, g in zip(dists, golds)])}
+            "calib_ver": f"{task}@{ver}/{today.isoformat()}", **fields, **speed}
 
 
 def _gold_units(cfg: Config, task: str, days: int, src: Source | None,
@@ -317,10 +330,10 @@ def _warn_thin(task: str, golds: list[str], what: str) -> None:
 
 
 def default_backends(cfg: Config, task: str) -> list[Backend]:
-    """Every model in the table (and label_model) that is fully on disk, plus the encoder once
-    trained. The others are printed with what it takes to fetch them."""
+    """Every model in the table (with label_model and label_extra_models) that is fully on disk,
+    plus the encoder once trained. The others are printed with what it takes to fetch them."""
     out: list[Backend] = []
-    for name in dict.fromkeys(list(MODELS) + [short_name(cfg.label_model)]):
+    for name in dict.fromkeys([*MODELS, short_name(cfg.label_model), *cfg.label_extra_models]):
         b = make_backend(task, Choice(model_id=name), cfg.label_model, cfg.label_llama_server)
         try:
             getattr(b, "prepare", lambda: None)()
@@ -384,6 +397,23 @@ def run_eval(cfg: Config, task: str, days: int = LABEL_DAYS, *, src: Source | No
     return recs
 
 
+def _one_ensemble_on_final(task: str, rec: dict[str, Any]) -> None:
+    """Many combinations were tried, so the final test days see one: the chosen one, once chosen,
+    and that fit of it. An id stays when `aut label ensemble` refits its members, so the revision
+    counts too. Trying a second there would make them part of the selection."""
+    if load_choice(task) != Choice(**_choice_entry(rec)):
+        raise AutError(f"label eval --final: {rec['model_id']} as last fitted is not {task}'s "
+                       f"choice (another model, or a later `aut label ensemble` refit it); run "
+                       f"`aut label choose --task {task} --model ensemble:{rec['ensemble']['id']}` "
+                       "first")
+    seen = {(r["model_id"], r["model_rev"]) for r in read_jsonl(eval_path(task, "final"))
+            if r.get("backend") == "ensemble"} - {(rec["model_id"], rec["model_rev"])}
+    if seen:
+        raise AutError(f"label eval --final: {sorted(seen)} already saw {task}'s final test days; "
+                       f"a second ensemble or a refit there is a selection on them, so "
+                       f"{rec['model_id']} is not scored. Those days no longer test an ensemble.")
+
+
 def run_final(cfg: Config, task: str, model: str, days: int = LABEL_DAYS, *,
               src: Source | None = None, backend: Backend | None = None,
               now: datetime | None = None) -> dict[str, Any]:
@@ -391,6 +421,8 @@ def run_final(cfg: Config, task: str, model: str, days: int = LABEL_DAYS, *,
     only this function reads those days; the result goes to its own file, which nothing reads."""
     now = now or datetime.now(timezone.utc)
     rec = _saved_result(task, model)
+    if rec["backend"] == "ensemble":
+        _one_ensemble_on_final(task, rec)
     pairs = [(r, g) for r, g in _gold_units(cfg, task, days, src, now.astimezone().date())
              if final_test(r)]
     if not pairs:
@@ -407,7 +439,8 @@ def run_final(cfg: Config, task: str, model: str, days: int = LABEL_DAYS, *,
         print(f"aut: label eval: {rec['model_id']} has seen the final test set {looks} times; "
               "if you changed anything because of it, it no longer tests that", file=sys.stderr)
     b = backend or make_backend(task, Choice(backend=rec["backend"], model_id=rec["model_id"],
-                                             model_rev=rec["model_rev"]), cfg.label_model,
+                                             model_rev=rec["model_rev"],
+                                             ensemble=rec.get("ensemble")), cfg.label_model,
                                 cfg.label_llama_server)
     try:
         getattr(b, "prepare", lambda: None)()
@@ -470,12 +503,16 @@ def pareto(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def recommend(rows: list[dict[str, Any]], cfg: Config) -> dict[str, Any] | None:
-    """Of the frontier of models that pass: the best quality (to two decimals: closer is noise on
-    gold this size), then the fastest."""
-    front = pareto([r for r in rows if not _fails(r, cfg)])
-    return min(front, key=lambda r: (-round(r.get("macro_f1_tuned") or 0, 2),
-                                     r.get("s_per_decision") or math.inf,
-                                     r.get("peak_mb") or math.inf), default=None)
+    """Of the models that pass: the best quality (to two decimals: closer is noise on gold this
+    size), then the fastest, unknown speed or memory last. On complete numbers this row is on the
+    frontier; pareto is not used, since null axes can make its relation circular and empty it."""
+    def known(x: float | None) -> float:
+        return math.inf if x is None else x
+
+    return min((r for r in rows if not _fails(r, cfg)),
+               key=lambda r: (-round(r.get("macro_f1_tuned") or 0, 2), known(r.get("s_per_decision")),
+                              known(r.get("peak_mb")), -(r.get("macro_f1_tuned") or 0)),
+               default=None)
 
 
 def table(cfg: Config, task: str) -> list[str]:
@@ -519,7 +556,15 @@ def details(recs: list[dict[str, Any]]) -> list[str]:
 
 
 def _saved_result(task: str, model: str) -> dict[str, Any]:
-    """The newest record of a model id (or a short name from backends.MODELS)."""
+    """The newest record of a model id (or a short name from backends.MODELS, or ensemble:<id>)."""
+    if model.startswith("ensemble:"):
+        rows = [r for r in read_jsonl(eval_path(task, "ensemble"))
+                if r.get("task_ver") == TASKS[task].ver and r.get("backend") == "ensemble"
+                and r["ensemble"]["id"] == model.removeprefix("ensemble:")]
+        if not rows:
+            raise AutError(f"label: no record of {model} for {task}; run `aut label ensemble` "
+                           "first")
+        return rows[-1]
     known = find_model(model)
     repo = known.repo if known else model
     match = [r for r in newest(task).values() if r["model_id"] == repo]
@@ -527,6 +572,15 @@ def _saved_result(task: str, model: str) -> dict[str, Any]:
         raise AutError(f"label: no eval record of {model} for {task}; run `aut label eval` "
                        f"first. Known: {sorted({r['model_id'] for r in newest(task).values()})}")
     return match[-1]
+
+
+def _choice_entry(win: dict[str, Any]) -> dict[str, Any]:
+    """What label.json holds for a saved result."""
+    return {"backend": win["backend"], "model_id": win["model_id"], "model_rev": win["model_rev"],
+            "temperature": win["temperature"], "platt": win.get("platt"),
+            "calib_ver": win["calib_ver"],
+            "tau": {k: v["tau"] for k, v in win["per_label"].items() if v["tau"] is not None},
+            **({"ensemble": win["ensemble"]} if win.get("ensemble") else {})}
 
 
 def choose(cfg: Config, task: str, model: str | None = None) -> dict[str, Any] | None:
@@ -554,11 +608,7 @@ def choose(cfg: Config, task: str, model: str | None = None) -> dict[str, Any] |
     except (OSError, ValueError) as exc:    # overwriting would lose every other task's choice
         raise AutError(f"label choose: {p} is unusable ({exc}); nothing written. Fix or move "
                        "it aside and run choose again for each task.") from None
-    obj.setdefault("tasks", {})[task] = {
-        "backend": win["backend"], "model_id": win["model_id"], "model_rev": win["model_rev"],
-        "temperature": win["temperature"], "platt": win.get("platt"),
-        "calib_ver": win["calib_ver"],
-        "tau": {k: v["tau"] for k, v in win["per_label"].items() if v["tau"] is not None}}
+    obj.setdefault("tasks", {})[task] = _choice_entry(win)
     atomic_write_text(p, json.dumps(obj, indent=2, sort_keys=True))
     return obj["tasks"][task]
 

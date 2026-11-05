@@ -3,8 +3,8 @@ share.
 
 Under core.data_dir() / "eval": <task>.silver.jsonl (teacher distributions: unit_id, teacher,
 dist, date, task_ver), <task>.jsonl (gold: unit_id, gold, labeller, date, task_ver),
-<task>.eval.jsonl (one bake-off record per backend, numbers only), <task>.final.jsonl (results on
-the final test days) and scores/ (one file per task, model, revision and prompt: unit_id and raw
+<task>.eval.jsonl (one bake-off record per backend, numbers only), <task>.ensemble.jsonl (one record
+per combination tried, numbers only), <task>.final.jsonl (results on the final test days) and scores/ (one file per task, model, revision and prompt: unit_id and raw
 dist). No row holds text: a unit's text is rebuilt from this machine's logs (tasks.units) whenever
 it is needed.
 """
@@ -36,7 +36,7 @@ FINAL_PCT = 20               # share of the days kept for `aut label eval --fina
 
 
 def eval_path(task: str, kind: str) -> Path:
-    """kind: silver | gold | eval | final."""
+    """kind: silver | gold | eval | ensemble | final."""
     return data_dir() / "eval" / (f"{task}.jsonl" if kind == "gold" else f"{task}.{kind}.jsonl")
 
 

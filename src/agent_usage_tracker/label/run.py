@@ -23,7 +23,7 @@ from ..event import ActivityEvent
 from ..push import job_heartbeat, send_activity_rows
 from ..sink import connect
 from ..state import atomic_write_text, collector_wm, load_json_dict, load_state, save_state
-from .backends import BackendUnavailable, make_backend
+from .backends import BackendUnavailable, Ensemble, close_all, make_backend
 from .core import (Backend, Choice, NoteBackend, current_labels, data_dir, decide, label_event,
                    load_choice, local_days, local_midnight)
 from .tasks import OUTCOME_DAYS, TASKS, Source, SourceUnavailable, Task, units
@@ -216,7 +216,10 @@ def run_label(cfg: Config, tasks: list[str] | None = None, since: datetime | Non
         k = (task if choice.backend == "encoder" else None, choice.backend,
              choice.model_id or cfg.label_model, choice.model_rev)
         if k not in loaded:
-            loaded[k] = make_backend(task, choice, cfg.label_model, cfg.label_llama_server)
+            # an ensemble's members come through here too: tasks share a member's one load
+            loaded[k] = Ensemble(choice, lambda c: default_backend(task, c)) \
+                if choice.backend == "ensemble" \
+                else make_backend(task, choice, cfg.label_model, cfg.label_llama_server)
         return loaded[k]
 
     backend_for = backend_for or default_backend
@@ -235,8 +238,7 @@ def run_label(cfg: Config, tasks: list[str] | None = None, since: datetime | Non
                 if stopped:
                     beat.fail(stopped)
         finally:
-            for b in loaded.values():        # a llama-server stops with the run
-                getattr(b, "close", lambda: None)()
+            close_all(loaded.values())       # a llama-server stops with the run
     return report
 
 

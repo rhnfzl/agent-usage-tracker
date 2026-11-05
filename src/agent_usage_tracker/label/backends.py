@@ -26,11 +26,12 @@ import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from types import FrameType
-from typing import IO, Any, Callable
+from typing import IO, Any, Callable, Iterable
 
 from ..config import AutError
 from ..net import HTTP_ERRORS, NoRedirect
-from .core import LETTERS, Backend, Choice, Request, data_dir, letter_distribution, softmax
+from .core import (LETTERS, Backend, Choice, Request, calibrate, data_dir, letter_distribution,
+                   softmax, top_label)
 
 ENCODER_DIM = 1 << 18
 MLX_CACHE_LIMIT = 1 << 30    # MLX's default is 95% of RAM: a long run filled a 64 GB Mac and froze it
@@ -693,6 +694,97 @@ class Encoder:
         return {k: v / s for k, v in out.items()}
 
 
+def combine(method: str, dists: list[dict[str, float]], weights: list[float] | None = None,
+            stack: dict[str, Any] | None = None) -> dict[str, float]:
+    """One distribution from the members' calibrated ones, the same at evaluation and at night."""
+    labels = list(dists[0])
+    if method == "confident":
+        return max(dists, key=lambda d: max(d.values()))
+    if method == "stack" and stack:
+        z = [sum(a * math.log(max(d[lab], 1e-12)) for a, d in zip(stack["a"], dists))
+             + stack["b"].get(lab, 0.0) for lab in labels]
+        return dict(zip(labels, softmax(z)))
+    w = weights if method == "weighted" and weights else [1.0] * len(dists)
+    mean = {lab: sum(x * d[lab] for x, d in zip(w, dists)) / sum(w) for lab in labels}
+    if method != "majority":
+        return mean
+    votes = [sum(top_label(d) == lab for d in dists) for lab in labels]
+    out = {lab: v / len(dists) for lab, v in zip(labels, votes)}
+    # an odd count still ties over three labels: the mean breaks it, and the nudge only orders the
+    # tie (top_label takes the first of equals)
+    out[max(labels, key=lambda lab: (out[lab], mean[lab]))] += 1e-9
+    return out
+
+
+def close_all(backends: Iterable[Backend]) -> None:
+    """Each one gets its close even when another raises (a llama-server must not outlive the run);
+    the first error then surfaces."""
+    first: Exception | None = None
+    for b in backends:
+        try:
+            getattr(b, "close", lambda: None)()
+        except Exception as exc:
+            first = first or exc
+    if first:
+        raise first
+
+
+def ensemble_rev(recipe: dict[str, Any]) -> str:
+    """Saved scores and label rows are keyed on the members' revisions and everything fitted."""
+    return hashlib.sha256(json.dumps(recipe, sort_keys=True).encode()).hexdigest()[:12]
+
+
+class Ensemble:
+    """Several members and one combining rule (`aut label ensemble`). distribution() gives the
+    combined output before choice.temperature, platt and tau, so run.py treats it as any backend.
+    Members stay loaded once each for the whole run, so memory is their sum: the `peak MB` of the
+    table. MLX members share the one process-wide cache cap (_cap_mlx_cache)."""
+    backend = "ensemble"
+    protocol = "1"
+    size_mb: float | None = None
+
+    def __init__(self, choice: Choice, member_for: Callable[[Choice], Backend]) -> None:
+        if not choice.ensemble:
+            raise BackendUnavailable(f"label: {choice.model_id} records no ensemble; run `aut "
+                                     "label ensemble` and `aut label choose`")
+        self.recipe = choice.ensemble
+        self.model_id = f"ensemble/{self.recipe['id']}"
+        self.model_rev = ensemble_rev(self.recipe)
+        self.members = [member_for(Choice(backend=m["backend"], model_id=m["model_id"],
+                                          model_rev=m["model_rev"]))
+                        for m in self.recipe["members"]]
+        self._ready = False
+
+    def prepare(self) -> None:
+        """Every member, before any of them loads: one that is missing fails here, with its name
+        and how to fetch it, not after minutes of loading the others."""
+        for b, m in zip(self.members, self.recipe["members"]):
+            try:
+                getattr(b, "prepare", lambda: None)()
+            except BackendUnavailable as exc:
+                raise BackendUnavailable(f"label: ensemble {self.recipe['id']}: member "
+                                         f"{m['model_id']}: {exc}") from None
+            if b.model_rev != m["model_rev"]:
+                raise BackendUnavailable(
+                    f"label: ensemble {self.recipe['id']}: member {m['model_id']} is at revision "
+                    f"{b.model_rev}, chosen at {m['model_rev']}; run `aut label eval`, `aut label "
+                    "ensemble` and `aut label choose`")
+        self._ready = True
+
+    def distribution(self, req: Request) -> dict[str, float]:
+        if not self._ready:
+            self.prepare()
+        cands = [c["id"] for c in req.candidates]
+        cal = [calibrate({c: raw.get(c, 0.0) for c in cands}, m["temperature"])
+               for m, raw in zip(self.recipe["members"],
+                                 (b.distribution(req) for b in self.members))]
+        return combine(self.recipe["method"], cal, self.recipe.get("weights"),
+                       self.recipe.get("stack"))
+
+    def close(self) -> None:
+        close_all(self.members)
+
+
 _MLX: dict[str, type[MlxLetter]] = {"mlx_elephant": MlxElephant, "mlx_card": MlxCard,
                                     "mlx_clef": MlxClef}
 
@@ -703,6 +795,8 @@ def make_backend(task: str, choice: Choice, default_model: str,
     known model runs; any other name is an MLX letter repo."""
     if choice.backend == "encoder":
         return Encoder(task, choice.model_id, choice.model_rev)
+    if choice.backend == "ensemble":
+        return Ensemble(choice, lambda c: make_backend(task, c, default_model, llama_server))
     name = choice.model_id or default_model
     m = find_model(name)
     if m is None:

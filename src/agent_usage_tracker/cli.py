@@ -36,6 +36,8 @@
                         bake-off on gold -> saved scores, eval record, one table per task
   aut label choose --task T [--model M] | train-encoder --task T
                         the table, or M's saved result -> label.json; the encoder
+  aut label ensemble --task T [--days D] [--models A,B,C]
+                        odd combinations of models from saved scores -> their records, one table
 
 The dry-run report doubles as the accuracy check: it prints per-agent, per-model token
 sums straight from your real logs.
@@ -181,6 +183,10 @@ def _label_bakeoff(cfg: Config, args: argparse.Namespace) -> None:
 def cmd_label(cfg: Config, args: argparse.Namespace) -> None:
     if args.label_cmd in ("run", "backfill"):
         _label_run(cfg, args)
+    elif args.label_cmd == "ensemble":
+        from .label import ensemble
+        ensemble.print_ensemble(cfg, args.task, *ensemble.run_ensemble(
+            cfg, args.task, args.days, models=args.models.split(",") if args.models else None))
     elif args.label_cmd == "teach":
         from .label import teach
         teach.print_teach(args.task, teach.run_teach(cfg, args.task, args.n,
@@ -290,16 +296,20 @@ def _build_parser() -> argparse.ArgumentParser:
     p_lrev.add_argument("--task", choices=LABEL_DECISION_TASKS)
     for name, text in (("eval", "score every backend on the gold labels; print the table"),
                        ("choose", "print the table, or write --model's result to label.json"),
+                       ("ensemble", "odd combinations of models, from saved scores"),
                        ("train-encoder", "fit the small encoder on gold + silver")):
         lab_sub.add_parser(name, help=text).add_argument("--task", choices=LABEL_DECISION_TASKS,
                                                          required=True)
-    for sp in (p_teach, p_lrev, lab_sub.choices["eval"], lab_sub.choices["train-encoder"]):
+    for sp in (p_teach, p_lrev, lab_sub.choices["eval"], lab_sub.choices["ensemble"],
+               lab_sub.choices["train-encoder"]):
         sp.add_argument("--days", type=int, default=LABEL_DAYS,
                         help=f"window of whole past days the units come from (default {LABEL_DAYS})")
     lab_sub.choices["eval"].add_argument("--final", action="store_true",
                                          help="score --model on the final test days")
+    lab_sub.choices["ensemble"].add_argument(
+        "--models", help="comma-separated: only these models (default: all with an eval record)")
     for name in ("eval", "choose"):
-        lab_sub.choices[name].add_argument("--model", help="a name from the eval table")
+        lab_sub.choices[name].add_argument("--model", help="a name from the table, or ensemble:<id>")
     return parser
 
 

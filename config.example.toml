@@ -97,6 +97,7 @@ agents = ["claude_code", "codex", "cursor_api", "cursor_cli", "pi"]
 # runs any one by hand. Tasks: steer_intent work_category soft_outcome aw_title_relevance daily_note
 # label_tasks = ["steer_intent"]
 # label_model = "mlx-community/gemma-4-31b-it-4bit"   # a short name from README "The models", or a local Hugging Face snapshot; never downloaded by aut
+# label_extra_models = ["org/any-mlx-instruct-repo"]   # more candidates for `aut label eval`, read through answer letters; never downloaded by aut
 # label_llama_server = "llama-server"   # the binary for aurelis-2b and kev-4b; a full path if the nightly job's PATH lacks it
 # label_precision = 0.90       # per-label floors on your gold labels: tau is set to reach both,
 # label_recall = 0.60          # out of fold; a model that misses one is marked as failing

@@ -19,4 +19,5 @@ logs at run time, is redacted, and is never stored or logged.
   gold      `aut label review`: the gold page on 127.0.0.1
   bakeoff   `aut label eval` / `choose` / `train-encoder`: saved scores, out-of-fold metrics,
             the table per task, the owner's pick into label.json
+  ensemble  `aut label ensemble`: odd combinations of models, from saved scores only
 """

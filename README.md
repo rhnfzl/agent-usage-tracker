@@ -147,8 +147,9 @@ other command refuses it.
 | `aut label teach --task T --n N [--budget-usd X] [--days D]` | teacher (silver) labels for a stratified sample of up to N units (default spend cap 5 USD, window 90 days) | same, plus `claude` on `PATH` |
 | `aut label review [--task T] [--days D]` | answer gold labels one unit at a time on a local page | `pg_dsn` |
 | `aut label eval --task T [--days D]` | score every backend on your gold labels (saved scores are re-used) and print one table: quality, speed, memory | same as `run` |
-| `aut label eval --task T --final --model M [--days D]` | score M on the final test days, which nothing else reads | an eval record of M |
-| `aut label choose --task T [--model M]` | with `--model`, write M's saved result into `label.json`; without it, print the table and a recommendation and write nothing | an eval record |
+| `aut label eval --task T --final --model M [--days D]` | score M on the final test days, which nothing else reads. M may be `ensemble:<id>`, only the chosen one and only one per task | an eval record of M |
+| `aut label choose --task T [--model M]` | with `--model`, write M's saved result into `label.json`; M may be `ensemble:<id>`. Without it, print the table and a recommendation and write nothing | an eval record |
+| `aut label ensemble --task T [--days D] [--models A,B,C]` | from saved scores only, try odd groups of 3, 5 and 7 models with five ways to combine them and print one table next to each model alone. `--models` limits the candidates | eval records of at least 3 models |
 | `aut label train-encoder --task T [--days D]` | fit the small stdlib encoder on gold and silver labels | gold or silver labels |
 
 Label tasks: `steer_intent`, `work_category`, `soft_outcome`, `aw_title_relevance`, and
@@ -190,6 +191,7 @@ matter:
 | `outcome_fetch` | `false` | fetch and ask `gh` before scoring. Turn it on where the nightly job runs, or squash-merged PRs count as abandoned |
 | `label_tasks` | `[]` | the tasks the nightly `aut label run` labels. Empty means it labels nothing |
 | `label_model` | `mlx-community/gemma-4-31b-it-4bit` | a short name from [The models](#the-models) or a Hugging Face model id, read from the local cache only. `daily_note` needs an instruct model, so leave it on Gemma if you use that task |
+| `label_extra_models` | `[]` | more Hugging Face model ids for `aut label eval` to try, read through answer letters from the local cache. A decision model with its own protocol still needs a row in the model table |
 | `label_llama_server` | `llama-server` | the binary for `aurelis-2b` and `kev-4b`. Use a full path if the nightly job's `PATH` lacks it |
 | `label_precision`, `label_recall`, `label_coverage`, `label_budget_s` | `0.90`, `0.60`, `0.75`, `3600` | floors per label (a model that misses one is marked as failing), coverage bar, time budget of one run in seconds |
 
@@ -296,6 +298,20 @@ Optional, Apple silicon. The model reads the text on this machine and only the l
    threshold. `aut label eval --task steer_intent --final --model M` is the last check, on days
    nothing else has read.
 6. Add the task to `label_tasks` and set `AUT_LABEL=1` in `scan.env` for the nightly run.
+
+Instead of one model, a task can use an ensemble. `aut label ensemble --task steer_intent` needs no
+model: it reads the saved scores of step 4 and tries every odd group of 3, 5 and 7 models with
+majority vote, soft vote, weighted soft vote, the most confident member, and a stacked logistic
+model. Every row uses the same units and the same floors, and a row's speed and memory are the sums
+of its members. Trying that many rows flatters the best one, so the output also says what picking a
+row is worth on a fold neither the pick nor its fits read, for ensembles and for single models, so
+every row is fitted six times. The recommendation follows the same rule as `aut label choose`: the
+best score among rows that pass the floors, then the fastest. If the gain is under 0.01, a rule of
+thumb and not a measurement, that is among the single models, as long as one passes. To use the pick,
+run `aut label choose --task T --model ensemble:<id>`, then `aut label eval --task T --final --model
+ensemble:<id>` once. A later `aut label ensemble` can refit the same id: `--final` then asks for
+`choose` again, and after those days have seen one fit they refuse any other. Every member then has to be on this machine, and each one stays loaded for the whole nightly
+run, so the machine needs the summed memory the table shows.
 
 Details and the stored row: [CONTRACT.md](CONTRACT.md#labels-activity_event-kind-label-aut-label).
 

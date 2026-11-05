@@ -24,6 +24,7 @@ from ..event import ActivityEvent, make_event_id
 PROMPT_VER = 2               # bump when render_prompt() or the chat prompt changes; task_ver covers candidates/definitions
 LETTERS = "ABCDEFGHIJ"
 TAU_FLOOR = 0.5
+ENSEMBLE_METHODS = ("majority", "soft", "weighted", "confident", "stack")
 
 
 def local_midnight(d: date) -> datetime:
@@ -91,6 +92,9 @@ class Choice:
     # label -> tau; a missing or null label never passes
     tau: dict[str, float | None] = field(default_factory=dict)
     calib_ver: str = "none"
+    # backend "ensemble": {"id", "method", "members": [{"backend", "model_id", "model_rev",
+    # "temperature"}], "weights", "stack"}; temperature, platt and tau above apply to its output
+    ensemble: dict[str, Any] | None = None
 
 
 class Backend(Protocol):
@@ -129,6 +133,26 @@ def _is_number(x: object) -> bool:
     return isinstance(x, (int, float)) and not isinstance(x, bool)
 
 
+def _usable_ensemble(e: Any) -> bool:
+    """The shape combine() and backends.Ensemble read."""
+    if not (isinstance(e, dict) and isinstance(e.get("id"), str)
+            and e.get("method") in ENSEMBLE_METHODS and isinstance(e.get("members"), list)
+            and e["members"]):
+        return False
+    n = len(e["members"])
+    weights, stack = e.get("weights"), e.get("stack")
+    return (all(isinstance(m, dict) and isinstance(m.get("backend"), str)
+                and isinstance(m.get("model_id"), str) and isinstance(m.get("model_rev"), str)
+                and _is_number(m.get("temperature")) and m["temperature"] > 0
+                for m in e["members"])
+            and (e["method"] != "weighted" or (isinstance(weights, list) and len(weights) == n
+                                               and all(_is_number(x) for x in weights)))
+            and (e["method"] != "stack" or (isinstance(stack, dict)
+                                            and isinstance(stack.get("a"), list)
+                                            and len(stack["a"]) == n
+                                            and isinstance(stack.get("b"), dict))))
+
+
 def _check_entry(task: str, c: object) -> None:
     """Raises ValueError for a label.json entry whose values decide() could not use."""
     if not isinstance(c, dict):
@@ -142,6 +166,9 @@ def _check_entry(task: str, c: object) -> None:
     if platt is not None and not (isinstance(platt, dict) and isinstance(platt.get("yes"), str)
                                   and _is_number(platt.get("a")) and _is_number(platt.get("b"))):
         raise ValueError(f"the platt of {task} is not a table of yes, a and b")
+    ens = c.get("ensemble")
+    if ens is not None and not _usable_ensemble(ens):
+        raise ValueError(f"the ensemble of {task} is not a table of id, method and members")
 
 
 def load_choice(task: str) -> Choice:

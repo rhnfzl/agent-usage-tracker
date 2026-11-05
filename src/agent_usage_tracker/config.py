@@ -111,6 +111,7 @@ class Config:
     # the precision bar for tau and the coverage gate, and the run's time budget.
     label_tasks: tuple[str, ...] = ()
     label_model: str = DEFAULT_LABEL_MODEL
+    label_extra_models: tuple[str, ...] = ()    # more MLX letter repos for `aut label eval`
     label_llama_server: str = "llama-server"
     label_precision: float = 0.90
     label_recall: float = 0.60
@@ -214,6 +215,13 @@ def _label_tasks(data: dict[str, Any]) -> tuple[str, ...]:
     return tuple(tasks)
 
 
+def _label_extra_models(data: dict[str, Any]) -> tuple[str, ...]:
+    extra = data.get("label_extra_models") or []
+    if not isinstance(extra, list) or not all(isinstance(x, str) for x in extra):
+        raise AutError("config: label_extra_models must be a list of model names")
+    return tuple(extra)
+
+
 def _label_bars(data: dict[str, Any]) -> tuple[float, float, float]:
     precision, recall, coverage = (float(data.get(k, d)) for k, d in
                                    (("label_precision", 0.90), ("label_recall", 0.60),
@@ -270,6 +278,7 @@ def _config_from(data: dict[str, Any], path: Path) -> Config:
         outcome_fetch=_as_bool(data.get("outcome_fetch", False)),
         label_tasks=label_tasks,
         label_model=str(data.get("label_model") or DEFAULT_LABEL_MODEL),
+        label_extra_models=_label_extra_models(data),
         label_llama_server=str(data.get("label_llama_server") or "llama-server"),
         label_precision=label_precision,
         label_recall=label_recall,
