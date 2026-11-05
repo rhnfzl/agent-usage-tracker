@@ -31,7 +31,7 @@ _BRANCH = re.compile(r'"(?:gitBranch|worktreeBranch)":\s*"((?:[^"\\]|\\.)*)"')
 _TEXT_MAX = 200
 _TAG = re.compile(r"</?[\w:-]+[^<>]{0,200}>")
 _WS = re.compile(r"\s+")
-_Q = r"""(?:"((?:[^"\\]|\\.)*)"|'([^']*)'|(\S+))"""
+_Q = r"""(?:\\"((?:[^"\\]|\\[^"])*)\\"|"((?:[^"\\]|\\.)*)"|'([^']*)'|(\S+))"""
 _MSG = re.compile(rf"\s(?:-m|--message)(?:=|\s+){_Q}")
 _PR_TITLE = re.compile(rf"\s(?:-t|--title)(?:=|\s+){_Q}")
 # a command up to its first unquoted `&&`, `||`, `;`, `|` or newline

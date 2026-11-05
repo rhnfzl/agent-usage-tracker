@@ -145,8 +145,9 @@ def _distance_from_merged(read: CloneRead, full: str) -> int:
 
 
 def _resolve(anchors: list[_Anchor], clones: list[Clone], stats: Counter[str]) -> None:
-    """Point each anchor at the clone where it is closest to merged, and mark the ones a failed git
-    read could change."""
+    """Point each anchor at the clone where it is closest to merged (among equals the keyed one,
+    then the freshest default ref, which sees the most reverts), and mark the ones a failed git read
+    could change."""
     shas = sorted({a.sha for a in anchors})
     held = {i: resolve_shas(c, shas) for i, c in enumerate(clones)} if shas else {}
     failed = [i for i, h in held.items() if h is None]
@@ -166,7 +167,8 @@ def _resolve(anchors: list[_Anchor], clones: list[Clone], stats: Counter[str]) -
     reads = {i: read_clone(clones[i], int(min(t for _, t in got)) - 2 * DAY, [f for f, _ in got])
              for i, got in per_clone.items()}
     for a, cands in found:
-        best = min(cands, key=lambda c: _distance_from_merged(reads[c.clone], c.full))
+        best = min(cands, key=lambda c: (_distance_from_merged(reads[c.clone], c.full),
+                                         clones[c.clone].key is None, -reads[c.clone].tip_t))
         a.pick = _Pick(clones[best.clone], reads[best.clone], best.full)
         a.unread |= not all(reads[j].ok for j, _ in cands)
         stats["found"] += 1

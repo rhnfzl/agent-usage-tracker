@@ -64,16 +64,43 @@ def test_segments_follow_shell_quoting() -> None:
         ("echo don't\ngit commit -m \"x\"", "x"),
         ("git commit -m \"$(cat <<'EOF'\nmsg\nEOF\n)\"", "msg"),
         ('git commit -m "a; b"', "a; b"),
+        # a backslash-newline joins lines: the next line is no new segment and starts no word
+        ("git add a && \\\ngit commit -m 'x'", "x"),
+        ("cd /r && \\\n  git commit -m 'x'", "x"),
+        ("GIT_AUTHOR_DATE=x \\\n git commit -m 'x'", "x"),
+        ("env A=1 \\\n git commit -m 'x'", "x"),
+        ("git add a && \\\ngit commit -m \"$(cat <<'EOF'\nmsg\nEOF\n)\"", "msg"),
+        # a flag named in a quoted message is no flag
+        ('git commit -m "add flag\n\nAdds --dry-run to the cli"', "add flag"),
+        ("git -c user.name=x commit -qm 'y --dry-run'", None),
+        # every heredoc delimiter form keeps an apostrophe in its body from pairing with a later quote
+        ("cat > f <<'END-MSG'\ndon't\nEND-MSG\ngit add f && git commit -m 'x'", "x"),
+        ("cat > f <<\\EOF\ndon't\nEOF\ngit add f && git commit -m 'x'", "x"),
+        # the quoted argument of a shell -c is commands
+        ("bash -c 'cd /x; git add a && git commit -m \"y\"'", "y"),
+        ("uv run bash -c 'git add a && git commit -m \"y\"'", "y"),
+        ('/bin/zsh -lc "cd /x\ngit add a\ngit -c user.name=n commit -q -m \'y\'"', "y"),
+        ('bash -c "git commit -m \\"y\\""', "y"),
     ]
     for cmd, want in cases:
         assert commit_call(cmd) and commit_args_at(cmd) is not None, cmd
         d = session_digest.Digest("x")
         d.note_shell(cmd, "", False)
-        assert d.view()["commits"] == [want], (cmd, d.view())
+        assert d.view()["commits"] == ([want] if want else []), (cmd, d.view())
     for cmd in ("echo 'a; git commit -m no'", 'echo "x && git commit -m no"',
-                "ls # it's; git commit -m no"):
+                "ls # it's; git commit -m no", "bash -c 'echo \"git commit -m no\"'",
+                "echo 'bash -c \"git commit -m no\"'", "bash -c 'git commit --dry-run'",
+                "git commit --dry-run -m 'x' # --amend", "ssh host 'git commit -m no'"):
         assert commit_call(cmd) is None and commit_args_at(cmd) is None, cmd
     assert commit_dir("cd 'a;b' && git commit -m x") == "a;b"
+    assert commit_dir("bash -c 'cd /x; git commit -m y'") == "/x"
+    # a cd in a shell of its own moves nothing after it
+    assert commit_dir("bash -c 'cd /x && make' && git commit -m y") is None
+    assert commit_call("bash -c 'cd /x && git add a && git commit -m y'") == (False, False)
+    assert commit_call("bash -c 'make; git commit -m y'") == (False, True)
+    # a flag only counts as a word of the command, not of its message
+    assert commit_call('git commit -m "first\n\nno --amend here"') == (False, False)
+    assert commit_call('git commit --amend -m "x"') == (True, False)
 
 
 def test_commit_regex_is_linear() -> None:

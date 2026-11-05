@@ -684,6 +684,33 @@ def test_a_stored_revert_from_before_the_merge_is_corrected(tmp_path, monkeypatc
     assert run() == [("merged", 1.0)]
 
 
+def test_a_stale_clone_does_not_hide_the_revert_a_fresh_clone_reads():
+    # both clones hold the merged commit; only the fresh one has seen its real revert. Either order.
+    with tempfile.TemporaryDirectory() as d:
+        origin, work = Path(d) / "origin.git", Path(d) / "projects" / "aold"
+        subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(origin)], check=True)
+        work.mkdir(parents=True)
+        _g(work, "init", "-q", "-b", "main")
+        _g(work, "remote", "add", "origin", str(origin))
+        _commit(work, "base.txt", "base\n", 60)
+        x = _commit(work, "x.txt", _lines("x"), 20)
+        _g(work, "push", "-q", "origin", "main")
+        _g(work, "remote", "set-head", "origin", "main")
+        fresh = Path(d) / "projects" / "zfresh"
+        subprocess.run(["git", "clone", "-q", str(origin), str(fresh)], check=True)
+        _g(fresh, "revert", "--no-edit", x, age=18)
+        _g(fresh, "push", "-q", "origin", "main")
+        _g(fresh, "fetch", "-q", "origin")
+        key = _key(str(origin))
+        clones = oc.find_clones([str(Path(d) / "projects")], RepoKeys(SALT))
+        assert len(clones) == 2
+        stored = {(x[:9], key): ("reverted", None)}
+        for order in (clones, clones[::-1]):
+            outs, _ = oc.evaluate([_row(x, key, 20)], order, NOW, cache={})
+            assert outs[0]["state"] == "reverted", outs
+            assert oc.pending(outs, stored) == []
+
+
 def test_a_dry_run_creates_no_salt(tmp_path, monkeypatch):
     monkeypatch.setenv("AUT_STATE", str(tmp_path / "st" / "state.json"))
     repo = tmp_path / "root" / "w"

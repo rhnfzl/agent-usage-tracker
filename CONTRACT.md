@@ -266,8 +266,10 @@ Rules worth knowing:
 - Hook denials (`PreToolUse:... hook error`) are not rejections; they count in the turn's
   `hook_blocks` (and in `tool_errors`, which counts every errored tool_result).
 - A commit call is a command segment (split on `;`, `&&`, `||`, `|` and newlines, not inside a
-  closed quote, a backslash escape or a `#` comment, heredoc bodies blanked first, so a commit
-  inside a quoted string such as `bash -c '...; git commit'` does not count) that is `git [global options such as -C <dir>, -c <k=v>]* commit`, optionally
+  closed quote, a backslash escape or a `#` comment, heredoc bodies blanked first and a
+  backslash-newline read as a space, so a commit inside a quoted string does not count, except the
+  quoted argument of `sh`, `bash`, `zsh` or `dash -c`, which is split the same way when it holds a
+  commit) that is `git [global options such as -C <dir>, -c <k=v>]* commit`, optionally
   behind `VAR=x`, `env`, `command`, `timeout N` or `rtk [proxy]`, without `--dry-run`. So
   `--no-commit`, `cat-file commit`, `verify-commit` or `commit` in an echo or a heredoc never count.
 - Commit SHAs come from git's `[branch sha]` line; failing that (and only for a successful call)
@@ -435,7 +437,8 @@ commit's `(state, survival)` differs from its latest stored row.
   again once, keeping its gh answers. A file gone from the base commit counts as 0
   lines alive.
 - When several clones hold a commit, the one where it is furthest along wins (on the default
-  branch, then on a branch, then unreachable).
+  branch, then on a branch, then unreachable); among equals a clone with a repo_key, then the
+  one whose default ref is freshest.
 - A commit this run cannot see or decide (no clone holds it any more, gh failed, a stale default
   ref, a failed or timed-out git read of a clone that holds or might hold it) never replaces a
   stored row of its sha: decided states stay decided. One exception: a stored `reverted` under the
