@@ -4,7 +4,10 @@
     cp packaging/launchd/dev.aut.scan.plist ~/Library/LaunchAgents/
     # edit the aut path below to `which aut` output, then:
     launchctl load ~/Library/LaunchAgents/dev.aut.scan.plist
-  Runs every 15 minutes and once at load. Offline runs are safe (nothing is lost).
+  Runs every 15 minutes, at load (login), and on wake. StartInterval alone does not fire for a
+  slot missed while asleep, but StartCalendarInterval does, once, on wake: so a laptop that comes
+  back after a week scans at once instead of waiting out the interval. Offline runs are safe
+  (nothing is lost).
   Note: launchd jobs do NOT inherit your shell env, so put the webhook secret directly in
   ~/.config/agent-usage-tracker/config.toml (local + gitignored, chmod 600) rather than env:.
 -->
@@ -21,6 +24,11 @@
   </array>
   <key>StartInterval</key>
   <integer>900</integer>
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Minute</key>
+    <integer>0</integer>
+  </dict>
   <key>RunAtLoad</key>
   <true/>
   <key>ProcessType</key>

@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  macOS daily job for `aut backup` (encrypted restic snapshot; see docs/new-laptop.md). A template:
+  nothing installs it. Set [backup] repository and password_command in config.toml first and check
+  them with `aut backup` and its check flag (docs/new-laptop.md), then:
+    cp packaging/launchd/dev.aut.backup.plist ~/Library/LaunchAgents/
+    sed -i '' "s#/Users/CHANGEME#$HOME#g" ~/Library/LaunchAgents/dev.aut.backup.plist
+    launchctl load ~/Library/LaunchAgents/dev.aut.backup.plist
+  Runs daily at 02:30 and at load. A slot missed while asleep runs once on wake. On battery below
+  20%, off the network, or while a run is still going, it logs a skip and exits 0.
+  PATH is set because launchd jobs do not inherit your shell's, and restic lives in Homebrew.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+ "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>dev.aut.backup</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/CHANGEME/.local/bin/aut</string>
+    <string>backup</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key>
+    <integer>2</integer>
+    <key>Minute</key>
+    <integer>30</integer>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>LowPriorityIO</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>/tmp/aut-backup.log</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/aut-backup.log</string>
+</dict>
+</plist>

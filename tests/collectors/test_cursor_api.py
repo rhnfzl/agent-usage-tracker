@@ -56,10 +56,14 @@ def test_cursor_api(monkeypatch) -> None:
         if name == "get-me":
             return {"userId": UID}
         calls["pages"].append(body.get("page"))
-        return page1 if body.get("page") == 1 else {"usageEventsDisplay": []}
+        if body.get("page") != 1:
+            return {"usageEventsDisplay": []}
+        return {"usageEventsDisplay": [e for e in page1["usageEventsDisplay"]      # the date filter
+                                       if body["startDate"] <= int(e["timestamp"]) <= body["endDate"]]}
 
     cfg = _cfg(Path("/tmp"))
     cfg.cursor_api = True
+    monkeypatch.setattr(cursor_api, "_now_ms", lambda: 1784314315897 + 60_000)
     with monkeypatch.context() as m:
         m.setattr(cursor_api, "_auth", lambda c: ("cookie", 3867693))
         m.setattr(cursor_api, "_post", fake_post)
@@ -156,3 +160,67 @@ def test_cursor_api_token_gone_is_unavailable_not_silent() -> None:
             raise AssertionError("a Cursor with no usable token must not look like a quiet week")
         except CollectorUnavailable as exc:
             assert "token" in str(exc)
+
+
+def _fake_api(events: list[dict], calls: list[dict]):
+    """A stand-in for the dashboard API: events in [startDate, endDate], newest first, paged."""
+    def post(cookie, name, body):
+        if name == "get-me":
+            return {"userId": "u1"}
+        calls.append(body)
+        hits = sorted((e for e in events
+                       if body["startDate"] <= int(e["timestamp"]) <= body["endDate"]),
+                      key=lambda e: -int(e["timestamp"]))
+        page, size = body["page"], body["pageSize"]
+        return {"usageEventsDisplay": hits[(page - 1) * size:page * size]}
+    return post
+
+
+def test_a_long_gap_with_more_than_the_page_cap_loses_nothing(monkeypatch) -> None:
+    from agent_usage_tracker.collectors import cursor_api
+    now = 1_790_000_000_000
+    since = now - 30 * cursor_api._DAY_MS
+    events = [{"owningUser": "u1", "timestamp": str(since + i * 100_000), "model": "m",
+               "conversationId": f"c{i}", "tokenUsage": {"inputTokens": 1, "outputTokens": 1}}
+              for i in range(25_000)]                     # about 29 days, far past 200 pages x 100
+    calls: list[dict] = []
+    cfg = _cfg(Path("/tmp"))
+    cfg.cursor_api = True
+    monkeypatch.setattr(cursor_api, "_auth", lambda c: ("cookie", 1))
+    monkeypatch.setattr(cursor_api, "_post", _fake_api(events, calls))
+    monkeypatch.setattr(cursor_api, "_now_ms", lambda: now)
+    wm: dict = {"since_ms": since}
+    seen: set[str] = set()
+    marks = []
+    for batch, commit in cursor_api.collect(cfg, wm):
+        seen.update(e.event_id for e in batch)
+        commit()
+        marks.append(wm["since_ms"])
+    assert len(seen) == 25_000                            # none lost to the page cap
+    assert len(marks) > 1 and marks == sorted(marks)      # the bookmark moves after each window
+    assert all(c["endDate"] - c["startDate"] <= cursor_api._WINDOW_MS for c in calls)
+    assert since + 24_999 * 100_000 <= wm["since_ms"] < now   # past the newest event, never `now`
+    assert [e for b, _ in cursor_api.collect(cfg, wm) for e in b
+            if e.event_id not in seen] == []              # a rerun finds nothing new
+
+
+def test_a_crash_mid_gap_resumes_at_the_last_window(monkeypatch) -> None:
+    from agent_usage_tracker.collectors import cursor_api
+    now = 1_790_000_000_000
+    since = now - 5 * cursor_api._DAY_MS
+    events = [{"owningUser": "u1", "timestamp": str(since + i * 3_600_000), "model": "m",
+               "conversationId": f"c{i}", "tokenUsage": {"inputTokens": 1, "outputTokens": 1}}
+              for i in range(5 * 24)]
+    cfg = _cfg(Path("/tmp"))
+    cfg.cursor_api = True
+    monkeypatch.setattr(cursor_api, "_auth", lambda c: ("cookie", 1))
+    monkeypatch.setattr(cursor_api, "_post", _fake_api(events, []))
+    monkeypatch.setattr(cursor_api, "_now_ms", lambda: now)
+    wm: dict = {"since_ms": since}
+    gen = cursor_api.collect(cfg, wm)
+    _first, commit = next(gen)
+    commit()                                              # one window delivered, then the run dies
+    gen.close()
+    assert wm["since_ms"] == since + cursor_api._WINDOW_MS
+    rest = {e.event_id for b, c in cursor_api.collect(cfg, wm) for e in b}
+    assert len(rest) == 5 * 24 - 24                       # the next run starts at that window

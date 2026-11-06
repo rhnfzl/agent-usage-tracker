@@ -104,6 +104,7 @@ class Source:
 
     def __init__(self, cfg: Config) -> None:
         self.cfg, self.keys = cfg, RepoKeys(cfg.repo_key_salt)
+        self.skipped: Counter[str] = Counter()        # units left out, by reason (the run reports it)
 
     def steers(self, since: datetime) -> list[dict[str, Any]]:
         """Every steer of each session that has one since `since` (for index and previous), in ts
@@ -117,6 +118,21 @@ class Source:
 
     def episodes(self, since: datetime) -> list[Episode]:
         return load_since(self.cfg.require_pg("label"), since)
+
+    def episodes_ready(self) -> datetime | None:
+        """Up to when agents.episode holds this machine's data: the start of this machine's last
+        Claude Code scan delivered before the last episode rebuild (a collector_scan row with
+        collector 'episode_link', written by the sink's nightly job). Without that row, the newest
+        episode activity. None on an empty sink."""
+        dsn = self.cfg.require_pg("label")
+        rows = _sql(dsn, "SELECT max(s.started_at) FROM agents.collector_scan s "
+                    "WHERE s.machine = %s AND s.collector = 'claude_code' AND s.status = 'ok' "
+                    "AND s.finished_at <= (SELECT max(finished_at) FROM agents.collector_scan "
+                    "WHERE collector = 'episode_link' AND status = 'ok')", (self.cfg.machine,))
+        if rows and rows[0][0] is not None:
+            return rows[0][0]
+        rows = _sql(dsn, "SELECT max(last_ts) FROM agents.episode", ())
+        return rows[0][0] if rows else None
 
     def activity(self, sessions: list[str], since: datetime, until: datetime) -> list[dict[str, Any]]:
         rows = _sql(self.cfg.require_pg("label"),
@@ -179,7 +195,11 @@ def _steer_units(task: Task, src: Source, since: datetime, until: datetime | Non
     for rs in by_session.values():
         for i, r in enumerate(rs):
             prev = rs[i - 1] if i else None
-            if r["event_id"] not in text or r["ts"] < since or (until and r["ts"] >= until):
+            if r["ts"] < since or (until and r["ts"] >= until):
+                continue
+            if r["event_id"] not in text:
+                # only Claude Code text is ever read, so only its misses mean a lost transcript
+                src.skipped["no_text"] += r["agent"] == "claude_code"
                 continue
             a = r["attrs"] or {}
             out.append(task.request("steer", r["event_id"], r["ts"], {

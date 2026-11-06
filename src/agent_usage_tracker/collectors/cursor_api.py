@@ -42,7 +42,8 @@ _ORIGIN = "https://cursor.com"
 _BASE = f"{_ORIGIN}/api/dashboard"
 _DAY_MS = 86_400 * MS_PER_S
 _PAGE = 100
-_MAX_PAGES = 200                 # hard stop (200*100 = 20k events/scan) so a bug can't loop forever
+_MAX_PAGES = 200                 # hard stop (200*100 = 20k events/window) so a bug can't loop forever
+_WINDOW_MS = _DAY_MS             # a gap is read oldest first, one day per request window
 
 
 def _auth(cfg: Config) -> tuple[str, int] | None:
@@ -167,14 +168,14 @@ def _page_events(batch: list[Any], uid: object, since: int) -> tuple[list[UsageE
     return events, fresh_rows, newest
 
 
-def _fetch_events(cookie: str, team_id: int, uid: object, since: int,
-                  start: int) -> tuple[list[UsageEvent], int]:
-    """(this user's events from `start`, the newest one's time, else `since`)."""
+def _fetch_events(cookie: str, team_id: int, uid: object, since: int, start: int,
+                  end: int) -> tuple[list[UsageEvent], int]:
+    """(this user's events in [start, end], the newest one's time, else `since`)."""
     events: list[UsageEvent] = []
     newest = since
     for page in range(1, _MAX_PAGES + 1):
         body = {"teamId": team_id, "userId": uid, "page": page, "pageSize": _PAGE,
-                "startDate": start, "endDate": _now_ms()}
+                "startDate": start, "endDate": end}
         data = _post(cookie, "get-filtered-usage-events", body)
         batch = data.get("usageEventsDisplay") if isinstance(data, dict) else None
         if not batch:
@@ -185,10 +186,9 @@ def _fetch_events(cookie: str, team_id: int, uid: object, since: int,
         if fresh_rows == 0 or len(batch) < _PAGE:
             break
     else:
-        # loop ran the full cap without a natural stop: a very large window remains unread.
-        # Never happens for 6h deltas; only a huge first backfill. Flag it (don't silently orphan).
-        print(f"aut: cursor_api: reached the {_MAX_PAGES}-page cap; older events this window may "
-              "be unread -- shorten cursor_api_lookback_days or run again.", file=sys.stderr)
+        # 20k events inside one day's window: never seen in practice. Flag it, never orphan quietly.
+        print(f"aut: cursor_api: reached the {_MAX_PAGES}-page cap in one day's window; older "
+              "events of that day may be unread.", file=sys.stderr)
     return events, newest
 
 
@@ -209,18 +209,33 @@ def collect(cfg: Config, wm: dict[str, Any]) -> Iterator[tuple[list[UsageEvent],
             raise CollectorUnavailable("cursor_api: could not resolve a userId; skipping")
         since = safe_int(wm.get("since_ms"))
         # first run (no watermark): bounded lookback window instead of all history
-        start = since if since else _now_ms() - cfg.cursor_api_lookback_days * _DAY_MS
-        events, newest = _fetch_events(cookie, team_id, uid, since, start)
+        lo = since if since else _now_ms() - cfg.cursor_api_lookback_days * _DAY_MS
+        # A gap is walked oldest first, one window at a time, and each window moves the watermark
+        # once delivered: a month away can hold more events than one request's page cap.
+        while True:
+            now = _now_ms()
+            hi = min(lo + _WINDOW_MS, now)
+            events, newest = _fetch_events(cookie, team_id, uid, lo, lo, hi)
+            # A closed window moves the watermark to its end (the next starts there, so an event
+            # exactly on the edge is read twice and deduped). The open window ends at the newest
+            # event, as before, so an event Cursor records late is still picked up.
+            # shortcut: assumes the API's endDate is inclusive (unchecked against the real API),
+            # and a day over the 20k page cap still loses the rest (warned); upgrade by splitting
+            # a capped window in half if that warning ever shows up.
+            mark = hi if hi < now else newest
+
+            def advance_watermark(w: dict[str, Any] = wm, n: int = mark) -> None:
+                if n:
+                    w["since_ms"] = n
+
+            yield events, advance_watermark
+            if hi >= now:
+                return
+            lo = hi
     except (*HTTP_ERRORS, json.JSONDecodeError, UnicodeDecodeError, AttributeError,
             TypeError) as exc:
         raise CollectorUnavailable(f"cursor_api: usage fetch failed ({exc}); skipping this run") \
             from exc
-
-    def advance_watermark(w: dict[str, Any] = wm, n: int = newest) -> None:
-        if n:
-            w["since_ms"] = n
-
-    yield events, advance_watermark
 
 
 def _now_ms() -> int:

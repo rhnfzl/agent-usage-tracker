@@ -36,6 +36,8 @@
                         bake-off on gold -> saved scores, eval record, one table per task
   aut label choose --task T [--model M] | train-encoder --task T
                         the table, or M's saved result -> label.json; the encoder
+  aut backup [--check]  encrypted restic backup of the logs, salt and label files ([backup] in
+                        config.toml); --check verifies the repository and sends nothing
 
 The dry-run report doubles as the accuracy check: it prints per-agent, per-model token
 sums straight from your real logs.
@@ -52,7 +54,7 @@ import sys
 from datetime import date, timedelta
 from typing import Sequence
 
-from . import inspector, manual_time, outcomes, pricing, review, scan
+from . import backup, inspector, manual_time, outcomes, pricing, review, scan
 from .collectors import REGISTRY
 from .config import (ALL_AGENTS, LABEL_DAYS, LABEL_DECISION_TASKS, LABEL_TASK_NAMES, AutError,
                      Config, load_config, config_path)
@@ -108,6 +110,7 @@ def cmd_status(cfg: Config, agents: Sequence[str], args: argparse.Namespace) -> 
         webhook_state = "configured" if cfg.has_webhook else "NOT set"
     print(f"webhook       : {webhook_state}")
     print(f"pg fallback   : {'configured' if cfg.has_pg else 'not set'}")
+    print(f"backup        : {backup.describe()}")
     print("watermarks    :")
     for name in agents:
         print(f"    {name:<12} {REGISTRY[name].describe(cfg, collector_wm(state, name))}")
@@ -206,6 +209,10 @@ def cmd_history_steers(cfg: Config, args: argparse.Namespace) -> None:
           f"{json.dumps(dict(c))}")
 
 
+def cmd_backup(cfg: Config, args: argparse.Namespace) -> None:
+    backup.run_backup(cfg, check=args.check)
+
+
 def cmd_sync_prices(args: argparse.Namespace) -> None:
     out = args.out or str(config_path().parent / "model_prices.json")
     n = pricing.sync_prices(out, litellm_url=args.litellm_url, models_dev_url=args.models_dev_url,
@@ -218,7 +225,7 @@ _AGENT_COMMANDS = {"scan": cmd_scan, "backfill": cmd_backfill, "export": cmd_exp
                    "status": cmd_status}
 _COMMANDS = {"time": cmd_time_add, "outcomes": cmd_outcomes, "outcome": cmd_outcome,
              "inspect": cmd_inspect, "episodes": cmd_episodes, "label": cmd_label,
-             "history-steers": cmd_history_steers}
+             "history-steers": cmd_history_steers, "backup": cmd_backup}
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -262,6 +269,9 @@ def _build_parser() -> argparse.ArgumentParser:
     p_hist = sub.add_parser("history-steers",
                             help="daily steer estimates for lost 2026 logs, from CLI history")
     p_hist.add_argument("--dry-run", action="store_true", help="count, write nothing")
+    p_bak = sub.add_parser("backup", help="encrypted restic backup of the logs ([backup] config)")
+    p_bak.add_argument("--check", action="store_true",
+                       help="verify the repository (restic check); back up nothing")
     p_out = sub.add_parser("outcome", help="mark this project's newest session's outcome")
     p_out.add_argument("outcome", choices=["shipped", "ruled-out", "open"])
     p_out.add_argument("--session", help="the session id (default: newest interactive here)")
