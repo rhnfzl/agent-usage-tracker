@@ -362,10 +362,13 @@ def label_event(req: Request, res: Response, labelled_at: str | None = None) -> 
 def current_labels(rows: Iterable[tuple[Any, ...]]) -> list[dict[str, Any]]:
     """The one current label per (task, unit, unit_id) of (event_id, ts, attrs) rows, picked as
     agents.label_latest picks it: newest task_ver, then newest labelled_at (a row without one
-    loses), then event_id. A row with no below_tau counts as below: readers treat it as unknown."""
+    loses), then event_id. A row with no below_tau counts as below: readers treat it as unknown.
+    Working estimates have separate consumers and never enter calibrated selection."""
     best: dict[tuple[Any, ...], tuple[Any, ...]] = {}
     for eid, ts, a in rows:
         a = a or {}
+        if str(a.get("task") or "").startswith("working."):
+            continue
         key = (a.get("task"), a.get("unit"), a.get("unit_id"))
         rank = (int(a.get("task_ver") or 0), a.get("labelled_at") or "", eid)
         if key not in best or rank > best[key][0]:

@@ -842,3 +842,15 @@ prefix of it. The collector cannot settle this per scan (which lines a scan sees
 and cannot clean up (its role holds INSERT and SELECT only).
 
 `metrics.json` is retired: aggregates are the sink's private database views.
+
+### Provisional working labels
+
+Historical estimates use `kind: label` with separate tasks `working.steer_intent` and
+`working.soft_outcome`. They do not replace calibrated task names. Their attrs include
+`label_policy: working-sonnet-v1`, a content-addressed `baseline_id`, `provisional: true`,
+`human_verified: false`, `population_weight`, and `label_source`. Probability `p` is null.
+An unknown primary label has `label: unknown` and `below_tau: true`; this flag expresses missing
+reference certainty here, not a fitted threshold. `signals` carries direct yes/no/unknown
+agent-review answers and question hashes. It never carries review reasons, source text or paths.
+Calibrated views and daily notes exclude the working namespace. Working estimate views retain
+unknowns in share denominators and report reviewed-signal counts without population weighting.

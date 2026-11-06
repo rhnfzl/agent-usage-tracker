@@ -50,6 +50,8 @@ sums straight from your real logs.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import argparse
 import json
 import os
@@ -216,6 +218,9 @@ def cmd_label(cfg: Config, args: argparse.Namespace) -> None:
     elif getattr(args, "labels", None) or (args.label_cmd == "eval"
                                            and getattr(args, "models", None)):
         raise AutError("label: --labels and eval --models need --binary")
+    elif args.label_cmd == "import-baseline":
+        from .label import baseline
+        print(json.dumps(baseline.run(cfg, Path(args.path), apply=args.apply), sort_keys=True))
     elif args.label_cmd in ("run", "backfill"):
         _label_run(cfg, args)
     elif args.label_cmd == "ensemble":
@@ -325,6 +330,9 @@ def _build_parser() -> argparse.ArgumentParser:
     ins.add_argument("--label", help="a label's unit_id (steer event id, <episode>:<date>, ...)")
     p_lab = sub.add_parser("label", help="local model labels (optional extra aut[label])")
     lab_sub = p_lab.add_subparsers(dest="label_cmd", required=True)
+    p_base = lab_sub.add_parser("import-baseline", help="preview provisional historical estimates")
+    p_base.add_argument("path", help="private working-baseline JSON file")
+    p_base.add_argument("--apply", action="store_true", help="append estimates to the sink")
     p_lrun = lab_sub.add_parser("run", help="label new units since the watermark")
     p_lrun.add_argument("--task", choices=LABEL_TASK_NAMES, help="one task (default: label_tasks)")
     p_lrun.add_argument("--since", type=date.fromisoformat,
