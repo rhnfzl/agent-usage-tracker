@@ -352,6 +352,9 @@ the minimum is at least 0.5. These scores are not validated accuracy estimates.
 
 Rows use `working.local.<task>` and policy `local-decision-v1`, with original unit timestamps,
 weight 1 and model/policy provenance. They describe eligible local inputs, not all activity.
+Changed input facts create a new event under the same policy, including a new unknown result.
+Repeating the same unit, facts and policy stays idempotent. Consumers select the newest
+`labelled_at` per task, unit type and unit ID across policies; they must retain newer unknowns.
 Current text classification reads Claude Code logs; work categories also use local window blocks.
 State and heartbeats use `label_local`. The frozen baseline views do not read these tasks.
 For scheduled estimates, set `AUT_LABEL=1` and `AUT_LABEL_MODE=local` in `scan.env`.

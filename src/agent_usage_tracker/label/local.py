@@ -218,5 +218,7 @@ def decorate(
     )
     if uncertain:
         attrs["label"] = "unknown"
-    event.event_id = make_event_id("local-estimate", event.event_id, backend.policy_id)
+    event.event_id = make_event_id(
+        "local-estimate", event.event_id, backend.policy_id, req.unit, attrs["input_hash"]
+    )
     return event
