@@ -248,7 +248,8 @@ def agent_replies(home: Path, sessions: set[str], want: set[str], until: datetim
                 o = parse_record(line)          # a malformed line holds no reply to show
                 if o is None:
                     continue
-                if until and _record_ts(o) and _record_ts(o) >= until:
+                ts = _record_ts(o)
+                if until and ts and ts >= until:
                     break
                 m = o.get("message")
                 if o.get("type") == "assistant" and isinstance(m, dict):
