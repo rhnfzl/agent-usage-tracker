@@ -105,6 +105,51 @@ def test_uncertainty_uses_unrounded_native_score(tmp_path, monkeypatch):
     assert event.attrs["label"] == "unknown" and event.attrs["below_tau"] is True
 
 
+def test_changed_input_under_same_policy_gets_a_new_event_even_when_unknown(tmp_path, monkeypatch):
+    b, _closed = backend(
+        tmp_path, monkeypatch, {"r1": "instruction", "r2": "instruction", "r3": "stop"}
+    )
+    events = []
+    for text, score, at in (
+        ("original facts", 0.8, "2026-11-05T10:00:00.000+00:00"),
+        ("updated facts", 0.4, "2026-11-05T11:00:00.000+00:00"),
+    ):
+        req = request()
+        req.facts = {"text": text}
+        raw = {c["id"]: (1 - score) / 8 for c in req.candidates}
+        raw["instruction"] = score
+        response = core.decide(req, raw, core.Choice(), b.model_id, b.model_rev)
+        events.append(local.decorate(core.label_event(req, response, at), req, b, score))
+    old, new = events
+    assert old.event_id != new.event_id
+    assert old.attrs["input_hash"] != new.attrs["input_hash"]
+    assert old.attrs["label"] == "instruction" and new.attrs["label"] == "unknown"
+    assert old.ts == new.ts
+    assert [(e.attrs["task"], e.attrs["unit"], e.attrs["unit_id"]) for e in events] == [
+        ("working.local.steer_intent", "steer", "u")
+    ] * 2
+    assert new.attrs["labelled_at"] > old.attrs["labelled_at"]
+    assert "updated facts" not in json.dumps(new.attrs)
+
+
+def test_same_input_and_policy_remain_idempotent_after_key_reordering(tmp_path, monkeypatch):
+    b, _closed = backend(
+        tmp_path, monkeypatch, {"r1": "instruction", "r2": "instruction", "r3": "stop"}
+    )
+    events = []
+    for facts, at in (
+        ({"text": "same", "count": 1}, "2026-11-05T10:00:00.000+00:00"),
+        ({"count": 1, "text": "same"}, "2026-11-05T11:00:00.000+00:00"),
+    ):
+        req = request()
+        req.facts = facts
+        raw = {c["id"]: float(c["id"] == "instruction") for c in req.candidates}
+        res = core.decide(req, raw, core.Choice(), b.model_id, b.model_rev)
+        events.append(local.decorate(core.label_event(req, res, at), req, b, res.prob))
+    assert events[0].event_id == events[1].event_id
+    assert events[0].attrs["input_hash"] == events[1].attrs["input_hash"]
+
+
 def test_remote_models_and_changed_prompts_are_rejected(tmp_path):
     path = tmp_path / "policy.json"
     row = recipe()
