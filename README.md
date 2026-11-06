@@ -299,6 +299,26 @@ Optional, Apple silicon. The model reads the text on this machine and only the l
 
 Details and the stored row: [CONTRACT.md](CONTRACT.md#labels-activity_event-kind-label-aut-label).
 
+### Provisional historical baseline
+
+Use existing model labels to explore work patterns without treating them as calibrated results.
+The import keeps primary Sonnet categories and direct agent-reviewed signals separate. Uncertain
+cases stay unknown. Charts describe estimates, not verified accuracy.
+
+```sh
+aut label import-baseline /path/to/private/working-baseline/labels.json  # preview only
+aut label import-baseline /path/to/private/working-baseline/labels.json --apply
+```
+
+`--apply` appends the entire validated bundle in one transaction through `transport.pg_dsn`.
+Repeated imports are idempotent. Rows use `working.steer_intent` and `working.soft_outcome`, so
+calibrated task choices, their shares, and daily notes do not consume these estimates. Source,
+sampling weight, unknowns, question hashes and agent-review provenance are retained. Review
+reasons and local file paths stay on the Mac. No model call or calibration runs during import.
+Deploy the companion sink schema and dashboard changes before using `--apply`.
+The sink's private `working_label_monthly` and `working_signal_monthly` views feed estimate panels.
+
+
 ### The models
 
 `--model` and `label_model` take these names. Any other name is read as an MLX repo through answer
