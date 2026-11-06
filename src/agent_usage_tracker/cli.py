@@ -38,6 +38,9 @@
                         the table, or M's saved result -> label.json; the encoder
   aut label ensemble --task T [--days D] [--models A,B,C]
                         odd combinations of models from saved scores -> their records, one table
+  aut git-days [--dry-run] [--allow-lower]
+                        your commits per Amsterdam day from every clone, counts only
+                        -> agents.git_commit_day ([git_days]; `aut scan` runs it daily if enabled)
   aut backup [--check]  encrypted restic backup of the logs, salt and label files ([backup] in
                         config.toml); --check verifies the repository and sends nothing
 
@@ -54,7 +57,7 @@ import sys
 from datetime import date, timedelta
 from typing import Sequence
 
-from . import backup, inspector, manual_time, outcomes, pricing, review, scan
+from . import backup, git_days, inspector, manual_time, outcomes, pricing, review, scan
 from .collectors import REGISTRY
 from .config import (ALL_AGENTS, LABEL_DAYS, LABEL_DECISION_TASKS, LABEL_TASK_NAMES, AutError,
                      Config, load_config, config_path)
@@ -72,6 +75,13 @@ def _fail_if_partial(what: str, failed: set[str]) -> None:
 def cmd_scan(cfg: Config, agents: Sequence[str], args: argparse.Namespace) -> None:
     report = scan.run_scan(cfg, agents, dry_run=args.dry_run)
     scan.print_scan(cfg, report, dry_run=args.dry_run)
+    if args.cmd == "scan" and not args.dry_run:
+        git_days.run_if_due(cfg)       # the launchd scan carries the daily git count
+
+
+def cmd_git_days(cfg: Config, args: argparse.Namespace) -> None:
+    git_days.print_report(git_days.run(cfg, dry_run=args.dry_run, allow_lower=args.allow_lower),
+                          dry_run=args.dry_run)
 
 
 def cmd_backfill(cfg: Config, agents: Sequence[str], args: argparse.Namespace) -> None:
@@ -226,7 +236,7 @@ _AGENT_COMMANDS = {"scan": cmd_scan, "backfill": cmd_backfill, "export": cmd_exp
                    "status": cmd_status}
 _COMMANDS = {"time": cmd_time_add, "outcomes": cmd_outcomes, "outcome": cmd_outcome,
              "inspect": cmd_inspect, "episodes": cmd_episodes, "label": cmd_label,
-             "history-steers": cmd_history_steers, "backup": cmd_backup}
+             "history-steers": cmd_history_steers, "backup": cmd_backup, "git-days": cmd_git_days}
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -273,6 +283,12 @@ def _build_parser() -> argparse.ArgumentParser:
     p_bak = sub.add_parser("backup", help="encrypted restic backup of the logs ([backup] config)")
     p_bak.add_argument("--check", action="store_true",
                        help="verify the repository (restic check); back up nothing")
+    p_git = sub.add_parser("git-days",
+                           help="your commits per day from every clone ([git_days] config)")
+    p_git.add_argument("--dry-run", action="store_true",
+                       help="scan and print totals per year, write nothing")
+    p_git.add_argument("--allow-lower", action="store_true",
+                       help="also rewrite stored days whose count went down (a deliberate fix)")
     p_out = sub.add_parser("outcome", help="mark this project's newest session's outcome")
     p_out.add_argument("outcome", choices=["shipped", "ruled-out", "open"])
     p_out.add_argument("--session", help="the session id (default: newest interactive here)")

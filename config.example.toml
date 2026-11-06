@@ -118,6 +118,21 @@ agents = ["claude_code", "codex", "cursor_api", "cursor_cli", "pi"]
 # paths = ["~/.claude/projects"]     # REPLACES the default list (docs/new-laptop.md has it)
 # excludes = ["*.tmp"]               # ADDED to the default exclude (~/.local/share/aut/label/models)
 
+# `aut git-days`: your commits per Amsterdam day, from every clone here and on your other machines,
+# to agents.git_commit_day for the public ledger. Counts only: no repo name, SHA, email or message
+# leaves this machine. With enabled = true, `aut scan` runs it once the last good run is 20 h old.
+# Your identities, hosts and paths belong HERE only, never in the repo. remotes are read with
+# ssh -o BatchMode=yes (a key, no prompt) running the same hardened, read-only git; a host that
+# fails makes that run write nothing, and so does a missing root. A stored day never goes down by
+# itself (`aut git-days --allow-lower` rewrites it).
+# [git_days]
+# enabled = true
+# since = 2022-02-03                            # the first day written (a TOML date or a string)
+# identities = ["you@example.com"]              # your author emails (compared lowercased)
+# shared_authors = [{ email_regex = "^shared@", repo_regex = "^some_repo_pattern$" }]
+# roots = ["~/projects"]                        # searched 6 levels deep, vendored folders skipped
+# remotes = [{ host = "my-vm", roots = ["~/projects"] }]     # an ~/.ssh/config Host alias
+
 # Keep [transport] LAST: every key below a table header belongs to that table, so a top-level
 # key written after this line would be read as transport.<key> and ignored.
 [transport]
