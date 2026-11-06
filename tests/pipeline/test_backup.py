@@ -197,7 +197,7 @@ def test_config_and_cli(world, monkeypatch, capsys):
     with pytest.raises(AutError, match="backup"):
         load_config()
     capsys.readouterr()
-    (tmp / "conf" / "config.toml").write_text(f'machine = "laptop"\nhome = "{tmp / "home"}"\n')
+    (tmp / "conf" / "config.toml").write_text(f'machine = "laptop"\nhome = "{(tmp / "home").as_posix()}"\n')
     assert cli.main(["--agents", "pi", "status"]) == 0
     assert "backup        : never ran" in capsys.readouterr().out
 
