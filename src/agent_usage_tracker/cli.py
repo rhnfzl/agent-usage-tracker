@@ -194,7 +194,29 @@ def _label_bakeoff(cfg: Config, args: argparse.Namespace) -> None:
 
 
 def cmd_label(cfg: Config, args: argparse.Namespace) -> None:
-    if args.label_cmd in ("run", "backfill"):
+    if getattr(args, "binary", False):
+        from .label import binary
+        if getattr(args, "final", False):
+            raise AutError("binary eval: final-test scoring waits for the gold gate and pilot pick")
+        selected = args.labels.split(",") if args.labels else None
+        models = args.models.split(",") if args.models else None
+        if args.label_cmd == "eval":
+            if args.model and models:
+                raise AutError("binary eval: use --model or --models, not both")
+            rows = binary.run_eval(cfg, args.task, args.days,
+                                   [args.model] if args.model else models or [
+                                       "pplx-decider-flash", "clef-flash"], selected=selected)
+        else:
+            rows = binary.run_ensemble(args.task, models, selected=selected)
+        for row in rows:
+            # Only numbers and model ids belong in terminal output.
+            print(json.dumps({k: row[k] for k in ("task", "model_id", "members", "per_label",
+                                                 "combined", "coverage") if k in row},
+                             sort_keys=True))
+    elif getattr(args, "labels", None) or (args.label_cmd == "eval"
+                                           and getattr(args, "models", None)):
+        raise AutError("label: --labels and eval --models need --binary")
+    elif args.label_cmd in ("run", "backfill"):
         _label_run(cfg, args)
     elif args.label_cmd == "ensemble":
         from .label import ensemble
@@ -334,6 +356,13 @@ def _build_parser() -> argparse.ArgumentParser:
                                          help="score --model on the final test days")
     lab_sub.choices["ensemble"].add_argument(
         "--models", help="comma-separated: only these models (default: all with an eval record)")
+    lab_sub.choices["eval"].add_argument(
+        "--models", help="binary mode: comma-separated model names")
+    for name in ("eval", "ensemble"):
+        lab_sub.choices[name].add_argument(
+            "--binary", action="store_true", help="version 3 yes/no pilot at fixed 0.70/0.70 floors")
+        lab_sub.choices[name].add_argument(
+            "--labels", help="binary mode: comma-separated leaf names or group:<name>")
     for name in ("eval", "choose"):
         lab_sub.choices[name].add_argument("--model", help="a name from the table, or ensemble:<id>")
     return parser

@@ -254,7 +254,7 @@ def elephant_user(req: Request, suffix: str | None = None) -> str:
     """The qev-labels-v2 user turn; `suffix` replaces the question, to find where it starts."""
     ids = [c["id"] for c in req.candidates]
     names = ["yes", "no"] if req.decision == "boolean" else ids     # a boolean's first is the yes
-    options = "\n".join(f"{x}. {n}: {c['desc']}"
+    options = "\n".join(f"{x}. {n}: {_state_text(c['desc'])}"
                         for x, n, c in zip(LETTERS, names, req.candidates))
     question = (f"Question: {req.question}\n\nOptions:\n{options}\n\n"
                 f"Answer with one letter: {', '.join(LETTERS[:len(ids)])}.")
@@ -313,7 +313,32 @@ class MlxCard(Decider):
     the last prompt token. The LoRA is merged once onto its base and saved in aut's data folder
     (label/merge.py); model_rev is the adapter revision recorded by that merge."""
     backend = "mlx_card"
-    protocol = "1"
+    protocol = "2"
+
+    def limited_prompt(self, tok: Any, req: Request) -> str:
+        """Keep the question and options when the facts exceed the card's 2,048 tokens."""
+        prompt = self._prompt(tok, CARD_SYSTEM, card_user(req))
+        if len(tok.encode(prompt, add_special_tokens=False)) <= 2048:
+            return prompt
+        facts = _state_text(req.facts)
+
+        def shortened(n: int) -> str:
+            body = json.loads(card_user(req))
+            body["state"] = facts[:n] + " [input truncated]"
+            return self._prompt(tok, CARD_SYSTEM, json.dumps(body, ensure_ascii=False))
+
+        low, high = 0, len(facts)
+        prompt = shortened(0)
+        if len(tok.encode(prompt, add_special_tokens=False)) > 2048:
+            raise BackendUnavailable("label: decision-4b question and options exceed 2,048 tokens")
+        while low < high:
+            mid = (low + high + 1) // 2
+            candidate = shortened(mid)
+            if len(tok.encode(candidate, add_special_tokens=False)) <= 2048:
+                low, prompt = mid, candidate
+            else:
+                high = mid - 1
+        return prompt
 
     def prepare(self) -> Path:
         name = short_name(self.model_id)
@@ -337,7 +362,7 @@ class MlxCard(Decider):
         model, tok = self._load()       # first: it turns a missing mlx into the install hint
         import mlx.core as mx
 
-        prompt = self._prompt(tok, CARD_SYSTEM, card_user(req))
+        prompt = self.limited_prompt(tok, req)
         last = model(mx.array([tok.encode(prompt, add_special_tokens=False)]))[0, -1]
         last = last.astype(mx.float32)
         z = [last[tok.encode(prompt + x, add_special_tokens=False)[-1]].item()
@@ -362,7 +387,7 @@ def pplx_user(req: Request, specials: list[str]) -> tuple[str, list[str]]:
 
     boolean = req.decision == "boolean"
     order = req.candidates[::-1] if boolean else req.candidates
-    options = "\n".join(f"{x}: {esc(c['desc'] if boolean else c['id'] + ': ' + c['desc'])}"
+    options = "\n".join(f"{x}: {esc(_state_text(c['desc']) if boolean else c['id'] + ': ' + _state_text(c['desc']))}"
                         for x, c in zip(LETTERS, order))
     return (f"State:\n{esc(_state_text(req.facts))}\n\nQuestion 0:\n{esc(req.question)}\nOptions:\n"
             f"{options}\n{PPLX_MARKER}", [c["id"] for c in order])

@@ -323,6 +323,33 @@ run, so the machine needs the summed memory the table shows.
 
 Details and the stored row: [CONTRACT.md](CONTRACT.md#labels-activity_event-kind-label-aut-label).
 
+### Experimental yes/no pilot
+
+The pilot checks each label separately before it can be used in nightly reports.
+It needs reference labels made with the structured version 3 definitions in `label/questions.py`.
+Existing version 2 gold cannot test these new questions. The current teach and review commands
+still produce version 2 gold, so prepare and check version 3 reference rows separately first.
+Each reference row uses `task_ver: 3`, `gold`, `unit_id`, and an explicit positive `weight` that
+restores the population frequency after sampling. Keep final-test days out of prompt development.
+
+```sh
+aut label eval --task steer_intent --binary --models pplx-decider-flash,clef-flash \
+  --labels group:pushback,correction,stop,framing --days 180
+aut label eval --task soft_outcome --binary --labels group:open --days 180
+aut label ensemble --task steer_intent --binary --models pplx-decider-flash,clef-flash
+```
+
+Binary mode uses fixed precision and recall floors of 0.70 each, independent of the nightly
+config. It fits thresholds outside each test day, accepts a label only with at most one
+infeasible fold, and checks the floors again after choosing among labels. A fine label takes
+precedence over a group; the highest calibrated probability wins within each level. No passing
+question means unknown. `group:open` includes both `still_open` and `blocked`.
+
+Raw scores resume from separate versioned files. Local reports use `<task>.binary-eval.jsonl`
+and `<task>.binary-ensemble.jsonl`. Ensembles average calibrated log-odds from two or three models.
+These commands do not choose a nightly model, send labels to the sink, or score final-test days.
+On macOS, scoring stops if free memory drops below 15%. Resume it manually after resolving the cause.
+
 ### The models
 
 `--model` and `label_model` take these names. Any other name is read as an MLX repo through answer
