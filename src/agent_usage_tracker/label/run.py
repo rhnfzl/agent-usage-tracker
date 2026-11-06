@@ -21,6 +21,7 @@ from ..config import LABEL_NOTE, Config
 from ..episode_store import Episode
 from ..event import ActivityEvent
 from ..push import job_heartbeat, send_activity_rows
+from ..repo_keys import refuse_new_salt
 from ..sink import connect
 from ..state import atomic_write_text, collector_wm, load_json_dict, load_state, save_state
 from .backends import BackendUnavailable, make_backend
@@ -29,6 +30,8 @@ from .core import (Backend, Choice, NoteBackend, current_labels, data_dir, decid
 from .tasks import OUTCOME_DAYS, TASKS, Source, SourceUnavailable, Task, units
 
 BATCH = 50
+# The day tasks built from agents.episode, which the sink rebuilds once a night: they wait for it.
+_EPISODE_TASKS = frozenset({"work_category", LABEL_NOTE})
 # One task's counts, read as 0 when unset, plus `labels`: the rows per label.
 TaskReport = defaultdict[str, Any]
 NAME = "label"
@@ -50,6 +53,7 @@ class _Run:
     state: dict[str, Any]
     cache: dict[str, Any]
     labelled_at: str
+    ready: datetime | None = None       # Source.episodes_ready, read once per run
 
     def advance(self, name: str, ts: str | None) -> None:
         """Save a task's watermark, never backwards: a backfill over old days leaves the nightly
@@ -60,8 +64,8 @@ class _Run:
         save_state(self.state, [NAME])
 
 
-def _window(name: str, wm: dict[str, Any], since: datetime | None,
-            now: datetime) -> tuple[datetime, datetime | None]:
+def _window(name: str, wm: dict[str, Any], since: datetime | None, now: datetime,
+            ready: datetime | None = None) -> tuple[datetime, datetime | None]:
     """(since, until) of one task. until None: up to now, and the watermark becomes the newest
     unit's ts. A day task covers whole past days (see _day_window)."""
     window = TASKS[name].window
@@ -71,7 +75,7 @@ def _window(name: str, wm: dict[str, Any], since: datetime | None,
                   f"{OUTCOME_DAYS} days", file=sys.stderr)
         return now - timedelta(days=OUTCOME_DAYS), None
     if window == "day":
-        return _day_window(name, wm, since, now)
+        return _day_window(name, wm, since, now, ready)
     return _start(name, wm, since, now), None
 
 
@@ -84,11 +88,18 @@ def _start(name: str, wm: dict[str, Any], since: datetime | None, now: datetime)
     return local_midnight(now.astimezone().date()) - timedelta(1)
 
 
-def _day_window(name: str, wm: dict[str, Any], since: datetime | None,
-                now: datetime) -> tuple[datetime, datetime]:
-    """(since, until) over whole past days: until is today's local midnight."""
-    start = _start(name, wm, since, now)
-    return local_midnight(start.astimezone().date()), local_midnight(now.astimezone().date())
+def _day_window(name: str, wm: dict[str, Any], since: datetime | None, now: datetime,
+                ready: datetime | None = None) -> tuple[datetime, datetime]:
+    """(since, until) over whole past days: until is today's local midnight, or for a task built
+    from episodes the midnight that starts the day of `ready`, so a day whose episodes are not
+    rebuilt yet (a month delivered after a gap) waits for the next rebuild instead of being passed
+    for good. Never before since: then the window is empty."""
+    start = local_midnight(_start(name, wm, since, now).astimezone().date())
+    until = local_midnight(now.astimezone().date())
+    if name in _EPISODE_TASKS:
+        until = start if ready is None else max(
+            start, min(until, local_midnight(ready.astimezone().date())))
+    return start, until
 
 
 def _note_prompt(day: date, labels: list[tuple[Any, ...]], episodes: list[Episode]) -> str:
@@ -150,7 +161,9 @@ def _run_task(run: _Run, task: Task, choice: Choice, backend: Backend, since: da
     c["labels"] = labels
     key = f"{task.name}@{task.ver}|{backend.model_id}|{choice.calib_ver}"
     done = set(run.cache.get(key, ())) if task.cached else set()
+    skipped = run.src.skipped["no_text"]
     reqs = [r for r in units(task.name, run.src, since, until) if r.unit_id not in done]
+    c["skipped_no_text"] = run.src.skipped["no_text"] - skipped
     pending: list[ActivityEvent] = []
     cut = None
     for r in reqs:
@@ -182,9 +195,9 @@ def _label_one(run: _Run, name: str, since: datetime | None, now: datetime, choi
     on, and the heartbeat row records it."""
     try:
         if name != LABEL_NOTE:
-            start, until = _window(name, run.wm, since, now)
+            start, until = _window(name, run.wm, since, now, run.ready)
             return _run_task(run, TASKS[name], choice, backend_for(name, choice), start, until), None
-        note_start, note_end = _day_window(name, run.wm, since, now)
+        note_start, note_end = _day_window(name, run.wm, since, now, run.ready)
         backend = backend_for(name, choice)
         if not isinstance(backend, NoteBackend):    # label.json can name the encoder for it
             raise BackendUnavailable(f"label: {name} needs a backend that can write text")
@@ -205,6 +218,7 @@ def run_label(cfg: Config, tasks: list[str] | None = None, since: datetime | Non
     (tests pass a fake). A dry run scores and counts, and writes nothing: no rows, watermark,
     cache or heartbeat. A task whose backend cannot run reports failed = 1 and the others go on."""
     dsn = cfg.require_pg("label (it reads the steer and episode rows)")
+    refuse_new_salt(cfg.repo_key_salt, dsn, cfg.machine)
     started = datetime.now(timezone.utc)
     labelled_at = started.isoformat(timespec="milliseconds")
     now = now or started
@@ -222,14 +236,17 @@ def run_label(cfg: Config, tasks: list[str] | None = None, since: datetime | Non
     backend_for = backend_for or default_backend
     state = load_state()
     wm = collector_wm(state, NAME)
+    names = tasks if tasks is not None else cfg.label_tasks
     run = _Run(cfg=cfg, dsn=dsn, src=src, dry_run=dry_run,
                deadline=time.monotonic() + cfg.label_budget_s, wm=wm, state=state,
-               cache=load_json_dict(_cache_path()), labelled_at=labelled_at)
+               cache=load_json_dict(_cache_path()), labelled_at=labelled_at,
+               ready=src.episodes_ready() if _EPISODE_TASKS & set(names) else None)
     report: dict[str, TaskReport] = {}
     with job_heartbeat(cfg, NAME, started, dry_run=dry_run) as beat:
         try:
-            for name in tasks if tasks is not None else cfg.label_tasks:
-                report[name], stopped = _label_one(run, name, since, now, load_choice(name),
+            for name in names:
+                choice = load_choice(name, TASKS[name].ver if name in TASKS else None)
+                report[name], stopped = _label_one(run, name, since, now, choice,
                                                    backend_for)
                 beat.events += report[name]["rows"] + report[name]["notes"]
                 if stopped:
@@ -249,6 +266,9 @@ def print_report(report: dict[str, TaskReport], *, dry_run: bool) -> None:
         what = f"{c['notes']} notes" if name == LABEL_NOTE else \
             f"{c['rows']} rows ({c['below_tau']} below tau), by label {json.dumps(labels)}"
         print(f"label {name} {mode}: {what}")
+        if c["skipped_no_text"]:      # a new laptop, or transcripts deleted: say so, once a run
+            print(f"aut: label {name}: {c['skipped_no_text']} steers skipped: their text is not on "
+                  "this machine", file=sys.stderr)
         if c["cut"]:
             print(f"aut: label {name}: stopped by the time budget (label_budget_s); the rest "
                   "waits for the next run", file=sys.stderr)

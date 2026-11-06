@@ -12,6 +12,7 @@ import socket
 import sys
 import tomllib
 from dataclasses import dataclass, field
+from datetime import date, datetime
 from pathlib import Path
 
 from .state import warn_if_group_readable
@@ -31,6 +32,7 @@ LABEL_DAYS = 90              # the window units are rebuilt over (teach, review,
 DEFAULT_AW_URL = "http://localhost:5600"
 DEFAULT_LABEL_MODEL = "mlx-community/gemma-4-31b-it-4bit"
 DEFAULT_REPO_ROOTS = ("~/projects",)
+DEFAULT_GIT_DAYS_SINCE = date(2022, 2, 3)     # the public ledger's first day
 AW_CATEGORIES = ("editor", "terminal", "agent", "dev", "browser", "comms", "docs", "design",
                  "media", "other")
 
@@ -116,6 +118,19 @@ class Config:
     label_recall: float = 0.60
     label_coverage: float = 0.75
     label_budget_s: int = 3600
+    # `aut backup` ([backup] table): the restic repository, the command that prints its password,
+    # the paths (empty: backup.default_paths) and excludes added to backup.default_excludes.
+    backup_repository: str | None = None
+    backup_password_command: str | None = None
+    backup_paths: tuple[str, ...] = ()
+    backup_excludes: tuple[str, ...] = ()
+    # `aut git-days` ([git_days] table): the owner's commits per day, from local and remote clones.
+    git_days_enabled: bool = False                       # true: `aut scan` runs it once a day
+    git_days_since: date = DEFAULT_GIT_DAYS_SINCE
+    git_days_identities: tuple[str, ...] = ()            # lowercased author emails
+    git_days_shared_authors: tuple[tuple[str, str], ...] = ()    # (email_regex, repo_regex)
+    git_days_roots: tuple[str, ...] = DEFAULT_REPO_ROOTS
+    git_days_remotes: tuple[tuple[str, tuple[str, ...]], ...] = ()   # (ssh host, roots there)
 
     @property
     def cf_access_headers(self) -> dict[str, str]:
@@ -214,6 +229,73 @@ def _label_tasks(data: dict[str, Any]) -> tuple[str, ...]:
     return tuple(tasks)
 
 
+def _str_list(section: dict[str, Any], key: str, where: str) -> tuple[str, ...]:
+    items = section.get(key) or []
+    if not isinstance(items, list) or not all(isinstance(x, str) and x for x in items):
+        raise AutError(f"config: {where}{key} must be a list of strings")
+    return tuple(items)
+
+
+def _backup(data: dict[str, Any]) -> dict[str, Any]:
+    section = data.get("backup") or {}
+    if not isinstance(section, dict):
+        raise AutError("config: [backup] must be a table")
+    return {"backup_repository": _resolve(section, "repository"),
+            "backup_password_command": _resolve(section, "password_command"),
+            "backup_paths": _str_list(section, "paths", "backup."),
+            "backup_excludes": _str_list(section, "excludes", "backup.")}
+
+
+_SSH_HOST = re.compile(r"[A-Za-z0-9_.@][A-Za-z0-9_.@-]*")     # never a leading "-": no ssh option
+
+
+def _git_days(data: dict[str, Any]) -> dict[str, Any]:
+    """[git_days]. Errors name the key, never the value: identities, hosts and paths are private."""
+    section = data.get("git_days") or {}
+    if not isinstance(section, dict):
+        raise AutError("config: [git_days] must be a table")
+    shared = []
+    for i, entry in enumerate(section.get("shared_authors") or []):
+        if not isinstance(entry, dict):
+            raise AutError(f"config: git_days.shared_authors[{i}] must be a table")
+        pair = (_text(entry, "email_regex") or "", _text(entry, "repo_regex") or "")
+        for key, pat in zip(("email_regex", "repo_regex"), pair):
+            try:
+                re.compile(pat)
+            except re.error as exc:
+                raise AutError(f"config: git_days.shared_authors[{i}].{key} is not a valid regex "
+                               f"({exc.msg})") from None
+        if not all(pair):
+            raise AutError(f"config: git_days.shared_authors[{i}] needs email_regex and repo_regex")
+        shared.append(pair)
+    remotes = []
+    for i, entry in enumerate(section.get("remotes") or []):
+        host = entry.get("host") if isinstance(entry, dict) else None
+        if not isinstance(host, str) or not _SSH_HOST.fullmatch(host):
+            raise AutError(f"config: git_days.remotes[{i}].host must be an ssh host name or alias")
+        roots = _str_list(entry, "roots", f"git_days.remotes[{i}].")
+        if not roots:
+            raise AutError(f"config: git_days.remotes[{i}].roots needs at least one folder")
+        remotes.append((host, roots))
+    since = section.get("since", DEFAULT_GIT_DAYS_SINCE)
+    if isinstance(since, datetime):         # a TOML datetime: its own calendar day
+        since = since.date()
+    elif isinstance(since, str):
+        try:
+            since = date.fromisoformat(since)
+        except ValueError:
+            since = None
+    if not isinstance(since, date):
+        raise AutError("config: git_days.since must be a date (YYYY-MM-DD)")
+    return {"git_days_enabled": _as_bool(section.get("enabled", False)),
+            "git_days_since": since,
+            "git_days_identities": tuple(e.strip().lower() for e in
+                                         _str_list(section, "identities", "git_days.")),
+            "git_days_shared_authors": tuple(shared),
+            "git_days_roots": _str_list(section, "roots", "git_days.") or DEFAULT_REPO_ROOTS,
+            "git_days_remotes": tuple(remotes)}
+
+
 def _label_bars(data: dict[str, Any]) -> tuple[float, float, float]:
     precision, recall, coverage = (float(data.get(k, d)) for k, d in
                                    (("label_precision", 0.90), ("label_recall", 0.60),
@@ -226,7 +308,8 @@ def _label_bars(data: dict[str, Any]) -> tuple[float, float, float]:
 def _warn_if_secrets_written(path: Path, transport: dict[str, Any], data: dict[str, Any]) -> None:
     # Only a value written in the file counts: an env:VAR reference keeps the secret out of it.
     written = (transport.get("webhook_secret"), transport.get("pg_dsn"),
-               transport.get("cf_access_client_secret"), data.get("repo_key_salt"))
+               transport.get("cf_access_client_secret"), data.get("repo_key_salt"),
+               (data.get("backup") or {}).get("repository"))   # a rest: URL can hold a password
     if path.exists() and any(v and not str(v).startswith("env:") for v in written):
         warn_if_group_readable(path)
 
@@ -241,6 +324,8 @@ def _config_from(data: dict[str, Any], path: Path) -> Config:
     aw_days = _aw_title_days(data)
     label_tasks = _label_tasks(data)
     label_precision, label_recall, label_coverage = _label_bars(data)
+    backup = _backup(data)
+    git_days = _git_days(data)
     _warn_if_secrets_written(path, transport, data)
 
     return Config(
@@ -275,4 +360,6 @@ def _config_from(data: dict[str, Any], path: Path) -> Config:
         label_recall=label_recall,
         label_coverage=label_coverage,
         label_budget_s=int(data.get("label_budget_s") or 3600),
+        **backup,
+        **git_days,
     )

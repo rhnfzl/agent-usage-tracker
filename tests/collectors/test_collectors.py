@@ -239,10 +239,15 @@ def test_hardening_edges(monkeypatch) -> None:
     pages = {1: {"usageEventsDisplay": zero_recent}, 2: {"usageEventsDisplay": [real]}}
 
     def fake_post(cookie, name, body):
-        return {"userId": UID} if name == "get-me" else pages.get(body.get("page"), {"usageEventsDisplay": []})
+        if name == "get-me":
+            return {"userId": UID}
+        rows = pages.get(body.get("page"), {"usageEventsDisplay": []})["usageEventsDisplay"]
+        return {"usageEventsDisplay": [r for r in rows      # the API's own date filter
+                                       if body["startDate"] <= int(r["timestamp"]) <= body["endDate"]]}
 
     cfg = _cfg(Path("/tmp"))
     cfg.cursor_api = True
+    monkeypatch.setattr(cursor_api, "_now_ms", lambda: 3000)
     monkeypatch.setattr(cursor_api, "_auth", lambda c: ("ck", 1))
     monkeypatch.setattr(cursor_api, "_post", fake_post)
     evs = [e for batch, _ in cursor_api.collect(cfg, {}) for e in batch]

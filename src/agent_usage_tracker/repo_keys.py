@@ -13,6 +13,7 @@ from urllib.parse import urlparse
 
 from .config import AutError
 from .git_safe import git_argv, git_env
+from .sink import connect
 from .state import state_path, warn_if_group_readable
 
 
@@ -37,16 +38,20 @@ def _salt_text(raw: bytes) -> str:
     return text if len(text) >= 32 else ""
 
 
-def require_readable_salt(configured: str | None) -> None:
+def require_readable_salt(configured: str | None, dsn: str | None = None,
+                          machine: str | None = None) -> None:
     """Raises before a run that sends rows, when the salt file is there but cannot be read or is
     corrupt: NULL keys are permanent once the watermark moves on and the sink's ON CONFLICT DO
-    NOTHING applies. A corrupt file is never replaced here: a new salt changes every key."""
+    NOTHING applies. A corrupt file is never replaced here: a new salt changes every key. Raises
+    too when the file is missing but the sink already holds this machine's keys (a new laptop
+    without the old salt): a new salt would split every repo's old and new rows for good."""
     if configured:
         return
     p = state_path().parent / "repo_key.salt"
     try:
         raw = p.read_bytes()
     except FileNotFoundError:
+        refuse_new_salt(configured, dsn, machine)
         return
     except OSError as exc:
         raise AutError(f"aut: could not read {p} ({exc}); fix its owner or mode, or every repo_key "
@@ -55,6 +60,35 @@ def require_readable_salt(configured: str | None) -> None:
         raise AutError(f"aut: {p} is too short or not text, so every repo_key of this run would be "
                        "NULL for good; restore it, or delete it to start new keys (old rows will "
                        "no longer match new ones)")
+
+
+def refuse_new_salt(configured: str | None, dsn: str | None, machine: str | None) -> None:
+    """Called before any command that can create repo_key.salt (RepoKeys makes it on first use: a
+    scan, a dry run, a label run, outcomes). Raises when there is no salt yet but the sink already
+    holds this machine's repo keys. With no sink to ask (webhook only), it warns instead."""
+    p = state_path().parent / "repo_key.salt"
+    if configured or p.exists():
+        return
+    if not dsn:
+        print(f"aut: warning: no {p} and no pg_dsn to ask the sink, so a new repo_key.salt is "
+              "made. If this machine sent rows before (a new laptop), stop and restore the old "
+              "salt first (docs/new-laptop.md).", file=sys.stderr)
+        return
+    if _sink_has_keys(dsn, machine or ""):
+        raise AutError(
+            f"aut: {p} is missing, but the sink already holds repo keys from machine "
+            f"'{machine}'. A new salt would never match them. Copy the old repo_key.salt "
+            "there, or set repo_key_salt in config.toml to its contents, then run again "
+            "(docs/new-laptop.md). Nothing was sent.")
+
+
+def _sink_has_keys(dsn: str, machine: str) -> bool:
+    """Whether any activity row of this machine carries a repo_key. A read error raises: going on
+    would mint a new salt before anyone could tell."""
+    with connect(dsn) as conn:
+        return conn.execute("SELECT 1 FROM agents.activity_event WHERE machine = %s "
+                            "AND attrs->>'repo_key' IS NOT NULL LIMIT 1", (machine,)).fetchone() \
+            is not None
 
 
 def _load_salt(configured: str | None, create: bool = True) -> bytes:

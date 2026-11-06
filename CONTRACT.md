@@ -607,6 +607,10 @@ webhook carries the usage and the activity and time rows of the same batch still
 `pg_dsn`, with the batch's session rows. A webhook-only machine skips them with the same one-line note; there is no backfill for
 time, so it does not send time.
 
+## What a label prompt reads
+
+`steer_intent` units carry `agent_reply_before`, the agent's last text before the steer. `work_category` episode days and `soft_outcome` episodes carry `last_agent_reply`, its latest text after the last steer. Text blocks only, redacted, cut to their last 1,500 characters, from Claude Code main logs. Every backend and `aut label teach` read the same facts. These fields move all three tasks to version 2. Existing version 1 rows remain selected until replaced; their saved calibration cannot score the new prompts as confident.
+
 ## Steer estimates: activity_event kind `steer_estimate` (`aut history-steers`)
 
 Session logs are gone for Claude Code from 2 March to 19 April 2026 and for most Codex days from
@@ -615,6 +619,29 @@ Session logs are gone for Claude Code from 2 March to 19 April 2026 and for most
 text, no session. A day with counted steers from that agent gets no estimate. Slash and shell
 commands are left out, so this is not the steer rule. No view counts it as a steer. To remove it,
 delete the rows of this kind.
+
+## Commits per day: agents.git_commit_day (`aut git-days`)
+
+`(day, commits, scanned_at)`, insert-only; a day's latest `scanned_at` wins
+(`agents.git_commits_daily`). `day` is the Europe/Amsterdam date of the author date. `commits`
+counts distinct SHAs from branches, remotes, tags and registered worktree heads, including
+detached heads outside scan roots. Merges, stash and notes refs are excluded. Each object store
+is read once because worktrees share it. The scan reads repositories
+under `[git_days] roots` here and each remote's roots over `ssh`, with no fetch. A commit counts
+when its author email is in `identities` (lowercased), or matches a `shared_authors` email_regex in
+a repo whose folder name matches its repo_regex. A bot (`[bot]` in the email, or
+`noreply@anthropic.com`) never counts. One run has one `scanned_at` and inserts every day from
+`since` to yesterday that has no row or whose count went up, zeros included: a day with no row is
+not a zero, and the ledger hides on a gap. A stored day never goes down by itself: the run summary
+counts such days and their total drop (no names), and only `aut git-days --allow-lower` writes
+them. A run writes nothing when a root is missing or unreadable, a host, folder or store could not
+be read, a remote's git is older than 2.31, it found no store, or it found under half the best
+store count of the last 5 good runs (`stores` in aut state, entry `git_days`, with `last_ok` and
+`last_attempt`; `--allow-lower` also skips this rule and restarts that list). After an attempt
+from `aut scan`, the next waits 6 h; a manual `aut git-days` always runs. Nothing else leaves the
+machine: no repo name, SHA, email or message is sent or printed. Each run that is not a dry run
+sends one `agents.collector_scan` row, collector `git_days`, `events` = days written, also when
+it fails before the scan.
 
 ## Labels: activity_event kind `label` (`aut label`)
 

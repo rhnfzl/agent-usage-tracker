@@ -134,3 +134,43 @@ def test_soft_outcome_only_no_code(tmp_path):
 def test_task_names_match_the_tasks():
     assert config.LABEL_DECISION_TASKS == tuple(tasks.TASKS)
     assert config.LABEL_NOTE not in tasks.TASKS
+
+
+def test_agent_replies_are_text_only_and_stop_at_until(tmp_path):
+    from datetime import datetime, timezone
+
+    from agent_usage_tracker.collectors import claude_code
+    from agent_usage_tracker.event import make_event_id
+
+    d = tmp_path / ".claude" / "projects" / "p"
+    d.mkdir(parents=True)
+    def rec(kind, uid, minute, content):
+        return json.dumps({"type": kind, "uuid": uid, "message": {"content": content},
+                           "timestamp": f"2026-11-01T10:{minute:02d}:00Z"})
+    (d / "s1.jsonl").write_text("\n".join([
+        rec("assistant", "x0", 0, [{"type": "text", "text": "hello"}]),
+        rec("user", "u1", 1, "first"),
+        rec("assistant", "x1", 2, [{"type": "thinking", "thinking": "secret"},
+                                   {"type": "tool_use", "name": "Bash", "input": {}}]),
+        rec("user", "tr", 3, [{"type": "tool_result", "content": "tool output"}]),
+        rec("assistant", "x2", 4, [{"type": "text", "text": "done one"}]),
+        rec("user", "u2", 5, "second"),
+        rec("assistant", "x3", 6, [{"type": "text", "text": "done two"}]),
+        "not json"]))
+    e1, e2 = (make_event_id("claude_code", "steer", u) for u in ("u1", "u2"))
+    got = claude_code.agent_replies(tmp_path, {"s1"}, {e1, e2})
+    assert got == {e1: ("hello", "done one"), e2: ("done one", "done two")}
+    until = datetime(2026, 11, 1, 10, 6, tzinfo=timezone.utc)
+    assert claude_code.agent_replies(tmp_path, {"s1"}, {e1, e2}, until)[e2] == ("done one", "")
+    assert claude_code.agent_replies(tmp_path, {"other"}, {e1, e2}) == {}
+
+
+def test_a_steer_unit_carries_the_reply_it_answers_cut_to_its_end(tmp_path, monkeypatch):
+    src = tasks.Source(_cfg(tmp_path))
+    long = "some words " * tasks.REPLY_MAX + "the end"
+    monkeypatch.setattr(tasks.claude_code, "agent_replies",
+                        lambda home, sessions, want, until=None: {e: (long, "after") for e in want})
+    rows = [{"event_id": "e", "agent": "claude_code", "session_id": "s"}]
+    assert src.replies(rows)["e"][0].endswith("the end")
+    assert len(src.replies(rows)["e"][0]) == tasks.REPLY_MAX
+    assert src.replies(rows)["e"][1] == "after"

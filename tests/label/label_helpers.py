@@ -59,8 +59,9 @@ def _steer(uid: str, sid: str, ts: datetime, agent="claude_code", **attrs) -> di
 
 
 class FakeSource(tasks.Source):
-    def __init__(self, cfg, steers=(), episodes=(), acts=(), wins=(), labels=()):
+    def __init__(self, cfg, steers=(), episodes=(), acts=(), wins=(), labels=(), ready=NOW):
         super().__init__(cfg)
+        self._ready = ready
         self._s, self._e, self._a, self._w, self._l = (list(x) for x in
                                                         (steers, episodes, acts, wins, labels))
 
@@ -70,6 +71,9 @@ class FakeSource(tasks.Source):
 
     def episodes(self, since):
         return [e for e in self._e if e["last_ts"] >= since]
+
+    def episodes_ready(self):
+        return self._ready
 
     def activity(self, sessions, since, until):
         return [a for a in self._a if a["session_id"] in sessions and since <= a["ts"] < until]
@@ -146,5 +150,5 @@ def _gold(tmp: Path, golds: list[str]):
     for u, r in reqs.items():
         evalset.append_jsonl(evalset.eval_path(TASK, "gold"), {
             "unit_id": u, "gold": r.facts["text"].split()[0], "labeller": "human", "date": "d",
-            "task_ver": 1})
+            "task_ver": 2})
     return cfg, src, reqs

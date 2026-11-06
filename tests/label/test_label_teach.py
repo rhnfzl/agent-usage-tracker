@@ -204,3 +204,13 @@ def test_print_teach_shows_the_counts_and_the_spend(tmp_path, capsys):
         out = capsys.readouterr().out
         assert "3 units, local 2, sonnet 1 (unusable 0, failed 4, skipped 0)" in out
         assert "spent $0.25 of $5.00" in out and str(evalset.eval_path(TASK, "silver")) in out
+
+
+def test_sonnet_only_loads_no_local_model_and_skips_what_sonnet_may_not_read(tmp_path, monkeypatch):
+    cfg, src = _src(tmp_path, ["framing", "stop"])
+    src.wins = [_win(BASE - timedelta(days=2), 6, title="Private bank - statement")]
+    monkeypatch.setattr(teach, "make_backend", lambda *a: pytest.fail("loaded a local model"))
+    monkeypatch.setattr(teach, "ask_claude", lambda p: ('{"stop": 0.9, "framing": 0.1}', 0.01))
+    with _env(tmp_path):
+        c = teach.run_teach(cfg, TASK, 10, src=src, now=BASE, sonnet_only=True)
+        assert c["sonnet"] == 2 and c["local"] == 0

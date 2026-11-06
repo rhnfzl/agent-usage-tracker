@@ -206,6 +206,16 @@ def test_label_source_reads_and_note(dsn, episode):
     assert "turn" in {a["kind"] for a in src.activity(["s1"], since, until)}
     assert {"unit_id": "steer2", "task": "steer_intent"} in [a for _e, _t, a in
                                                             src.labels(since, until)]
+    assert src.episodes_ready() == T0 + timedelta(hours=1)     # no rebuild row: the newest episode
+    with connect(dsn) as conn:
+        for machine, collector, at in (("t", "claude_code", T0 + timedelta(hours=2)),
+                                       ("sink", "episode_link", T0 + timedelta(hours=3)),
+                                       ("t", "claude_code", T0 + timedelta(hours=4))):
+            conn.execute("INSERT INTO agents.collector_scan (machine, collector, started_at, "
+                         "finished_at, status, events, human) VALUES (%s, %s, %s, %s, 'ok', 0, 0)",
+                         (machine, collector, at, at + timedelta(minutes=1)))
+        conn.commit()
+    assert src.episodes_ready() == T0 + timedelta(hours=2)     # the last scan the rebuild saw
     for text in ("first", "second"):   # the first draft is kept
         label_run._insert_note(dsn, date(2026, 6, 15), text, "m")
     with connect(dsn) as conn:

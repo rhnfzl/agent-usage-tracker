@@ -132,7 +132,8 @@ other command refuses it.
 | `aut backfill` | reset the watermark for the selected agents, then scan all history | a transport |
 | `aut backfill --sessions-only [--dry-run]` | re-read all history and send only session rows; the watermark is untouched | `pg_dsn` (not with `--dry-run`) |
 | `aut backfill --activity-only [--dry-run]` | the same for activity rows (steers, commits, turns, links, ...); never usage. Both flags may be given together | `pg_dsn` (not with `--dry-run`) |
-| `aut status` | show machine, agents, transports and watermarks | |
+| `aut status` | show machine, agents, transports, watermarks and the age of the last good backup | |
+| `aut backup [--check]` | an encrypted, deduplicated restic snapshot of the logs, config, label files and `repo_key.salt` ([docs/new-laptop.md](docs/new-laptop.md)), then the retention (`restic forget`: 14 daily, 8 weekly, 12 monthly; `--prune` once a week). Skips with exit 0 while another run holds the lock, on battery below 20%, or when the repository is unreachable. `--check` runs `restic check` and sends nothing | `[backup]` in `config.toml`, `restic` on `PATH` |
 | `aut export [--out FILE]` | write all usage rows as CSV (stdout by default), deduplicated, columns in sink order for `COPY`. Exits 1 if a collector that feeds the CSV could not fully read a source, so the CSV is partial (`activitywatch` has no usage rows, so it never does); `backfill --sessions-only`/`--activity-only` do the same for the collectors with those rows | |
 | `aut sync-prices [--out FILE] [--litellm-url URL] [--models-dev-url URL] [--genai-prices-url URL]` | build the API-equivalent price map, `model_prices.json` in the config dir by default; the URLs must be http(s) | network |
 | `aut time add --start T --end T` | record a manual active-time interval in local time, e.g. `--start "2026-11-03 09:00"` | `pg_dsn` |
@@ -143,6 +144,7 @@ other command refuses it.
 | `aut inspect --episode ID \| --day YYYY-MM-DD \| --label UNIT_ID` | local evidence page: why an episode (id or prefix), a day's episodes, or a label exists. Its linked correction form writes `agents.episode_correction` | `pg_dsn` |
 | `aut label run [--task T] [--since YYYY-MM-DD] [--dry-run]` | label new units since the watermark, for `label_tasks` or one task | `label` extra, `pg_dsn`, the model in the HF cache |
 | `aut history-steers [--dry-run]` | daily steer estimates for the lost 2026 logs, from the CLI history files (rows of kind `steer_estimate`, a count and no text) | `pg_dsn` |
+| `aut git-days [--dry-run] [--allow-lower]` | your commits per Amsterdam day from `since` to yesterday, zeros included, from every clone under `roots` and on each `remotes` host (over `ssh`, read-only, no fetch). Writes only new days and days whose count went up to `agents.git_commit_day`, counts only; a day that would go down is counted in the summary and kept, unless `--allow-lower`. Writes nothing after a partial scan (a missing root, or a host, folder or repository it could not read, or a remote git older than 2.31), a scan with no repositories, or one with under half the repositories of the best recent run. `--dry-run` prints totals per year. With `enabled = true`, `aut scan` runs it once a day, and after a failure waits 6 h | `[git_days]` in `config.toml`, `pg_dsn` |
 | `aut label backfill --task T --days N` | label one task over the last N days; the nightly watermark is not moved back. `soft_outcome` always covers the last 14 days, whatever `--days` or `--since` say (it notes this on stderr) | same |
 | `aut label teach --task T --n N [--budget-usd X] [--days D]` | teacher (silver) labels for a stratified sample of up to N units (default spend cap 5 USD, window 90 days) | same, plus `claude` on `PATH` |
 | `aut label review [--task T] [--days D]` | answer gold labels one unit at a time on a local page | `pg_dsn` |
@@ -192,6 +194,8 @@ matter:
 | `label_model` | `mlx-community/gemma-4-31b-it-4bit` | a short name from [The models](#the-models) or a Hugging Face model id, read from the local cache only. `daily_note` needs an instruct model, so leave it on Gemma if you use that task |
 | `label_llama_server` | `llama-server` | the binary for `aurelis-2b` and `kev-4b`. Use a full path if the nightly job's `PATH` lacks it |
 | `label_precision`, `label_recall`, `label_coverage`, `label_budget_s` | `0.90`, `0.60`, `0.75`, `3600` | floors per label (a model that misses one is marked as failing), coverage bar, time budget of one run in seconds |
+| `[backup] repository`, `password_command`, `paths`, `excludes` | unset | for `aut backup`: the restic repository, the command restic runs for its password, the paths (replace the defaults) and excludes (added to the model-cache exclude) |
+| `[git_days] enabled`, `since`, `identities`, `shared_authors`, `roots`, `remotes` | `false`, `2022-02-03`, `[]`, `[]`, `["~/projects"]`, `[]` | for `aut git-days`: run it from `aut scan` once a day; the first day; your author emails; `{email_regex, repo_regex}` pairs for a shared author that counts only in matching repos (bots never count); local roots; `{host, roots}` read over `ssh -o BatchMode=yes`. Identities, hosts and paths live in `config.toml` only |
 
 Keys outside `[transport]` must come before the `[transport]` line in the file, or TOML puts
 them inside that table and aut never sees them.
@@ -243,6 +247,10 @@ events. Full rules: [CONTRACT.md](CONTRACT.md#active-time-agentstime_interval).
 `packaging/` ships units that run `aut scan` every 15 minutes (launchd, Task Scheduler) or 10
 minutes (systemd). Setup steps are in [packaging/README.md](packaging/README.md).
 
+The launchd scan also runs at login and on wake, so a laptop that was away for a week catches up
+at once. `packaging/launchd/dev.aut.backup.plist` runs `aut backup` daily and at login. For a long
+gap, a backup and a new laptop, see [docs/new-laptop.md](docs/new-laptop.md).
+
 For more than the bare scan, run the wrapper `packaging/launchd/aut-scan.sh` instead (macOS
 and Linux; on systemd set `ExecStart=/bin/bash %h/.config/agent-usage-tracker/aut-scan.sh`).
 Copy it to `~/.config/agent-usage-tracker/`. It needs `nc` and `ssh` on `PATH` when a tunnel is
@@ -282,6 +290,8 @@ fails to send prints a warning and never fails the scan.
 
 Optional, Apple silicon. The model reads the text on this machine and only the label is sent.
 `daily_note` is the exception: it sends the short note the model writes from a day's counts.
+Saved calibration applies only to its exact task and prompt version. Older choices run
+uncalibrated until explicitly replaced. Episode-based day tasks wait for a known rebuild.
 
 1. Fetch the models you want to compare once (see [The models](#the-models)).
 2. `aut label teach --task steer_intent --n 200` writes silver labels.
@@ -450,6 +460,12 @@ and most fail without an error: an empty `pg_dsn` quietly stops session, activit
 heartbeat rows, empty `cf_access_client_*` values drop the Cloudflare Access headers, and an
 empty `repo_key_salt` falls back to this machine's random `repo_key.salt`, so repo, branch,
 ticket, PR and SHA keys stop matching other machines.
+
+**`... repo_key.salt is missing, but the sink already holds repo keys from machine ...`.** A new
+laptop without the old salt. A new salt would make every repo key differ from the old ones, so
+`aut scan` (also a dry run), `aut label` and `aut outcomes` stop and send nothing. Copy the old
+`repo_key.salt` next to the state file, or set `repo_key_salt` in `config.toml` to its contents
+([docs/new-laptop.md](docs/new-laptop.md)).
 
 **`aut label run` labels nothing.** `label_tasks` is empty by default. List the tasks there or
 pass `--task`.

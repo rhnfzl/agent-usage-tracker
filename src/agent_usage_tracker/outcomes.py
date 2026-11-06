@@ -43,7 +43,7 @@ from .config import AutError, Config
 from .outcome_git import (DAY, DECIDE_S, Clone, CloneRead, GitFailed, ResolvedCommit, fetch_clones,
                           find_clones, gh_merged, read_clone, resolve_shas, run_git, survival)
 from .push import job_heartbeat
-from .repo_keys import RepoKeys
+from .repo_keys import RepoKeys, refuse_new_salt
 from .sink import connect, write_many
 from .state import state_path, atomic_write_text, load_json_dict
 
@@ -378,6 +378,7 @@ def run_outcomes(cfg: Config, *, refresh: bool, dry_run: bool,
     fetches the clones and turns on gh. A dry run reads the sink and the clones as they are and
     changes nothing: no rows, no cache, no heartbeat, no fetch, no gh, even with refresh."""
     dsn = cfg.require_pg("outcomes (it reads the commit rows)")
+    refuse_new_salt(cfg.repo_key_salt, dsn, cfg.machine)
     started = datetime.now(timezone.utc)
     decided = (now or started).astimezone(timezone.utc)
     with job_heartbeat(cfg, "outcomes", started, dry_run=dry_run) as beat:
@@ -452,6 +453,7 @@ def build_manual_outcome(cfg: Config, outcome: str, cwd: str, session: str | Non
     if not sid:
         raise AutError("outcome: no interactive session found for this directory; "
                        "pass --session ID")
+    refuse_new_salt(cfg.repo_key_salt, cfg.pg_dsn, cfg.machine)
     ts = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
     return {"session_id": sid, "outcome": MANUAL[outcome], "ts": ts,
             "repo_key": RepoKeys(cfg.repo_key_salt).of_cwd(cwd)}
