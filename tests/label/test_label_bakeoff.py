@@ -545,12 +545,16 @@ def _choices(tmp_path, monkeypatch, records):
 
 def test_choose_writes_the_named_model_and_keeps_other_tasks(tmp_path, monkeypatch):
     with _env(tmp_path):
-        _choices(tmp_path, monkeypatch, [_row("big", 0.95), _row("small", 0.9)])
+        records = [_row("big", 0.95), _row("small", 0.9)]
+        for record in records:
+            record["prompt_ver"] = f"{TASK}@{tasks.TASKS[TASK].ver}/p{core.PROMPT_VER}"
+        _choices(tmp_path, monkeypatch, records)
         (tmp_path / "label.json").write_text('{"tasks": {"other": {"backend": "x"}}}')
         win = bakeoff.choose(_cfg(tmp_path), TASK, "small")
         assert win["model_id"] == "small" and win["tau"] == {"stop": 0.6}
         saved = json.loads((tmp_path / "label.json").read_text())
         assert saved["tasks"]["other"] == {"backend": "x"} and saved["tasks"][TASK] == win
+        assert core.load_choice(TASK, tasks.TASKS[TASK].ver).tau == win["tau"]
 
 
 def test_choose_reads_only_the_newest_record_of_a_model(tmp_path, monkeypatch):

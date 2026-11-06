@@ -455,7 +455,7 @@ def test_two_encoder_tasks_do_not_share_a_backend(tmp_path, monkeypatch):
         def distribution(self, req):
             return {}
     monkeypatch.setattr(run, "make_backend", lambda task, c, m, llama: built.append(task) or Fake())
-    monkeypatch.setattr(run, "load_choice", lambda name: core.Choice(backend="encoder"))
+    monkeypatch.setattr(run, "load_choice", lambda name, version: core.Choice(backend="encoder"))
     with _env(tmp_path):
         run.run_label(_cfg(tmp_path), ["steer_intent", "work_category"], dry_run=True,
                       src=FakeSource(_cfg(tmp_path)), now=NOW)

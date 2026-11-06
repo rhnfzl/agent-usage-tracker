@@ -59,7 +59,7 @@ def _steer(uid: str, sid: str, ts: datetime, agent="claude_code", **attrs) -> di
 
 
 class FakeSource(tasks.Source):
-    def __init__(self, cfg, steers=(), episodes=(), acts=(), wins=(), labels=(), ready=None):
+    def __init__(self, cfg, steers=(), episodes=(), acts=(), wins=(), labels=(), ready=NOW):
         super().__init__(cfg)
         self._ready = ready
         self._s, self._e, self._a, self._w, self._l = (list(x) for x in

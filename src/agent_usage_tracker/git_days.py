@@ -1,6 +1,7 @@
 """`aut git-days`: the owner's commits per Amsterdam day, from every clone, to agents.git_commit_day.
 
-Reads `git log --branches --remotes --tags --no-merges` (no stash, no notes) in every object store under [git_days] roots on this machine and,
+Reads branches, remotes, tags and all registered worktree heads (no merges, stash or notes),
+including detached heads outside scan roots, in each object store under [git_days] roots and,
 over `ssh -o BatchMode=yes`, under each remote's roots, with the same hardened git (git_safe). No
 fetch. A commit counts once (by SHA) when its author email is one of the owner's identities, or a
 shared author's in a repo whose name matches that author's repo_regex; a bot never counts.
@@ -103,7 +104,10 @@ def _scan_local(cfg: Config, tz: tzinfo, found: Found) -> None:
                 elif common and os.path.realpath(common) not in seen:
                     seen.add(os.path.realpath(common))
                     found.stores += 1
-                    log = run_git(dirpath, *LOG_ARGS)
+                    worktrees = run_git(dirpath, "worktree", "list", "--porcelain")
+                    heads = [line[5:] for line in (worktrees or "").splitlines()
+                             if line.startswith("HEAD ")]
+                    log = run_git(dirpath, *LOG_ARGS, *heads) if worktrees is not None else None
                     if log is None:
                         found.failed += 1
                     else:
@@ -165,7 +169,11 @@ $c
   seen="$seen$c
 "
   printf '\\001%s\\n' "$c"
-  {_sh(git_argv(_DIR, *LOG_ARGS))} || printf '\\002\\n'
+  if ! heads=$({_sh(git_argv(_DIR, 'worktree', 'list', '--porcelain'))}); then
+    printf '\\002\\n'; continue
+  fi
+  heads=$(printf '%s\\n' "$heads" | sed -n 's/^HEAD //p')
+  {_sh(git_argv(_DIR, *LOG_ARGS))} $heads || printf '\\002\\n'
 done
 exit 0
 """

@@ -557,7 +557,7 @@ def choose(cfg: Config, task: str, model: str | None = None) -> dict[str, Any] |
     obj.setdefault("tasks", {})[task] = {
         "backend": win["backend"], "model_id": win["model_id"], "model_rev": win["model_rev"],
         "temperature": win["temperature"], "platt": win.get("platt"),
-        "calib_ver": win["calib_ver"],
+        "calib_ver": win["calib_ver"], "prompt_ver": win["prompt_ver"],
         "tau": {k: v["tau"] for k, v in win["per_label"].items() if v["tau"] is not None}}
     atomic_write_text(p, json.dumps(obj, indent=2, sort_keys=True))
     return obj["tasks"][task]

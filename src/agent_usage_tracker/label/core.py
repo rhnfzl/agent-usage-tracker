@@ -144,11 +144,13 @@ def _check_entry(task: str, c: object) -> None:
         raise ValueError(f"the platt of {task} is not a table of yes, a and b")
 
 
-def load_choice(task: str) -> Choice:
+def load_choice(task: str, task_ver: int | None = None) -> Choice:
     try:
         c = read_choices().get("tasks", {}).get(task)
         if c is not None:
             _check_entry(task, c)
+            if task_ver is not None and c.get("prompt_ver") != f"{task}@{task_ver}/p{PROMPT_VER}":
+                raise ValueError(f"the calibration of {task} belongs to another prompt version")
     except (OSError, ValueError) as exc:
         print(f"aut: warning: {choice_path()} is unusable ({exc}); {task} runs uncalibrated, so "
               "none of its labels pass tau. Fix it or move it aside and re-run `aut label choose`.", file=sys.stderr)

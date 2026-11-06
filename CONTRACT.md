@@ -609,7 +609,7 @@ time, so it does not send time.
 
 ## What a label prompt reads
 
-`steer_intent` units carry `agent_reply_before`, the agent's last text before the steer. `work_category` episode days and `soft_outcome` episodes carry `last_agent_reply`, its latest text after the last steer. Text blocks only, redacted, cut to their last 1,500 characters, from Claude Code main logs. Every backend and `aut label teach` read the same facts. These fields moved all three tasks to version 2, so labels of version 1 no longer count.
+`steer_intent` units carry `agent_reply_before`, the agent's last text before the steer. `work_category` episode days and `soft_outcome` episodes carry `last_agent_reply`, its latest text after the last steer. Text blocks only, redacted, cut to their last 1,500 characters, from Claude Code main logs. Every backend and `aut label teach` read the same facts. These fields move all three tasks to version 2. Existing version 1 rows remain selected until replaced; their saved calibration cannot score the new prompts as confident.
 
 ## Steer estimates: activity_event kind `steer_estimate` (`aut history-steers`)
 
@@ -624,7 +624,9 @@ delete the rows of this kind.
 
 `(day, commits, scanned_at)`, insert-only; a day's latest `scanned_at` wins
 (`agents.git_commits_daily`). `day` is the Europe/Amsterdam date of the author date. `commits`
-counts distinct SHAs (`git log --branches --remotes --tags --no-merges`: no stash, no notes; every object store once: worktrees share one)
+counts distinct SHAs from branches, remotes, tags and registered worktree heads, including
+detached heads outside scan roots. Merges, stash and notes refs are excluded. Each object store
+is read once because worktrees share it. The scan reads repositories
 under `[git_days] roots` here and each remote's roots over `ssh`, with no fetch. A commit counts
 when its author email is in `identities` (lowercased), or matches a `shared_authors` email_regex in
 a repo whose folder name matches its repo_regex. A bot (`[bot]` in the email, or

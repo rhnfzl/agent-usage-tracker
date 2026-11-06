@@ -290,6 +290,8 @@ fails to send prints a warning and never fails the scan.
 
 Optional, Apple silicon. The model reads the text on this machine and only the label is sent.
 `daily_note` is the exception: it sends the short note the model writes from a day's counts.
+Saved calibration applies only to its exact task and prompt version. Older choices run
+uncalibrated until explicitly replaced. Episode-based day tasks wait for a known rebuild.
 
 1. Fetch the models you want to compare once (see [The models](#the-models)).
 2. `aut label teach --task steer_intent --n 200` writes silver labels.

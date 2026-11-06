@@ -96,8 +96,9 @@ def _day_window(name: str, wm: dict[str, Any], since: datetime | None, now: date
     for good. Never before since: then the window is empty."""
     start = local_midnight(_start(name, wm, since, now).astimezone().date())
     until = local_midnight(now.astimezone().date())
-    if ready is not None and name in _EPISODE_TASKS:
-        until = max(start, min(until, local_midnight(ready.astimezone().date())))
+    if name in _EPISODE_TASKS:
+        until = start if ready is None else max(
+            start, min(until, local_midnight(ready.astimezone().date())))
     return start, until
 
 
@@ -244,7 +245,8 @@ def run_label(cfg: Config, tasks: list[str] | None = None, since: datetime | Non
     with job_heartbeat(cfg, NAME, started, dry_run=dry_run) as beat:
         try:
             for name in names:
-                report[name], stopped = _label_one(run, name, since, now, load_choice(name),
+                choice = load_choice(name, TASKS[name].ver if name in TASKS else None)
+                report[name], stopped = _label_one(run, name, since, now, choice,
                                                    backend_for)
                 beat.events += report[name]["rows"] + report[name]["notes"]
                 if stopped:

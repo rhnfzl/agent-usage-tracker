@@ -156,6 +156,17 @@ def test_a_bad_platt_in_label_json_runs_uncalibrated(tmp_path, monkeypatch, caps
     assert core.load_choice("steer_intent").platt == good
 
 
+@pytest.mark.parametrize("prompt", [None, "steer_intent@1/p2", "steer_intent@2/p1"])
+def test_old_or_unversioned_calibration_cannot_label_new_prompts(tmp_path, monkeypatch, prompt):
+    monkeypatch.setenv("AUT_CONFIG", str(tmp_path / "config.toml"))
+    entry = {"tau": {"stop": 0.7}, "prompt_ver": prompt}
+    (tmp_path / "label.json").write_text(json.dumps({"tasks": {"steer_intent": entry}}))
+    assert core.load_choice("steer_intent", 2) == core.Choice()
+    entry["prompt_ver"] = f"steer_intent@2/p{core.PROMPT_VER}"
+    (tmp_path / "label.json").write_text(json.dumps({"tasks": {"steer_intent": entry}}))
+    assert core.load_choice("steer_intent", 2).tau == {"stop": 0.7}
+
+
 def _two_options(**kw) -> core.Request:
     base = dict(task="t", task_ver=2, unit="steer", unit_id="u", ts="2026-01-01T00:00:00+00:00",
                 facts={"text": "go", "n": 3, "names": ["é"]}, question="Which?", decision="choice",

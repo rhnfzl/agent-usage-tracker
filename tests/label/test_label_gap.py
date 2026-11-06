@@ -6,6 +6,8 @@ from __future__ import annotations
 import json
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 from agent_usage_tracker.label import run, tasks
 from label_helpers import ById, FakeSource, _cfg, _claude_log, _env, _steer
 from test_label import sink  # noqa: F401  (fixture)
@@ -37,12 +39,13 @@ def test_day_window_stops_at_the_rebuilt_episodes():
     _s, until = run._day_window("work_category", wm, None, NOW, ready=NOW)
     assert until == _midnight(NOW)
     _s, until = run._day_window("work_category", wm, None, NOW, ready=None)
-    assert until == _midnight(NOW)                      # nothing known: today's midnight, as before
+    assert until == start                              # no rebuild: preserve the pending days
     # titles come from this machine's aw-server, not from the episodes: never held back
     assert run._window("aw_title_relevance", wm, None, NOW, ready=GAP)[1] == _midnight(NOW)
 
 
-def test_gap_days_are_labelled_after_the_rebuild_not_before(tmp_path, sink):  # noqa: F811
+@pytest.mark.parametrize("ready", [None, NOW - timedelta(days=31)])
+def test_gap_days_are_labelled_after_the_rebuild_not_before(tmp_path, sink, ready):  # noqa: F811
     steers, eps = _gap_day(tmp_path)
     cfg = _cfg(tmp_path)
     wm0 = _midnight(NOW - timedelta(days=31)).isoformat()
@@ -51,7 +54,7 @@ def test_gap_days_are_labelled_after_the_rebuild_not_before(tmp_path, sink):  # 
             {"collectors": {"label": {"work_category": wm0}}}))
         # the scan just delivered the month; the last rebuild saw only the days before the gap
         rep = run.run_label(cfg, ["work_category"], backend_for=lambda t, c: ById("planning"),
-                            src=FakeSource(cfg, steers, (), ready=NOW - timedelta(days=31)),
+                            src=FakeSource(cfg, steers, (), ready=ready),
                             now=NOW)
         assert rep["work_category"]["rows"] == 0
         wm = json.loads((tmp_path / "state.json").read_text())["collectors"]["label"]
@@ -76,7 +79,7 @@ def test_episodes_ready_reads_the_rebuild_then_the_newest_episode(tmp_path, monk
 
     monkeypatch.setattr(tasks, "_sql", fake_sql)
     src = tasks.Source(_cfg(tmp_path))
-    assert src.episodes_ready() is None                 # an empty sink: no cap
+    assert src.episodes_ready() is None                 # an empty sink: day tasks wait
     assert seen[0][1] == ("test",)                      # this machine's scans only
     t1, t2 = datetime(2026, 10, 3, 12, tzinfo=timezone.utc), datetime(2026, 10, 5, tzinfo=timezone.utc)
     answers["agents.episode"] = t1

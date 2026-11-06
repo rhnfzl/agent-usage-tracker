@@ -101,6 +101,29 @@ def test_a_sha_in_two_stores_counts_once(world):
     assert git_days.day_counts(found.commits, date(2026, 11, 1), date(2026, 11, 5)) == EXPECTED
 
 
+@pytest.mark.parametrize("remote", [False, True])
+def test_detached_worktree_heads_count_even_outside_scan_roots(world, monkeypatch, remote):
+    if remote and sys.platform == "win32":
+        pytest.skip("the remote script is POSIX sh")
+    repo = world / "projects" / "app"
+    detached = world / "outside"
+    _g(repo, "worktree", "add", "-q", "--detach", str(detached))
+    _g(detached, "commit", "-q", "--allow-empty", "-m", "detached linked work",
+       when="2026-11-05T10:00:00+00:00")
+    _g(repo, "checkout", "-q", "--detach")
+    _g(repo, "commit", "-q", "--allow-empty", "-m", "detached main work",
+       when="2026-11-05T11:00:00+00:00")
+    cfg = _cfg(world)
+    if remote:
+        monkeypatch.setattr(git_days, "_ssh_argv", lambda host: ["sh", "-s"])
+        cfg = _cfg(world, git_days_roots=(),
+                   git_days_remotes=(("local", (str(world / "projects"),)),))
+    found = git_days.scan_all(cfg, TZ)
+    assert (found.stores, found.failed) == (2, 0)
+    expected = {**EXPECTED, date(2026, 11, 5): 2}
+    assert git_days.day_counts(found.commits, date(2026, 11, 1), date(2026, 11, 5)) == expected
+
+
 def test_bots_never_count_even_when_a_pattern_matches_them(world):
     cfg = _cfg(world, git_days_shared_authors=((r".*", r".*"),))
     found = git_days.scan_all(cfg, TZ)
