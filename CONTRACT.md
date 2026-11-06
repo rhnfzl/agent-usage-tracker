@@ -620,6 +620,27 @@ text, no session. A day with counted steers from that agent gets no estimate. Sl
 commands are left out, so this is not the steer rule. No view counts it as a steer. To remove it,
 delete the rows of this kind.
 
+## Commits per day: agents.git_commit_day (`aut git-days`)
+
+`(day, commits, scanned_at)`, insert-only; a day's latest `scanned_at` wins
+(`agents.git_commits_daily`). `day` is the Europe/Amsterdam date of the author date. `commits`
+counts distinct SHAs (`git log --branches --remotes --tags --no-merges`: no stash, no notes; every object store once: worktrees share one)
+under `[git_days] roots` here and each remote's roots over `ssh`, with no fetch. A commit counts
+when its author email is in `identities` (lowercased), or matches a `shared_authors` email_regex in
+a repo whose folder name matches its repo_regex. A bot (`[bot]` in the email, or
+`noreply@anthropic.com`) never counts. One run has one `scanned_at` and inserts every day from
+`since` to yesterday that has no row or whose count went up, zeros included: a day with no row is
+not a zero, and the ledger hides on a gap. A stored day never goes down by itself: the run summary
+counts such days and their total drop (no names), and only `aut git-days --allow-lower` writes
+them. A run writes nothing when a root is missing or unreadable, a host, folder or store could not
+be read, a remote's git is older than 2.31, it found no store, or it found under half the best
+store count of the last 5 good runs (`stores` in aut state, entry `git_days`, with `last_ok` and
+`last_attempt`; `--allow-lower` also skips this rule and restarts that list). After an attempt
+from `aut scan`, the next waits 6 h; a manual `aut git-days` always runs. Nothing else leaves the
+machine: no repo name, SHA, email or message is sent or printed. Each run that is not a dry run
+sends one `agents.collector_scan` row, collector `git_days`, `events` = days written, also when
+it fails before the scan.
+
 ## Labels: activity_event kind `label` (`aut label`)
 
 `aut label run [--task T] [--since YYYY-MM-DD] [--dry-run]` and `aut label backfill --task T

@@ -7,7 +7,8 @@ requires-python = ">=3.11"
 license = { text = "MIT" }
 keywords = ["tokens", "usage", "coding-agent", "claude-code", "codex", "cursor", "pi", "observability"]
 # Base install has ZERO runtime dependencies: stdlib json / sqlite3 / urllib / tomllib / hashlib.
-dependencies = []
+# The one exception is Windows only: it ships no time zone database, and zoneinfo needs one.
+dependencies = ["tzdata; sys_platform == 'win32'"]
 
 [project.optional-dependencies]
 # Only needed if you use the direct-Postgres fallback transport (transport.pg_dsn).

@@ -129,5 +129,10 @@ needs to run a retention on this repository.
 8. Install the two launchd jobs: the scan (`dev.aut.scan.plist`, or the wrapper and retry job in
    `packaging/README.md`) and the backup (`dev.aut.backup.plist`). Both run at login, and the scan
    also runs on wake.
-9. On the machine that labels (`AUT_LABEL=1`), download the label models again. `label.json` and
+9. If `[git_days]` is enabled, check that `ssh -o BatchMode=yes <host> true` works for each
+   remote (keys and `~/.ssh/config` aliases), and run `aut git-days --dry-run`: its year totals
+   should match the old laptop's. Clone every repo the old laptop had under `roots` first: a run
+   that finds under half the repositories of the best recent run writes nothing, and a day whose
+   count would go down is kept as stored (the summary counts them; `--allow-lower` rewrites).
+10. On the machine that labels (`AUT_LABEL=1`), download the label models again. `label.json` and
    the gold files came back with the restore.
