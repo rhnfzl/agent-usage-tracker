@@ -643,6 +643,14 @@ machine: no repo name, SHA, email or message is sent or printed. Each run that i
 sends one `agents.collector_scan` row, collector `git_days`, `events` = days written, also when
 it fails before the scan.
 
+Configured roots resolve to physical paths. Shared clones receive an exact per-command
+`safe.directory` exception after clearing inherited exceptions. No global Git setting changes.
+All Git transports and lazy fetching are disabled for these reads. Repository hooks, fsmonitor,
+external diffs, text conversion and signature commands remain disabled. Discovery does not
+follow nested directory symlinks and skips generated Python caches and vendored directories.
+`exclude_dirs` names exact absolute physical paths outside the owner's source scope, with no
+wildcard matching. It defaults to empty. Any other unreadable directory fails the complete scan.
+
 ## Labels: activity_event kind `label` (`aut label`)
 
 `aut label run [--task T] [--since YYYY-MM-DD] [--dry-run]` and `aut label backfill --task T
@@ -808,3 +816,13 @@ reference certainty here, not a fitted threshold. `signals` carries direct yes/n
 agent-review answers and question hashes. It never carries review reasons, source text or paths.
 Calibrated views and daily notes exclude the working namespace. Working estimate views retain
 unknowns in share denominators and report reviewed-signal counts without population weighting.
+
+Ongoing local estimates use distinct tasks `working.local.work_category`,
+`working.local.steer_intent` and `working.local.soft_outcome`, with policy `local-decision-v1`.
+They never use the frozen Sonnet policy. `provisional` is true, `human_verified` and `calibrated`
+are false, and `source_scope` is `ongoing_local_eligible`. Weight is 1 per eligible unit.
+`policy_id`, `source_eval_sha256`, input hashes and member revisions identify the saved recipe.
+`native_score` is the unrounded combined score, not validated accuracy; `p` remains rounded.
+A score at or below the recipe minimum becomes `label: unknown` and `below_tau: true`.
+Steer timestamps remain the event time; assessed outcomes retain the episode start time.
+No public view may silently combine this ongoing coverage with the frozen historical frame.

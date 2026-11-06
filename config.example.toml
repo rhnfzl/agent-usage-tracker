@@ -114,6 +114,7 @@ agents = ["claude_code", "codex", "cursor_api", "cursor_cli", "pi"]
 # [backup]
 # repository = "sftp:backup-host:/srv/restic/aut"       # an ~/.ssh/config Host alias works here
 # password_command = "security find-generic-password -s aut-backup -w"
+# retention = false                 # keep every snapshot; no forget or prune
 # paths = ["~/.claude/projects"]     # REPLACES the default list (docs/new-laptop.md has it)
 # excludes = ["*.tmp"]               # ADDED to the default exclude (~/.local/share/aut/label/models)
 
@@ -130,6 +131,7 @@ agents = ["claude_code", "codex", "cursor_api", "cursor_cli", "pi"]
 # identities = ["you@example.com"]              # your author emails (compared lowercased)
 # shared_authors = [{ email_regex = "^shared@", repo_regex = "^some_repo_pattern$" }]
 # roots = ["~/projects"]                        # searched 6 levels deep, vendored folders skipped
+# exclude_dirs = []                             # exact physical paths outside your source scope
 # remotes = [{ host = "my-vm", roots = ["~/projects"] }]     # an ~/.ssh/config Host alias
 
 # Keep [transport] LAST: every key below a table header belongs to that table, so a top-level

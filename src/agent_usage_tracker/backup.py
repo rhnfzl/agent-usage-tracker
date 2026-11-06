@@ -21,6 +21,7 @@ import os
 import re
 import subprocess  # nosec B404 # restic and pmset, argv lists, no shell
 import sys
+from glob import glob
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -45,9 +46,18 @@ PRUNE_EVERY = timedelta(days=7)
 
 def default_paths(cfg: Config) -> list[Path]:
     from .label.core import data_dir     # here, not at the top: `aut` itself loads no label module
+    from .collectors.cursor import cursor_db
     h = cfg.home
-    return [h / ".claude" / "projects", h / ".codex" / "sessions", h / ".codex" / "history.jsonl",
-            h / ".codex" / "archived_sessions", h / ".cursor" / "chats",
+    cursor = cursor_db(cfg)
+    cursor_paths = [cursor, Path(str(cursor) + "-wal"), Path(str(cursor) + "-shm")] \
+        if cfg.cursor_db_path else [cursor.parent.parent]
+    manifests = [Path(p) for p in glob(os.path.expanduser(cfg.cursor_sdk_manifests), recursive=True)] \
+        if cfg.cursor_sdk_manifests else []
+    return [h / ".claude" / "projects", h / ".claude" / "history.jsonl",
+            h / ".codex" / "sessions", h / ".codex" / "history.jsonl",
+            h / ".codex" / "archived_sessions", h / ".codex" / "session_index.jsonl",
+            h / ".cursor" / "chats", h / ".cursor" / "projects", *cursor_paths,
+            h / ".pi" / "agent" / "sessions", *manifests,
             h / "Library" / "Application Support" / "activitywatch",
             config_path().parent,           # config.toml, label.json, scan.env
             data_dir(),                     # label state and eval/ gold files; models excluded
@@ -191,7 +201,8 @@ def _locked(cfg: Config, env: dict[str, str], check: bool) -> int:
     if r.returncode == _PARTIAL:
         print(f"aut backup: warning: some files could not be read: {_tail(r)}", file=sys.stderr)
     _record("ok" if r.returncode == 0 else "ok, some files unreadable", ok=True)
-    _forget(cfg, env)
+    if cfg.backup_retention:
+        _forget(cfg, env)
     return 0
 
 

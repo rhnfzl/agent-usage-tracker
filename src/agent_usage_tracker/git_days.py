@@ -31,7 +31,6 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .config import AutError, Config
 from .git_safe import HARDENED_ENV, git_argv
-from .outcome_git import _common_dir, run_git
 from .push import job_heartbeat, redacted_error
 from .sink import connect, write_many
 from .state import collector_wm, load_state, save_state
@@ -39,7 +38,7 @@ from .state import collector_wm, load_state, save_state
 NAME = "git_days"                   # its aut state entry and heartbeat collector
 LEDGER_TZ = "Europe/Amsterdam"      # the ledger's day, as in the sink's views
 LOG_ARGS = ("log", "--branches", "--remotes", "--tags", "--no-merges", "--format=%H%x09%aI%x09%ae")
-_PRUNE = ("node_modules", ".venv", "venv", "vendor")
+_PRUNE = ("node_modules", ".venv", "venv", "vendor", "__pycache__")
 _MAX_DEPTH = 6                      # folders below a root; its .git sits one deeper
 _BOT = re.compile(r"\[bot\]|^noreply@anthropic\.com$")
 MIN_STORE_SHARE = 0.5
@@ -49,6 +48,21 @@ RETRY_AFTER = timedelta(hours=6)    # after an attempt that failed or was refuse
 SSH_CONNECT_S = 10
 REMOTE_TIMEOUT_S = 900
 INSERT_SQL = "INSERT INTO agents.git_commit_day (day, commits, scanned_at) VALUES (%s, %s, %s)"
+READ_ENV = {**HARDENED_ENV, "GIT_NO_LAZY_FETCH": "1", "GIT_ALLOW_PROTOCOL": "", "LC_ALL": "C"}
+
+
+def _read_argv(path: str, sub: str, *args: str) -> list[str]:
+    # Configured physical roots authorize reads of shared clones, never wildcard or global trust.
+    argv = git_argv(path, sub, *args)
+    return [*argv[:3], "-c", "safe.directory=", "-c", f"safe.directory={path}", *argv[3:]]
+
+
+def _read_git(path: str, sub: str, *args: str) -> subprocess.CompletedProcess[str] | None:
+    try:
+        return subprocess.run(_read_argv(path, sub, *args), capture_output=True, text=True,
+                              errors="replace", timeout=300, env={**os.environ, **READ_ENV})
+    except (OSError, subprocess.SubprocessError):
+        return None
 
 
 @dataclass(slots=True)
@@ -91,36 +105,44 @@ def _scan_local(cfg: Config, tz: tzinfo, found: Found) -> None:
         found.failed += 1
 
     for root in cfg.git_days_roots:
-        base = os.path.expanduser(root)
+        base = os.path.realpath(os.path.expanduser(root))
+        if base in cfg.git_days_exclude_dirs:
+            continue
         if not os.path.isdir(base):         # missing or unmounted: its repos would read as zero
             found.failed += 1
             continue
         for dirpath, dirnames, filenames in os.walk(base, onerror=unreadable):
             depth = dirpath[len(base):].count(os.sep)
             if ".git" in dirnames or ".git" in filenames:
-                common = _common_dir(dirpath)
+                rev = _read_git(dirpath, "rev-parse", "--path-format=absolute", "--git-common-dir")
+                common = rev.stdout.strip() if rev is not None and rev.returncode == 0 else \
+                    "" if rev is not None and ("not a git repository" in rev.stderr or
+                                              "invalid gitfile format" in rev.stderr) else None
                 if common is None:
                     found.failed += 1
                 elif common and os.path.realpath(common) not in seen:
                     seen.add(os.path.realpath(common))
                     found.stores += 1
-                    worktrees = run_git(dirpath, "worktree", "list", "--porcelain")
+                    wt = _read_git(dirpath, "worktree", "list", "--porcelain")
+                    worktrees = wt.stdout if wt is not None and wt.returncode == 0 else None
                     heads = [line[5:] for line in (worktrees or "").splitlines()
-                             if line.startswith("HEAD ")]
-                    log = run_git(dirpath, *LOG_ARGS, *heads) if worktrees is not None else None
-                    if log is None:
+                             if line.startswith("HEAD ") and line[5:].strip("0")]
+                    log = _read_git(dirpath, *LOG_ARGS, *heads) if worktrees is not None else None
+                    if log is None or log.returncode:
                         found.failed += 1
                     else:
-                        _take(log, repo_name(common), cfg, tz, found.commits)
+                        _take(log.stdout, repo_name(common), cfg, tz, found.commits)
             dirnames[:] = [] if depth >= _MAX_DEPTH else \
-                [n for n in dirnames if n not in (*_PRUNE, ".git")]
+                [n for n in dirnames if n not in (*_PRUNE, ".git") and
+                 os.path.join(dirpath, n) not in cfg.git_days_exclude_dirs]
 
 
 _DIR = "\0"     # stands for the folder in a git argv; no real argument holds a NUL
 
 
 def _sh(argv: list[str]) -> str:
-    return " ".join('"$d"' if a == _DIR else shlex.quote(a) for a in argv)
+    return " ".join('"$d"' if a == _DIR else '"safe.directory=$d"'
+                    if a == "safe.directory=" + _DIR else shlex.quote(a) for a in argv)
 
 
 def _sh_root(root: str) -> str:
@@ -129,14 +151,17 @@ def _sh_root(root: str) -> str:
     return shlex.quote(root)
 
 
-def remote_script(roots: Iterable[str]) -> str:
+def remote_script(roots: Iterable[str], exclude_dirs: Iterable[str] = ()) -> str:
     """POSIX sh doing what _scan_local does: \\1<common dir> starts a store's log lines, \\2 marks a
     missing root, a folder find could not read or a store git could not read, \\3 a git older than
     2.31 (no --path-format). A stale .git that holds no repository is skipped, as locally. stderr
     stays its own stream: ssh hands it back, and it is never printed (it names paths)."""
-    env = " ".join(f"{k}={shlex.quote(v)}" for k, v in HARDENED_ENV.items())
+    env = " ".join(f"{k}={shlex.quote(v)}" for k, v in READ_ENV.items())
     prune = " -o ".join(f"-name {n}" for n in _PRUNE)
-    rev = _sh(git_argv(_DIR, "rev-parse", "--path-format=absolute", "--git-common-dir"))
+    for path in exclude_dirs:
+        pattern = "".join("\\" + c if c in "\\*?[]" else c for c in path)
+        prune += " -o -path " + shlex.quote(pattern)
+    rev = _sh(_read_argv(_DIR, "rev-parse", "--path-format=absolute", "--git-common-dir"))
     return f"""export {env} LC_ALL=C
 set -- $(git version)
 v=${{3:-0.0}}
@@ -150,6 +175,7 @@ seen='
 '
 for root in {" ".join(map(_sh_root, roots))}; do
   if [ -d "$root" ]; then
+    root=$(CDPATH= cd "$root" && pwd -P) || {{ printf '\\002\\n'; continue; }}
     find -H "$root" -maxdepth {_MAX_DEPTH + 1} \\( {prune} \\) -prune \
 -o -name .git -prune -print || printf '\\002\\n'
   else
@@ -169,18 +195,19 @@ $c
   seen="$seen$c
 "
   printf '\\001%s\\n' "$c"
-  if ! heads=$({_sh(git_argv(_DIR, 'worktree', 'list', '--porcelain'))}); then
+  if ! heads=$({_sh(_read_argv(_DIR, 'worktree', 'list', '--porcelain'))}); then
     printf '\\002\\n'; continue
   fi
-  heads=$(printf '%s\\n' "$heads" | sed -n 's/^HEAD //p')
-  {_sh(git_argv(_DIR, *LOG_ARGS))} $heads || printf '\\002\\n'
+  heads=$(printf '%s\\n' "$heads" | sed -n '/^HEAD 0*$/d;s/^HEAD //p')
+  {_sh(_read_argv(_DIR, *LOG_ARGS))} $heads || printf '\\002\\n'
 done
 exit 0
 """
 
 
 def _ssh_argv(host: str) -> list[str]:
-    return ["ssh", "-o", "BatchMode=yes", "-o", f"ConnectTimeout={SSH_CONNECT_S}", host,
+    return ["ssh", "-o", "BatchMode=yes", "-o", "ClearAllForwardings=yes",
+            "-o", f"ConnectTimeout={SSH_CONNECT_S}", host,
             "sh", "-s"]
 
 
@@ -188,7 +215,8 @@ def _scan_remote(i: int, host: str, roots: tuple[str, ...], cfg: Config, tz: tzi
                  found: Found) -> None:
     try:
         r = subprocess.run(  # nosec B603 # no shell here; the host is validated by config
-            _ssh_argv(host), input=remote_script(roots), capture_output=True, text=True,
+            _ssh_argv(host), input=remote_script(roots, cfg.git_days_exclude_dirs),
+            capture_output=True, text=True,
             errors="replace", timeout=REMOTE_TIMEOUT_S)
         code: int | None = r.returncode
     except (OSError, subprocess.SubprocessError):

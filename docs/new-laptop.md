@@ -34,8 +34,13 @@ the dedup step below). `aut scan` already is the catch-up.
 `aut backup` sends an encrypted, deduplicated [restic](https://restic.net) snapshot to a
 repository you choose (an SFTP server, a restic REST server, S3, ...). It covers:
 
-- `~/.claude/projects`, `~/.codex/sessions`, `~/.codex/history.jsonl`, `~/.codex/archived_sessions`
-  and `~/.cursor/chats`: the logs
+- `~/.claude/projects` and `~/.claude/history.jsonl`: Claude Code sessions and typed history
+- `~/.codex/sessions`, `~/.codex/history.jsonl`, `~/.codex/session_index.jsonl` and
+  `~/.codex/archived_sessions`: Codex sessions and history
+- `~/.cursor/chats`, `~/.cursor/projects` and the desktop Cursor User directory: CLI, SDK and IDE
+  stores. An explicit `cursor_db_path` backs up that database and its WAL/SHM files only.
+- `~/.pi/agent/sessions`: Pi sessions. Files matching `cursor_sdk_manifests` also count, including
+  manifests outside the standard Cursor folders.
 - `~/Library/Application Support/activitywatch`: the window history
 - `~/.config/agent-usage-tracker`: `config.toml`, `label.json`, `scan.env`
 - `~/.local/share/aut`: the label state and the `eval/` gold files, but not the model caches under
@@ -83,8 +88,15 @@ After each good backup, `aut backup` also runs the retention on this machine's s
 `restic forget --tag aut --host <machine> --keep-daily 14 --keep-weekly 8 --keep-monthly 12`, with
 `--prune` at most once a week (the time of the last prune is kept in `backup.json`). Nothing else
 needs to run a retention on this repository.
+Set `retention = false` in `[backup]` to keep every snapshot and disable both forget and prune.
+Use this for a new installation until retention deletion is explicitly approved.
 
 `aut status` shows the age of the last good backup.
+
+The backup password must have a recovery copy outside the Mac. Keep it separate from the SFTP
+account and repository, readable only by the recovery owner. Test a restore before relying on
+the first snapshot. A live SQLite store can change during backup; inspect restored databases
+with SQLite's integrity check when verifying a backup.
 
 ## Move to a new laptop
 

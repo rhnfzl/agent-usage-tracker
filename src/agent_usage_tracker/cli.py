@@ -168,7 +168,7 @@ def _label_run(cfg: Config, args: argparse.Namespace) -> None:
     else:
         since, tasks, dry = args.since, [args.task] if args.task else None, args.dry_run
     report = label_run.run_label(cfg, tasks, local_midnight(since) if since else None,
-                                 dry_run=dry)
+                                 dry_run=dry, local_estimates=getattr(args, "local_estimates", False))
     label_run.print_report(report, dry_run=dry)
     failed = [name for name, c in report.items() if c["failed"]]
     if failed:
@@ -310,6 +310,8 @@ def _build_parser() -> argparse.ArgumentParser:
     p_lrun.add_argument("--since", type=date.fromisoformat,
                         help="local YYYY-MM-DD to start from instead of the watermark")
     p_lrun.add_argument("--dry-run", action="store_true", help="score and count, write nothing")
+    p_lrun.add_argument("--local-estimates", action="store_true",
+                       help="apply saved local decision recipes as separate provisional estimates")
     p_lback = lab_sub.add_parser("backfill", help="label one task over the last N days")
     p_lback.add_argument("--task", choices=LABEL_TASK_NAMES, required=True)
     p_lback.add_argument("--days", type=int, required=True)
