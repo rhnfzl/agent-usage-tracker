@@ -643,6 +643,14 @@ machine: no repo name, SHA, email or message is sent or printed. Each run that i
 sends one `agents.collector_scan` row, collector `git_days`, `events` = days written, also when
 it fails before the scan.
 
+Configured roots resolve to physical paths. Shared clones receive an exact per-command
+`safe.directory` exception after clearing inherited exceptions. No global Git setting changes.
+All Git transports and lazy fetching are disabled for these reads. Repository hooks, fsmonitor,
+external diffs, text conversion and signature commands remain disabled. Discovery does not
+follow nested directory symlinks and skips generated Python caches and vendored directories.
+`exclude_dirs` names exact absolute physical paths outside the owner's source scope, with no
+wildcard matching. It defaults to empty. Any other unreadable directory fails the complete scan.
+
 ## Labels: activity_event kind `label` (`aut label`)
 
 `aut label run [--task T] [--since YYYY-MM-DD] [--dry-run]` and `aut label backfill --task T

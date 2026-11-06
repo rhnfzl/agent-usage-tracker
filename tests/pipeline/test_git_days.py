@@ -253,6 +253,32 @@ def test_the_remote_script_reads_the_same_as_the_local_scan(world, monkeypatch):
     assert git_days.day_counts(found.commits, date(2026, 11, 1), date(2026, 11, 5)) == EXPECTED
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="shared-repo scan uses POSIX sh and symlinks")
+@pytest.mark.parametrize("remote", [False, True])
+def test_shared_reads_are_exact_scoped_hardened_and_offline(world, monkeypatch, remote):
+    outside = world / "outside"
+    _repo(outside, [(ME, "2026-11-05T10:00:00+00:00")])
+    (world / "projects" / "escape").symlink_to(outside, target_is_directory=True)
+    marker = world / "executed"
+    _g(world / "projects" / "app", "config", "core.fsmonitor", f"touch {marker}")
+    monkeypatch.setenv("GIT_TEST_ASSUME_DIFFERENT_OWNER", "1")
+    monkeypatch.setenv("GIT_ALLOW_PROTOCOL", "https:ssh:file")
+    monkeypatch.setenv("GIT_NO_LAZY_FETCH", "0")
+    assert subprocess.run(["git", "-C", str(world / "projects" / "app"), "status"],
+                          capture_output=True).returncode != 0
+    monkeypatch.setattr(git_days, "_ssh_argv", lambda host: ["sh", "-s"])
+    cfg = _cfg(world, git_days_roots=() if remote else (str(world / "projects"),),
+               git_days_remotes=(("local", (str(world / "projects"),)),) if remote else ())
+    found = git_days.scan_all(cfg, TZ)
+    assert (found.stores, found.failed) == (2, 0)
+    assert git_days.day_counts(found.commits, date(2026, 11, 1), date(2026, 11, 5)) == EXPECTED
+    assert not marker.exists()
+    argv = git_days._read_argv(str(world / "projects" / "app"), "log")
+    assert "safe.directory=" in argv and not any(a.endswith("=*") for a in argv)
+    assert git_days.READ_ENV["GIT_ALLOW_PROTOCOL"] == ""
+    assert git_days.READ_ENV["GIT_NO_LAZY_FETCH"] == "1"
+
+
 def test_run_if_due_respects_enabled_and_the_20_hour_gap(world, monkeypatch):
     ran: list = []
     monkeypatch.setattr(git_days, "run", lambda cfg, dry_run: ran.append(1) or
@@ -355,6 +381,43 @@ def test_the_remote_script_reports_a_missing_root_and_find_errors(world, monkeyp
             assert git_days.scan_all(cfg, TZ).failed == 1
         finally:
             blocked.chmod(0o755)
+
+
+@pytest.mark.skipif(not _posix_unreadable_ok(), reason="needs POSIX permissions, not as root")
+@pytest.mark.parametrize("remote", [False, True])
+def test_explicit_exclusions_are_literal_and_other_read_errors_still_fail(world, monkeypatch, remote):
+    root = world / "projects"
+    blocked = root / "foreign[1]"
+    blocked.mkdir()
+    (blocked / "child").mkdir()
+    blocked.chmod(0o744)
+    # The bracket in the excluded name must not also exclude a different owner's clone.
+    _repo(root / "foreign1", [(ME, "2026-11-05T10:00:00+00:00")])
+    monkeypatch.setattr(git_days, "_ssh_argv", lambda host: ["sh", "-s"])
+    cfg = _cfg(world, git_days_roots=() if remote else (str(root),),
+               git_days_remotes=(("local", (str(root),)),) if remote else (),
+               git_days_exclude_dirs=(str(blocked),))
+    try:
+        found = git_days.scan_all(cfg, TZ)
+        assert (found.stores, found.failed) == (3, 0)
+        blocked.chmod(0)
+        assert git_days.scan_all(cfg, TZ).failed == 0
+        assert git_days.scan_all(_cfg(world), TZ).failed > 0
+    finally:
+        blocked.chmod(0o755)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="remote reads use POSIX sh")
+@pytest.mark.parametrize("remote", [False, True])
+def test_a_configured_root_can_itself_be_excluded(world, monkeypatch, remote):
+    root = str((world / "projects" / "app").resolve())
+    monkeypatch.setattr(git_days, "_ssh_argv", lambda host: ["sh", "-s"])
+    cfg = _cfg(world, git_days_roots=() if remote else (root,),
+               git_days_remotes=(("local", (root,)),) if remote else (),
+               git_days_exclude_dirs=(root,))
+    found = git_days.scan_all(cfg, TZ)
+    assert (found.stores, found.failed) == (0, 0)
+    assert git_days.refusal(found, None) == "the scan found no repositories"
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="the remote script is POSIX sh")

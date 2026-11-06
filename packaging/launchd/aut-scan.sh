@@ -92,9 +92,11 @@ if [ "$rc" -eq 0 ] && [ "${AUT_LABEL:-}" = "1" ] \
     && [ "$(cat "$LABELMARK" 2>/dev/null)" != "$(date +%F)" ]; then
   date +%F >"$LABELMARK"
   echo "$(ts) label start" >>"$LOG"
-  label_args=()
-  if [ "${AUT_LABEL_MODE:-calibrated}" = "local" ]; then label_args+=(--local-estimates); fi
-  "$AUT" label run "${label_args[@]}" >>"$LOG" 2>&1
+  if [ "${AUT_LABEL_MODE:-calibrated}" = "local" ]; then
+    "$AUT" label run --local-estimates >>"$LOG" 2>&1
+  else
+    "$AUT" label run >>"$LOG" 2>&1
+  fi
   lrc=$?
   echo "$(ts) label done (exit $lrc)" >>"$LOG"
 fi

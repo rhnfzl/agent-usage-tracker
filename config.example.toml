@@ -131,6 +131,7 @@ agents = ["claude_code", "codex", "cursor_api", "cursor_cli", "pi"]
 # identities = ["you@example.com"]              # your author emails (compared lowercased)
 # shared_authors = [{ email_regex = "^shared@", repo_regex = "^some_repo_pattern$" }]
 # roots = ["~/projects"]                        # searched 6 levels deep, vendored folders skipped
+# exclude_dirs = []                             # exact physical paths outside your source scope
 # remotes = [{ host = "my-vm", roots = ["~/projects"] }]     # an ~/.ssh/config Host alias
 
 # Keep [transport] LAST: every key below a table header belongs to that table, so a top-level

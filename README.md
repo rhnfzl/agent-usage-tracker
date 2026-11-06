@@ -328,6 +328,11 @@ reasons and local file paths stay on the Mac. No model call or calibration runs 
 Deploy the companion sink schema and dashboard changes before using `--apply`.
 The sink's private `working_label_monthly` and `working_signal_monthly` views feed estimate panels.
 
+Git-day scans read shared clones within configured physical roots using exact, temporary trust
+exceptions. They disable all Git transports and lazy fetching. They skip generated Python caches
+and vendored directories. `git_days.exclude_dirs` can name exact physical paths outside your
+source scope, such as another user's inaccessible storage. Other read failures prevent a write.
+
 ### Ongoing local estimates
 
 New work can receive provisional labels from saved local decision-model recipes. These remain

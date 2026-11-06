@@ -127,6 +127,7 @@ class Config:
     backup_retention: bool = True
     # `aut git-days` ([git_days] table): the owner's commits per day, from local and remote clones.
     git_days_enabled: bool = False                       # true: `aut scan` runs it once a day
+    git_days_exclude_dirs: tuple[str, ...] = ()
     git_days_since: date = DEFAULT_GIT_DAYS_SINCE
     git_days_identities: tuple[str, ...] = ()            # lowercased author emails
     git_days_shared_authors: tuple[tuple[str, str], ...] = ()    # (email_regex, repo_regex)
@@ -256,6 +257,9 @@ def _git_days(data: dict[str, Any]) -> dict[str, Any]:
     section = data.get("git_days") or {}
     if not isinstance(section, dict):
         raise AutError("config: [git_days] must be a table")
+    exclude_dirs = _str_list(section, "exclude_dirs", "git_days.")
+    if any(not p.startswith("/") or "\n" in p or "\x00" in p for p in exclude_dirs):
+        raise AutError("config: git_days.exclude_dirs needs absolute physical directory paths")
     shared = []
     for i, entry in enumerate(section.get("shared_authors") or []):
         if not isinstance(entry, dict):
@@ -290,6 +294,7 @@ def _git_days(data: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(since, date):
         raise AutError("config: git_days.since must be a date (YYYY-MM-DD)")
     return {"git_days_enabled": _as_bool(section.get("enabled", False)),
+            "git_days_exclude_dirs": exclude_dirs,
             "git_days_since": since,
             "git_days_identities": tuple(e.strip().lower() for e in
                                          _str_list(section, "identities", "git_days.")),
