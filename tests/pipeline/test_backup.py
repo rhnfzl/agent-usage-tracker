@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import fcntl
 import json
 import plistlib
 import subprocess
@@ -144,6 +143,7 @@ def test_a_failed_backup_raises_and_a_partial_one_counts(world):
 
 def test_an_overlapping_run_is_skipped(world):
     cfg, fake, tmp = world
+    fcntl = pytest.importorskip("fcntl")                 # no flock on Windows
     with open(tmp / "state" / "backup.lock", "a") as held:
         fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
         assert backup.run_backup(cfg) == 0
