@@ -114,6 +114,7 @@ agents = ["claude_code", "codex", "cursor_api", "cursor_cli", "pi"]
 # [backup]
 # repository = "sftp:backup-host:/srv/restic/aut"       # an ~/.ssh/config Host alias works here
 # password_command = "security find-generic-password -s aut-backup -w"
+# retention = false                 # keep every snapshot; no forget or prune
 # paths = ["~/.claude/projects"]     # REPLACES the default list (docs/new-laptop.md has it)
 # excludes = ["*.tmp"]               # ADDED to the default exclude (~/.local/share/aut/label/models)
 

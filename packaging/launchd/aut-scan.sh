@@ -20,10 +20,13 @@
 #   AUT_TUNNEL_HOST=user@host                # unset (the default) means no tunnel, scan direct
 #   AUT_TUNNEL_SPEC=15432:10.0.0.5:5432      # ssh -L argument; required with AUT_TUNNEL_HOST
 #   AUT_LABEL=1                              # run the nightly `aut label run` here (needs aut[label])
+#   AUT_LABEL_MODE=local                     # saved local estimates, separate from calibrated labels
 #
 # The env file exists because launchd and systemd do not inherit your shell environment. Keep
 # secrets out of it: they belong in config.toml, which is already chmod 600.
 set -u
+# launchd omits Homebrew; outcomes needs gh even when aut itself uses an absolute path.
+export PATH="${PATH:-/usr/bin:/bin}:/opt/homebrew/bin:/usr/local/bin"
 
 CONF="$HOME/.config/agent-usage-tracker"
 LOG="$CONF/scan.log"
@@ -89,7 +92,9 @@ if [ "$rc" -eq 0 ] && [ "${AUT_LABEL:-}" = "1" ] \
     && [ "$(cat "$LABELMARK" 2>/dev/null)" != "$(date +%F)" ]; then
   date +%F >"$LABELMARK"
   echo "$(ts) label start" >>"$LOG"
-  "$AUT" label run >>"$LOG" 2>&1
+  label_args=()
+  if [ "${AUT_LABEL_MODE:-calibrated}" = "local" ]; then label_args+=(--local-estimates); fi
+  "$AUT" label run "${label_args[@]}" >>"$LOG" 2>&1
   lrc=$?
   echo "$(ts) label done (exit $lrc)" >>"$LOG"
 fi

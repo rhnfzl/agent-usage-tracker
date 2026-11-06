@@ -106,7 +106,7 @@ def _scan_local(cfg: Config, tz: tzinfo, found: Found) -> None:
                     found.stores += 1
                     worktrees = run_git(dirpath, "worktree", "list", "--porcelain")
                     heads = [line[5:] for line in (worktrees or "").splitlines()
-                             if line.startswith("HEAD ")]
+                             if line.startswith("HEAD ") and line[5:].strip("0")]
                     log = run_git(dirpath, *LOG_ARGS, *heads) if worktrees is not None else None
                     if log is None:
                         found.failed += 1
@@ -172,7 +172,7 @@ $c
   if ! heads=$({_sh(git_argv(_DIR, 'worktree', 'list', '--porcelain'))}); then
     printf '\\002\\n'; continue
   fi
-  heads=$(printf '%s\\n' "$heads" | sed -n 's/^HEAD //p')
+  heads=$(printf '%s\\n' "$heads" | sed -n '/^HEAD 0*$/d;s/^HEAD //p')
   {_sh(git_argv(_DIR, *LOG_ARGS))} $heads || printf '\\002\\n'
 done
 exit 0
@@ -180,7 +180,8 @@ exit 0
 
 
 def _ssh_argv(host: str) -> list[str]:
-    return ["ssh", "-o", "BatchMode=yes", "-o", f"ConnectTimeout={SSH_CONNECT_S}", host,
+    return ["ssh", "-o", "BatchMode=yes", "-o", "ClearAllForwardings=yes",
+            "-o", f"ConnectTimeout={SSH_CONNECT_S}", host,
             "sh", "-s"]
 
 

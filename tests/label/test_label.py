@@ -332,7 +332,7 @@ def test_config_and_evalset_stay_below_their_callers():
 def test_cli_and_config(tmp_path, monkeypatch):
     seen = {}
     monkeypatch.setattr(cli, "load_config", lambda: _cfg(tmp_path))
-    monkeypatch.setattr(run, "run_label", lambda cfg, t, since, dry_run: seen.update(
+    monkeypatch.setattr(run, "run_label", lambda cfg, t, since, dry_run, local_estimates=False: seen.update(
         t=t, since=since, dry=dry_run) or {})
     assert cli.main(["label", "run", "--task", "steer_intent", "--since", "2026-10-01",
                      "--dry-run"]) == 0

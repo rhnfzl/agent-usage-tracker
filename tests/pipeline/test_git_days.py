@@ -124,6 +124,23 @@ def test_detached_worktree_heads_count_even_outside_scan_roots(world, monkeypatc
     assert git_days.day_counts(found.commits, date(2026, 11, 1), date(2026, 11, 5)) == expected
 
 
+@pytest.mark.parametrize("remote", [False, True])
+def test_empty_repos_and_unborn_heads_are_zero_not_partial_reads(world, monkeypatch, remote):
+    if remote and sys.platform == "win32":
+        pytest.skip("the remote script is POSIX sh")
+    empty = world / "projects" / "empty"
+    empty.mkdir()
+    _g(empty, "init", "-q", "-b", "main")
+    _g(world / "projects" / "app", "checkout", "-q", "--orphan", "unborn")
+    cfg = _cfg(world)
+    if remote:
+        monkeypatch.setattr(git_days, "_ssh_argv", lambda host: ["sh", "-s"])
+        cfg = _cfg(world, git_days_roots=(), git_days_remotes=(("local", (str(world / "projects"),)),))
+    found = git_days.scan_all(cfg, TZ)
+    assert (found.stores, found.failed) == (3, 0)
+    assert git_days.day_counts(found.commits, date(2026, 11, 1), date(2026, 11, 5)) == EXPECTED
+
+
 def test_bots_never_count_even_when_a_pattern_matches_them(world):
     cfg = _cfg(world, git_days_shared_authors=((r".*", r".*"),))
     found = git_days.scan_all(cfg, TZ)
@@ -218,6 +235,7 @@ def test_remote_is_read_over_batch_ssh_and_a_failed_host_blocks_the_write(world,
     argv, kw = calls[0]
     assert argv[:2] == ["ssh", "-o"] and "BatchMode=yes" in argv \
         and any(a.startswith("ConnectTimeout=") for a in argv) and argv[-2:] == ["sh", "-s"]
+    assert "ClearAllForwardings=yes" in argv
     assert '"$HOME"/' in kw["input"] and "core.fsmonitor=" in kw["input"]
     assert (found.stores, found.failed) == (2, 1)
     assert git_days.day_counts(found.commits, date(2026, 11, 5), date(2026, 11, 5)) == \

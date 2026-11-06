@@ -100,6 +100,39 @@ def test_missing_paths_are_left_out_and_config_paths_replace_the_defaults(world)
     assert "*.tmp" in args and str(tmp / "share" / "aut" / "label" / "models") in args  # added to
 
 
+def test_defaults_cover_all_local_coding_agent_stores(world):
+    cfg, _fake, _tmp = world
+    paths = backup.default_paths(cfg)
+    for suffix in (".claude/history.jsonl", ".pi/agent/sessions", ".cursor/projects",
+                   ".codex/session_index.jsonl"):
+        assert cfg.home / suffix in paths
+    from agent_usage_tracker.collectors.cursor import cursor_db
+    assert cursor_db(cfg).parent.parent in paths
+
+
+def test_retention_can_be_disabled_without_disabling_backup(world):
+    cfg, fake, tmp = world
+    assert backup.run_backup(replace(cfg, backup_retention=False)) == 0
+    assert fake.verbs() == ["cat", "backup"]
+    assert "last_ok" in _status(tmp) and "last_prune" not in _status(tmp)
+
+
+def test_custom_cursor_database_does_not_expand_backup_to_its_parent_tree(world):
+    cfg, _fake, tmp = world
+    database = tmp / "cursor.db"
+    paths = backup.default_paths(replace(cfg, cursor_db_path=str(database)))
+    assert database in paths and tmp.parent not in paths
+
+
+def test_configured_sdk_manifests_are_backed_up_without_parent_trees(world):
+    cfg, _fake, tmp = world
+    manifest = tmp / "sdk" / "manifest.json"
+    manifest.parent.mkdir()
+    manifest.write_text("{}")
+    paths = backup.default_paths(replace(cfg, cursor_sdk_manifests=str(tmp / "sdk" / "*.json")))
+    assert manifest in paths and manifest.parent not in paths
+
+
 @pytest.mark.parametrize("battery, skipped", [((True, 15), True), ((True, 20), False),
                                               ((False, 5), False), (None, False)])
 def test_low_battery_skips_with_exit_0(world, monkeypatch, battery, skipped):

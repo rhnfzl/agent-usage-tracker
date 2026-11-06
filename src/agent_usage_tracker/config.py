@@ -124,6 +124,7 @@ class Config:
     backup_password_command: str | None = None
     backup_paths: tuple[str, ...] = ()
     backup_excludes: tuple[str, ...] = ()
+    backup_retention: bool = True
     # `aut git-days` ([git_days] table): the owner's commits per day, from local and remote clones.
     git_days_enabled: bool = False                       # true: `aut scan` runs it once a day
     git_days_since: date = DEFAULT_GIT_DAYS_SINCE
@@ -243,7 +244,8 @@ def _backup(data: dict[str, Any]) -> dict[str, Any]:
     return {"backup_repository": _resolve(section, "repository"),
             "backup_password_command": _resolve(section, "password_command"),
             "backup_paths": _str_list(section, "paths", "backup."),
-            "backup_excludes": _str_list(section, "excludes", "backup.")}
+            "backup_excludes": _str_list(section, "excludes", "backup."),
+            "backup_retention": _as_bool(section.get("retention", True))}
 
 
 _SSH_HOST = re.compile(r"[A-Za-z0-9_.@][A-Za-z0-9_.@-]*")     # never a leading "-": no ssh option

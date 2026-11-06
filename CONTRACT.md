@@ -808,3 +808,13 @@ reference certainty here, not a fitted threshold. `signals` carries direct yes/n
 agent-review answers and question hashes. It never carries review reasons, source text or paths.
 Calibrated views and daily notes exclude the working namespace. Working estimate views retain
 unknowns in share denominators and report reviewed-signal counts without population weighting.
+
+Ongoing local estimates use distinct tasks `working.local.work_category`,
+`working.local.steer_intent` and `working.local.soft_outcome`, with policy `local-decision-v1`.
+They never use the frozen Sonnet policy. `provisional` is true, `human_verified` and `calibrated`
+are false, and `source_scope` is `ongoing_local_eligible`. Weight is 1 per eligible unit.
+`policy_id`, `source_eval_sha256`, input hashes and member revisions identify the saved recipe.
+`native_score` is the unrounded combined score, not validated accuracy; `p` remains rounded.
+A score at or below the recipe minimum becomes `label: unknown` and `below_tau: true`.
+Steer timestamps remain the event time; assessed outcomes retain the episode start time.
+No public view may silently combine this ongoing coverage with the frozen historical frame.

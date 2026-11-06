@@ -28,6 +28,7 @@ from .backends import BackendUnavailable, make_backend
 from .core import (Backend, Choice, NoteBackend, current_labels, data_dir, decide, label_event,
                    load_choice, local_days, local_midnight)
 from .tasks import OUTCOME_DAYS, TASKS, Source, SourceUnavailable, Task, units
+from .local import LocalBackend, decorate, load_policy
 
 BATCH = 50
 # The day tasks built from agents.episode, which the sink rebuilds once a night: they wait for it.
@@ -54,6 +55,8 @@ class _Run:
     cache: dict[str, Any]
     labelled_at: str
     ready: datetime | None = None       # Source.episodes_ready, read once per run
+    state_name: str = NAME
+    local_estimates: bool = False
 
     def advance(self, name: str, ts: str | None) -> None:
         """Save a task's watermark, never backwards: a backfill over old days leaves the nightly
@@ -61,7 +64,7 @@ class _Run:
         if ts and (not self.wm.get(name)
                    or datetime.fromisoformat(ts) > datetime.fromisoformat(self.wm[name])):
             self.wm[name] = ts
-        save_state(self.state, [NAME])
+        save_state(self.state, [self.state_name])
 
 
 def _window(name: str, wm: dict[str, Any], since: datetime | None, now: datetime,
@@ -163,6 +166,11 @@ def _run_task(run: _Run, task: Task, choice: Choice, backend: Backend, since: da
     done = set(run.cache.get(key, ())) if task.cached else set()
     skipped = run.src.skipped["no_text"]
     reqs = [r for r in units(task.name, run.src, since, until) if r.unit_id not in done]
+    if run.local_estimates:
+        if not isinstance(backend, LocalBackend):
+            raise BackendUnavailable("label: local estimates require a saved local decision recipe")
+        backend.prepare_requests(reqs, run.deadline)
+        c["provisional"] = 1
     c["skipped_no_text"] = run.src.skipped["no_text"] - skipped
     pending: list[ActivityEvent] = []
     cut = None
@@ -173,11 +181,13 @@ def _run_task(run: _Run, task: Task, choice: Choice, backend: Backend, since: da
         raw = backend.distribution(r)       # first: it can load the model, which sets model_rev
         res = decide(r, raw, choice, backend.model_id, backend.model_rev)
         ev = label_event(r, res, run.labelled_at)
+        if isinstance(backend, LocalBackend):
+            ev = decorate(ev, r, backend, res.prob)
         ev.machine = run.cfg.machine
         pending.append(ev)
         c["rows"] += 1
-        c["below_tau"] += res.below_tau
-        labels[res.chosen] += 1
+        c["below_tau"] += ev.attrs["below_tau"]
+        labels[ev.attrs["label"]] += 1
         if len(pending) >= BATCH:
             _flush(run, task, key, pending, r.ts)
     if cut is not None:
@@ -213,7 +223,7 @@ def _label_one(run: _Run, name: str, since: datetime | None, now: datetime, choi
 def run_label(cfg: Config, tasks: list[str] | None = None, since: datetime | None = None, *,
               dry_run: bool = False, src: Source | None = None,
               backend_for: Callable[[str, Choice], Backend] | None = None,
-              now: datetime | None = None) -> dict[str, TaskReport]:
+              now: datetime | None = None, local_estimates: bool = False) -> dict[str, TaskReport]:
     """Label each task (default: config label_tasks). backend_for(task, choice) -> backend
     (tests pass a fake). A dry run scores and counts, and writes nothing: no rows, watermark,
     cache or heartbeat. A task whose backend cannot run reports failed = 1 and the others go on."""
@@ -224,8 +234,16 @@ def run_label(cfg: Config, tasks: list[str] | None = None, since: datetime | Non
     now = now or started
     src = src or Source(cfg)
     loaded: dict[tuple[str | None, str | None, str | None, str | None], Backend] = {}
+    policy, policy_id = load_policy() if local_estimates else ({}, "")
 
     def default_backend(task: str, choice: Choice) -> Backend:
+        if local_estimates:
+            key = (task, "local", policy_id, None)
+            if key not in loaded:
+                if task not in policy["tasks"]:
+                    raise BackendUnavailable("label: task has no saved local decision recipe")
+                loaded[key] = LocalBackend(task, policy["tasks"][task], policy_id, cfg)
+            return loaded[key]
         # one model load per run, shared across tasks; an encoder is trained for one task alone
         k = (task if choice.backend == "encoder" else None, choice.backend,
              choice.model_id or cfg.label_model, choice.model_rev)
@@ -235,17 +253,20 @@ def run_label(cfg: Config, tasks: list[str] | None = None, since: datetime | Non
 
     backend_for = backend_for or default_backend
     state = load_state()
-    wm = collector_wm(state, NAME)
+    state_name = "label_local" if local_estimates else NAME
+    wm = collector_wm(state, state_name)
     names = tasks if tasks is not None else cfg.label_tasks
     run = _Run(cfg=cfg, dsn=dsn, src=src, dry_run=dry_run,
                deadline=time.monotonic() + cfg.label_budget_s, wm=wm, state=state,
                cache=load_json_dict(_cache_path()), labelled_at=labelled_at,
-               ready=src.episodes_ready() if _EPISODE_TASKS & set(names) else None)
+               ready=src.episodes_ready() if _EPISODE_TASKS & set(names) else None,
+               state_name=state_name, local_estimates=local_estimates)
     report: dict[str, TaskReport] = {}
-    with job_heartbeat(cfg, NAME, started, dry_run=dry_run) as beat:
+    with job_heartbeat(cfg, state_name, started, dry_run=dry_run) as beat:
         try:
             for name in names:
-                choice = load_choice(name, TASKS[name].ver if name in TASKS else None)
+                choice = Choice() if local_estimates else load_choice(
+                    name, TASKS[name].ver if name in TASKS else None)
                 report[name], stopped = _label_one(run, name, since, now, choice,
                                                    backend_for)
                 beat.events += report[name]["rows"] + report[name]["notes"]
@@ -265,6 +286,8 @@ def print_report(report: dict[str, TaskReport], *, dry_run: bool) -> None:
         labels = dict(sorted(c.get("labels", {}).items()))
         what = f"{c['notes']} notes" if name == LABEL_NOTE else \
             f"{c['rows']} rows ({c['below_tau']} below tau), by label {json.dumps(labels)}"
+        if c.get("provisional"):
+            what = f"{c['rows']} provisional rows ({c['below_tau']} unknown), by label {json.dumps(labels)}"
         print(f"label {name} {mode}: {what}")
         if c["skipped_no_text"]:      # a new laptop, or transcripts deleted: say so, once a run
             print(f"aut: label {name}: {c['skipped_no_text']} steers skipped: their text is not on "

@@ -328,6 +328,29 @@ reasons and local file paths stay on the Mac. No model call or calibration runs 
 Deploy the companion sink schema and dashboard changes before using `--apply`.
 The sink's private `working_label_monthly` and `working_signal_monthly` views feed estimate panels.
 
+### Ongoing local estimates
+
+New work can receive provisional labels from saved local decision-model recipes. These remain
+separate from the frozen Sonnet sample and from calibrated labels.
+
+```sh
+aut label run --local-estimates --dry-run
+aut label run --local-estimates
+```
+
+Set `label_tasks` to the required tasks and keep a `label-local.json` beside `config.toml`.
+That file records version `local-decision-v1`, each task's exact prompt version, pinned local
+members, saved temperatures and combining coefficients, an evaluation hash and `minimum_score`.
+Only local decision backends are accepted. Nothing is fitted or downloaded during this command.
+Members run in batches, one model at a time. Scores at or below the saved minimum stay unknown;
+the minimum is at least 0.5. These scores are not validated accuracy estimates.
+
+Rows use `working.local.<task>` and policy `local-decision-v1`, with original unit timestamps,
+weight 1 and model/policy provenance. They describe eligible local inputs, not all activity.
+Current text classification reads Claude Code logs; work categories also use local window blocks.
+State and heartbeats use `label_local`. The frozen baseline views do not read these tasks.
+For scheduled estimates, set `AUT_LABEL=1` and `AUT_LABEL_MODE=local` in `scan.env`.
+
 
 ### The models
 
