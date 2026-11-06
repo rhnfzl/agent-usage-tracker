@@ -128,7 +128,7 @@ def run_teach(cfg: Config, task: str, n: int, *, budget_usd: float = 5.0, days: 
     sonnet, today_s = _SonnetRun(budget_usd), today.isoformat()
     for r in todo:
         for teacher in wants(r):
-            dist = _sonnet_dist(r, sonnet, c) if teacher == SONNET else local.distribution(r)
+            dist = _sonnet_dist(r, sonnet, c) if teacher == SONNET or local is None else local.distribution(r)
             if dist is None:
                 continue
             append_jsonl(out, {"unit_id": r.unit_id, "teacher": teacher, "task_ver": t.ver,
