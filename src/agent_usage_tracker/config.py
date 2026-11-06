@@ -117,6 +117,12 @@ class Config:
     label_recall: float = 0.60
     label_coverage: float = 0.75
     label_budget_s: int = 3600
+    # `aut backup` ([backup] table): the restic repository, the command that prints its password,
+    # the paths (empty: backup.default_paths) and excludes added to backup.default_excludes.
+    backup_repository: str | None = None
+    backup_password_command: str | None = None
+    backup_paths: tuple[str, ...] = ()
+    backup_excludes: tuple[str, ...] = ()
 
     @property
     def cf_access_headers(self) -> dict[str, str]:
@@ -222,6 +228,23 @@ def _label_extra_models(data: dict[str, Any]) -> tuple[str, ...]:
     return tuple(extra)
 
 
+def _str_list(section: dict[str, Any], key: str, where: str) -> tuple[str, ...]:
+    items = section.get(key) or []
+    if not isinstance(items, list) or not all(isinstance(x, str) and x for x in items):
+        raise AutError(f"config: {where}{key} must be a list of strings")
+    return tuple(items)
+
+
+def _backup(data: dict[str, Any]) -> dict[str, Any]:
+    section = data.get("backup") or {}
+    if not isinstance(section, dict):
+        raise AutError("config: [backup] must be a table")
+    return {"backup_repository": _resolve(section, "repository"),
+            "backup_password_command": _resolve(section, "password_command"),
+            "backup_paths": _str_list(section, "paths", "backup."),
+            "backup_excludes": _str_list(section, "excludes", "backup.")}
+
+
 def _label_bars(data: dict[str, Any]) -> tuple[float, float, float]:
     precision, recall, coverage = (float(data.get(k, d)) for k, d in
                                    (("label_precision", 0.90), ("label_recall", 0.60),
@@ -234,7 +257,8 @@ def _label_bars(data: dict[str, Any]) -> tuple[float, float, float]:
 def _warn_if_secrets_written(path: Path, transport: dict[str, Any], data: dict[str, Any]) -> None:
     # Only a value written in the file counts: an env:VAR reference keeps the secret out of it.
     written = (transport.get("webhook_secret"), transport.get("pg_dsn"),
-               transport.get("cf_access_client_secret"), data.get("repo_key_salt"))
+               transport.get("cf_access_client_secret"), data.get("repo_key_salt"),
+               (data.get("backup") or {}).get("repository"))   # a rest: URL can hold a password
     if path.exists() and any(v and not str(v).startswith("env:") for v in written):
         warn_if_group_readable(path)
 
@@ -249,6 +273,7 @@ def _config_from(data: dict[str, Any], path: Path) -> Config:
     aw_days = _aw_title_days(data)
     label_tasks = _label_tasks(data)
     label_precision, label_recall, label_coverage = _label_bars(data)
+    backup = _backup(data)
     _warn_if_secrets_written(path, transport, data)
 
     return Config(
@@ -284,4 +309,5 @@ def _config_from(data: dict[str, Any], path: Path) -> Config:
         label_recall=label_recall,
         label_coverage=label_coverage,
         label_budget_s=int(data.get("label_budget_s") or 3600),
+        **backup,
     )

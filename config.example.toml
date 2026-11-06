@@ -104,6 +104,20 @@ agents = ["claude_code", "codex", "cursor_api", "cursor_cli", "pi"]
 # label_coverage = 0.75        # a module below this share of known labels is not exported
 # label_budget_s = 3600        # time budget of one run; the rest waits for the next night
 
+# `aut backup` (optional): an encrypted, deduplicated restic snapshot of the logs, the config, the
+# label files and repo_key.salt. Steps and restore: docs/new-laptop.md. restic runs
+# password_command itself, so aut never holds the password: keep it in the keychain (or a 0600
+# file outside any repo, e.g. "cat ~/.config/restic/aut.password"). Write the repository string
+# itself: an sftp: path holds no secret. env:VAR does not work under launchd, which starts the
+# backup job with only the PATH its plist sets, so the variable is never there and every nightly
+# run fails. Each good run also runs the retention: restic forget --tag aut --host <machine>
+# --keep-daily 14 --keep-weekly 8 --keep-monthly 12, with --prune at most once a week.
+# [backup]
+# repository = "sftp:backup-host:/srv/restic/aut"       # an ~/.ssh/config Host alias works here
+# password_command = "security find-generic-password -s aut-backup -w"
+# paths = ["~/.claude/projects"]     # REPLACES the default list (docs/new-laptop.md has it)
+# excludes = ["*.tmp"]               # ADDED to the default exclude (~/.local/share/aut/label/models)
+
 # Keep [transport] LAST: every key below a table header belongs to that table, so a top-level
 # key written after this line would be read as transport.<key> and ignored.
 [transport]

@@ -19,6 +19,16 @@ launchctl load ~/Library/LaunchAgents/dev.aut.scan.plist
 launchd jobs do not inherit your shell environment, so put the webhook secret **directly**
 in the local config file (not as `env:`).
 
+The scan job runs at login and on wake as well as on its interval, so a laptop that comes back
+after a week catches up at once. An older copy without `StartCalendarInterval` and `RunAtLoad`
+waits out its interval: copy the plist again and reload it.
+
+### Daily backup (optional)
+
+`dev.aut.backup.plist` runs `aut backup` daily at 02:30 and at login. Set up the `[backup]` table
+and the repository first; [docs/new-laptop.md](../docs/new-laptop.md) has every step, and the
+restore onto a new laptop.
+
 ## Linux (systemd user timer)
 
 ```bash

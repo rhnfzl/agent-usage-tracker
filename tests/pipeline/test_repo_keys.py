@@ -103,3 +103,86 @@ def test_an_unreadable_salt_warns_and_stops_a_scan(tmp_path, monkeypatch, capsys
     with pytest.raises(AutError, match="repo_key"):
         scan.run_scan(cfg, ["pi"], dry_run=False)
     assert not (tmp_path / "state.json").exists()
+
+
+class _KeysSink:
+    """connect() stand-in: answers the 'does this machine already have repo keys' read."""
+    def __init__(self, has_keys: bool):
+        self.has_keys, self.params = has_keys, []
+
+    def __call__(self, dsn, timeout=15):
+        return self
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def execute(self, sql, params):
+        assert "repo_key" in sql and "machine" in sql
+        self.params.append(params)
+        return self
+
+    def fetchone(self):
+        return (1,) if self.has_keys else None
+
+
+def test_a_missing_salt_with_keys_in_the_sink_stops_the_scan(tmp_path, monkeypatch) -> None:
+    from agent_usage_tracker import repo_keys
+    monkeypatch.setenv("AUT_STATE", str(tmp_path / "state.json"))
+    monkeypatch.setattr(scan, "make_sender", lambda cfg: [].extend)
+    sink = _KeysSink(has_keys=True)
+    monkeypatch.setattr(repo_keys, "connect", sink)
+    cfg = Config(machine="laptop", agents=("pi",), webhook_url=None, webhook_secret=None,
+                 pg_dsn="pg://x", home=tmp_path)
+    for run in (lambda: scan.run_scan(cfg, ["pi"], dry_run=False),
+                lambda: scan.run_history_backfill(cfg, ["pi"], dry_run=False)):
+        with pytest.raises(AutError, match="docs/new-laptop.md") as exc:
+            run()
+        assert "repo_key.salt" in str(exc.value) and "repo_key_salt" in str(exc.value)
+    assert sink.params == [("laptop",), ("laptop",)]        # this machine's rows only
+    assert not (tmp_path / "repo_key.salt").exists()        # no new salt minted
+    assert not (tmp_path / "state.json").exists()
+
+
+def test_a_missing_salt_on_a_new_sink_or_a_configured_salt_goes_on(tmp_path, monkeypatch) -> None:
+    from agent_usage_tracker import repo_keys
+    monkeypatch.setenv("AUT_STATE", str(tmp_path / "state.json"))
+    sink = _KeysSink(has_keys=False)
+    monkeypatch.setattr(repo_keys, "connect", sink)
+    repo_keys.require_readable_salt(None, "pg://x", "laptop")       # a first install: fine
+    repo_keys.require_readable_salt(None, None, "laptop")           # webhook only: cannot tell
+    sink.has_keys = True
+    repo_keys.require_readable_salt("from-config-" * 3, "pg://x", "laptop")  # config salt: no read
+    assert sink.params == [("laptop",)]
+
+
+def test_every_command_that_can_make_a_salt_asks_the_sink_first(tmp_path, monkeypatch) -> None:
+    """A dry run, a label run and the outcome commands create the salt too (RepoKeys mints it on
+    first use), so each one refuses before it, not only a sending scan."""
+    from agent_usage_tracker import outcomes, repo_keys
+    from agent_usage_tracker.label.run import run_label
+    monkeypatch.setenv("AUT_STATE", str(tmp_path / "state.json"))
+    monkeypatch.setattr(repo_keys, "connect", _KeysSink(has_keys=True))
+    cfg = Config(machine="laptop", agents=("pi",), webhook_url=None, webhook_secret=None,
+                 pg_dsn="pg://x", home=tmp_path)
+    for run in (lambda: scan.run_scan(cfg, ["pi"], dry_run=True),
+                lambda: scan.run_history_backfill(cfg, ["pi"], dry_run=True),
+                lambda: run_label(cfg, [], dry_run=True),
+                lambda: outcomes.run_outcomes(cfg, refresh=False, dry_run=False),
+                lambda: outcomes.build_manual_outcome(cfg, "shipped", str(tmp_path), "s1")):
+        with pytest.raises(AutError, match="docs/new-laptop.md"):
+            run()
+    assert not (tmp_path / "repo_key.salt").exists()
+
+
+def test_a_new_salt_with_no_sink_to_ask_is_a_clear_warning(tmp_path, monkeypatch, capsys) -> None:
+    from agent_usage_tracker import repo_keys
+    monkeypatch.setenv("AUT_STATE", str(tmp_path / "state.json"))
+    repo_keys.require_readable_salt(None, None, "laptop")           # webhook only: cannot tell
+    err = capsys.readouterr().err
+    assert "new repo_key.salt" in err and "docs/new-laptop.md" in err
+    (tmp_path / "repo_key.salt").write_text("a" * 64)
+    repo_keys.require_readable_salt(None, None, "laptop")           # the salt is there: quiet
+    assert capsys.readouterr().err == ""

@@ -132,7 +132,8 @@ other command refuses it.
 | `aut backfill` | reset the watermark for the selected agents, then scan all history | a transport |
 | `aut backfill --sessions-only [--dry-run]` | re-read all history and send only session rows; the watermark is untouched | `pg_dsn` (not with `--dry-run`) |
 | `aut backfill --activity-only [--dry-run]` | the same for activity rows (steers, commits, turns, links, ...); never usage. Both flags may be given together | `pg_dsn` (not with `--dry-run`) |
-| `aut status` | show machine, agents, transports and watermarks | |
+| `aut status` | show machine, agents, transports, watermarks and the age of the last good backup | |
+| `aut backup [--check]` | an encrypted, deduplicated restic snapshot of the logs, config, label files and `repo_key.salt` ([docs/new-laptop.md](docs/new-laptop.md)), then the retention (`restic forget`: 14 daily, 8 weekly, 12 monthly; `--prune` once a week). Skips with exit 0 while another run holds the lock, on battery below 20%, or when the repository is unreachable. `--check` runs `restic check` and sends nothing | `[backup]` in `config.toml`, `restic` on `PATH` |
 | `aut export [--out FILE]` | write all usage rows as CSV (stdout by default), deduplicated, columns in sink order for `COPY`. Exits 1 if a collector that feeds the CSV could not fully read a source, so the CSV is partial (`activitywatch` has no usage rows, so it never does); `backfill --sessions-only`/`--activity-only` do the same for the collectors with those rows | |
 | `aut sync-prices [--out FILE] [--litellm-url URL] [--models-dev-url URL] [--genai-prices-url URL]` | build the API-equivalent price map, `model_prices.json` in the config dir by default; the URLs must be http(s) | network |
 | `aut time add --start T --end T` | record a manual active-time interval in local time, e.g. `--start "2026-11-03 09:00"` | `pg_dsn` |
@@ -194,6 +195,7 @@ matter:
 | `label_extra_models` | `[]` | more Hugging Face model ids for `aut label eval` to try, read through answer letters from the local cache. A decision model with its own protocol still needs a row in the model table |
 | `label_llama_server` | `llama-server` | the binary for `aurelis-2b` and `kev-4b`. Use a full path if the nightly job's `PATH` lacks it |
 | `label_precision`, `label_recall`, `label_coverage`, `label_budget_s` | `0.90`, `0.60`, `0.75`, `3600` | floors per label (a model that misses one is marked as failing), coverage bar, time budget of one run in seconds |
+| `[backup] repository`, `password_command`, `paths`, `excludes` | unset | for `aut backup`: the restic repository, the command restic runs for its password, the paths (replace the defaults) and excludes (added to the model-cache exclude) |
 
 Keys outside `[transport]` must come before the `[transport]` line in the file, or TOML puts
 them inside that table and aut never sees them.
@@ -244,6 +246,10 @@ events. Full rules: [CONTRACT.md](CONTRACT.md#active-time-agentstime_interval).
 
 `packaging/` ships units that run `aut scan` every 15 minutes (launchd, Task Scheduler) or 10
 minutes (systemd). Setup steps are in [packaging/README.md](packaging/README.md).
+
+The launchd scan also runs at login and on wake, so a laptop that was away for a week catches up
+at once. `packaging/launchd/dev.aut.backup.plist` runs `aut backup` daily and at login. For a long
+gap, a backup and a new laptop, see [docs/new-laptop.md](docs/new-laptop.md).
 
 For more than the bare scan, run the wrapper `packaging/launchd/aut-scan.sh` instead (macOS
 and Linux; on systemd set `ExecStart=/bin/bash %h/.config/agent-usage-tracker/aut-scan.sh`).
@@ -446,6 +452,12 @@ and most fail without an error: an empty `pg_dsn` quietly stops session, activit
 heartbeat rows, empty `cf_access_client_*` values drop the Cloudflare Access headers, and an
 empty `repo_key_salt` falls back to this machine's random `repo_key.salt`, so repo, branch,
 ticket, PR and SHA keys stop matching other machines.
+
+**`... repo_key.salt is missing, but the sink already holds repo keys from machine ...`.** A new
+laptop without the old salt. A new salt would make every repo key differ from the old ones, so
+`aut scan` (also a dry run), `aut label` and `aut outcomes` stop and send nothing. Copy the old
+`repo_key.salt` next to the state file, or set `repo_key_salt` in `config.toml` to its contents
+([docs/new-laptop.md](docs/new-laptop.md)).
 
 **`aut label run` labels nothing.** `label_tasks` is empty by default. List the tasks there or
 pass `--task`.
