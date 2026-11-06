@@ -61,7 +61,7 @@ def test_gold_page_hides_silver_until_answered_and_writes_no_text(tmp_path):
         reqs = evalset.window_units(cfg, TASK, src=src, today=TODAY)
         for u in reqs:
             evalset.append_jsonl(evalset.eval_path(TASK, "silver"), {
-                "unit_id": u, "teacher": "fake/teacher", "task_ver": 1, "date": "d",
+                "unit_id": u, "teacher": "fake/teacher", "task_ver": 2, "date": "d",
                 "dist": {"acceptance": 0.8, "stop": 0.2}})
         t, box = _serve(reqs)
         url = box["url"]
@@ -91,7 +91,7 @@ def test_gold_page_hides_silver_until_answered_and_writes_no_text(tmp_path):
         assert not t.is_alive() and box["res"] == Counter(answered=1, skipped=0)
         rows = evalset.read_jsonl(evalset.eval_path(TASK, "gold"))
         assert rows == [{"unit_id": shown, "gold": "stop", "labeller": "human",
-                         "date": rows[0]["date"], "task_ver": 1}]
+                         "date": rows[0]["date"], "task_ver": 2}]
         assert WORD not in evalset.eval_path(TASK, "gold").read_text()
         # the next session starts with what is left
         t, box = _serve(reqs)

@@ -146,5 +146,5 @@ def _gold(tmp: Path, golds: list[str]):
     for u, r in reqs.items():
         evalset.append_jsonl(evalset.eval_path(TASK, "gold"), {
             "unit_id": u, "gold": r.facts["text"].split()[0], "labeller": "human", "date": "d",
-            "task_ver": 1})
+            "task_ver": 2})
     return cfg, src, reqs
