@@ -160,6 +160,8 @@ Label tasks: `steer_intent`, `work_category`, `soft_outcome`, `aw_title_relevanc
 
 The local pages (`episodes review`, `inspect`, `label review`) listen on 127.0.0.1 at a random
 port with a random token. Their text is never stored or logged.
+Invalid form URLs never save answers. Rejected POST connections close in stages so the error
+response reaches the client. Discarded input is limited to 1 MiB and one second.
 
 `packaging/claude/commands/outcome.md` is a Claude Code `/outcome` command that runs
 `aut outcome <verdict> --session <this session>`. Copy it to `~/.claude/commands/`.
