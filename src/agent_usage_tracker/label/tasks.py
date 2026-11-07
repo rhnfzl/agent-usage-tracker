@@ -105,6 +105,8 @@ class Source:
     def __init__(self, cfg: Config) -> None:
         self.cfg, self.keys = cfg, RepoKeys(cfg.repo_key_salt)
         self.skipped: Counter[str] = Counter()        # units left out, by reason (the run reports it)
+        self.missing_text_units: list[datetime] = []
+        self.partial_text_units: list[datetime] = []
 
     def steers(self, since: datetime) -> list[dict[str, Any]]:
         """Every steer of each session that has one since `since` (for index and previous), in ts
@@ -200,6 +202,8 @@ def _steer_units(task: Task, src: Source, since: datetime, until: datetime | Non
             if r["event_id"] not in text:
                 # only Claude Code text is ever read, so only its misses mean a lost transcript
                 src.skipped["no_text"] += r["agent"] == "claude_code"
+                if r["agent"] == "claude_code":
+                    src.missing_text_units.append(r["ts"])
                 continue
             a = r["attrs"] or {}
             out.append(task.request("steer", r["event_id"], r["ts"], {
@@ -303,8 +307,15 @@ def _category_units(task: Task, src: Source, since: datetime, until: datetime | 
     acts = src.activity(sids, since, until) if sids else []
     day_of = set(local_days(since, until))
     days = _episode_days(mine, acts, of_session, day_of)
-    built = (_episode_day_unit(task, ep, d, u, text, reply) for (ep, d), u in days.items())
-    out = [r for r in built if r]
+    out = []
+    for (ep, d), u in days.items():
+        req = _episode_day_unit(task, ep, d, u, text, reply)
+        if req is None:
+            src.missing_text_units.append(u["steers"][0]["ts"])
+        else:
+            out.append(req)
+            if any(r["event_id"] not in text for r in u["steers"]):
+                src.partial_text_units.append(u["steers"][0]["ts"])
     wins = src.windows(since, until)
     out += _aw_blocks(task, wins, [r["ts"] for r in steers])
     return out
@@ -324,7 +335,10 @@ def _outcome_units(task: Task, src: Source, since: datetime, until: datetime | N
         st = [r for r in steers if r["session_id"] in mine]
         said = [text[r["event_id"]] for r in st if r["event_id"] in text]
         if not said:
+            src.missing_text_units.append(ep["first_ts"])
             continue
+        if len(said) < len(st):
+            src.partial_text_units.append(ep["first_ts"])
         # ts = the episode start, so the row's day (and its fold) never moves; rev =
         # its last activity, so a changed episode is re-asked and an unchanged one is a no-op
         out.append(task.request("episode", ep["id"], ep["first_ts"], {

@@ -143,6 +143,8 @@ other command refuses it.
 | `aut episodes review [--month YYYY-MM]` | hand-check a sample of 30 of a month's episodes (default: last completed month) on a local page; writes `agents.episode_correction` | `pg_dsn` |
 | `aut inspect --episode ID \| --day YYYY-MM-DD \| --label UNIT_ID` | local evidence page: why an episode (id or prefix), a day's episodes, or a label exists. Its linked correction form writes `agents.episode_correction` | `pg_dsn` |
 | `aut label run [--task T] [--since YYYY-MM-DD] [--dry-run]` | label new units since the watermark, for `label_tasks` or one task | `label` extra, `pg_dsn`, the model in the HF cache |
+| `aut label replay --task T --since D --until D` | freeze redacted inputs for an explicit local date range and preview counts; no scoring or sink writes | saved local recipe, logs, `pg_dsn` |
+| `aut label replay --job ID [--apply] [--budget-s N]` | preview or resume the private job; `--apply` scores local models and delivers batches, with separate progress | same, plus local model runtime |
 | `aut history-steers [--dry-run]` | daily steer estimates for the lost 2026 logs, from the CLI history files (rows of kind `steer_estimate`, a count and no text) | `pg_dsn` |
 | `aut git-days [--dry-run] [--allow-lower]` | your commits per Amsterdam day from `since` to yesterday, zeros included, from every clone under `roots` and on each `remotes` host (over `ssh`, read-only, no fetch). Writes only new days and days whose count went up to `agents.git_commit_day`, counts only; a day that would go down is counted in the summary and kept, unless `--allow-lower`. Writes nothing after a partial scan (a missing root, or a host, folder or repository it could not read, or a remote git older than 2.31), a scan with no repositories, or one with under half the repositories of the best recent run. `--dry-run` prints totals per year. With `enabled = true`, `aut scan` runs it once a day, and after a failure waits 6 h | `[git_days]` in `config.toml`, `pg_dsn` |
 | `aut label backfill --task T --days N` | label one task over the last N days; the nightly watermark is not moved back. `soft_outcome` always covers the last 14 days, whatever `--days` or `--since` say (it notes this on stderr) | same |
@@ -358,6 +360,45 @@ Repeating the same unit, facts and policy stays idempotent. Consumers select the
 Current text classification reads Claude Code logs; work categories also use local window blocks.
 State and heartbeats use `label_local`. The frozen baseline views do not read these tasks.
 For scheduled estimates, set `AUT_LABEL=1` and `AUT_LABEL_MODE=local` in `scan.env`.
+
+### Historical local replay
+
+`aut label replay` prepares historical labels without resetting daily collection. First choose
+one task and explicit local dates. The end date is exclusive and cannot include an unfinished day:
+
+```bash
+aut label replay --task steer_intent --since 2026-10-01 --until 2026-10-08
+aut label replay --job JOB_ID
+aut label replay --job JOB_ID --apply --budget-s 600
+```
+
+The preview returns a private job ID, eligible request counts, and `missing_local_text` for units
+excluded because this machine lacks their text. It runs no model and sends no rows. Resume the
+same job with `--apply`; progress advances only after each batch is delivered. The default budget
+is 600 seconds, with a maximum of 3600. An incomplete result reports `remaining` and
+`complete: false`; repeat the saved job to continue. Nightly watermarks are untouched.
+The budget stops new scoring work. An active model call or sink delivery can finish after it.
+`partial_local_text` counts eligible episode units with some missing steer text. Counts cover
+supported local source units, not all historical work. Replies and context can also be absent.
+
+Jobs retain redacted input facts under `~/.local/share/aut/label/replay/` (or `XDG_DATA_HOME`).
+This explicit local snapshot is an exception to the normal text-free label cache. Job directories
+are private, files use mode 0600, and a local ignore file excludes them from Git. No trace text is
+sent to the sink or a cloud model. Keep private jobs, references, evaluation reports and
+data-derived benchmark results outside the public source repository.
+
+Each new preview creates an intentional classification generation. Retries of that saved job are
+idempotent, including after a delivery succeeded but checkpointing failed. Each preparation reserves
+a strictly newer `labelled_at` under a private lock, including when preparation times are equal.
+Normal local-estimate runs share this ordering clock. Calibrated labels and notes keep their existing behavior.
+This timestamp stays fixed, so a delayed older job cannot replace a newer result. Changing the current task
+recipe requires a new job; changing an unrelated task does not invalidate the saved job.
+
+Replay selects original unit timestamps within the requested range and uses current facts frozen
+at preparation. It does not reconstruct past episode state. Work includes eligible window blocks.
+Explicit outcome replay can reach older units beyond the nightly fourteen-day selector, but
+still includes only currently eligible no-code episodes. Publishers must check current episode
+eligibility and select newest labels across policies, retaining newer unknowns.
 
 
 ### The models

@@ -56,7 +56,7 @@ class Request:
     unit: str                  # steer | episode_day | aw_block | episode | aw_title
     unit_id: str
     ts: str                    # the unit's own time (ISO-8601): the label row's ts
-    facts: dict[str, Any]                # what the decision reads; text in it is redacted, never stored
+    facts: dict[str, Any]                # redacted; only explicit private replay jobs retain the facts
     question: str
     decision: str              # choice | boolean
     candidates: list[dict[str, Any]]     # [{"id", "desc"}]: the task's closed list

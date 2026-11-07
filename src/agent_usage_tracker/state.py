@@ -13,6 +13,7 @@ run re-reads and re-sends (idempotent at the sink).
 from __future__ import annotations
 
 import contextlib
+import errno
 import json
 import os
 import stat
@@ -69,21 +70,33 @@ def load_state() -> dict[str, Any]:
     return obj
 
 
+class LockBusy(BlockingIOError):
+    """A nonblocking lock could not be acquired."""
+
+
 @contextlib.contextmanager
-def _locked(path: Path) -> Iterator[None]:
+def _locked(path: Path, *, blocking: bool = True) -> Iterator[None]:
     """Hold an advisory lock on a file beside `path`, for one short read-merge-write."""
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path.with_suffix(".lock"), "a+b") as fh:
         if sys.platform == "win32":
             import msvcrt
-            msvcrt.locking(fh.fileno(), msvcrt.LK_LOCK, 1)  # OSError after about 10 s of retries
+            try:
+                msvcrt.locking(fh.fileno(), msvcrt.LK_LOCK if blocking else msvcrt.LK_NBLCK, 1)
+            except OSError as exc:
+                if not blocking and exc.errno in (errno.EACCES, errno.EAGAIN, errno.EDEADLK):
+                    raise LockBusy(exc.errno, "lock is already held") from exc
+                raise
             try:
                 yield
             finally:
                 msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
         else:
             import fcntl
-            fcntl.flock(fh, fcntl.LOCK_EX)      # closing the file releases it
+            try:
+                fcntl.flock(fh, fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB))
+            except BlockingIOError as exc:
+                raise LockBusy(exc.errno, "lock is already held") from exc
             yield
 
 

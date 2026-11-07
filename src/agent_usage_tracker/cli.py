@@ -28,6 +28,10 @@
                         a local model labels new units (optional extra aut[label]) -> label rows
   aut label backfill --task T --days N
                         the same over the last N days; the nightly watermark is not moved back
+  aut label replay --task T --since YYYY-MM-DD --until YYYY-MM-DD
+                        freeze a private historical job and preview its counts, without scoring
+  aut label replay --job ID [--apply] [--budget-s N]
+                        preview or resume that job; separate progress, no teacher calls
   aut label teach --task T --n N [--budget-usd X]
                         teacher (silver) labels for a stratified sample -> eval/<task>.silver.jsonl
   aut label review [--task T]
@@ -197,6 +201,19 @@ def cmd_label(cfg: Config, args: argparse.Namespace) -> None:
     if args.label_cmd == "import-baseline":
         from .label import baseline
         print(json.dumps(baseline.run(cfg, Path(args.path), apply=args.apply), sort_keys=True))
+    elif args.label_cmd == "replay":
+        from .label import replay
+        if not 1 <= args.budget_s <= 3600:
+            raise AutError("label replay: budget must be between 1 and 3600 seconds")
+        if args.job:
+            if args.task or args.since or args.until:
+                raise AutError("label replay: a saved job cannot be combined with a new range")
+            result = replay.resume(cfg, args.job, apply=args.apply, budget_s=args.budget_s)
+        else:
+            if args.apply or not (args.task and args.since and args.until):
+                raise AutError("label replay: preview a task and date range, then apply its saved job")
+            result = replay.prepare(cfg, args.task, args.since, args.until)
+        print(json.dumps(result, sort_keys=True))
     elif args.label_cmd in ("run", "backfill"):
         _label_run(cfg, args)
     elif args.label_cmd == "teach":
@@ -315,6 +332,13 @@ def _build_parser() -> argparse.ArgumentParser:
     p_lback = lab_sub.add_parser("backfill", help="label one task over the last N days")
     p_lback.add_argument("--task", choices=LABEL_TASK_NAMES, required=True)
     p_lback.add_argument("--days", type=int, required=True)
+    p_replay = lab_sub.add_parser("replay", help="preview or resume a private historical local job")
+    p_replay.add_argument("--task", choices=("steer_intent", "work_category", "soft_outcome"))
+    p_replay.add_argument("--since", type=date.fromisoformat, help="first local date, inclusive")
+    p_replay.add_argument("--until", type=date.fromisoformat, help="last local date, exclusive")
+    p_replay.add_argument("--job", help="saved private job ID instead of a new range")
+    p_replay.add_argument("--apply", action="store_true", help="score and deliver the saved job")
+    p_replay.add_argument("--budget-s", type=int, default=600, help="1 to 3600 seconds per resume")
     p_teach = lab_sub.add_parser("teach", help="teacher (silver) labels for a stratified sample")
     p_teach.add_argument("--task", choices=LABEL_DECISION_TASKS, required=True)
     p_teach.add_argument("--n", type=int, required=True, help="units to label this run")
