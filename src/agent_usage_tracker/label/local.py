@@ -27,9 +27,9 @@ TASK_NAMES = {"steer_intent", "work_category", "soft_outcome"}
 def reserve_label_time(root: Path, now: datetime) -> str:
     """Reserve a strictly newer local label time across runs and replay jobs."""
     root.mkdir(mode=0o700, parents=True, exist_ok=True)
-    atomic_write_text(root / ".gitignore", "*\n")
     path = root / "generation.json"
     with _locked(path):
+        atomic_write_text(root / ".gitignore", "*\n")
         previous = -1
         if path.exists():
             saved = load_json_dict(path).get("last_ms")
