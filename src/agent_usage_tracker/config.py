@@ -118,6 +118,7 @@ class Config:
     label_recall: float = 0.60
     label_coverage: float = 0.75
     label_budget_s: int = 3600
+    label_mature_outcomes: bool = False  # local-only catch-up, disabled until evaluated
     # `aut backup` ([backup] table): the restic repository, the command that prints its password,
     # the paths (empty: backup.default_paths) and excludes added to backup.default_excludes.
     backup_repository: str | None = None
@@ -367,6 +368,7 @@ def _config_from(data: dict[str, Any], path: Path) -> Config:
         label_recall=label_recall,
         label_coverage=label_coverage,
         label_budget_s=int(data.get("label_budget_s") or 3600),
+        label_mature_outcomes=_as_bool(data.get("label_mature_outcomes", False)),
         **backup,
         **git_days,
     )

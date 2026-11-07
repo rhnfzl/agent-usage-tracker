@@ -233,3 +233,73 @@ def test_inspect_day_means_a_member_row_that_day_not_span_overlap(dsn, episode):
     a_quiet_day = (T0.astimezone() - timedelta(days=2)).date().isoformat()
     assert inspector.fetch(dsn, "day", a_quiet_day)["episodes"] == []
     assert str(wide) in [ep["id"] for ep in inspector.fetch(dsn, "day", DAY)["episodes"]]
+
+
+@pytest.mark.parametrize("reopen_during_scoring", [False, True])
+def test_mature_outcome_runner_reads_and_rechecks_real_episode_rows(
+        dsn, tmp_path, monkeypatch, reopen_during_scoring):
+    import json
+    from dataclasses import replace
+    from agent_usage_tracker.event import make_event_id
+    from agent_usage_tracker.label import local
+    from label_helpers import _env
+
+    eid = uuid.uuid4()
+    sid = f"sql-{eid}"
+    at, end = T0, T0+timedelta(minutes=1)
+    with connect(dsn) as conn:
+        conn.execute("INSERT INTO agents.episode VALUES (%s,%s,%s,1,1,1,0,0,'no_code','git',false)",
+                     (eid, at, end))
+        conn.execute("INSERT INTO agents.episode_member VALUES (%s,%s,'seed',%s)", (eid, sid, []))
+        conn.commit()
+    push.send_activity_rows(dsn, [ActivityEvent(event_id=make_event_id("claude_code", "steer", sid),
+        ts=at.isoformat(), agent="claude_code", kind="steer", session_id=sid, turn_id=None,
+        attrs={"via": "typed"}, machine="t")])
+    directory = tmp_path / ".claude/projects/p"
+    directory.mkdir(parents=True)
+    (directory/f"{sid}.jsonl").write_text("\n".join(json.dumps(row) for row in [
+        {"type": "user", "uuid": sid, "timestamp": at.isoformat(), "sessionId": sid,
+         "message": {"content": "answer the synthetic question"}},
+        {"type": "assistant", "uuid": sid+"-reply", "timestamp": end.isoformat(),
+         "sessionId": sid, "message": {"content": "synthetic answer complete"}}]))
+    cfg = Config(machine="t", agents=(), webhook_url=None, webhook_secret=None, pg_dsn=dsn,
+                 home=tmp_path, repo_key_salt="synthetic-sql-salt", label_mature_outcomes=True)
+    row = {"minimum_score": .5, "source_eval_sha256": "a"*64,
+           "recipe": {"id": "synthetic", "members": []}}
+    monkeypatch.setattr(label_run, "load_policy", lambda: ({}, "b"*64))
+    scored = []
+
+    class Model(local.LocalBackend):
+        def __init__(self):
+            super().__init__("soft_outcome", row, "b"*64, cfg)
+
+        def prepare_requests(self, requests, deadline):
+            pass
+
+        def distribution(self, request):
+            scored.append(request.unit_id)
+            if reopen_during_scoring:
+                with connect(dsn) as conn:
+                    conn.execute("UPDATE agents.episode SET outcome='shipped' WHERE episode_id=%s", (eid,))
+                    conn.commit()
+            return {candidate["id"]: float(candidate["id"] == "resolved")
+                    for candidate in request.candidates}
+
+    with _env(tmp_path):
+        now = end+timedelta(days=40)
+        disabled = replace(cfg, label_mature_outcomes=False)
+        assert label_run.run_label(disabled, ["soft_outcome"], local_estimates=True, now=now,
+            backend_for=lambda task, choice: Model())["soft_outcome"]["rows"] == 0
+        result = label_run.run_label(cfg, ["soft_outcome"], local_estimates=True, now=now,
+            backend_for=lambda task, choice: Model())["soft_outcome"]
+        assert scored == [str(eid)]
+        with connect(dsn) as conn:
+            labels = conn.execute("SELECT attrs->>'label' FROM agents.activity_event WHERE "
+                "kind='label' AND attrs->>'task'='working.local.soft_outcome' "
+                "AND attrs->>'unit_id'=%s", (str(eid),)).fetchall()
+        assert labels == ([] if reopen_during_scoring else [("resolved",)])
+        assert result["rows"] == (0 if reopen_during_scoring else 1)
+        if not reopen_during_scoring:
+            result = label_run.run_label(cfg, ["soft_outcome"], local_estimates=True,
+                now=now+timedelta(days=1), backend_for=lambda task, choice: Model())["soft_outcome"]
+            assert result["rows"] == 0 and scored == [str(eid)]

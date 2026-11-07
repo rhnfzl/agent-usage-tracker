@@ -62,6 +62,7 @@ def _report(manifest: dict[str, Any], progress: dict[str, Any], delivered: int =
             "since": manifest["since"], "until": manifest["until"], "total": total,
             "missing_local_text": manifest["missing_local_text"],
             "partial_local_text": manifest["partial_local_text"],
+            "incomplete_outcome_context": manifest.get("incomplete_outcome_context", 0),
             "delivered": delivered, "remaining": total - progress["next"],
             "complete": progress["next"] == total, "reason": reason}
 
@@ -78,9 +79,10 @@ def prepare(cfg: Config, task: str, since: date, until: date, *, src: Source | N
     if task not in policy["tasks"]:
         raise AutError("label replay: this task has no saved local recipe")
     start, end = local_midnight(since), local_midnight(until)
-    src = src or Source(cfg)
+    src = src or Source(cfg, local_context=True)
     missing = len(getattr(src, "missing_text_units", []))
     partial = len(getattr(src, "partial_text_units", []))
+    incomplete = len(getattr(src, "incomplete_outcome_units", []))
     # Outcome facts describe the current snapshot; daily work stops at the selected date.
     reqs = [r for r in units(task, src, start, now if task == "soft_outcome" else end)
             if start <= datetime.fromisoformat(r.ts) < end]
@@ -98,6 +100,8 @@ def prepare(cfg: Config, task: str, since: date, until: date, *, src: Source | N
                                           getattr(src, "missing_text_units", [])[missing:]),
                 "partial_local_text": sum(start <= ts < end for ts in
                                           getattr(src, "partial_text_units", [])[partial:]),
+                "incomplete_outcome_context": sum(start <= ts < end for ts in
+                    getattr(src, "incomplete_outcome_units", [])[incomplete:]),
                 "requests": [asdict(r) for r in reqs]}
     progress = {"manifest_sha256": _digest(manifest), "next": 0}
     directory.mkdir(mode=0o700)

@@ -169,7 +169,8 @@ def test_a_steer_unit_carries_the_reply_it_answers_cut_to_its_end(tmp_path, monk
     src = tasks.Source(_cfg(tmp_path))
     long = "some words " * tasks.REPLY_MAX + "the end"
     monkeypatch.setattr(tasks.claude_code, "agent_replies",
-                        lambda home, sessions, want, until=None: {e: (long, "after") for e in want})
+                        lambda home, sessions, want, until=None, **kw:
+                        {e: (long, "after") for e in want})
     rows = [{"event_id": "e", "agent": "claude_code", "session_id": "s"}]
     assert src.replies(rows)["e"][0].endswith("the end")
     assert len(src.replies(rows)["e"][0]) == tasks.REPLY_MAX

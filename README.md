@@ -379,7 +379,40 @@ weight 1 and model/policy provenance. They describe eligible local inputs, not a
 Changed input facts create a new event under the same policy, including a new unknown result.
 Repeating the same unit, facts and policy stays idempotent. Consumers select the newest
 `labelled_at` per task, unit type and unit ID across policies; they must retain newer unknowns.
-Current text classification reads Claude Code logs; work categories also use local window blocks.
+Local estimates and new historical replay previews can read Claude Code, Codex, Cursor CLI,
+and Pi inputs using their collector event IDs. Teacher/export sources remain Claude-only.
+No input text is sent to the sink. Work categories also use local window blocks.
+Codex automated/subagent prompts, copied fork history, Cursor summaries/subagent chats, and
+copied Pi prompts are excluded. Cursor reply text is omitted because the stores lack reliable
+per-reply timestamps. Missing local text stays unclassified. Saved replay snapshots are unchanged;
+adding agent support does not expand an existing job's frozen inputs.
+Outcome inputs stay inside their own episode's time bounds. Local estimates skip incomplete
+prompts or a missing attributable final reply, reporting these as unclassified rather than
+using a reply to an earlier input. Replay previews report `incomplete_outcome_context` separately.
+The draft `writing_task()` and `bounded_outcome_task()` are not registered. They define explicit
+version-3 private evaluations; live work/outcome tasks and recipe validation remain version 2.
+Each Source snapshots canonical session paths once per agent, then reads only requested files.
+Text and replies still use each request's cutoff; no persistent text cache is added. A new
+Source discovers files created after the previous snapshot.
+Registered Cursor automation is excluded even when callers supply steer IDs or paths directly.
+New registrations also invalidate cached Cursor context. The direct reader checks origin after
+its message snapshot; prompt wording and one-shot usage do not establish automation.
+Mature-outcome catch-up is disabled by default. After evaluating input coverage and the saved
+recipe, set `label_mature_outcomes = true` and use `aut label run --local-estimates --task soft_outcome`.
+This retains recent reassessment and includes older current no-code episodes with complete
+bounded context. Otherwise the nightly outcome window stays fourteen days.
+The private `label/outcome-coverage.json` journal stores coverage hashes, machine identity, and
+the next queue phase. It advances only after delivery, including unknown results. Each phase
+gets a turn across resumptions; increasing mature idle age alone does not trigger reclassification.
+New source revision, input context, task version, or policy causes new coverage work. Current
+no-code eligibility and revision are rechecked before delivery. Corrupt progress is not reset.
+The journal uses the per-user label data directory (`~/.local/share/aut/`, or `XDG_DATA_HOME`).
+POSIX files use mode 0600. On Windows, access depends on inherited directory ACLs (access
+permissions); Unix mode bits do not establish privacy. Use a directory restricted to your account.
+Set `label_mature_outcomes = false` to stop mature catch-up without deleting its journal or
+changing the saved model recipe. This setting applies only to local estimates; teacher sources
+and frozen replay jobs keep their existing scope. A dry run scores local models but writes no
+coverage progress or labels. Real model-batch throughput still depends on the configured budget.
 State and heartbeats use `label_local`. The frozen baseline views do not read these tasks.
 For scheduled estimates, set `AUT_LABEL=1` and `AUT_LABEL_MODE=local` in `scan.env`.
 
@@ -405,7 +438,8 @@ supported local source units, not all historical work. Replies and context can a
 
 Jobs retain redacted input facts under `~/.local/share/aut/label/replay/` (or `XDG_DATA_HOME`).
 This explicit local snapshot is an exception to the normal text-free label cache. Job directories
-are private, files use mode 0600, and a local ignore file excludes them from Git. No trace text is
+use mode 0700 and files use mode 0600 on POSIX. Windows uses inherited directory ACLs, so keep
+the data directory restricted to your account. A local ignore file excludes jobs from Git. No trace text is
 sent to the sink or a cloud model. Keep private jobs, references, evaluation reports and
 data-derived benchmark results outside the public source repository.
 

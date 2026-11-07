@@ -29,6 +29,7 @@ from .core import (Backend, Choice, NoteBackend, current_labels, data_dir, decid
                    load_choice, local_days, local_midnight)
 from .tasks import OUTCOME_DAYS, TASKS, Source, SourceUnavailable, Task, units
 from .local import LocalBackend, decorate, load_policy, reserve_label_time
+from .covered_run import covered_outcomes
 
 BATCH = 50
 # The day tasks built from agents.episode, which the sink rebuilds once a night: they wait for it.
@@ -68,14 +69,17 @@ class _Run:
 
 
 def _window(name: str, wm: dict[str, Any], since: datetime | None, now: datetime,
-            ready: datetime | None = None) -> tuple[datetime, datetime | None]:
+            ready: datetime | None = None, *, mature_outcomes: bool = False,
+            ) -> tuple[datetime, datetime | None]:
     """(since, until) of one task. until None: up to now, and the watermark becomes the newest
     unit's ts. A day task covers whole past days (see _day_window)."""
     window = TASKS[name].window
     if window == "recent":
         if since:
-            print(f"aut: label {name}: --since and --days do not apply; it always covers the last "
-                  f"{OUTCOME_DAYS} days", file=sys.stderr)
+            scope = "recent and pending mature outcomes" if mature_outcomes else \
+                f"the last {OUTCOME_DAYS} days"
+            print(f"aut: label {name}: --since and --days do not apply; it always covers "
+                  f"{scope}", file=sys.stderr)
         return now - timedelta(days=OUTCOME_DAYS), None
     if window == "day":
         return _day_window(name, wm, since, now, ready)
@@ -165,7 +169,16 @@ def _run_task(run: _Run, task: Task, choice: Choice, backend: Backend, since: da
     key = f"{task.name}@{task.ver}|{backend.model_id}|{choice.calib_ver}"
     done = set(run.cache.get(key, ())) if task.cached else set()
     skipped = run.src.skipped["no_text"]
+    incomplete = len(run.src.incomplete_outcome_units)
     reqs = [r for r in units(task.name, run.src, since, until) if r.unit_id not in done]
+    c["skipped_incomplete_outcome"] = len(run.src.incomplete_outcome_units) - incomplete
+    if task.name == "soft_outcome" and run.local_estimates and run.cfg.label_mature_outcomes:
+        if not isinstance(backend, LocalBackend):
+            raise BackendUnavailable("label: mature outcomes require a saved local recipe")
+        if not run.src.mature_outcomes:
+            raise BackendUnavailable("label: mature outcomes require an opted-in local source")
+        covered_outcomes(run, reqs, backend, choice, c, BATCH, send_activity_rows)
+        return c
     if run.local_estimates:
         if not isinstance(backend, LocalBackend):
             raise BackendUnavailable("label: local estimates require a saved local decision recipe")
@@ -205,7 +218,10 @@ def _label_one(run: _Run, name: str, since: datetime | None, now: datetime, choi
     on, and the heartbeat row records it."""
     try:
         if name != LABEL_NOTE:
-            start, until = _window(name, run.wm, since, now, run.ready)
+            start, until = _window(name, run.wm, since, now, run.ready,
+                mature_outcomes=run.local_estimates and run.cfg.label_mature_outcomes)
+            if TASKS[name].window == "recent":
+                until = now  # All recent and mature requests in this run share one as-of time.
             return _run_task(run, TASKS[name], choice, backend_for(name, choice), start, until), None
         note_start, note_end = _day_window(name, run.wm, since, now, run.ready)
         backend = backend_for(name, choice)
@@ -232,7 +248,7 @@ def run_label(cfg: Config, tasks: list[str] | None = None, since: datetime | Non
     started = datetime.now(timezone.utc)
     labelled_at = started.isoformat(timespec="milliseconds")
     now = now or started
-    src = src or Source(cfg)
+    src = src or Source(cfg, local_context=local_estimates)
     loaded: dict[tuple[str | None, str | None, str | None, str | None], Backend] = {}
     policy, policy_id = load_policy() if local_estimates else ({}, "")
     if local_estimates and not dry_run:
@@ -294,6 +310,12 @@ def print_report(report: dict[str, TaskReport], *, dry_run: bool) -> None:
         if c["skipped_no_text"]:      # a new laptop, or transcripts deleted: say so, once a run
             print(f"aut: label {name}: {c['skipped_no_text']} steers skipped: their text is not on "
                   "this machine", file=sys.stderr)
+        if c["skipped_incomplete_outcome"]:
+            print(f"aut: label {name}: {c['skipped_incomplete_outcome']} outcomes unclassified: "
+                  "incomplete prompts or no attributable final reply", file=sys.stderr)
+        if c["skipped_stale_outcome"]:
+            print(f"aut: label {name}: {c['skipped_stale_outcome']} changed or no longer no-code "
+                  "outcomes skipped; current inputs wait for the next run", file=sys.stderr)
         if c["cut"]:
             print(f"aut: label {name}: stopped by the time budget (label_budget_s); the rest "
                   "waits for the next run", file=sys.stderr)

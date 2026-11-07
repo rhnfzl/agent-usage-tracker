@@ -102,6 +102,7 @@ agents = ["claude_code", "codex", "cursor_api", "cursor_cli", "pi"]
 # label_recall = 0.60          # out of fold; a model that misses one is marked as failing
 # label_coverage = 0.75        # a module below this share of known labels is not exported
 # label_budget_s = 3600        # time budget of one run; the rest waits for the next night
+# label_mature_outcomes = false # opt-in local catch-up for older no-code episodes after evaluation
 
 # `aut backup` (optional): an encrypted, deduplicated restic snapshot of the logs, the config, the
 # label files and repo_key.salt. Steps and restore: docs/new-laptop.md. restic runs
