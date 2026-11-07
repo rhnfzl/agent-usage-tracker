@@ -9,7 +9,7 @@ files live in a separate infrastructure repo; this page names what they must pro
 
 | Piece | Purpose |
 |---|---|
-| schema SQL | database `agents`: every table in [CONTRACT.md](CONTRACT.md) (`usage_event` as a hypertable, `event_session`, `activity_event`, `time_interval`, `collector_scan`, `commit_outcome`, `manual_outcome`, `episode_correction`, `daily_note`), the views built from them (`usage_event_dedup`, `time_interval_public`, `episode`, `episode_member`, `label_latest`, ...), compression and retention |
+| schema SQL | database `agents`: every table in [CONTRACT.md](CONTRACT.md) (`usage_event` as a hypertable, `event_session`, `activity_event`, `time_interval`, `collector_scan`, `commit_outcome`, `manual_outcome`, `episode_correction`, `daily_note`, `git_commit_day`), the views built from them (`usage_event_dedup`, `time_interval_public`, `episode`, `episode_member`, `label_latest`, `git_commits_daily`, ...), compression and retention |
 | grants SQL | least-privilege `agents_writer` (INSERT and SELECT, used by `pg_dsn`, and by n8n if you run the webhook) and `agents_ro` (read-only, used by Grafana; sees `time_interval_public`, never titles) |
 | n8n workflow (optional) | webhook -> check `X-AUT-Secret` -> `INSERT ... ON CONFLICT (event_id, ts) DO NOTHING` into `agents.usage_event` |
 | Grafana dashboard | reads the views as `agents_ro` |
