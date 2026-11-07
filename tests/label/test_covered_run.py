@@ -1,6 +1,7 @@
 """Exercise the real runner/source/journal seam with synthetic local model responses."""
 
 import json
+import os
 from dataclasses import replace
 from datetime import timedelta
 
@@ -90,7 +91,8 @@ def test_real_source_selects_old_work_journal_skips_age_only_reruns(scenario, tm
         saved = json.loads(progress().read_text())
         assert len(saved["acknowledged"]) == 2
         assert "question" not in progress().read_text()
-        assert progress().stat().st_mode & 0o077 == 0
+        if os.name != "nt":
+            assert progress().stat().st_mode & 0o077 == 0
         # Age changes alone do not re-run mature work; recent work is reassessed.
         state["scored"].clear()
         execute(now=NOW+timedelta(days=1))

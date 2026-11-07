@@ -378,6 +378,9 @@ the next queue phase. It advances only after delivery, including unknown results
 gets a turn across resumptions; increasing mature idle age alone does not trigger reclassification.
 New source revision, input context, task version, or policy causes new coverage work. Current
 no-code eligibility and revision are rechecked before delivery. Corrupt progress is not reset.
+The journal uses the per-user label data directory (`~/.local/share/aut/`, or `XDG_DATA_HOME`).
+POSIX files use mode 0600. On Windows, access depends on inherited directory ACLs (access
+permissions); Unix mode bits do not establish privacy. Use a directory restricted to your account.
 Set `label_mature_outcomes = false` to stop mature catch-up without deleting its journal or
 changing the saved model recipe. This setting applies only to local estimates; teacher sources
 and frozen replay jobs keep their existing scope. A dry run scores local models but writes no
@@ -407,7 +410,8 @@ supported local source units, not all historical work. Replies and context can a
 
 Jobs retain redacted input facts under `~/.local/share/aut/label/replay/` (or `XDG_DATA_HOME`).
 This explicit local snapshot is an exception to the normal text-free label cache. Job directories
-are private, files use mode 0600, and a local ignore file excludes them from Git. No trace text is
+use mode 0700 and files use mode 0600 on POSIX. Windows uses inherited directory ACLs, so keep
+the data directory restricted to your account. A local ignore file excludes jobs from Git. No trace text is
 sent to the sink or a cloud model. Keep private jobs, references, evaluation reports and
 data-derived benchmark results outside the public source repository.
 
