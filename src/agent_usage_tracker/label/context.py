@@ -10,7 +10,7 @@ from itertools import islice
 from pathlib import Path
 from typing import Any, Iterable
 
-from ..collectors import codex, cursor_cli, pi
+from ..collectors import claude_code, codex, cursor_cli, pi
 from ..collectors.activity_common import first_record, text_of
 from ..collectors.cursor import connect_ro
 from ..event import CollectorUnavailable, make_event_id
@@ -18,6 +18,30 @@ from ..repo_keys import RepoKeys
 from ..state import parse_record
 
 AGENTS = frozenset({"claude_code", "codex", "cursor_cli", "pi"})
+
+
+def session_paths(home: Path, agent: str) -> dict[str, list[tuple[int, str]]]:
+    """Canonical session identities and paths in discovery order, without retaining text."""
+    discover = {"claude_code": claude_code.main_session_files, "codex": codex.session_files,
+                "cursor_cli": cursor_cli.chat_stores, "pi": pi.session_files}[agent]
+    index: dict[str, list[tuple[int, str]]] = {}
+    for order, path in enumerate(discover(home)):
+        sid: Any = None
+        if agent == "claude_code":
+            sid = Path(path).stem
+        elif agent == "cursor_cli":
+            sid = Path(path).parent.name
+        else:
+            head = first_record(path)
+            if agent == "codex":
+                payload = head.get("payload") if head else None
+                if isinstance(payload, dict):
+                    sid = payload.get("id") or payload.get("session_id")
+            elif head and head.get("type") == "session":
+                sid = pi.header(head, path)["id"]
+        if isinstance(sid, str):
+            index.setdefault(sid, []).append((order, path))
+    return index
 
 
 @dataclass(frozen=True)
@@ -146,9 +170,10 @@ def _codex_events(path: str, until: datetime | None, keys: RepoKeys, prefix: int
 
 
 def codex_context(home: Path, sessions: set[str], want: set[str],
-                  until: datetime | None, keys: RepoKeys) -> dict[str, Context]:
+                  until: datetime | None, keys: RepoKeys, *,
+                  paths: Iterable[str] | None = None) -> dict[str, Context]:
     out: dict[str, Context] = {}
-    for path in codex.session_files(home):
+    for path in codex.session_files(home) if paths is None else paths:
         head = first_record(path)
         payload = head.get("payload") if head else None
         if not isinstance(payload, dict) or (payload.get("id") or payload.get("session_id")) \
@@ -221,9 +246,9 @@ def _pi_context(path: str, want: set[str], until: datetime | None) -> dict[str, 
 
 
 def pi_context(home: Path, sessions: set[str], want: set[str],
-               until: datetime | None) -> dict[str, Context]:
+               until: datetime | None, *, paths: Iterable[str] | None = None) -> dict[str, Context]:
     out: dict[str, Context] = {}
-    for path in pi.session_files(home):
+    for path in pi.session_files(home) if paths is None else paths:
         head = first_record(path)
         if not head or head.get("type") != "session" or pi.header(head, path)["id"] not in sessions:
             continue
@@ -232,10 +257,11 @@ def pi_context(home: Path, sessions: set[str], want: set[str],
 
 
 def cursor_context(home: Path, sessions: set[str], want: set[str],
-                   until: datetime | None, keys: RepoKeys) -> dict[str, Context]:
+                   until: datetime | None, keys: RepoKeys, *,
+                   paths: Iterable[str] | None = None) -> dict[str, Context]:
     out: dict[str, Context] = {}
     ambiguous: set[str] = set()
-    for path in cursor_cli.chat_stores(home):
+    for path in cursor_cli.chat_stores(home) if paths is None else paths:
         if Path(path).parent.name not in sessions:
             continue
         con = connect_ro(path)

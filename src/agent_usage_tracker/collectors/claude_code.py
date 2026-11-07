@@ -20,7 +20,7 @@ import time
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Iterator, NamedTuple, TypedDict
+from typing import Any, Iterable, Iterator, NamedTuple, TypedDict
 
 from ..config import Config
 from ..event import Row, ActivityEvent, Batch, EventSession, RunOrigin, UsageEvent, make_event_id
@@ -211,11 +211,12 @@ def _record_uid(o: dict[str, Any], path: str) -> str:
     return o.get("uuid") or f"{path}:{o.get('timestamp')}"
 
 
-def steer_texts(home: Path, sessions: set[str], want: set[str]) -> dict[str, str]:
+def steer_texts(home: Path, sessions: set[str], want: set[str], *,
+                paths: Iterable[str] | None = None) -> dict[str, str]:
     """steer event_id -> its raw text, for the ids in `want`, from the main logs of `sessions`. The
     id comes from the same record uid the steer row was made with."""
     out: dict[str, str] = {}
-    for f in main_session_files(home):
+    for f in main_session_files(home) if paths is None else paths:
         if Path(f).stem not in sessions:
             continue
         with open(f, encoding="utf-8", errors="replace") as fh:
@@ -233,13 +234,14 @@ def steer_texts(home: Path, sessions: set[str], want: set[str]) -> dict[str, str
 
 
 def agent_replies(home: Path, sessions: set[str], want: set[str], until: datetime | None = None,
+                  *, paths: Iterable[str] | None = None,
                   ) -> dict[str, tuple[str, str]]:
     """steer event_id -> (the agent's last text before it, the agent's last text after it and
     before the next steer in `want`), from the main logs of `sessions`. Text blocks only: no tool
     output and no thinking. A record at or after `until` is not read, so a replay sees only what
     was said by then."""
     out: dict[str, tuple[str, str]] = {}
-    for f in main_session_files(home):
+    for f in main_session_files(home) if paths is None else paths:
         if Path(f).stem not in sessions:
             continue
         last, cur = "", None

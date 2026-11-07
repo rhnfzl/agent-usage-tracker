@@ -137,6 +137,7 @@ class Source:
         self.incomplete_outcome_units: list[datetime] = []
         self._context_key: tuple[frozenset[tuple[str, str, str]], datetime | None] | None = None
         self._context_cache: dict[str, context.Context] = {}
+        self._path_cache: dict[str, dict[str, list[tuple[int, str]]]] = {}
         self.skipped: Counter[str] = Counter()        # units left out, by reason (the run reports it)
         self.missing_text_units: list[datetime] = []
         self.partial_text_units: list[datetime] = []
@@ -195,10 +196,20 @@ class Source:
         """steer event_id -> redacted local text, restricted to this source's allowed agents."""
         want = {s["event_id"] for s in steers if s["agent"] == "claude_code"}
         sessions = {s["session_id"] for s in steers if s["agent"] == "claude_code"}
-        texts = claude_code.steer_texts(self.cfg.home, sessions, want)
+        texts = claude_code.steer_texts(self.cfg.home, sessions, want,
+                                       paths=self._paths("claude_code", sessions))
         for eid, value in self._other_context(steers, until).items():
             texts[eid] = value.text
         return {eid: redact(text)[:TEXT_MAX] for eid, text in texts.items() if text.strip()}
+
+    def _paths(self, agent: str, sessions: set[str]) -> list[str]:
+        if not sessions:
+            return []
+        if agent not in self._path_cache:
+            self._path_cache[agent] = context.session_paths(self.cfg.home, agent)
+        index = self._path_cache[agent]
+        # Preserve cross-file overwrite and ambiguity semantics from canonical discovery order.
+        return [path for order, path in sorted(p for sid in sessions for p in index.get(sid, []))]
 
     def _other_context(self, steers: list[dict[str, Any]], until: datetime | None,
                        ) -> dict[str, context.Context]:
@@ -214,12 +225,15 @@ class Source:
             sessions = {s["session_id"] for s in mine}
             want = {s["event_id"] for s in mine}
             try:
+                paths = self._paths(agent, sessions)
                 if agent == "cursor_cli":
-                    values = context.cursor_context(self.cfg.home, sessions, want, until, self.keys)
+                    values = context.cursor_context(self.cfg.home, sessions, want, until, self.keys,
+                                                    paths=paths)
                 elif agent == "codex":
-                    values = context.codex_context(self.cfg.home, sessions, want, until, self.keys)
+                    values = context.codex_context(self.cfg.home, sessions, want, until, self.keys,
+                                                   paths=paths)
                 else:
-                    values = context.pi_context(self.cfg.home, sessions, want, until)
+                    values = context.pi_context(self.cfg.home, sessions, want, until, paths=paths)
             except (OSError, CollectorUnavailable) as exc:
                 raise SourceUnavailable(f"{agent}: local context unavailable") from exc
             out.update(values)
@@ -232,7 +246,8 @@ class Source:
         their last REPLY_MAX chars, from this source's supported local agent logs."""
         want = {s["event_id"] for s in steers if s["agent"] == "claude_code"}
         sessions = {s["session_id"] for s in steers if s["agent"] == "claude_code"}
-        replies = claude_code.agent_replies(self.cfg.home, sessions, want, until)
+        replies = claude_code.agent_replies(self.cfg.home, sessions, want, until,
+                                           paths=self._paths("claude_code", sessions))
         replies.update({eid: (value.before, value.after)
                         for eid, value in self._other_context(steers, until).items()})
         return {eid: (redact(a)[-REPLY_MAX:], redact(b)[-REPLY_MAX:])

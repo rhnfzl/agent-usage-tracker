@@ -369,6 +369,9 @@ prompts or a missing attributable final reply, reporting these as unclassified r
 using a reply to an earlier input. Replay previews report `incomplete_outcome_context` separately.
 The draft `writing_task()` and `bounded_outcome_task()` are not registered. They define explicit
 version-3 private evaluations; live work/outcome tasks and recipe validation remain version 2.
+Each Source snapshots canonical session paths once per agent, then reads only requested files.
+Text and replies still use each request's cutoff; no persistent text cache is added. A new
+Source discovers files created after the previous snapshot.
 Mature-outcome catch-up is disabled by default. After evaluating input coverage and the saved
 recipe, set `label_mature_outcomes = true` and use `aut label run --local-estimates --task soft_outcome`.
 This retains recent reassessment and includes older current no-code episodes with complete

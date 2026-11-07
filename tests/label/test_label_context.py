@@ -195,9 +195,9 @@ def test_source_reads_one_context_snapshot_for_text_and_replies(tmp_path, monkey
     calls = []
     original = context.codex_context
 
-    def counted(*args):
+    def counted(*args, **kw):
         calls.append(True)
-        return original(*args)
+        return original(*args, **kw)
 
     monkeypatch.setattr(context, "codex_context", counted)
     src = tasks.Source(_cfg(tmp_path), local_context=True)
