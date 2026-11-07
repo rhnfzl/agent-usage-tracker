@@ -90,3 +90,23 @@ def test_writing_is_explicit_versioned_draft_with_separate_cache_identity():
     assert before.prompt_ver != after.prompt_ver
     assert scores_path(before.task, "model", "rev", before.prompt_ver) != scores_path(
         after.task, "model", "rev", after.prompt_ver)
+
+
+def test_bounded_outcome_contract_is_unregistered_and_has_separate_cache_identity():
+    old, draft = tasks.TASKS["soft_outcome"], tasks.bounded_outcome_task()
+    assert old.ver == 2 and draft.ver == 3
+    assert old.candidates == draft.candidates
+    before = old.request("episode", "stable-episode", NOW, {"days_idle": 40}, rev="same-rev")
+    after = draft.request("episode", "stable-episode", NOW, before.facts, rev=before.rev)
+    assert before.unit_id == after.unit_id and before.task == after.task
+    assert before.prompt_ver != after.prompt_ver
+    assert scores_path(before.task, "model", "rev", before.prompt_ver) != scores_path(
+        after.task, "model", "rev", after.prompt_ver)
+    assert coverage.coverage_key(before, "policy") != coverage.coverage_key(after, "policy")
+
+
+def test_outcome_contract_three_refuses_legacy_source(tmp_path):
+    from agent_usage_tracker.config import AutError
+    from label_helpers import FakeSource, _cfg
+    with pytest.raises(AutError, match="opted-in"):
+        tasks._outcome_units(tasks.bounded_outcome_task(), FakeSource(_cfg(tmp_path)), NOW, NOW)

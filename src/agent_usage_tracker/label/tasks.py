@@ -106,6 +106,15 @@ def writing_task() -> Task:
     return replace(TASKS["work_category"], ver=3, candidates=tuple(candidates))
 
 
+def bounded_outcome_task() -> Task:
+    """Draft version 3 for episode-bounded prompts and an attributable final reply.
+
+    Private evaluation must use a local source with require_outcome_reply enabled. The live
+    registry and recipe validation remain version 2 until an explicit contract promotion.
+    """
+    return replace(TASKS["soft_outcome"], ver=3)
+
+
 class SourceUnavailable(AutError):
     """aw-server could not be read: the task's watermark must not move. A sink read's own error
     (a raw psycopg one) is not this: the sink being down stops the whole run."""
@@ -384,6 +393,8 @@ def _category_units(task: Task, src: Source, since: datetime, until: datetime | 
 def _outcome_units(task: Task, src: Source, since: datetime, until: datetime | None) -> list[Request]:
     """Episodes without commits (git outcome no_code) touched in the last OUTCOME_DAYS, as they
     stood at `until`: started before it, and only what was said before it."""
+    if task.ver >= 3 and not src.require_outcome_reply:
+        raise AutError("label: outcome contract 3 requires an opted-in bounded local source")
     now = until or datetime.now(timezone.utc)
     start = datetime(1970, 1, 1, tzinfo=timezone.utc) if src.mature_outcomes else since
     eps = [e for e in src.episodes(start) if e["outcome"] == "no_code" and e["first_ts"] < now]
