@@ -357,7 +357,30 @@ weight 1 and model/policy provenance. They describe eligible local inputs, not a
 Changed input facts create a new event under the same policy, including a new unknown result.
 Repeating the same unit, facts and policy stays idempotent. Consumers select the newest
 `labelled_at` per task, unit type and unit ID across policies; they must retain newer unknowns.
-Current text classification reads Claude Code logs; work categories also use local window blocks.
+Local estimates and new historical replay previews can read Claude Code, Codex, Cursor CLI,
+and Pi inputs using their collector event IDs. Teacher/export sources remain Claude-only.
+No input text is sent to the sink. Work categories also use local window blocks.
+Codex automated/subagent prompts, copied fork history, Cursor summaries/subagent chats, and
+copied Pi prompts are excluded. Cursor reply text is omitted because the stores lack reliable
+per-reply timestamps. Missing local text stays unclassified. Saved replay snapshots are unchanged;
+adding agent support does not expand an existing job's frozen inputs.
+Outcome inputs stay inside their own episode's time bounds. Local estimates skip incomplete
+prompts or a missing attributable final reply, reporting these as unclassified rather than
+using a reply to an earlier input. Replay previews report `incomplete_outcome_context` separately.
+The draft `writing_task()` is not registered and does not change the live taxonomy.
+Mature-outcome catch-up is disabled by default. After evaluating input coverage and the saved
+recipe, set `label_mature_outcomes = true` and use `aut label run --local-estimates --task soft_outcome`.
+This retains recent reassessment and includes older current no-code episodes with complete
+bounded context. Otherwise the nightly outcome window stays fourteen days.
+The private `label/outcome-coverage.json` journal stores coverage hashes, machine identity, and
+the next queue phase. It advances only after delivery, including unknown results. Each phase
+gets a turn across resumptions; increasing mature idle age alone does not trigger reclassification.
+New source revision, input context, task version, or policy causes new coverage work. Current
+no-code eligibility and revision are rechecked before delivery. Corrupt progress is not reset.
+Set `label_mature_outcomes = false` to stop mature catch-up without deleting its journal or
+changing the saved model recipe. This setting applies only to local estimates; teacher sources
+and frozen replay jobs keep their existing scope. A dry run scores local models but writes no
+coverage progress or labels. Real model-batch throughput still depends on the configured budget.
 State and heartbeats use `label_local`. The frozen baseline views do not read these tasks.
 For scheduled estimates, set `AUT_LABEL=1` and `AUT_LABEL_MODE=local` in `scan.env`.
 

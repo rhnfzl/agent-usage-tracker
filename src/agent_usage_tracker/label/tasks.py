@@ -9,8 +9,8 @@ Changing a candidate or a definition bumps that task's `ver`.
 from __future__ import annotations
 
 from collections import Counter, defaultdict
-from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from dataclasses import dataclass, replace
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Callable
 
 from ..collectors import activitywatch as aw
@@ -22,6 +22,7 @@ from ..redact import redact
 from ..repo_keys import RepoKeys
 from ..sink import connect
 from .core import Request, local_days
+from . import context
 
 TEXT_MAX = 1500              # chars of one steer text a prompt carries
 REPLY_MAX = 1500             # chars of one agent reply a prompt carries: its end, where it concludes
@@ -89,6 +90,22 @@ TASKS: dict[str, Task] = {t.name: t for t in (
 )}
 
 
+def writing_task() -> Task:
+    """Draft version 3 for explicit private evaluation; never registered as a live task."""
+    descriptions = {
+        "building": "producing executable code, configuration, or a structured software implementation",
+        "maintenance": "dependency/configuration upkeep and cleanup, excluding prose authorship",
+        "collaboration": "communicating with people: messages, meetings, or tickets for others",
+    }
+    candidates = []
+    for label, description in TASKS["work_category"].candidates:
+        candidates.append((label, descriptions.get(label, description)))
+        if label == "review":
+            candidates.append(("writing", "authoring or revising a prose deliverable, including "
+                                "articles, reports, and documentation; not messages for people"))
+    return replace(TASKS["work_category"], ver=3, candidates=tuple(candidates))
+
+
 class SourceUnavailable(AutError):
     """aw-server could not be read: the task's watermark must not move. A sink read's own error
     (a raw psycopg one) is not this: the sink being down stops the whole run."""
@@ -102,8 +119,15 @@ def _sql(dsn: str, sql: str, params: tuple[Any, ...]) -> list[tuple[Any, ...]]:
 class Source:
     """Everything a unit builder reads. Tests replace the sink reads; the text reads are local."""
 
-    def __init__(self, cfg: Config) -> None:
+    def __init__(self, cfg: Config, *, local_context: bool = False) -> None:
         self.cfg, self.keys = cfg, RepoKeys(cfg.repo_key_salt)
+        # Teacher/export paths retain their Claude-only boundary. Local estimates opt in.
+        self.context_agents = context.AGENTS if local_context else frozenset({"claude_code"})
+        self.require_outcome_reply = local_context
+        self.mature_outcomes = local_context and cfg.label_mature_outcomes
+        self.incomplete_outcome_units: list[datetime] = []
+        self._context_key: tuple[frozenset[tuple[str, str, str]], datetime | None] | None = None
+        self._context_cache: dict[str, context.Context] = {}
         self.skipped: Counter[str] = Counter()        # units left out, by reason (the run reports it)
         self.missing_text_units: list[datetime] = []
         self.partial_text_units: list[datetime] = []
@@ -120,6 +144,15 @@ class Source:
 
     def episodes(self, since: datetime) -> list[Episode]:
         return load_since(self.cfg.require_pg("label"), since)
+
+    def outcome_revisions(self, requests: list[Request]) -> dict[str, str]:
+        """Recheck current no-code eligibility before delivery; reopened work must not be sent."""
+        if not requests:
+            return {}
+        since = min(datetime.fromisoformat(r.ts) for r in requests)
+        ids = {r.unit_id for r in requests}
+        return {ep["id"]: ep["last_ts"].astimezone(timezone.utc).isoformat()
+                for ep in self.episodes(since) if ep["id"] in ids and ep["outcome"] == "no_code"}
 
     def episodes_ready(self) -> datetime | None:
         """Up to when agents.episode holds this machine's data: the start of this machine's last
@@ -149,23 +182,52 @@ class Source:
                     "agents.activity_event WHERE kind = 'label' AND ts >= %s AND ts < %s ORDER BY ts",
                     (since, until))
 
-    def texts(self, steers: list[dict[str, Any]]) -> dict[str, str]:
-        """steer event_id -> its redacted text, from this machine's Claude Code logs.
-        shortcut: Claude Code only; Codex and Pi seed theirs from position, so their steers stay
-        unlabelled. Upgrade when they carry many steers."""
+    def texts(self, steers: list[dict[str, Any]], until: datetime | None = None) -> dict[str, str]:
+        """steer event_id -> redacted local text, restricted to this source's allowed agents."""
         want = {s["event_id"] for s in steers if s["agent"] == "claude_code"}
         sessions = {s["session_id"] for s in steers if s["agent"] == "claude_code"}
-        return {eid: redact(text)[:TEXT_MAX]
-                for eid, text in claude_code.steer_texts(self.cfg.home, sessions, want).items()}
+        texts = claude_code.steer_texts(self.cfg.home, sessions, want)
+        for eid, value in self._other_context(steers, until).items():
+            texts[eid] = value.text
+        return {eid: redact(text)[:TEXT_MAX] for eid, text in texts.items() if text.strip()}
+
+    def _other_context(self, steers: list[dict[str, Any]], until: datetime | None,
+                       ) -> dict[str, context.Context]:
+        out: dict[str, context.Context] = {}
+        key = (frozenset((s["agent"], s["session_id"], s["event_id"]) for s in steers
+                         if s["agent"] in self.context_agents - {"claude_code"}), until)
+        if key == self._context_key:
+            return self._context_cache
+        for agent in self.context_agents - {"claude_code"}:
+            mine = [s for s in steers if s["agent"] == agent]
+            if not mine:
+                continue
+            sessions = {s["session_id"] for s in mine}
+            want = {s["event_id"] for s in mine}
+            try:
+                if agent == "cursor_cli":
+                    values = context.cursor_context(self.cfg.home, sessions, want, until, self.keys)
+                elif agent == "codex":
+                    values = context.codex_context(self.cfg.home, sessions, want, until, self.keys)
+                else:
+                    values = context.pi_context(self.cfg.home, sessions, want, until)
+            except (OSError, CollectorUnavailable) as exc:
+                raise SourceUnavailable(f"{agent}: local context unavailable") from exc
+            out.update(values)
+        self._context_key, self._context_cache = key, out
+        return out
 
     def replies(self, steers: list[dict[str, Any]], until: datetime | None = None,
                 ) -> dict[str, tuple[str, str]]:
         """steer event_id -> (agent reply before it, agent reply after it), redacted and cut to
-        their last REPLY_MAX chars, from this machine's Claude Code logs."""
+        their last REPLY_MAX chars, from this source's supported local agent logs."""
         want = {s["event_id"] for s in steers if s["agent"] == "claude_code"}
         sessions = {s["session_id"] for s in steers if s["agent"] == "claude_code"}
-        return {eid: (redact(a)[-REPLY_MAX:], redact(b)[-REPLY_MAX:]) for eid, (a, b)
-                in claude_code.agent_replies(self.cfg.home, sessions, want, until).items()}
+        replies = claude_code.agent_replies(self.cfg.home, sessions, want, until)
+        replies.update({eid: (value.before, value.after)
+                        for eid, value in self._other_context(steers, until).items()})
+        return {eid: (redact(a)[-REPLY_MAX:], redact(b)[-REPLY_MAX:])
+                for eid, (a, b) in replies.items()}
 
     def windows(self, since: datetime, until: datetime) -> list[dict[str, Any]]:
         """This machine's ActivityWatch window rows in [since, until), through the collector's own
@@ -188,7 +250,7 @@ class Source:
 
 def _steer_units(task: Task, src: Source, since: datetime, until: datetime | None) -> list[Request]:
     rows = src.steers(since)
-    text = src.texts(rows)
+    text = src.texts(rows, until)
     reply = src.replies(rows, until)
     by_session: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for r in rows:
@@ -200,9 +262,8 @@ def _steer_units(task: Task, src: Source, since: datetime, until: datetime | Non
             if r["ts"] < since or (until and r["ts"] >= until):
                 continue
             if r["event_id"] not in text:
-                # only Claude Code text is ever read, so only its misses mean a lost transcript
-                src.skipped["no_text"] += r["agent"] == "claude_code"
-                if r["agent"] == "claude_code":
+                src.skipped["no_text"] += r["agent"] in src.context_agents
+                if r["agent"] in src.context_agents:
                     src.missing_text_units.append(r["ts"])
                 continue
             a = r["attrs"] or {}
@@ -243,10 +304,9 @@ def _aw_blocks(task: Task, wins: list[dict[str, Any]], steer_ts: list[datetime])
     return out
 
 
-def _claude_steers(steers: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Claude Code steers only: an episode unit's facts may reach Sonnet (teach), and Sonnet
-    inputs are built only from Claude Code fields."""
-    return [r for r in steers if r["agent"] == "claude_code"]
+def _context_steers(src: Source, steers: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Local opt-in covers supported agents; teacher sources retain their original boundary."""
+    return [r for r in steers if r["agent"] in src.context_agents]
 
 
 def _episode_days(mine: list[dict[str, Any]], acts: list[dict[str, Any]], of_session: dict[str, list[str]],
@@ -294,16 +354,16 @@ def _episode_day_unit(task: Task, ep: str, d: date, u: dict[str, Any], text: dic
 def _category_units(task: Task, src: Source, since: datetime, until: datetime | None) -> list[Request]:
     until = until or datetime.now(timezone.utc)
     steers = [r for r in src.steers(since) if r["ts"] < until]
-    text = src.texts(steers)
+    text = src.texts(steers, until)
     reply = src.replies(steers, until)
-    mine = _claude_steers(steers)
-    claude_sessions = {r["session_id"] for r in mine}
+    mine = _context_steers(src, steers)
+    context_sessions = {r["session_id"] for r in mine}
     eps = src.episodes(since)
     of_session: dict[str, list[str]] = defaultdict(list)
     for episode in eps:
         for m in episode["members"]:
             of_session[m["session_id"]].append(episode["id"])
-    sids = sorted(claude_sessions & set(of_session))
+    sids = sorted(context_sessions & set(of_session))
     acts = src.activity(sids, since, until) if sids else []
     day_of = set(local_days(since, until))
     days = _episode_days(mine, acts, of_session, day_of)
@@ -325,26 +385,34 @@ def _outcome_units(task: Task, src: Source, since: datetime, until: datetime | N
     """Episodes without commits (git outcome no_code) touched in the last OUTCOME_DAYS, as they
     stood at `until`: started before it, and only what was said before it."""
     now = until or datetime.now(timezone.utc)
-    eps = [e for e in src.episodes(since) if e["outcome"] == "no_code" and e["first_ts"] < now]
-    steers = [r for r in _claude_steers(src.steers(since)) if r["ts"] < now] if eps else []
-    text = src.texts(steers)
-    reply = src.replies(steers, until)
+    start = datetime(1970, 1, 1, tzinfo=timezone.utc) if src.mature_outcomes else since
+    eps = [e for e in src.episodes(start) if e["outcome"] == "no_code" and e["first_ts"] < now]
+    text_since = min([start, *(e["first_ts"] for e in eps)])
+    steers = [r for r in _context_steers(src, src.steers(text_since)) if r["ts"] < now] if eps else []
+    text = src.texts(steers, until)
     out = []
     for ep in eps:
         mine = {m["session_id"] for m in ep["members"]}
-        st = [r for r in steers if r["session_id"] in mine]
+        st = [r for r in steers if r["session_id"] in mine
+              and ep["first_ts"] <= r["ts"] <= ep["last_ts"]]
         said = [text[r["event_id"]] for r in st if r["event_id"] in text]
         if not said:
             src.missing_text_units.append(ep["first_ts"])
             continue
         if len(said) < len(st):
             src.partial_text_units.append(ep["first_ts"])
+        # Session membership can span multiple episodes. Later replies and copied earlier
+        # prompts must not turn this episode into a resolved task.
+        reply = src.replies(st, min(now, ep["last_ts"] + timedelta(microseconds=1)))
+        last_reply = reply.get(st[-1]["event_id"], ("", ""))[1]
+        if src.require_outcome_reply and (len(said) < len(st) or not last_reply.strip()):
+            src.incomplete_outcome_units.append(ep["first_ts"])
+            continue
         # ts = the episode start, so the row's day (and its fold) never moves; rev =
         # its last activity, so a changed episode is re-asked and an unchanged one is a no-op
         out.append(task.request("episode", ep["id"], ep["first_ts"], {
             "last_steers": said[-5:],
-            "last_agent_reply": next((reply[r["event_id"]][1] for r in reversed(st)
-                                      if reply.get(r["event_id"], ("", ""))[1]), ""),
+            "last_agent_reply": last_reply,
             "days_idle": max((now - ep["last_ts"]).days, 0),
             "sessions": len({r["session_id"] for r in st}), "steers": len(st)},
             rev=ep["last_ts"].astimezone(timezone.utc).isoformat()))
