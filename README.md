@@ -246,6 +246,28 @@ events. Full rules: [CONTRACT.md](CONTRACT.md#active-time-agentstime_interval).
 
 ## Scheduling
 
+Scripted Cursor requests must not increase your human session or steer counts. Use
+`aut cursor-run --model MODEL --workspace /path/to/workspace < prompt.txt` for those requests.
+This command uses your installed `cursor-agent` and its existing account. It creates an empty
+chat, records its ID as automated, then resumes that chat in print/ask mode. The prompt comes
+from standard input. The model must be explicit; the command preserves Cursor's JSON output.
+It can use your account's credits when invoked. Normal collection never runs this command.
+
+Registration must finish before the first prompt. A registration failure sends no prompt.
+A failed Cursor request keeps its origin record. Collection omits registered human steer rows
+and retains automated turn rows and child links. Unregistered one-shot sessions keep their
+existing behavior; prompt wording and ask mode do not prove automation.
+
+The local `cursor-automated.json` registry sits beside the watermark (`~/.local/state/agent-usage-tracker/`
+by default; `AUT_STATE` or `XDG_STATE_HOME` changes that location). It stores chat IDs only,
+without prompts, model output, or credentials. Default backups include its directory.
+POSIX files use mode 0600. On Windows, privacy depends on inherited directory ACLs (access
+permissions); keep that directory restricted to your account. Corrupt or unreadable records
+stop collection and classification instead of resetting the registry.
+Local classification excludes registered Cursor steers and activity. Existing frozen replay
+inputs remain unchanged. Direct Cursor calls bypass this guard. Existing sink rows, episode
+links, counters, and labels require a separate audited repair; this command does not rewrite them.
+
 `packaging/` ships units that run `aut scan` every 15 minutes (launchd, Task Scheduler) or 10
 minutes (systemd). Setup steps are in [packaging/README.md](packaging/README.md).
 

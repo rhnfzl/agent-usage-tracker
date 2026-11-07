@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Any, Generator, Iterable, Iterator, NotRequired, TypedDict
 
 from ..config import Config
+from ..cursor_run import automated_sessions
 from ..event import (ActivityKind, Batch, ActivityEvent, CollectorUnavailable, EventSession, Row,
                      RunOrigin, make_event_id)
 from ..repo_keys import RepoKeys
@@ -327,15 +328,17 @@ def _closed_turn_rows(path: str, con: sqlite3.Connection, meta: dict[str, Any], 
     # A subagent chat's prompts are its parent agent talking, not a person. Its parent is in
     # subagentInfo.parentAgentId, but it has no usage or human row to carry a session row.
     info = meta.get("subagentInfo")
-    human = not info
     parent = info.get("parentAgentId") if isinstance(info, dict) else None
-    # No session row can carry a subagent chat's origin (it has no usage row), so its turn does.
-    origin: _TurnOrigin = {"run_origin": "interactive"} if human else {
-        "run_origin": "subagent",
-        "parent_session_id": parent if isinstance(parent, str) and _UUID.fullmatch(parent) else None}
     created = epoch_ms_to_iso(meta.get("createdAt"))
     lists = root_lists(con)
     msgs = messages(con, {i for seq in lists for i in seq})
+    # Read after the message snapshot: a concurrent wrapper registers before its first prompt.
+    scripted = sid in automated_sessions()
+    human = not info and not scripted
+    origin: _TurnOrigin = {"run_origin": "automated"} if scripted else (
+        {"run_origin": "interactive"} if human else {
+            "run_origin": "subagent",
+            "parent_session_id": parent if isinstance(parent, str) and _UUID.fullmatch(parent) else None})
     done = set(cur.get("done", ()))
     act = _Activity(keys)
     turns = _read_turns(lists, msgs, done, act)

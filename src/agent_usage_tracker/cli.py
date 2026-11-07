@@ -61,7 +61,7 @@ import sys
 from datetime import date, timedelta
 from typing import Sequence
 
-from . import backup, git_days, inspector, manual_time, outcomes, pricing, review, scan
+from . import backup, cursor_run, git_days, inspector, manual_time, outcomes, pricing, review, scan
 from .collectors import REGISTRY
 from .config import (ALL_AGENTS, LABEL_DAYS, LABEL_DECISION_TASKS, LABEL_TASK_NAMES, AutError,
                      Config, load_config, config_path)
@@ -247,7 +247,11 @@ def cmd_sync_prices(args: argparse.Namespace) -> None:
     print(f"synced {n} model prices -> {out}", file=sys.stderr)
 
 
-_NO_CONFIG_COMMANDS = {"sync-prices": cmd_sync_prices}
+def cmd_cursor_run(args: argparse.Namespace) -> None:
+    cursor_run.run(args.model, args.workspace, sys.stdin)
+
+
+_NO_CONFIG_COMMANDS = {"sync-prices": cmd_sync_prices, "cursor-run": cmd_cursor_run}
 _AGENT_COMMANDS = {"scan": cmd_scan, "backfill": cmd_backfill, "export": cmd_export,
                    "status": cmd_status}
 _COMMANDS = {"time": cmd_time_add, "outcomes": cmd_outcomes, "outcome": cmd_outcome,
@@ -280,6 +284,9 @@ def _build_parser() -> argparse.ArgumentParser:
     p_sync.add_argument("--litellm-url", default=pricing.LITELLM_URL)
     p_sync.add_argument("--models-dev-url", default=pricing.MODELS_DEV_URL)
     p_sync.add_argument("--genai-prices-url", default=pricing.GENAI_PRICES_URL)
+    p_cursor = sub.add_parser("cursor-run", help="run a scripted Cursor request with a registered origin")
+    p_cursor.add_argument("--model", required=True, help="explicit Cursor model identifier")
+    p_cursor.add_argument("--workspace", required=True, help="workspace for this scripted request")
     p_time = sub.add_parser("time", help="manual active time")
     time_sub = p_time.add_subparsers(dest="time_cmd", required=True)
     p_tadd = time_sub.add_parser("add", help="record one manual interval (local times)")
