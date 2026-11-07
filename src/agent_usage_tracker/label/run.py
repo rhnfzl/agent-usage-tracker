@@ -28,7 +28,7 @@ from .backends import BackendUnavailable, make_backend
 from .core import (Backend, Choice, NoteBackend, current_labels, data_dir, decide, label_event,
                    load_choice, local_days, local_midnight)
 from .tasks import OUTCOME_DAYS, TASKS, Source, SourceUnavailable, Task, units
-from .local import LocalBackend, decorate, load_policy
+from .local import LocalBackend, decorate, load_policy, reserve_label_time
 
 BATCH = 50
 # The day tasks built from agents.episode, which the sink rebuilds once a night: they wait for it.
@@ -235,6 +235,8 @@ def run_label(cfg: Config, tasks: list[str] | None = None, since: datetime | Non
     src = src or Source(cfg)
     loaded: dict[tuple[str | None, str | None, str | None, str | None], Backend] = {}
     policy, policy_id = load_policy() if local_estimates else ({}, "")
+    if local_estimates and not dry_run:
+        labelled_at = reserve_label_time(data_dir() / "label" / "replay", started)
 
     def default_backend(task: str, choice: Choice) -> Backend:
         if local_estimates:

@@ -9,17 +9,43 @@ import re
 import subprocess
 import sys
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
 from ..config import AutError, Config, config_path
 from ..event import ActivityEvent, make_event_id
+from ..state import _locked, atomic_write_text, load_json_dict
 from .backends import BackendUnavailable, find_model, make_backend
 from .core import PROMPT_VER, Backend, Choice, Request, calibrate, softmax, top_label
 from .tasks import TASKS
 
 POLICY = "local-decision-v1"
 TASK_NAMES = {"steer_intent", "work_category", "soft_outcome"}
+
+
+def reserve_label_time(root: Path, now: datetime) -> str:
+    """Reserve a strictly newer local label time across runs and replay jobs."""
+    root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    path = root / "generation.json"
+    with _locked(path):
+        atomic_write_text(root / ".gitignore", "*\n")
+        previous = -1
+        if path.exists():
+            saved = load_json_dict(path).get("last_ms")
+            if type(saved) is not int or saved < 0:
+                raise AutError("label: invalid local generation state; it was not reset")
+            previous = saved
+        elif any(child.is_dir() for child in root.iterdir()):
+            raise AutError("label: missing generation state; it was not reset")
+        stamp = max(int(now.timestamp() * 1000), previous + 1)
+        try:
+            value = (datetime(1970, 1, 1, tzinfo=timezone.utc) + timedelta(milliseconds=stamp)
+                     ).isoformat(timespec="milliseconds")
+        except OverflowError as exc:
+            raise AutError("label: invalid local generation state; it was not reset") from exc
+        atomic_write_text(path, json.dumps({"last_ms": stamp}))
+        return value
 
 
 def _number(value: Any) -> bool:
