@@ -26,6 +26,8 @@ import tempfile
 import time
 from pathlib import Path
 
+import pytest
+
 from test_activity import _git_repo, _key, _plain_value
 
 from agent_usage_tracker import scan
@@ -209,6 +211,47 @@ def _eid(kind: str, seed: str) -> str:
 
 def test_registered() -> None:
     assert NAME in REGISTRY and set(REGISTRY) == set(ALL_AGENTS), "config and registry drifted"
+
+
+def test_registered_automation_keeps_turns_but_not_human_steers(tmp_path, monkeypatch):
+    from agent_usage_tracker import cursor_run
+    from agent_usage_tracker.state import atomic_write_text
+    monkeypatch.setenv("AUT_STATE", str(tmp_path / "state.json"))
+    atomic_write_text(cursor_run.registry_path(), json.dumps({"version": 1, "sessions": [A]}))
+    _store(tmp_path, A, [[_prompt("r1", TYPED)]])
+    _store(tmp_path, B, [[_prompt("r2", TYPED)]])
+    events = _collect(tmp_path)
+    assert not _acts(events, "steer", A)
+    assert not [e for e in events if isinstance(e, UsageEvent) and e.session.session_id == A]
+    assert {e.attrs["run_origin"] for e in _acts(events, "turn", A)} == {"automated"}
+    assert {e.attrs["role"] for e in _acts(events, "link", A)} == {"child"}
+    assert len(_acts(events, "steer", B)) == 1
+
+
+@pytest.mark.parametrize("mode", ["ask", "search"])
+def test_unregistered_one_shot_is_not_assumed_automated(tmp_path, monkeypatch, mode):
+    monkeypatch.setenv("AUT_STATE", str(tmp_path / "state.json"))
+    _store(tmp_path, A, [[_prompt("r1", "Label these independent units. Return JSON.")]],
+           mode=mode, run_origin="unknown")
+    events = _collect(tmp_path)
+    assert len(_acts(events, "steer", A)) == 1
+    assert {e.session.run_origin for e in events if isinstance(e, UsageEvent)} == {"interactive"}
+
+
+def test_registry_is_read_after_prompt_snapshot(tmp_path, monkeypatch):
+    from agent_usage_tracker import cursor_run
+    from agent_usage_tracker.state import atomic_write_text
+    monkeypatch.setenv("AUT_STATE", str(tmp_path / "state.json"))
+    _store(tmp_path, A, [[_prompt("r1", TYPED)]])
+    read_messages = cursor_cli.messages
+
+    def snapshot(*args):
+        messages = read_messages(*args)
+        atomic_write_text(cursor_run.registry_path(), json.dumps({"version": 1, "sessions": [A]}))
+        return messages
+
+    monkeypatch.setattr(cursor_cli, "messages", snapshot)
+    assert not _acts(_collect(tmp_path), "steer", A)
 
 
 def test_cli_human_and_sessions() -> None:

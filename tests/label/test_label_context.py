@@ -116,6 +116,63 @@ def test_cursor_read_is_sqlite_read_only(tmp_path, monkeypatch):
     assert called and before == path.read_bytes()
 
 
+@pytest.mark.parametrize("warm_cache", [False, True])
+def test_explicit_source_inputs_cannot_bypass_registered_cursor_origin(tmp_path, monkeypatch, warm_cache):
+    from agent_usage_tracker import cursor_run
+    from agent_usage_tracker.state import atomic_write_text
+    monkeypatch.setenv("AUT_STATE", str(tmp_path / "state.json"))
+    _store(tmp_path, A, [[_prompt("r", "Label these examples. Return JSON.")]])
+    eid = make_event_id("cursor_cli", "steer", f"{A}|r")
+    rows = [{"agent": "cursor_cli", "session_id": A, "event_id": eid}]
+    src = tasks.Source(_cfg(tmp_path), local_context=True)
+    if warm_cache:
+        assert src.texts(rows, UNTIL)[eid].strip() == "Label these examples. Return JSON."
+        assert src.replies(rows, UNTIL)[eid] == ("", "")
+    atomic_write_text(cursor_run.registry_path(), json.dumps({"version": 1, "sessions": [A]}))
+    assert src.texts(rows, UNTIL) == {}
+    assert src.replies(rows, UNTIL) == {}
+
+
+def test_direct_cursor_reader_honors_registry_with_explicit_paths(tmp_path, monkeypatch):
+    from agent_usage_tracker import cursor_run
+    from agent_usage_tracker.state import atomic_write_text
+    monkeypatch.setenv("AUT_STATE", str(tmp_path / "state.json"))
+    path = _store(tmp_path, A, [[_prompt("r", "one-shot human question")]])
+    eid = make_event_id("cursor_cli", "steer", f"{A}|r")
+    keys = tasks.Source(_cfg(tmp_path)).keys
+    assert context.cursor_context(tmp_path, {A}, {eid}, UNTIL, keys, paths=[str(path)])[eid].text.strip()
+    atomic_write_text(cursor_run.registry_path(), json.dumps({"version": 1, "sessions": [A]}))
+    assert context.cursor_context(tmp_path, {A}, {eid}, UNTIL, keys, paths=[str(path)]) == {}
+
+
+def test_direct_cursor_reader_checks_origin_after_message_snapshot(tmp_path, monkeypatch):
+    from agent_usage_tracker import cursor_run
+    from agent_usage_tracker.state import atomic_write_text
+    monkeypatch.setenv("AUT_STATE", str(tmp_path / "state.json"))
+    _store(tmp_path, A, [[_prompt("r", "scripted question")]])
+    eid = make_event_id("cursor_cli", "steer", f"{A}|r")
+    original = cursor_cli.messages
+
+    def snapshot(*args):
+        messages = original(*args)
+        atomic_write_text(cursor_run.registry_path(), json.dumps({"version": 1, "sessions": [A]}))
+        return messages
+
+    monkeypatch.setattr(cursor_cli, "messages", snapshot)
+    assert context.cursor_context(tmp_path, {A}, {eid}, UNTIL, tasks.Source(_cfg(tmp_path)).keys) == {}
+
+
+def test_direct_cursor_reader_fails_closed_on_corrupt_origin(tmp_path, monkeypatch):
+    from agent_usage_tracker import cursor_run
+    from agent_usage_tracker.config import AutError
+    from agent_usage_tracker.state import atomic_write_text
+    monkeypatch.setenv("AUT_STATE", str(tmp_path / "state.json"))
+    _store(tmp_path, A, [[_prompt("r", "question")]])
+    atomic_write_text(cursor_run.registry_path(), "invalid")
+    with pytest.raises(AutError):
+        context.cursor_context(tmp_path, {A}, set(), UNTIL, tasks.Source(_cfg(tmp_path)).keys)
+
+
 def test_unreadable_cursor_store_fails_without_silent_partial_coverage(tmp_path, monkeypatch):
     _store(tmp_path, A, [[_prompt("r", "hello")]])
     monkeypatch.setattr(context, "connect_ro", lambda path: None)

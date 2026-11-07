@@ -16,6 +16,7 @@ from typing import Any, Callable
 from ..collectors import activitywatch as aw
 from ..collectors import claude_code
 from ..config import AutError, Config
+from ..cursor_run import automated_sessions
 from ..episode_store import Episode, load_since
 from ..event import CollectorUnavailable, make_event_id
 from ..redact import redact
@@ -150,7 +151,9 @@ class Source:
                     "WHERE kind = 'steer' AND session_id IN (SELECT session_id FROM "
                     "agents.activity_event WHERE kind = 'steer' AND ts >= %s) ORDER BY ts",
                     (since,))
-        return [dict(zip(("event_id", "ts", "agent", "session_id", "attrs"), r)) for r in rows]
+        scripted = automated_sessions()
+        return [dict(zip(("event_id", "ts", "agent", "session_id", "attrs"), r)) for r in rows
+                if not (r[2] == "cursor_cli" and r[3] in scripted)]
 
     def episodes(self, since: datetime) -> list[Episode]:
         return load_since(self.cfg.require_pg("label"), since)
@@ -181,10 +184,12 @@ class Source:
 
     def activity(self, sessions: list[str], since: datetime, until: datetime) -> list[dict[str, Any]]:
         rows = _sql(self.cfg.require_pg("label"),
-                    "SELECT session_id, ts, kind, attrs FROM agents.activity_event WHERE kind IN "
+                    "SELECT session_id, ts, kind, attrs, agent FROM agents.activity_event WHERE kind IN "
                     "('turn', 'interrupt', 'rejection', 'commit') AND session_id = ANY(%s) "
                     "AND ts >= %s AND ts < %s", (sessions, since, until))
-        return [dict(zip(("session_id", "ts", "kind", "attrs"), r)) for r in rows]
+        scripted = automated_sessions()
+        return [dict(zip(("session_id", "ts", "kind", "attrs", "agent"), r)) for r in rows
+                if not (r[4] == "cursor_cli" and r[0] in scripted)]
 
     def labels(self, since: datetime, until: datetime) -> list[tuple[Any, ...]]:
         """(event_id, ts, attrs) of each label row: what core.current_labels reads."""
@@ -214,6 +219,9 @@ class Source:
     def _other_context(self, steers: list[dict[str, Any]], until: datetime | None,
                        ) -> dict[str, context.Context]:
         out: dict[str, context.Context] = {}
+        scripted = automated_sessions()
+        steers = [s for s in steers if not (s["agent"] == "cursor_cli"
+                                           and s["session_id"] in scripted)]
         key = (frozenset((s["agent"], s["session_id"], s["event_id"]) for s in steers
                          if s["agent"] in self.context_agents - {"claude_code"}), until)
         if key == self._context_key:

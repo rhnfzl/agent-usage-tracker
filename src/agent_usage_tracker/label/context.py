@@ -13,6 +13,7 @@ from typing import Any, Iterable
 from ..collectors import claude_code, codex, cursor_cli, pi
 from ..collectors.activity_common import first_record, text_of
 from ..collectors.cursor import connect_ro
+from ..cursor_run import automated_sessions
 from ..event import CollectorUnavailable, make_event_id
 from ..repo_keys import RepoKeys
 from ..state import parse_record
@@ -276,6 +277,8 @@ def cursor_context(home: Path, sessions: set[str], want: set[str],
                 continue
             lists = cursor_cli.root_lists(con)
             messages = cursor_cli.messages(con, {i for seq in lists for i in seq})
+            if sid in automated_sessions():
+                continue
             turns = cursor_cli._read_turns(lists, messages, set(), cursor_cli._Activity(keys))
             for rid, turn in turns.items():
                 prompts = [((), turn.msg)] + [((mid,), pm) for mid, pm in turn.more.values()]
