@@ -8,8 +8,10 @@ from __future__ import annotations
 
 import html
 import secrets
+import socket
 import sys
 import threading
+import time
 import webbrowser
 from email.message import Message
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -73,10 +75,29 @@ def serve(token: str, on_get: Callable[[str], bytes | None],
             page = on_get(self.path[len(root):]) if self.path.startswith(root) else None
             self._reply(200 if page is not None else 404, b"not found" if page is None else page)
 
+        def _close_rejected_post(self) -> None:
+            # Let the client receive the 404 before unread POST bytes can reset the connection.
+            deadline, left = time.monotonic() + 1, _MAX_BODY
+            try:
+                self.wfile.flush()
+                self.connection.shutdown(socket.SHUT_WR)
+                while left:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    self.connection.settimeout(remaining)
+                    data = self.connection.recv(min(left, 65536))
+                    if not data:
+                        break
+                    left -= len(data)
+            except OSError:
+                pass  # The client may already have closed or reset its connection.
+
         def do_POST(self) -> None:
-            # the token first: nothing the request says is read until it has shown the token
+            # The token gates form parsing and saves; rejected bodies are only discarded.
             if self.path != root or not 0 < _body_length(self.headers) <= _MAX_BODY:
                 self._reply(404, b"not found")
+                self._close_rejected_post()
                 return
             form = parse_qs(self.rfile.read(_body_length(self.headers)).decode("utf-8", "replace"))
             try:

@@ -22,7 +22,7 @@ from ..event import CollectorUnavailable, make_event_id
 from ..redact import redact
 from ..repo_keys import RepoKeys
 from ..sink import connect
-from .core import Request, local_days
+from .core import Request, local_days, local_midnight
 from . import context
 
 TEXT_MAX = 1500              # chars of one steer text a prompt carries
@@ -341,7 +341,7 @@ def _context_steers(src: Source, steers: list[dict[str, Any]]) -> list[dict[str,
     return [r for r in steers if r["agent"] in src.context_agents]
 
 
-def _episode_days(mine: list[dict[str, Any]], acts: list[dict[str, Any]], of_session: dict[str, list[str]],
+def _episode_days(mine: list[dict[str, Any]], acts: list[dict[str, Any]], of_session: dict[str, list[Episode]],
                   day_of: set[date]) -> dict[tuple[str, date], dict[str, Any]]:
     """(episode, local day) -> its steers, sessions and activity rows that day."""
     days: dict[tuple[str, date], dict[str, Any]] = {}
@@ -350,14 +350,16 @@ def _episode_days(mine: list[dict[str, Any]], acts: list[dict[str, Any]], of_ses
         if d not in day_of:
             continue
         for ep in of_session.get(r["session_id"], ()):
-            u = days.setdefault((ep, d), {"steers": [], "sessions": set(), "acts": []})
+            if not ep["first_ts"] <= r["ts"] <= ep["last_ts"]:
+                continue
+            u = days.setdefault((ep["id"], d), {"steers": [], "sessions": set(), "acts": []})
             u["steers"].append(r)
             u["sessions"].add(r["session_id"])
     for a in acts:
         d = a["ts"].astimezone().date()
         for ep in of_session.get(a["session_id"], ()):
-            if (ep, d) in days:
-                days[(ep, d)]["acts"].append(a)
+            if ep["first_ts"] <= a["ts"] <= ep["last_ts"] and (ep["id"], d) in days:
+                days[(ep["id"], d)]["acts"].append(a)
     return days
 
 
@@ -387,20 +389,23 @@ def _category_units(task: Task, src: Source, since: datetime, until: datetime | 
     until = until or datetime.now(timezone.utc)
     steers = [r for r in src.steers(since) if r["ts"] < until]
     text = src.texts(steers, until)
-    reply = src.replies(steers, until)
     mine = _context_steers(src, steers)
     context_sessions = {r["session_id"] for r in mine}
     eps = src.episodes(since)
-    of_session: dict[str, list[str]] = defaultdict(list)
+    of_session: dict[str, list[Episode]] = defaultdict(list)
     for episode in eps:
         for m in episode["members"]:
-            of_session[m["session_id"]].append(episode["id"])
+            of_session[m["session_id"]].append(episode)
     sids = sorted(context_sessions & set(of_session))
     acts = src.activity(sids, since, until) if sids else []
     day_of = set(local_days(since, until))
     days = _episode_days(mine, acts, of_session, day_of)
+    by_id = {episode["id"]: episode for episode in eps}
     out = []
     for (ep, d), u in days.items():
+        cutoff = min(until, local_midnight(d + timedelta(days=1)),
+                     by_id[ep]["last_ts"] + timedelta(microseconds=1))
+        reply = src.replies(u["steers"], cutoff)
         req = _episode_day_unit(task, ep, d, u, text, reply)
         if req is None:
             src.missing_text_units.append(u["steers"][0]["ts"])
