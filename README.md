@@ -5,11 +5,10 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 ![Platforms](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey)
 
-**See how you work with coding agents, across tools and machines.**
+**Stop guessing how many tokens your coding agents use and what they actually do.**
 
-`aut` reads the logs Claude Code, Codex, Cursor, and Pi already write.
-It collects usage, sessions, activity, and outcomes into a database you control.
-Optional local models classify the work behind those numbers.
+`aut` reads existing Claude Code, Codex, Cursor, and Pi logs. Export usage to a local CSV, or keep usage and sessions across machines in a database you control.
+Optional local models classify the work as building, debugging, planning, or reviewing.
 
 Use it to answer:
 
@@ -18,7 +17,12 @@ Use it to answer:
 - Which sessions belong to the same piece of work, and what became of it?
 - Do I have a copy of my session logs if this laptop fails?
 
-Start with a local CSV, or connect a self-hosted database for history across machines.
+With [uv](https://docs.astral.sh/uv/getting-started/installation/) installed, try a local export:
+
+```bash
+uvx --from git+https://github.com/rhnfzl/agent-usage-tracker aut --agents claude_code,codex,cursor_cli,pi export --out usage.csv
+```
+
 AUT is a collector and CLI. Dashboards and websites read your database; this repository does not ship a hosted dashboard.
 
 [Quick start](#quick-start) · [Collectors](#collectors) · [Local labels](#local-labels-aut-label) · [Privacy](#privacy-model) · [Documentation](#documentation)
