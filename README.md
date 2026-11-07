@@ -389,6 +389,8 @@ adding agent support does not expand an existing job's frozen inputs.
 Outcome inputs stay inside their own episode's time bounds. Local estimates skip incomplete
 prompts or a missing attributable final reply, reporting these as unclassified rather than
 using a reply to an earlier input. Replay previews report `incomplete_outcome_context` separately.
+Work-category prompts and activity also stay inside their own episode. Final replies stop at
+the earlier of the episode end or local midnight, so shared sessions cannot mix separate work days.
 The draft `writing_task()` and `bounded_outcome_task()` are not registered. They define explicit
 version-3 private evaluations; live work/outcome tasks and recipe validation remain version 2.
 Each Source snapshots canonical session paths once per agent, then reads only requested files.

@@ -131,6 +131,58 @@ def test_soft_outcome_only_no_code(tmp_path):
     assert again.ts == reqs[0].ts and core.label_event(again, res).event_id != first
 
 
+def test_work_category_bounds_shared_session_prompts_activity_and_reply(tmp_path, monkeypatch):
+    t0 = DAY1.replace(minute=0)
+    _claude_log(tmp_path, "s1", [("u1", "plan the export"), ("u2", "fix the crash")])
+    steers = [_steer("u1", "s1", t0), _steer("u2", "s1", t0 + timedelta(hours=1))]
+    eps = [{"id": name, "first_ts": start, "last_ts": start + timedelta(minutes=10),
+            "members": [_member("s1")]} for name, start in
+           [("early", t0), ("late", t0 + timedelta(hours=1))]]
+    acts = [{"session_id": "s1", "ts": start + timedelta(minutes=1), "kind": "turn",
+             "attrs": {"by_tool": {tool: 1}}} for start, tool in
+            [(t0, "Plan"), (t0 + timedelta(hours=1), "Edit")]]
+    src = FakeSource(_cfg(tmp_path), steers, eps, acts)
+    cutoffs = []
+
+    def replies(rows, until=None):
+        cutoffs.append(until)
+        return {row["event_id"]: ("", "later unrelated reply") for row in rows}
+
+    monkeypatch.setattr(src, "replies", replies)
+    local_day = t0.astimezone().date()
+    reqs = tasks.units("work_category", src, run.local_midnight(local_day),
+                       run.local_midnight(local_day + timedelta(days=1)))
+    assert len(reqs) == 2
+    assert [r.facts["first_steer"] for r in reqs] == ["plan the export", "fix the crash"]
+    assert [r.facts["steers"] for r in reqs] == [1, 1]
+    assert [r.facts["tool_calls_by_tool"] for r in reqs] == [{"Plan": 1}, {"Edit": 1}]
+    assert cutoffs == [e["last_ts"] + timedelta(microseconds=1) for e in eps]
+
+
+def test_work_category_reply_stops_at_local_midnight_and_inclusive_episode_end(tmp_path):
+    next_day = DAY1.astimezone().date() + timedelta(days=1)
+    midnight = run.local_midnight(next_day)
+    first, second, end = (midnight + timedelta(minutes=m) for m in (-2, 2, 5))
+    _claude_log(tmp_path, "s1", [])
+    log = tmp_path / ".claude/projects/-p/s1.jsonl"
+    log.write_text("\n".join(json.dumps({"type": role, "uuid": uid, "sessionId": "s1",
+        "timestamp": ts.isoformat(), "message": {"role": role, "content": text}})
+        for role, uid, ts, text in [
+            ("user", "u1", first, "plan"),
+            ("assistant", "a1", midnight - timedelta(minutes=1), "first day reply"),
+            ("assistant", "a2", midnight + timedelta(minutes=1), "next day reply"),
+            ("user", "u2", second, "build"),
+            ("assistant", "a3", end, "episode end reply"),
+            ("assistant", "a4", end + timedelta(minutes=1), "outside episode"),
+        ]))
+    src = FakeSource(_cfg(tmp_path), [_steer("u1", "s1", first), _steer("u2", "s1", second)],
+                     [{"id": "e", "first_ts": first, "last_ts": end,
+                       "members": [_member("s1")]}])
+    reqs = tasks.units("work_category", src, run.local_midnight(next_day - timedelta(days=1)),
+                       run.local_midnight(next_day + timedelta(days=1)))
+    assert [r.facts["last_agent_reply"] for r in reqs] == ["first day reply", "episode end reply"]
+
+
 def test_task_names_match_the_tasks():
     assert config.LABEL_DECISION_TASKS == tuple(tasks.TASKS)
     assert config.LABEL_NOTE not in tasks.TASKS
