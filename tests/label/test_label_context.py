@@ -45,12 +45,130 @@ def codex_log(home, sid="thread", source="cli", fork=False):
         [ts, "2026-11-01T10:03:00Z"], 1)]
 
 
+def test_codex_imported_prompts_and_replies_are_not_new_native_evidence(tmp_path):
+    first, second = codex_log(tmp_path)
+    index = tmp_path / ".codex/external_agent_session_imports.json"
+    index.write_text(json.dumps({"records": [{
+        "imported_thread_id": "thread", "imported_at": int(
+            datetime(2026, 11, 1, 10, 2, tzinfo=timezone.utc).timestamp())}]}))
+    keys = tasks.Source(_cfg(tmp_path)).keys
+    got = context.codex_context(tmp_path, {"thread"}, {first, second}, None, keys)
+    assert first not in got
+    assert got[second] == context.Context("now review", "", "future reply", 2)
+
+
+def test_codex_import_boundary_second_is_conservatively_unavailable(tmp_path):
+    first, second = codex_log(tmp_path)
+    (tmp_path / ".codex/external_agent_session_imports.json").write_text(json.dumps({
+        "records": [{"imported_thread_id": "thread", "imported_at": int(
+            datetime(2026, 11, 1, 10, 3, tzinfo=timezone.utc).timestamp())}]}))
+    keys = tasks.Source(_cfg(tmp_path)).keys
+    assert context.codex_context(tmp_path, {"thread"}, {first, second}, None, keys) == {}
+
+
+def test_label_sources_exclude_imported_counts_as_well_as_text(tmp_path, monkeypatch):
+    first, second = codex_log(tmp_path)
+    bound = datetime(2026, 11, 1, 10, 2, tzinfo=timezone.utc)
+    (tmp_path / ".codex/external_agent_session_imports.json").write_text(json.dumps({
+        "records": [{"imported_thread_id": "thread", "imported_at": int(bound.timestamp())}]}))
+    rows = [(first, bound - timedelta(minutes=1), "codex", "thread", {}),
+            (second, bound + timedelta(minutes=1), "codex", "thread", {})]
+    monkeypatch.setattr(tasks, "_sql", lambda *args: rows)
+    src = tasks.Source(_cfg(tmp_path), local_context=True)
+    assert [r["event_id"] for r in src.steers(bound - timedelta(days=1))] == [second]
+    activity = [("thread", r[1], "turn", {}, "codex") for r in rows]
+    monkeypatch.setattr(tasks, "_sql", lambda *args: activity)
+    assert [r["ts"] for r in src.activity(["thread"], bound - timedelta(days=1), UNTIL)] \
+        == [rows[1][1]]
+
+
+def test_bad_import_index_uses_the_task_source_failure_boundary(tmp_path, monkeypatch):
+    path = tmp_path / ".codex/external_agent_session_imports.json"
+    path.parent.mkdir()
+    path.write_text("{")
+    source = tasks.Source(_cfg(tmp_path), local_context=True)
+    monkeypatch.setattr(tasks, "_sql", lambda *args: [])
+    with pytest.raises(tasks.SourceUnavailable):
+        source.steers(UNTIL)
+    with pytest.raises(tasks.SourceUnavailable):
+        source.activity([], UNTIL - timedelta(days=1), UNTIL)
+
+
+def test_codex_tied_prompt_times_keep_native_transcript_order(tmp_path, monkeypatch):
+    stamp = "2026-11-01T10:01:00Z"
+    ts = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+    sid = "tied"
+    ids = [make_event_id("codex", "steer", sid, stamp, n) for n in (1, 2)]
+    assert ids[0] > ids[1]  # Hash order deliberately disagrees with the transcript.
+    path = tmp_path / ".codex/sessions/rollout-tied.jsonl"
+    write_log(path, [
+        {"type": "session_meta", "payload": {"id": sid, "source": "cli"}},
+        {"type": "event_msg", "timestamp": stamp,
+         "payload": {"type": "user_message", "message": "first request"}},
+        {"type": "event_msg", "timestamp": "2026-11-01T10:02:00Z",
+         "payload": {"type": "agent_message", "message": "first reply"}},
+        {"type": "event_msg", "timestamp": stamp,
+         "payload": {"type": "user_message", "message": "second request"}},
+        {"type": "event_msg", "timestamp": "2026-11-01T10:03:00Z",
+         "payload": {"type": "agent_message", "message": "second reply"}},
+        {"type": "event_msg", "timestamp": "2026-11-01T10:06:00Z",
+         "payload": {"type": "agent_message", "message": "outside the episode"}},
+    ])
+    rows = [(eid, ts, "codex", sid, {}) for eid in ids]
+    src = tasks.Source(_cfg(tmp_path), local_context=True)
+    ep = {"id": "episode", "first_ts": ts, "last_ts": UNTIL, "outcome": "no_code",
+          "members": [{"session_id": sid}]}
+    monkeypatch.setattr(src, "episodes", lambda since: [ep])
+    for order in (rows, list(reversed(rows))):
+        monkeypatch.setattr(tasks, "_sql", lambda *args: order)
+        request = tasks.units("soft_outcome", src, ts, UNTIL + timedelta(days=20))[0]
+        assert request.facts["last_steers"] == ["first request", "second request"]
+        assert request.facts["last_agent_reply"] == "second reply"
+
+
+def test_conflicting_concurrent_final_replies_are_not_arbitrarily_selected(tmp_path, monkeypatch):
+    ts = UNTIL - timedelta(minutes=1)
+    rows = [("a", ts, "claude_code", "one", {}),
+            ("b", ts, "claude_code", "two", {})]
+    src = tasks.Source(_cfg(tmp_path), local_context=True)
+    monkeypatch.setattr(tasks, "_sql", lambda *args: rows)
+    monkeypatch.setattr(src, "episodes", lambda since: [{
+        "id": "episode", "first_ts": ts, "last_ts": UNTIL, "outcome": "no_code",
+        "members": [{"session_id": "one"}, {"session_id": "two"}]}])
+    monkeypatch.setattr(src, "texts", lambda rows, until: {"a": "first", "b": "second"})
+    monkeypatch.setattr(src, "replies", lambda rows, until: {
+        "a": ("", "done"), "b": ("", "cannot continue")})
+    assert tasks.units("soft_outcome", src, ts, UNTIL + timedelta(days=20)) == []
+    assert src.incomplete_outcome_units == [ts]
+
+
+def test_work_keeps_prompts_without_choosing_a_concurrent_reply(tmp_path, monkeypatch):
+    ts = UNTIL - timedelta(minutes=1)
+    rows = [("a", ts, "claude_code", "one", {}),
+            ("b", ts, "claude_code", "two", {})]
+    src = tasks.Source(_cfg(tmp_path), local_context=True)
+    monkeypatch.setattr(tasks, "_sql", lambda *args: rows)
+    monkeypatch.setattr(src, "episodes", lambda since: [{
+        "id": "episode", "first_ts": ts, "last_ts": UNTIL, "outcome": "no_code",
+        "members": [{"session_id": "one"}, {"session_id": "two"}]}])
+    monkeypatch.setattr(src, "texts", lambda rows, until: {"a": "first", "b": "second"})
+    monkeypatch.setattr(src, "replies", lambda rows, until: {
+        "a": ("", "done"), "b": ("", "cannot continue")})
+    monkeypatch.setattr(src, "activity", lambda *args: [])
+    monkeypatch.setattr(src, "windows", lambda *args: [])
+    requests = tasks.units("work_category", src, ts.replace(hour=0, minute=0),
+                           (ts + timedelta(days=1)).replace(hour=0, minute=0))
+    assert len(requests) == 1
+    assert requests[0].facts["steers"] == 2
+    assert requests[0].facts["last_agent_reply"] == ""
+
+
 @pytest.mark.parametrize("fork", [False, True])
 def test_codex_ids_forks_replies_and_until(tmp_path, fork):
     first, second = codex_log(tmp_path, fork=fork)
     got = context.codex_context(tmp_path, {"thread"}, {first, second}, UNTIL, tasks.Source(_cfg(tmp_path)).keys)
-    assert got[first] == context.Context("fix bob@example.com", "", "fixed first")
-    assert got[second] == context.Context("now review", "fixed first", "")
+    assert got[first] == context.Context("fix bob@example.com", "", "fixed first", 1)
+    assert got[second] == context.Context("now review", "fixed first", "", 2)
     assert context.codex_context(tmp_path, {"thread"}, {first, second}, None, tasks.Source(_cfg(tmp_path)).keys)[second].after \
         == "future reply"
 
@@ -205,8 +323,9 @@ def test_nonclaude_inputs_route_through_all_local_tasks(tmp_path):
 
 
 def test_reply_to_unrequested_prompt_does_not_attach_to_previous_input():
-    assert context._join([("one", "first"), ("two", "second"), (None, "reply second")],
-                         {"one"}) == {"one": context.Context("first")}
+    assert context._join([("one", "first", 1), ("two", "second", 2),
+                          (None, "reply second", None)],
+                         {"one"}) == {"one": context.Context("first", prompt_ordinal=1)}
 
 
 def test_codex_distinct_and_repeated_metadata_matches_collector_ids(tmp_path):

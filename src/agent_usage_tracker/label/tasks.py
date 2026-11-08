@@ -14,7 +14,7 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Any, Callable
 
 from ..collectors import activitywatch as aw
-from ..collectors import claude_code
+from ..collectors import claude_code, codex
 from ..config import AutError, Config
 from ..cursor_run import automated_sessions
 from ..episode_store import Episode, load_since
@@ -152,11 +152,23 @@ class Source:
                     "agents.activity_event WHERE kind = 'steer' AND ts >= %s) ORDER BY ts",
                     (since,))
         scripted = automated_sessions()
-        return [dict(zip(("event_id", "ts", "agent", "session_id", "attrs"), r)) for r in rows
-                if not (r[2] == "cursor_cli" and r[3] in scripted)]
+        imports = self._imports()
+        steers = [dict(zip(("event_id", "ts", "agent", "session_id", "attrs"), r)) for r in rows
+                  if not (r[2] == "cursor_cli" and r[3] in scripted)
+                  and not (r[2] == "codex" and r[3] in imports and r[1] < imports[r[3]])]
+        # Equal timestamps must not change evidence hashes when the database changes row order.
+        return sorted(steers, key=lambda r: (r["ts"], r["event_id"], r["agent"], r["session_id"]))
 
     def episodes(self, since: datetime) -> list[Episode]:
         return load_since(self.cfg.require_pg("label"), since)
+
+    def _imports(self) -> dict[str, datetime]:
+        if "codex" not in self.context_agents:
+            return {}
+        try:
+            return codex.imported_until(self.cfg.home)
+        except CollectorUnavailable as exc:
+            raise SourceUnavailable("codex: local import provenance unavailable") from exc
 
     def outcome_revisions(self, requests: list[Request]) -> dict[str, str]:
         """Recheck current no-code eligibility before delivery; reopened work must not be sent."""
@@ -188,8 +200,10 @@ class Source:
                     "('turn', 'interrupt', 'rejection', 'commit') AND session_id = ANY(%s) "
                     "AND ts >= %s AND ts < %s", (sessions, since, until))
         scripted = automated_sessions()
+        imports = self._imports()
         return [dict(zip(("session_id", "ts", "kind", "attrs", "agent"), r)) for r in rows
-                if not (r[4] == "cursor_cli" and r[0] in scripted)]
+                if not (r[4] == "cursor_cli" and r[0] in scripted)
+                and not (r[4] == "codex" and r[0] in imports and r[1] < imports[r[0]])]
 
     def labels(self, since: datetime, until: datetime) -> list[tuple[Any, ...]]:
         """(event_id, ts, attrs) of each label row: what core.current_labels reads."""
@@ -261,6 +275,41 @@ class Source:
         return {eid: (redact(a)[-REPLY_MAX:], redact(b)[-REPLY_MAX:])
                 for eid, (a, b) in replies.items()}
 
+    def ordered_steers(self, steers: list[dict[str, Any]], until: datetime | None,
+                       ) -> list[dict[str, Any]]:
+        """Native prompt ordinals resolve clock ties within a session, never across sessions."""
+        frames = self._other_context(steers, until)
+
+        def key(row: dict[str, Any]) -> tuple[Any, ...]:
+            frame = frames.get(row["event_id"])
+            ordinal = frame.prompt_ordinal if frame else None
+            return (row["ts"], row["agent"], row["session_id"], ordinal is None,
+                    ordinal or 0, row["event_id"])
+
+        return sorted(steers, key=key)
+
+    def last_reply(self, steers: list[dict[str, Any]], replies: dict[str, tuple[str, str]],
+                   until: datetime) -> str:
+        if not steers:
+            return ""
+        if not self.require_outcome_reply:
+            return replies.get(steers[-1]["event_id"], ("", ""))[1]
+        newest = max(r["ts"] for r in steers)
+        latest = [r for r in steers if r["ts"] == newest]
+        if len(latest) == 1:
+            return replies.get(latest[0]["event_id"], ("", ""))[1]
+        if len({(r["agent"], r["session_id"]) for r in latest}) == 1:
+            frames = self._other_context(steers, until)
+            ordinals = {r["event_id"]: frames[r["event_id"]].prompt_ordinal
+                        for r in latest if r["event_id"] in frames}
+            if (len(ordinals) == len(latest) and None not in ordinals.values()
+                    and len(set(ordinals.values())) == len(latest)):
+                final = max(ordinals, key=lambda eid: ordinals[eid] or 0)
+                return replies.get(final, ("", ""))[1]
+        # Distinct concurrent replies have no proven global order.
+        answers = {replies.get(r["event_id"], ("", ""))[1] for r in latest}
+        return answers.pop() if len(answers) == 1 else ""
+
     def windows(self, since: datetime, until: datetime) -> list[dict[str, Any]]:
         """This machine's ActivityWatch window rows in [since, until), through the collector's own
         guards (idle, deny-list, redaction, title settings), one day per query. No rows where
@@ -284,6 +333,7 @@ def _steer_units(task: Task, src: Source, since: datetime, until: datetime | Non
     rows = src.steers(since)
     text = src.texts(rows, until)
     reply = src.replies(rows, until)
+    rows = src.ordered_steers(rows, until)
     by_session: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for r in rows:
         by_session[r["session_id"]].append(r)
@@ -364,7 +414,7 @@ def _episode_days(mine: list[dict[str, Any]], acts: list[dict[str, Any]], of_ses
 
 
 def _episode_day_unit(task: Task, ep: str, d: date, u: dict[str, Any], text: dict[str, str],
-                      reply: dict[str, tuple[str, str]]) -> Request | None:
+                      last_reply: str) -> Request | None:
     """The unit of one episode day; None when none of its steers has local text."""
     st = u["steers"]
     said = [text[r["event_id"]] for r in st if r["event_id"] in text]
@@ -377,7 +427,7 @@ def _episode_day_unit(task: Task, ep: str, d: date, u: dict[str, Any], text: dic
             tools.update((a["attrs"] or {}).get("by_tool") or {})
     return task.request("episode_day", f"{ep}:{d.isoformat()}", st[0]["ts"], {
         "first_steer": said[0], "last_steers": said[1:][-3:], "steers": len(st),
-        "last_agent_reply": reply.get(st[-1]["event_id"], ("", ""))[1],
+        "last_agent_reply": last_reply,
         "sessions": len(u["sessions"]), "tool_calls_by_tool": dict(tools),
         "tool_errors": sum((a["attrs"] or {}).get("tool_errors") or 0 for a in u["acts"]
                            if a["kind"] == "turn"),
@@ -389,6 +439,7 @@ def _category_units(task: Task, src: Source, since: datetime, until: datetime | 
     until = until or datetime.now(timezone.utc)
     steers = [r for r in src.steers(since) if r["ts"] < until]
     text = src.texts(steers, until)
+    steers = src.ordered_steers(steers, until)
     mine = _context_steers(src, steers)
     context_sessions = {r["session_id"] for r in mine}
     eps = src.episodes(since)
@@ -406,7 +457,9 @@ def _category_units(task: Task, src: Source, since: datetime, until: datetime | 
         cutoff = min(until, local_midnight(d + timedelta(days=1)),
                      by_id[ep]["last_ts"] + timedelta(microseconds=1))
         reply = src.replies(u["steers"], cutoff)
-        req = _episode_day_unit(task, ep, d, u, text, reply)
+        u["steers"] = src.ordered_steers(u["steers"], cutoff)
+        req = _episode_day_unit(task, ep, d, u, text,
+                               src.last_reply(u["steers"], reply, cutoff))
         if req is None:
             src.missing_text_units.append(u["steers"][0]["ts"])
         else:
@@ -442,8 +495,11 @@ def _outcome_units(task: Task, src: Source, since: datetime, until: datetime | N
             src.partial_text_units.append(ep["first_ts"])
         # Session membership can span multiple episodes. Later replies and copied earlier
         # prompts must not turn this episode into a resolved task.
-        reply = src.replies(st, min(now, ep["last_ts"] + timedelta(microseconds=1)))
-        last_reply = reply.get(st[-1]["event_id"], ("", ""))[1]
+        cutoff = min(now, ep["last_ts"] + timedelta(microseconds=1))
+        reply = src.replies(st, cutoff)
+        st = src.ordered_steers(st, cutoff)
+        said = [text[r["event_id"]] for r in st if r["event_id"] in text]
+        last_reply = src.last_reply(st, reply, cutoff)
         if src.require_outcome_reply and (len(said) < len(st) or not last_reply.strip()):
             src.incomplete_outcome_units.append(ep["first_ts"])
             continue

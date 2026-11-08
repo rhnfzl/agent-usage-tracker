@@ -100,11 +100,23 @@ Codex automated/subagent prompts, copied fork history, Cursor summaries/subagent
 copied Pi prompts are excluded. Cursor reply text is omitted because the stores lack reliable
 per-reply timestamps. Missing local text stays unclassified. Saved replay snapshots are unchanged;
 adding agent support does not expand an existing job's frozen inputs.
+Codex's `external_agent_session_imports.json` identifies copied external history. New
+collection and local label inputs exclude records through the registered import second.
+Later native work keeps its existing event IDs. The index has second precision, so work
+within that final second stays unavailable. An unreadable or invalid index stops the source
+instead of accepting copied history. Existing stored rows and frozen jobs are retained;
+consumers need an audited availability guard for classifications made from copied inputs.
+Upgrades rebuild carried import state while preserving retained native ordinals. New scans
+resolve the imported prefix format separately from later native records. Older releases can
+already have conflicting mixed-format ordinal histories. Keep the existing watermark when
+recovering those installations; a fresh reread cannot infer their earlier collection order.
 Outcome inputs stay inside their own episode's time bounds. Local estimates skip incomplete
 prompts or a missing attributable final reply, reporting these as unclassified rather than
 using a reply to an earlier input. Replay previews report `incomplete_outcome_context` separately.
 Work-category prompts and activity also stay inside their own episode. Final replies stop at
 the earlier of the episode end or local midnight, so shared sessions cannot mix separate work days.
+Native Codex prompt order resolves tied timestamps within one session. Conflicting replies
+from simultaneous sessions do not supply an attributable final reply.
 The draft `writing_task()` and `bounded_outcome_task()` are not registered. They define explicit
 version-3 private evaluations; live work/outcome tasks and recipe validation remain version 2.
 Each Source snapshots canonical session paths once per agent, then reads only requested files.

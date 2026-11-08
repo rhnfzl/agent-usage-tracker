@@ -15,13 +15,16 @@ persisted so resuming from a byte offset keeps the right attribution across scan
 from __future__ import annotations
 
 import glob
+import json
 import os
 from collections import Counter
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator, NamedTuple, TypedDict
 
 from ..config import Config
-from ..event import Row, ActivityKind, Batch, ActivityEvent, EventSession, RunOrigin, UsageEvent, make_event_id
+from ..event import (Row, ActivityKind, Batch, ActivityEvent, CollectorUnavailable, EventSession,
+                     RunOrigin, UsageEvent, make_event_id, parse_ts)
 from ..repo_keys import RepoKeys, repo_identity
 from ..state import parse_record
 from .activity_common import (Link, TurnAgg, add_call, best_effort, blank_tool_tally, drop_raw_shas,
@@ -52,6 +55,8 @@ class FileState(TypedDict, total=False):
     has_um: bool              # the file has user_message records
     skip: int                 # copied lines of a fork still unread; see parsed_records
     act: dict[str, Any]       # _Activity's carried state
+    import_checked: str       # import boundary used to rebuild carried state
+    import_has_um: bool       # imported prefix format, independent of the later native format
 
 
 def sessions_dir(home: Path) -> Path:
@@ -60,6 +65,38 @@ def sessions_dir(home: Path) -> Path:
 
 def session_files(home: Path) -> list[str]:
     return glob.glob(str(sessions_dir(home) / "**" / "rollout-*.jsonl"), recursive=True)
+
+
+def imported_until(home: Path) -> dict[str, datetime]:
+    """Imported history has import-time timestamps, not new native work timestamps."""
+    try:
+        value = json.loads((home / ".codex/external_agent_session_imports.json").read_text(
+            encoding="utf-8"))
+        if not isinstance(value, dict) or not isinstance(value.get("records"), list):
+            raise ValueError("Invalid import index")
+        out: dict[str, datetime] = {}
+        for record in value["records"]:
+            if (not isinstance(record, dict)
+                    or not isinstance(record.get("imported_thread_id"), str)
+                    or not record["imported_thread_id"]
+                    or type(record.get("imported_at")) is not int or record["imported_at"] < 0):
+                raise ValueError("Invalid import record")
+            # shortcut: second precision omits same-second work, use offsets when Codex records them.
+            bound = datetime.fromtimestamp(record["imported_at"] + 1, timezone.utc)
+            sid = record["imported_thread_id"]
+            out[sid] = max(out.get(sid, bound), bound)
+        return out
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError, OverflowError) as exc:
+        raise CollectorUnavailable("codex: import index is unreadable or invalid") from exc
+
+
+def imported_record(record: dict[str, Any], bound: datetime | None) -> bool:
+    if bound is None:
+        return False
+    stamp = parse_ts(record.get("timestamp"))
+    return stamp is None or stamp.tzinfo is None or stamp < bound
 
 
 def thread_names(home: Path) -> dict[str, str]:
@@ -392,21 +429,24 @@ def _token_event(o: dict[str, Any], payload: dict[str, Any], cur: FileState, pat
     )
 
 
-def _prompt_rows(o: dict[str, Any], prompt: tuple[str, int], cur: FileState, path: str, act: _Activity) -> list[Row]:
+def _prompt_rows(o: dict[str, Any], prompt: tuple[str, int], cur: FileState, path: str,
+                 act: _Activity, imported: bool = False) -> list[Row]:
     """The human and steer rows of a prompt someone typed. Threads a program drives (subagents,
     `codex exec`, MCP calls, another agent's integration, scheduled automations) are not human
     turns, and get none."""
     after_intr = bool(act.carried.pop("intr", False))
     text, images = prompt
-    Link(act.keys, act.carried.setdefault("link", {})).note_text(text)
+    if not imported:
+        Link(act.keys, act.carried.setdefault("link", {})).note_text(text)
     sess = _session(cur, path)
     if sess.run_origin in ("subagent", "automated") or is_scheduled_automation(text):
         return []
     # No tokens; a stable per-session ordinal makes the id deterministic so a
     # re-read (file reset) re-emits the same id and the sink dedups it. The ordinal
-    # advances only for kept messages, which is fine: it just has to be stable for a
-    # given file, and the screening above is deterministic from the same bytes.
+    # Includes imported human messages so existing native-tail IDs stay unchanged.
     cur["um_ord"] += 1
+    if imported:
+        return []
     ts = o.get("timestamp")
     sid = cur["session_id"] or os.path.basename(path)
     return [
@@ -420,7 +460,8 @@ def _prompt_rows(o: dict[str, Any], prompt: tuple[str, int], cur: FileState, pat
     ]
 
 
-def _chunk_rows(path: str, recs: list[ParsedRecord], cur: FileState, keys: RepoKeys, skipped: Counter[str]) -> list[Row]:
+def _chunk_rows(path: str, recs: list[ParsedRecord], cur: FileState, keys: RepoKeys,
+                skipped: Counter[str], imports: dict[str, datetime] | None = None) -> list[Row]:
     """All rows of one file's new records; updates `cur`, the private copy of its watermark entry."""
     # shortcut: judged per chunk (plus earlier chunks of the file), so an older-format turn
     # split exactly between its UserMessage item and its user_message counts twice; older
@@ -431,23 +472,76 @@ def _chunk_rows(path: str, recs: list[ParsedRecord], cur: FileState, keys: RepoK
     events: list[Row] = []
     for o, t, p, copied in recs:
         try:
+            previous_turn = cur.get("turn")
             _note_context(t, p, copied, cur, keys)
+            imported = imported_record(o, (imports or {}).get(_session(cur, path).session_id))
+            if imported:
+                cur["turn"] = previous_turn
             if t == "event_msg" and p.get("type") == "token_count":
                 event = _token_event(o, p, cur, path)
-                if event:
+                if event and not imported:
                     events.append(event)
                 continue
             if copied:      # the parent's turns, not this thread's (usage above is unchanged)
                 continue
-            prompt = prompt_of(t, p, bool(cur.get("has_um")))
+            prompt = prompt_of(t, p, bool(cur.get("import_has_um") if imported
+                                        else cur.get("has_um")))
             if prompt is not None:
-                events.extend(_prompt_rows(o, prompt, cur, path, act))
+                events.extend(_prompt_rows(o, prompt, cur, path, act, imported))
+                continue
+            if imported:
                 continue
             best_effort(act.errors, act.record, o)
         except MALFORMED_RECORD:    # one bad line must not wedge every later scan at this offset
             skipped["malformed"] += 1
     skipped.update(act.errors)
     return events + act.events
+
+
+def _prepare_import(path: str, cur: FileState, off: int, keys: RepoKeys,
+                    imports: dict[str, datetime]) -> None:
+    sid = (cur.get("meta") or {}).get("id")
+    if not isinstance(sid, str):
+        head = first_record(path)
+        payload = head.get("payload") if head else None
+        sid = payload.get("id") or payload.get("session_id") if isinstance(payload, dict) else None
+    if not isinstance(sid, str) or sid not in imports:
+        return
+    bound = imports[sid]
+    if cur.get("import_checked") == bound.isoformat():
+        return
+    # A later native format must not renumber the completed imported prefix.
+    modern = False
+    try:
+        with open(path, "rb") as stream:
+            for line in stream:
+                record = parse_record(line)
+                if record and imported_record(record, bound) and record.get("type") == "event_msg":
+                    p = record.get("payload")
+                    if isinstance(p, dict) and p.get("type") == "user_message":
+                        modern = True
+                        break
+        if off:
+            prior = _fresh_state(Path(path).stat())
+            prior["import_has_um"] = modern
+            with open(path, "rb") as stream:
+                consumed, chunk_start = 0, 0
+                lines: list[bytes] = []
+                for line in stream:
+                    if consumed + len(line) > off:
+                        break
+                    lines.append(line)
+                    consumed += len(line)
+                    if len(lines) == 1000 or consumed == off:
+                        records = parsed_records(lines, chunk_start, prior, Counter())
+                        _chunk_rows(path, records, prior, keys, Counter(), imports)
+                        lines = []
+                        chunk_start = consumed
+            cur["act"] = prior.get("act", {})
+            cur["turn"] = prior.get("turn")
+    except OSError as exc:
+        raise CollectorUnavailable("codex: imported carried state cannot be checked") from exc
+    cur["import_has_um"], cur["import_checked"] = modern, bound.isoformat()
 
 
 def _trim_state(cur: FileState) -> None:
@@ -465,11 +559,15 @@ def collect(cfg: Config, wm: dict[str, Any]) -> Iterator[Batch]:
     if not sessions_dir(cfg.home).exists():
         return
     keys = RepoKeys(cfg.repo_key_salt)
+    imports = imported_until(cfg.home)
     _upgrade_state(wm, keys)
 
     def chunk_rows(path: str, cur: FileState, off: int, lines: list[bytes],
                    skipped: Counter[str]) -> list[Row]:
-        events = _chunk_rows(path, parsed_records(lines, off, cur, skipped), cur, keys, skipped)
+        if imports:
+            _prepare_import(path, cur, off, keys, imports)
+        events = _chunk_rows(path, parsed_records(lines, off, cur, skipped), cur, keys, skipped,
+                             imports)
         _trim_state(cur)
         return events
 
