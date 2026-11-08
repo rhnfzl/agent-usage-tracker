@@ -150,15 +150,25 @@ def _resume(cfg: Config, job_id: str, directory: Path, apply: bool, budget_s: in
                                              manifest["policy_id"], cfg)
     deadline = time.monotonic() + budget_s
     delivered = 0
+    prepared: list[Request] = []
+    prepared_start = progress["next"]
     try:
         while progress["next"] < len(manifest["requests"]):
             if time.monotonic() >= deadline:
                 return _report(manifest, progress, delivered, "budget")
-            chunk = [Request(**r) for r in manifest["requests"][progress["next"]:
-                                                               progress["next"] + BATCH]]
-            for req in chunk:
-                req.rev = f"replay:{job_id}:{req.rev or ''}"
-            backend.prepare_requests(chunk, deadline)
+            if not prepared or progress["next"] >= prepared_start + len(prepared):
+                prepared_start = progress["next"]
+                group_size = getattr(getattr(backend, "runtime", None), "group_size", BATCH)
+                prefetch = max(BATCH, group_size // BATCH * BATCH)
+                prepared = [
+                    Request(**r)
+                    for r in manifest["requests"][prepared_start : prepared_start + prefetch]
+                ]
+                for req in prepared:
+                    req.rev = f"replay:{job_id}:{req.rev or ''}"
+                backend.prepare_requests(prepared, deadline)
+            offset = progress["next"] - prepared_start
+            chunk = prepared[offset : offset + BATCH]
             events = []
             for req in chunk:
                 if time.monotonic() >= deadline:

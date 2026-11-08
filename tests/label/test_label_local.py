@@ -40,6 +40,7 @@ def request(uid="u"):
 
 def backend(tmp_path, monkeypatch, answers):
     closed = []
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
     monkeypatch.setattr(local, "memory_guard", lambda: None)
 
     class Member:

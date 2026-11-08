@@ -15,9 +15,9 @@ from typing import Any, Callable
 
 from ..config import AutError, Config, config_path
 from ..event import ActivityEvent, make_event_id
-from ..state import _locked, atomic_write_text, load_json_dict
+from ..state import LockBusy, _locked, atomic_write_text, load_json_dict
 from .backends import BackendUnavailable, find_model, make_backend
-from .core import PROMPT_VER, Backend, Choice, Request, calibrate, softmax, top_label
+from .core import PROMPT_VER, Backend, Choice, Request, calibrate, data_dir, softmax, top_label
 from .tasks import TASKS
 
 POLICY = "local-decision-v1"
@@ -40,8 +40,9 @@ def reserve_label_time(root: Path, now: datetime) -> str:
             raise AutError("label: missing generation state; it was not reset")
         stamp = max(int(now.timestamp() * 1000), previous + 1)
         try:
-            value = (datetime(1970, 1, 1, tzinfo=timezone.utc) + timedelta(milliseconds=stamp)
-                     ).isoformat(timespec="milliseconds")
+            value = (
+                datetime(1970, 1, 1, tzinfo=timezone.utc) + timedelta(milliseconds=stamp)
+            ).isoformat(timespec="milliseconds")
         except OverflowError as exc:
             raise AutError("label: invalid local generation state; it was not reset") from exc
         atomic_write_text(path, json.dumps({"last_ms": stamp}))
@@ -49,7 +50,10 @@ def reserve_label_time(root: Path, now: datetime) -> str:
 
 
 def _number(value: Any) -> bool:
-    return type(value) in (int, float) and math.isfinite(value)
+    try:
+        return type(value) in (int, float) and math.isfinite(value)
+    except OverflowError:
+        return False
 
 
 def _require(condition: Any) -> None:
@@ -129,8 +133,43 @@ def combine(
     return {label: sum(top_label(d) == label for d in dists) / len(dists) for label in labels}
 
 
+def score_member(
+    member: dict[str, Any],
+    requests: list[Request],
+    deadline: float,
+    factory: Callable[[dict[str, Any]], Backend],
+    stopped: Callable[[], bool] | None = None,
+) -> list[dict[str, float]]:
+    def check() -> None:
+        if time.monotonic() >= deadline or (stopped is not None and stopped()):
+            raise BackendUnavailable("label: local model budget reached; unfinished batch retries")
+        memory_guard()
+
+    check()
+    backend = factory(member)
+    try:
+        check()
+        getattr(backend, "prepare", lambda: None)()
+        if backend.model_rev != member["model_rev"]:
+            raise BackendUnavailable("label: local model revision differs from saved recipe")
+        scores = []
+        for item in requests:
+            check()
+            raw = backend.distribution(item)
+            if (
+                set(raw) != {c["id"] for c in item.candidates}
+                or not all(_number(v) and v >= 0 for v in raw.values())
+                or sum(raw.values()) <= 0
+            ):
+                raise BackendUnavailable("label: local model returned an invalid distribution")
+            scores.append(calibrate(raw, member["temperature"]))
+        return scores
+    finally:
+        getattr(backend, "close", lambda: None)()
+
+
 class LocalBackend:
-    """Score a batch per member, closing it before loading the next model."""
+    """Apply the saved recipe, using serial scoring unless execution settings qualify."""
 
     backend = "local_decision"
     size_mb: float | None = None
@@ -156,6 +195,14 @@ class LocalBackend:
         self._requests: list[Request] = []
         self._offset, self._deadline = 0, 0.0
         self._scores: dict[str, dict[str, float]] = {}
+        from .local_parallel import load_profile
+
+        self.runtime = load_profile(task, row) if member_for is None else None
+        self.label_model, self.llama_server = cfg.label_model, cfg.label_llama_server
+
+    @property
+    def prefetch_size(self) -> int:
+        return self.runtime.group_size if self.runtime is not None else 50
 
     def prepare_requests(self, requests: list[Request], deadline: float) -> None:
         self._requests, self._deadline = requests, deadline
@@ -164,54 +211,60 @@ class LocalBackend:
 
     def distribution(self, req: Request) -> dict[str, float]:
         if req.unit_id not in self._scores:
-            batch = self._requests[self._offset : self._offset + 50]
-            if not batch or batch[0].unit_id != req.unit_id:
-                raise BackendUnavailable("label: local model request order changed")
-            members = []
-            for member in self.recipe["members"]:
-                memory_guard()
-                backend = self.member_for(member)
-                try:
-                    getattr(backend, "prepare", lambda: None)()
-                    if backend.model_rev != member["model_rev"]:
-                        raise BackendUnavailable(
-                            "label: local model revision differs from saved recipe"
-                        )
-                    scores = []
-                    for item in batch:
-                        if time.monotonic() >= self._deadline:
-                            raise BackendUnavailable(
-                                "label: local model budget reached; unfinished batch retries"
-                            )
-                        memory_guard()
-                        raw = backend.distribution(item)
-                        labels = {c["id"] for c in item.candidates}
-                        if (
-                            set(raw) != labels
-                            or not all(_number(v) and v >= 0 for v in raw.values())
-                            or sum(raw.values()) <= 0
-                        ):
-                            raise BackendUnavailable(
-                                "label: local model returned an invalid distribution"
-                            )
-                        scores.append(calibrate(raw, member["temperature"]))
-                    members.append(scores)
-                finally:
-                    getattr(backend, "close", lambda: None)()
-            self._scores = {
+            try:
+                with _locked(data_dir() / "label" / "model-runtime.json", blocking=False):
+                    self._score_next(req)
+            except LockBusy as exc:
+                raise BackendUnavailable("label: local model scoring is already running") from exc
+        return self._scores.pop(req.unit_id)
+
+    def _score_next(self, req: Request) -> None:
+        from .local_parallel import MemoryAdmissionError, score_parallel
+
+        batch = self._requests[self._offset : self._offset + self.prefetch_size]
+        if not batch or batch[0].unit_id != req.unit_id:
+            raise BackendUnavailable("label: local model request order changed")
+        parallel = False
+        if self.runtime is not None:
+            try:
+                scores = score_parallel(
+                    batch,
+                    self.row,
+                    self.label_model,
+                    self.llama_server,
+                    self.runtime,
+                    self._deadline,
+                )
+                parallel = True
+            except MemoryAdmissionError:
+                batch = batch[:50]
+                print(
+                    "aut: local parallel scoring waits for memory; using serial groups",
+                    file=sys.stderr,
+                )
+        if not parallel:
+            members = [
+                score_member(m, batch, self._deadline, self.member_for)
+                for m in self.recipe["members"]
+            ]
+            scores = {
                 item.unit_id: combine(
                     self.recipe["method"], [m[i] for m in members], self.recipe.get("stack")
                 )
                 for i, item in enumerate(batch)
             }
-            if any(
-                not all(_number(v) and 0 <= v <= 1 for v in dist.values())
+        if set(scores) != {item.unit_id for item in batch}:
+            raise BackendUnavailable("label: saved local recipe returned invalid scores")
+        for item in batch:
+            dist = scores[item.unit_id]
+            if (
+                set(dist) != {c["id"] for c in item.candidates}
+                or not all(_number(v) and 0 <= v <= 1 for v in dist.values())
                 or abs(sum(dist.values()) - 1) > 1e-5
-                for dist in self._scores.values()
             ):
                 raise BackendUnavailable("label: saved local recipe returned invalid scores")
-            self._offset += len(batch)
-        return self._scores.pop(req.unit_id)
+        self._scores = scores
+        self._offset += len(batch)
 
     def close(self) -> None:
         self._scores.clear()
