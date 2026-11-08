@@ -156,8 +156,9 @@ def test_work_keeps_prompts_without_choosing_a_concurrent_reply(tmp_path, monkey
         "a": ("", "done"), "b": ("", "cannot continue")})
     monkeypatch.setattr(src, "activity", lambda *args: [])
     monkeypatch.setattr(src, "windows", lambda *args: [])
-    requests = tasks.units("work_category", src, ts.replace(hour=0, minute=0),
-                           (ts + timedelta(days=1)).replace(hour=0, minute=0))
+    day = ts.astimezone().date()
+    requests = tasks.units("work_category", src, tasks.local_midnight(day),
+                           tasks.local_midnight(day + timedelta(days=1)))
     assert len(requests) == 1
     assert requests[0].facts["steers"] == 2
     assert requests[0].facts["last_agent_reply"] == ""
