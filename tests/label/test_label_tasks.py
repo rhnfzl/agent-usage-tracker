@@ -17,6 +17,29 @@ from agent_usage_tracker.label import tasks
 from label_helpers import DAY1, FakeSource, NOW, _cfg, _claude_log, _steer, _win
 
 
+def test_equal_timestamp_prompt_order_keeps_mature_coverage_stable(tmp_path, monkeypatch):
+    from agent_usage_tracker.label.outcome_coverage import coverage_key
+
+    rows = [("a", DAY1, "claude_code", "s", {}),
+            ("b", DAY1, "claude_code", "s", {}),
+            ("c", DAY1 + timedelta(seconds=1), "claude_code", "s", {})]
+    episode = {"id": "episode", "first_ts": DAY1, "last_ts": rows[-1][1],
+               "outcome": "no_code", "members": [_member("s")]}
+    source = tasks.Source(_cfg(tmp_path), local_context=True)
+    monkeypatch.setattr(source, "episodes", lambda since: [episode])
+    monkeypatch.setattr(source, "texts", lambda steers, until: {"a": "alpha", "b": "beta",
+                                                             "c": "finished"})
+    monkeypatch.setattr(source, "replies", lambda steers, until: {"c": ("", "done")})
+    monkeypatch.setattr(tasks, "automated_sessions", lambda: frozenset())
+    result = []
+    for order in (rows, [rows[1], rows[0], rows[2]]):
+        monkeypatch.setattr(tasks, "_sql", lambda *args: order)
+        result.append(tasks.units("soft_outcome", source, DAY1,
+                                  DAY1 + timedelta(days=20))[0])
+    assert result[0].facts == result[1].facts
+    assert coverage_key(result[0], "same-policy") == coverage_key(result[1], "same-policy")
+
+
 def test_steer_without_uuid_finds_its_text_under_the_collectors_id(tmp_path):
     # the id the collector gives a record with no uuid: path:timestamp
     proj = tmp_path / ".claude" / "projects" / "-p"

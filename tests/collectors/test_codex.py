@@ -12,16 +12,116 @@ from __future__ import annotations
 
 import contextlib
 import io
+import json
 import tempfile
+from datetime import datetime
 from pathlib import Path
+
+import pytest
 
 from agent_usage_tracker.collectors import codex
 from agent_usage_tracker.event import UsageEvent
+from agent_usage_tracker.event import CollectorUnavailable
 from agent_usage_tracker.event import make_event_id
 from codex_pi_helpers import (T, _acts, _append, _call, _cfg, _collect, _ev, _item,
                               _meta, _run, _tok, _usage, _write_jsonl)
 from test_activity import _key
 from test_collectors import _drain
+
+
+def test_imported_history_keeps_native_tail_ids_across_resumes(tmp_path):
+    home = tmp_path
+    path = home / ".codex/sessions/rollout-imported.jsonl"
+    stamp = int(datetime.fromisoformat(T(3).replace("Z", "+00:00")).timestamp())
+    _write_jsonl(path, [
+        _meta("imported", source="vscode", originator="Codex Desktop"),
+        _ev(T(1), type="user_message", message="copied question"),
+        _ev(T(2), type="agent_message", message="copied answer"),
+        _tok(T(3)),
+    ])
+    (home / ".codex/external_agent_session_imports.json").write_text(json.dumps({
+        "records": [{"imported_thread_id": "imported", "imported_at": stamp}]}))
+    wm = {}
+    assert _collect(codex, home, wm) == []
+    _append(path, [_ev(T(5), type="user_message", message="new native question"), _tok(T(6))])
+    rows = _collect(codex, home, wm)
+    steers = _acts(rows, "steer")
+    assert [r.event_id for r in steers] == [
+        make_event_id("codex", "steer", "imported", T(5), 2)]
+    assert len(_usage(rows)) == 1
+    assert {r.event_id for r in rows} == {r.event_id for r in _collect(codex, home)}
+    assert _collect(codex, home, wm) == []
+
+
+def test_unreadable_import_index_does_not_accept_copied_activity(tmp_path):
+    root = tmp_path / ".codex"
+    _write_jsonl(root / "sessions/rollout-native.jsonl", [
+        _meta("native", source="cli"), _ev(T(1), type="user_message", message="native")])
+    index = root / "external_agent_session_imports.json"
+    for raw in ("{", '{"records": {}}', '{"records": [{"imported_at": true}]}'):
+        index.write_text(raw)
+        try:
+            _collect(codex, tmp_path)
+        except CollectorUnavailable:
+            pass
+        else:
+            raise AssertionError("An invalid import index must not silently permit activity")
+
+
+@pytest.mark.parametrize("source", ["exec", "mcp", {"subagent": "worker"}])
+def test_native_software_prompt_still_links_child_work(tmp_path, source):
+    path = tmp_path / ".codex/sessions/rollout-software.jsonl"
+    _write_jsonl(path, [_meta("software", source=source),
+        _ev(T(0), type="task_started", turn_id="turn"),
+        _ev(T(1), type="user_message", message="Review https://github.com/example/project/pull/7 " + "a1" * 20),
+        _ev(T(2), type="task_complete", turn_id="turn")])
+    rows = _collect(codex, tmp_path)
+    assert not _acts(rows, "steer")
+    link = _acts(rows, "link")[0].attrs
+    assert link["pr_keys"] and link["sha_refs"]
+
+
+@pytest.mark.parametrize("native_already_seen", [False, True])
+def test_upgrade_rebuilds_only_imported_carried_links(tmp_path, monkeypatch, native_already_seen):
+    path = tmp_path / ".codex/sessions/rollout-upgrade.jsonl"
+    records = [_meta("imported", source="vscode"),
+        _ev(T(1), type="user_message", message="Copied https://github.com/example/project/pull/7 " + "a1" * 20)]
+    native = [_ev(T(5), type="task_started", turn_id="native"),
+              _ev(T(6), type="user_message", message="Native https://github.com/example/project/pull/8 " + "b2" * 20)]
+    _write_jsonl(path, records + (native if native_already_seen else []))
+    index = tmp_path / ".codex/external_agent_session_imports.json"
+    index.write_text(json.dumps({"records": [{"imported_thread_id": "imported", "imported_at": int(
+        datetime.fromisoformat(T(3).replace("Z", "+00:00")).timestamp())}]}))
+    wm = {}
+    reader = codex.imported_until
+    monkeypatch.setattr(codex, "imported_until", lambda home: {})
+    before = _collect(codex, tmp_path, wm)
+    monkeypatch.setattr(codex, "imported_until", reader)
+    _append(path, ([] if native_already_seen else native) + [_ev(T(7), type="task_complete", turn_id="native")])
+    resumed = _collect(codex, tmp_path, wm)
+    fresh = _collect(codex, tmp_path)
+    got = _acts(resumed, "link")[0]
+    expected = _acts(fresh, "link")[0]
+    assert got.event_id == expected.event_id
+    assert got.attrs == expected.attrs
+    assert len(got.attrs["pr_keys"]) == len(got.attrs["sha_refs"]) == 1
+    if native_already_seen:
+        assert _acts(before, "steer")[-1].event_id == _acts(fresh, "steer")[0].event_id
+
+
+def test_legacy_import_does_not_renumber_native_tail_on_full_read(tmp_path):
+    path = tmp_path / ".codex/sessions/rollout-legacy-import.jsonl"
+    _write_jsonl(path, [_meta("imported", source="vscode"),
+        _item(T(1), "old", type="UserMessage", id="old-user", content=[{"type": "text", "text": "copied"}])])
+    (tmp_path / ".codex/external_agent_session_imports.json").write_text(json.dumps({
+        "records": [{"imported_thread_id": "imported", "imported_at": int(
+            datetime.fromisoformat(T(3).replace("Z", "+00:00")).timestamp())}]}))
+    wm = {}
+    assert _collect(codex, tmp_path, wm) == []
+    _append(path, [_ev(T(5), type="user_message", message="native")])
+    resumed = _acts(_collect(codex, tmp_path, wm), "steer")
+    fresh = _acts(_collect(codex, tmp_path), "steer")
+    assert [e.event_id for e in resumed] == [e.event_id for e in fresh]
 
 
 def test_codex_human_turn_classification() -> None:

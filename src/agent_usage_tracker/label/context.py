@@ -50,6 +50,7 @@ class Context:
     text: str
     before: str = ""
     after: str = ""
+    prompt_ordinal: int | None = None
 
 
 def _records(path: str) -> Iterable[dict[str, Any]]:
@@ -69,19 +70,19 @@ def _in_time(record: dict[str, Any], until: datetime | None) -> bool:
         return False
 
 
-def _join(events: Iterable[tuple[str | None, str]], want: set[str]) -> dict[str, Context]:
+def _join(events: Iterable[tuple[str | None, str, int | None]], want: set[str]) -> dict[str, Context]:
     out: dict[str, Context] = {}
     last, current = "", None
-    for eid, text in events:
+    for eid, text, ordinal in events:
         if eid is not None:
             current = eid if eid in want else None
             if current:
-                out[current] = Context(text, last)
+                out[current] = Context(text, last, prompt_ordinal=ordinal)
         elif text.strip():
             last = text
             if current:
                 previous = out[current]
-                out[current] = Context(previous.text, previous.before, text)
+                out[current] = Context(previous.text, previous.before, text, previous.prompt_ordinal)
     return out
 
 
@@ -131,7 +132,8 @@ def _codex_prefixes(path: str, keys: RepoKeys, want: set[str]) -> list[int]:
 
 
 def _codex_events(path: str, until: datetime | None, keys: RepoKeys, prefix: int,
-                   ) -> Iterable[tuple[str | None, str]]:
+                   imported_until: datetime | None = None,
+                   ) -> Iterable[tuple[str | None, str, int | None]]:
     cur = codex._fresh_state(Path(path).stat())
     legacy, modern_n, seen_modern = 0, 0, False
     for record, kind, payload, copied in _codex_records(path, cur):
@@ -142,7 +144,7 @@ def _codex_events(path: str, until: datetime | None, keys: RepoKeys, prefix: int
         seen_modern |= is_modern
         prompt = codex.prompt_of(kind, payload, seen_modern)
         if prompt is not None and codex.is_scheduled_automation(prompt[0]):
-            yield "", ""  # A software prompt ends the preceding human prompt's reply interval.
+            yield "", "", None  # A software prompt ends the preceding human prompt's reply interval.
         elif prompt is not None:
             if is_modern:
                 modern_n += 1
@@ -150,39 +152,45 @@ def _codex_events(path: str, until: datetime | None, keys: RepoKeys, prefix: int
             else:
                 legacy += 1
                 if legacy > prefix:
-                    yield "", ""
+                    yield "", "", None
                     continue
                 ordinal = legacy
-            if _in_time(record, until):
+            if codex.imported_record(record, imported_until):
+                yield "", "", None
+            elif _in_time(record, until):
                 yield make_event_id("codex", "steer", cur["session_id"] or Path(path).name,
-                                    record.get("timestamp") or "", ordinal), prompt[0]
-        elif _in_time(record, until):
+                                    record.get("timestamp") or "", ordinal), prompt[0], ordinal
+        elif not codex.imported_record(record, imported_until) and _in_time(record, until):
             if kind == "response_item" and payload.get("type") == "message" \
                     and payload.get("role") == "assistant":
                 content = payload.get("content")
                 blocks = content if isinstance(content, list) else []
                 yield None, "\n".join(b["text"] for b in blocks if isinstance(b, dict)
                                      and b.get("type") in {"text", "output_text"}
-                                     and isinstance(b.get("text"), str))
+                                     and isinstance(b.get("text"), str)), None
             elif kind == "event_msg" and payload.get("type") == "agent_message":
                 message = payload.get("message")
                 if isinstance(message, str):
-                    yield None, message
+                    yield None, message, None
 
 
 def codex_context(home: Path, sessions: set[str], want: set[str],
                   until: datetime | None, keys: RepoKeys, *,
                   paths: Iterable[str] | None = None) -> dict[str, Context]:
     out: dict[str, Context] = {}
+    imports = codex.imported_until(home)
     for path in codex.session_files(home) if paths is None else paths:
         head = first_record(path)
         payload = head.get("payload") if head else None
-        if not isinstance(payload, dict) or (payload.get("id") or payload.get("session_id")) \
-                not in sessions:
+        if not isinstance(payload, dict):
+            continue
+        sid = payload.get("id") or payload.get("session_id")
+        if not isinstance(sid, str) or sid not in sessions:
             continue
         if codex.run_origin(payload) in {"subagent", "automated"}:
             continue
-        profiles = [_join(_codex_events(path, until, keys, prefix), want)
+        imported_until = imports.get(sid)
+        profiles = [_join(_codex_events(path, until, keys, prefix, imported_until), want)
                     for prefix in _codex_prefixes(path, keys, want)]
         if not profiles:
             continue
@@ -191,7 +199,8 @@ def codex_context(home: Path, sessions: set[str], want: set[str],
             if len({v.text for v in values}) == 1:
                 out[eid] = Context(values[0].text,
                     values[0].before if len({v.before for v in values}) == 1 else "",
-                    values[0].after if len({v.after for v in values}) == 1 else "")
+                    values[0].after if len({v.after for v in values}) == 1 else "",
+                    values[0].prompt_ordinal if len({v.prompt_ordinal for v in values}) == 1 else None)
     return out
 
 
