@@ -80,11 +80,16 @@ def cmd_scan(cfg: Config, agents: Sequence[str], args: argparse.Namespace) -> No
     report = scan.run_scan(cfg, agents, dry_run=args.dry_run)
     scan.print_scan(cfg, report, dry_run=args.dry_run)
     if args.cmd == "scan" and not args.dry_run:
-        git_days.run_if_due(cfg)       # the launchd scan carries the daily git count
+        if args.git_defer_remotes_until:
+            git_days.run_if_due(cfg, defer_remotes_until=args.git_defer_remotes_until)
+        else:
+            git_days.run_if_due(cfg)       # the launchd scan carries the daily git count
 
 
 def cmd_git_days(cfg: Config, args: argparse.Namespace) -> None:
-    git_days.print_report(git_days.run(cfg, dry_run=args.dry_run, allow_lower=args.allow_lower),
+    git_days.print_report(git_days.run(cfg, dry_run=args.dry_run, allow_lower=args.allow_lower,
+                                      local_only=args.local_only,
+                                      defer_remotes_until=args.git_defer_remotes_until),
                           dry_run=args.dry_run)
 
 
@@ -263,6 +268,8 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="aut", description="passive coding-agent usage, activity, active-time and outcome tracker")
     agents_help = "comma-separated subset override (default: config)"
     parser.add_argument("--agents", help=f"{agents_help}; for scan, backfill, export and status")
+    parser.add_argument('--git-defer-remotes-until', type=date.fromisoformat,
+                        help='skip Git SSH sources before this ledger date; scan/git-days only')
     sub = parser.add_subparsers(dest="cmd", required=True)
     p_scan = sub.add_parser("scan", help="push new usage since the watermark")
     p_scan.add_argument("--dry-run", action="store_true", help="parse + report, send nothing")
@@ -308,6 +315,7 @@ def _build_parser() -> argparse.ArgumentParser:
                        help="verify the repository (restic check); back up nothing")
     p_git = sub.add_parser("git-days",
                            help="your commits per day from every clone ([git_days] config)")
+    p_git.add_argument('--local-only', action='store_true', help='do not contact Git SSH sources')
     p_git.add_argument("--dry-run", action="store_true",
                        help="scan and print totals per year, write nothing")
     p_git.add_argument("--allow-lower", action="store_true",
@@ -387,6 +395,8 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _dispatch(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
+    if args.git_defer_remotes_until and args.cmd not in ('scan', 'git-days'):
+        parser.error('--git-defer-remotes-until applies only to scan and git-days')
     if args.agents and args.cmd not in _AGENT_COMMANDS:     # it would run over everything
         parser.error(f"--agents does not apply to {args.cmd}")
     if args.cmd in _NO_CONFIG_COMMANDS:

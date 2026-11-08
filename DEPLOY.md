@@ -26,6 +26,13 @@ CREATE ROLE agents_ro     LOGIN PASSWORD 'REDACTED';   -- Grafana
 \i /path/agents_grants.sql
 ```
 
+Before upgrading a collector that writes partial Git counts, add
+`agents.git_commit_day.complete boolean NOT NULL DEFAULT true` and update
+`agents.git_commits_daily` to return `day, commits, complete`.
+The view must retain partial increases, preserve unchanged complete counts, and let a newer complete
+scan reset the baseline. See [the Git count contract](CONTRACT.md#commits-per-day-agentsgit_commit_day-aut-git-days).
+Upgrade website readers before publishing missing or partial Git coverage.
+
 ### 2. n8n (optional: webhook transport, carries usage rows only)
 
 Skip this when every machine can reach Postgres, directly or through a tunnel: `pg_dsn` alone

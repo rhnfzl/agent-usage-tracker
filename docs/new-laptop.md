@@ -146,5 +146,9 @@ with SQLite's integrity check when verifying a backup.
    should match the old laptop's. Clone every repo the old laptop had under `roots` first: a run
    that finds under half the repositories of the best recent run writes nothing, and a day whose
    count would go down is kept as stored (the summary counts them; `--allow-lower` rewrites).
+   Restore `git-days-sources.json` beside the watermark with its original repository salt.
+   It retains verified commit identities and source coverage across offline machines.
+   Use `aut git-days --local-only` while remotes are unavailable. Missing coverage stays unknown.
+   A lower-count reset requires every configured source freshly complete.
 10. On the machine that labels (`AUT_LABEL=1`), download the label models again. `label.json` and
    the gold files came back with the restore.

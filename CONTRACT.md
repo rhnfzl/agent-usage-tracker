@@ -622,24 +622,39 @@ delete the rows of this kind.
 
 ## Commits per day: agents.git_commit_day (`aut git-days`)
 
-`(day, commits, scanned_at)`, insert-only; a day's latest `scanned_at` wins
-(`agents.git_commits_daily`). `day` is the Europe/Amsterdam date of the author date. `commits`
+`(day, commits, scanned_at, complete)`, insert-only. `complete` is a non-null boolean,
+defaulting to true for older collectors. `day` is the Europe/Amsterdam date of the author date. `commits`
 counts distinct SHAs from branches, remotes, tags and registered worktree heads, including
 detached heads outside scan roots. Merges, stash and notes refs are excluded. Each object store
 is read once because worktrees share it. The scan reads repositories
 under `[git_days] roots` here and each remote's roots over `ssh`, with no fetch. A commit counts
 when its author email is in `identities` (lowercased), or matches a `shared_authors` email_regex in
 a repo whose folder name matches its repo_regex. A bot (`[bot]` in the email, or
-`noreply@anthropic.com`) never counts. One run has one `scanned_at` and inserts every day from
-`since` to yesterday that has no row or whose count went up, zeros included: a day with no row is
-not a zero, and the ledger hides on a gap. A stored day never goes down by itself: the run summary
-counts such days and their total drop (no names), and only `aut git-days --allow-lower` writes
-them. A run writes nothing when a root is missing or unreadable, a host, folder or store could not
-be read, a remote's git is older than 2.31, it found no store, or it found under half the best
-store count of the last 5 good runs (`stores` in aut state, entry `git_days`, with `last_ok` and
-`last_attempt`; `--allow-lower` also skips this rule and restarts that list). After an attempt
-from `aut scan`, the next waits 6 h; a manual `aut git-days` always runs. Nothing else leaves the
-machine: no repo name, SHA, email or message is sent or printed. Each run that is not a dry run
+`noreply@anthropic.com`) never counts. One run has one `scanned_at` and covers `since` through yesterday.
+A private `git-days-sources.json` beside the watermark retains salted commit identities and each
+source's last complete date range. Successful reads accumulate without counting shared commits twice.
+The cache uses the repository salt and binds the author policy, exclusions, start date and time zone.
+Restore the cache and salt together. Policy changes require a deliberate full-source reset.
+
+Partial reads may insert positive counts, with `complete = false`. They never invent zero days,
+lower earlier counts, or downgrade an unchanged complete count. A same-count completeness upgrade
+gets a new row. Zero days require complete coverage from every configured source.
+Each source rejects complete status after read failures, no repositories, or fewer than half its
+best store count from the last five complete reads. A full scan also checks the earlier aggregate history.
+Existing aggregate history must pass for the configured sources before partial reads can establish complete coverage.
+Only `--allow-lower`, with every source freshly complete, can lower counts and reset the cache/history.
+`--local-only` skips all SSH sources. `aut --git-defer-remotes-until YYYY-MM-DD scan` (or `git-days`)
+skips them before that Amsterdam date, then resumes normal reads automatically.
+
+`agents.git_commits_daily` exposes `day, commits, complete`, with `complete` last for compatibility.
+The newest complete scan resets the day's baseline. Rows at or after that baseline compete by
+greatest count, then complete status, then timestamp. This preserves partial increases and permits
+an explicit full-source lower-count reset. Deploy this column and view before upgrading collectors.
+
+Partial runs retain a degraded heartbeat and remain retry-eligible after 6 h. Only a fresh complete
+run advances `last_ok`; normal complete scans are due after 20 h. A manual command always runs.
+Only counts and completeness leave the machine. No raw repo name, SHA, email or message is sent,
+printed or saved in the cache. Each run that is not a dry run
 sends one `agents.collector_scan` row, collector `git_days`, `events` = days written, also when
 it fails before the scan.
 

@@ -38,6 +38,7 @@ ME, ALIAS, SHARED, BOT = "me@example.com", "Me@Example.org", "shared@example.inv
 def _cfg(tmp: Path, **kw) -> Config:
     base = dict(machine="t", agents=(), webhook_url=None, webhook_secret=None,
                 pg_dsn="postgresql://x", home=tmp, git_days_enabled=True,
+                repo_key_salt="synthetic-test-key-for-git-day-cache",
                 git_days_since=date(2026, 11, 1),
                 git_days_identities=(ME, ALIAS.lower()),
                 git_days_shared_authors=((r"^shared@", r"^demo_.*_tool$"),),
@@ -166,7 +167,8 @@ def test_refusal(stores, failed, prev, refused):
 
 def _stored_rows(monkeypatch, stored: dict[date, int]) -> list:
     log: list = []
-    monkeypatch.setattr(git_days, "load_stored", lambda dsn: stored)
+    monkeypatch.setattr(git_days, "load_stored", lambda dsn: {
+        d: (n, True) if isinstance(n, int) else n for d, n in stored.items()})
     monkeypatch.setattr(push, "send_scan_rows", lambda dsn, rows: log.append(("beat", rows)))
     return log
 
@@ -177,7 +179,7 @@ def test_run_writes_with_one_scanned_at_and_saves_the_store_count(world, monkeyp
         report = git_days.run(_cfg(world), dry_run=False, now=NOW, tz=TZ)
     git_days.print_report(report, dry_run=False)
     (sql, rows), = [x for x in log if isinstance(x, tuple) and x[0] != "beat"]
-    assert "INSERT INTO agents.git_commit_day (day, commits, scanned_at)" in sql
+    assert "INSERT INTO agents.git_commit_day (day, commits, scanned_at, complete)" in sql
     assert [r[:2] for r in rows] == [(date(2026, 11, d), n) for d, n in
                                      ((2, 1), (3, 1), (4, 1), (5, 0))]
     assert {r[2] for r in rows} == {NOW}
@@ -344,14 +346,146 @@ def _posix_unreadable_ok() -> bool:
     return sys.platform != "win32" and hasattr(os, "geteuid") and os.geteuid() != 0
 
 
-def test_a_missing_root_is_a_failure_and_the_run_writes_nothing(world, monkeypatch):
+def test_a_missing_root_keeps_positive_counts_and_unknown_zero_days(world, monkeypatch):
     cfg = _cfg(world, git_days_roots=(str(world / "projects"), str(world / "gone")))
     found = git_days.scan_all(cfg, TZ)
     assert (found.stores, found.failed) == (2, 1)
     log = _stored_rows(monkeypatch, {})
-    with _fake_psycopg(log), pytest.raises(AutError, match="could not be read"):
-        git_days.run(cfg, dry_run=False, now=NOW, tz=TZ)
-    assert not [x for x in log if isinstance(x, tuple) and x[0] != "beat"]
+    with _fake_psycopg(log):
+        report = git_days.run(cfg, dry_run=False, now=NOW, tz=TZ)
+    (_, rows), = [x for x in log if isinstance(x, tuple) and x[0] != "beat"]
+    assert report['partial'] and len(rows) == 3
+    assert all(n == 1 and not c for _, n, _, c in rows)
+
+
+def test_local_only_retains_counts_and_never_contacts_remotes(world, monkeypatch):
+    cfg = _cfg(world, git_days_remotes=(("office", ("~/projects",)),))
+    monkeypatch.setattr(git_days, "_scan_remote", lambda *a: pytest.fail("office contact"))
+    log = _stored_rows(monkeypatch, {})
+    with _fake_psycopg(log):
+        report = git_days.run(cfg, dry_run=False, local_only=True, now=NOW, tz=TZ)
+    (_, rows), = [x for x in log if isinstance(x, tuple) and x[0] != "beat"]
+    assert [(r[0], r[1], r[3]) for r in rows] == [
+        (date(2026, 11, d), 1, False) for d in (2, 3, 4)]
+    assert report["partial"] is True
+    assert "last_ok" not in load_state()["collectors"]["git_days"]
+    cache = (world / "git-days-sources.json").read_text()
+    assert ME not in cache and "office" not in cache and str(world) not in cache
+    assert _g(world / "projects" / "app", "rev-parse", "HEAD") not in cache
+
+
+def test_partial_sources_accumulate_and_then_complete_without_double_counting(world, monkeypatch):
+    cfg = _cfg(world, git_days_remotes=(("office", ("~/projects",)),))
+    d = date(2026, 11, 2)
+    monkeypatch.setattr(git_days, "_scan_local", lambda c, t, f: (
+        setattr(f, "stores", 1), f.commits.update({"shared": d})))
+    monkeypatch.setattr(git_days, "_scan_remote", lambda *a: pytest.fail("deferred"))
+    log = _stored_rows(monkeypatch, {})
+    with _fake_psycopg(log):
+        git_days.run(cfg, dry_run=False, local_only=True, now=NOW, tz=TZ)
+    monkeypatch.setattr(git_days, "_scan_local", lambda c, t, f: setattr(f, "failed", 1))
+    monkeypatch.setattr(git_days, "_scan_remote", lambda i, h, r, c, t, f: (
+        setattr(f, "stores", 1), f.commits.update({"shared": d, "office-only": d})))
+    log = _stored_rows(monkeypatch, {d: (1, False)})
+    with _fake_psycopg(log):
+        report = git_days.run(cfg, dry_run=False, now=NOW, tz=TZ)
+    (_, rows), = [x for x in log if isinstance(x, tuple) and x[0] != "beat"]
+    assert (d, 2, NOW, True) in rows
+    assert report["days"][d] == 2
+    assert report["partial"] is True  # fresh failure stays retry-eligible
+
+
+def test_alternating_partial_sources_cannot_bypass_legacy_store_guard(world, monkeypatch):
+    (world / 'state.json').write_text(json.dumps({'collectors': {'git_days': {'stores': [100]}}}))
+    cfg = _cfg(world, git_days_remotes=(('office', ('~/projects',)),))
+    d = date(2026, 11, 2)
+    monkeypatch.setattr(git_days, '_scan_local', lambda c, t, f: (
+        setattr(f, 'stores', 1), f.commits.update({'local': d})))
+    monkeypatch.setattr(git_days, '_scan_remote', lambda i, h, r, c, t, f: setattr(f, 'failed', 1))
+    with _fake_psycopg(_stored_rows(monkeypatch, {})):
+        first = git_days.run(cfg, dry_run=False, now=NOW, tz=TZ)
+    assert not any(first['complete'].values())
+    monkeypatch.setattr(git_days, '_scan_local', lambda c, t, f: setattr(f, 'failed', 1))
+    monkeypatch.setattr(git_days, '_scan_remote', lambda i, h, r, c, t, f: setattr(f, 'stores', 1))
+    log = _stored_rows(monkeypatch, {d: (1, False)})
+    with _fake_psycopg(log):
+        second = git_days.run(cfg, dry_run=False, now=NOW, tz=TZ)
+    assert not any(second['complete'].values())
+    assert not [x for x in log if isinstance(x, tuple) and x[0] != 'beat']
+
+
+def test_partial_attempt_uses_six_hour_retry_despite_recent_complete_run(world, monkeypatch):
+    (world / 'state.json').write_text(json.dumps({'collectors': {'git_days': {
+        'last_ok': NOW.isoformat(), 'last_attempt': (NOW + timedelta(hours=1)).isoformat(),
+        'partial_pending': True}}}))
+    calls = []
+    monkeypatch.setattr(git_days, 'run', lambda cfg, dry_run: calls.append(1) or
+                        {'stores': 1, 'failed': 1, 'written': 0})
+    git_days.run_if_due(_cfg(world), now=NOW + timedelta(hours=7))
+    assert calls == [1]
+
+
+def test_same_count_completeness_upgrade_and_no_partial_downgrade():
+    d = date(2026, 11, 2)
+    assert git_days.coverage_rows({d: 2}, {d: True}, {d: (2, False)}) == ([(d, 2, True)], [])
+    assert git_days.coverage_rows({d: 2}, {d: False}, {d: (2, True)}) == ([], [])
+    assert git_days.coverage_rows({d: 0}, {d: False}, {}) == ([], [])
+    assert git_days.coverage_rows({d: 3}, {d: False}, {d: (2, True)}) == ([(d, 3, False)], [])
+
+
+def test_remote_deferral_expires_at_ledger_midnight(world, monkeypatch):
+    cfg = _cfg(world, git_days_remotes=(("office", ("~/projects",)),))
+    called = []
+    monkeypatch.setattr(git_days, "_scan_remote", lambda *a: called.append(1))
+    limit = date(2026, 11, 10)
+    git_days.scan_all(cfg, TZ, defer_remotes=True)
+    assert not called
+    git_days.scan_all(cfg, TZ)
+    assert called == [1]
+    args = cli._build_parser().parse_args(["--git-defer-remotes-until", limit.isoformat(), "scan"])
+    assert args.git_defer_remotes_until == limit
+    called.clear()
+    monkeypatch.setattr(git_days, '_scan_remote', lambda i, h, r, c, t, f: (
+        called.append(1), setattr(f, 'stores', 1)))
+    before = datetime(2026, 11, 9, 22, 59, 59, tzinfo=timezone.utc)
+    assert git_days.run(cfg, dry_run=True, defer_remotes_until=limit, now=before, tz=TZ)['partial']
+    assert called == []
+    after = before + timedelta(seconds=1)
+    assert not git_days.run(cfg, dry_run=True, defer_remotes_until=limit, now=after, tz=TZ)['partial']
+    assert called == [1]
+
+
+def test_existing_identity_cache_requires_its_salt_and_policy_before_scanning(world, monkeypatch):
+    _stored_rows(monkeypatch, {})
+    with _fake_psycopg([]):
+        git_days.run(_cfg(world), dry_run=False, now=NOW, tz=TZ)
+    original = (world / 'git-days-sources.json').read_bytes()
+    monkeypatch.setattr(git_days, 'scan_all', lambda *a, **kw: pytest.fail('invalid cache scanned'))
+    with pytest.raises(AutError, match='salt'):
+        git_days.run(_cfg(world, repo_key_salt=None), dry_run=False, now=NOW, tz=TZ)
+    assert not (world / 'repo_key.salt').exists()
+    with pytest.raises(AutError, match='salt/policy'):
+        git_days.run(_cfg(world, git_days_since=date(2026, 10, 1)), dry_run=False, now=NOW, tz=TZ)
+    assert (world / 'git-days-sources.json').read_bytes() == original
+
+
+def test_allow_lower_refuses_a_deferred_source(world, monkeypatch):
+    _stored_rows(monkeypatch, {})
+    cfg = _cfg(world, git_days_remotes=(('office', ('~/projects',)),))
+    monkeypatch.setattr(git_days, '_scan_remote', lambda *a: pytest.fail('office contact'))
+    with pytest.raises(AutError, match='freshly complete'):
+        git_days.run(cfg, dry_run=False, local_only=True, allow_lower=True, now=NOW, tz=TZ)
+    assert not (world / 'git-days-sources.json').exists()
+
+
+def test_failed_delivery_does_not_advance_source_cache(world, monkeypatch):
+    _stored_rows(monkeypatch, {})
+    def fail(*args):
+        raise RuntimeError("delivery failed")
+    monkeypatch.setattr(git_days, "write_many", fail)
+    with pytest.raises(RuntimeError, match="delivery failed"):
+        git_days.run(_cfg(world), dry_run=False, now=NOW, tz=TZ)
+    assert not (world / "git-days-sources.json").exists()
 
 
 @pytest.mark.skipif(not _posix_unreadable_ok(), reason="needs POSIX permissions, not as root")
