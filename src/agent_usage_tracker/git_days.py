@@ -5,35 +5,39 @@ including detached heads outside scan roots, in each object store under [git_day
 over `ssh -o BatchMode=yes`, under each remote's roots, with the same hardened git (git_safe). No
 fetch. A commit counts once (by SHA) when its author email is one of the owner's identities, or a
 shared author's in a repo whose name matches that author's repo_regex; a bot never counts.
-Only counts leave the Mac: repo names, SHAs, emails and messages stay in memory, and no message
-names a repo, host or path.
+Only counts and completeness leave the Mac. Raw repo names, SHAs and emails stay in memory.
+Salted commit identities and per-source coverage stay in a private local cache.
 
 The table is insert-only and a day's latest scan wins, so a run inserts, with one scanned_at, the
 days from `since` to yesterday that have no row yet or whose count went up. A stored day never goes
 down by itself: a lower count is only counted in the summary, and `--allow-lower` rewrites it.
-A partial scan writes nothing: a missing or unreadable root, a host, folder or store that could not
-be read, a remote git older than 2.31, a scan that found nothing, or one with under half the object
-stores of the best of the last good runs. After a failed run `aut scan` waits RETRY_AFTER.
+Partial scans retain known commits without inventing zero days. Each source keeps its last
+complete coverage. Missing sources remain retry-eligible. `--allow-lower` requires a fresh
+complete scan of every configured source and resets the private identity cache.
 """
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shlex
 import subprocess  # nosec B404 # argv lists only; the remote script goes to ssh on stdin
 import sys
 from dataclasses import dataclass, field
+from contextlib import nullcontext
 from datetime import date, datetime, timedelta, timezone, tzinfo
-from pathlib import PurePosixPath
-from typing import Any, Iterable
+from pathlib import Path, PurePosixPath
+from typing import Any, Callable, Iterable
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .config import AutError, Config
 from .git_safe import HARDENED_ENV, git_argv
-from .push import job_heartbeat, redacted_error
+from .git_day_cache import Snapshot, Status, load_cache, merge_sources
+from .push import JobBeat, job_heartbeat, redacted_error
 from .sink import connect, write_many
-from .state import collector_wm, load_state, save_state
+from .repo_keys import RepoKeys, require_readable_salt
+from .state import _locked, atomic_write_text, collector_wm, load_state, save_state, state_path
 
 NAME = "git_days"                   # its aut state entry and heartbeat collector
 LEDGER_TZ = "Europe/Amsterdam"      # the ledger's day, as in the sink's views
@@ -47,7 +51,7 @@ DUE_AFTER = timedelta(hours=20)
 RETRY_AFTER = timedelta(hours=6)    # after an attempt that failed or was refused
 SSH_CONNECT_S = 10
 REMOTE_TIMEOUT_S = 900
-INSERT_SQL = "INSERT INTO agents.git_commit_day (day, commits, scanned_at) VALUES (%s, %s, %s)"
+INSERT_SQL = "INSERT INTO agents.git_commit_day (day, commits, scanned_at, complete) VALUES (%s, %s, %s, %s)"
 READ_ENV = {**HARDENED_ENV, "GIT_NO_LAZY_FETCH": "1", "GIT_ALLOW_PROTOCOL": "", "LC_ALL": "C"}
 
 
@@ -70,6 +74,7 @@ class Found:
     stores: int = 0                 # distinct object stores read
     failed: int = 0                 # hosts and stores that could not be read
     commits: dict[str, date] = field(default_factory=dict)     # counted SHA -> local day
+    sources: list[tuple[str, Found, bool]] = field(default_factory=list)
 
 
 def repo_name(common: str) -> str:
@@ -224,13 +229,13 @@ def _scan_remote(i: int, host: str, roots: tuple[str, ...], cfg: Config, tz: tzi
     if code != 0:
         found.failed += 1
         print(f"aut: warning: git-days: remotes[{i}] could not be read "
-              f"({'no answer' if code is None else f'exit {code}'}); this run writes nothing",
+              f"({'no answer' if code is None else f'exit {code}'}); source coverage is incomplete",
               file=sys.stderr)
         return
     if "\x03" in r.stdout.splitlines():
         found.failed += 1
         print(f"aut: warning: git-days: remotes[{i}] has git older than 2.31 (or none); "
-              "this run writes nothing", file=sys.stderr)
+              "source coverage is incomplete", file=sys.stderr)
         return
     repo, log = "", ""
     for line in r.stdout.splitlines() + ["\x01"]:
@@ -247,11 +252,21 @@ def _scan_remote(i: int, host: str, roots: tuple[str, ...], cfg: Config, tz: tzi
             log += line + "\n"
 
 
-def scan_all(cfg: Config, tz: tzinfo) -> Found:
+def scan_all(cfg: Config, tz: tzinfo, *, defer_remotes: bool = False) -> Found:
     found = Found()
-    _scan_local(cfg, tz, found)
+    if cfg.git_days_roots:
+        local = Found()
+        _scan_local(cfg, tz, local)
+        found.sources.append((json.dumps(['local', cfg.git_days_roots]), local, False))
     for i, (host, roots) in enumerate(cfg.git_days_remotes):
-        _scan_remote(i, host, roots, cfg, tz, found)
+        remote = Found()
+        if not defer_remotes:
+            _scan_remote(i, host, roots, cfg, tz, remote)
+        found.sources.append((json.dumps(['remote', host, roots]), remote, defer_remotes))
+    for _, source, _ in found.sources:
+        found.stores += source.stores
+        found.failed += source.failed
+        found.commits.update(source.commits)
     return found
 
 
@@ -293,9 +308,22 @@ def refusal(found: Found, prev_stores: list[int] | None, *,
     return None
 
 
-def load_stored(dsn: str) -> dict[date, int]:
+def coverage_rows(days: dict[date, int], complete: dict[date, bool],
+                  stored: dict[date, tuple[int, bool]], *,
+                  allow_lower: bool = False) -> tuple[list[tuple[date, int, bool]], list[int]]:
+    candidates = {d: n for d, n in days.items() if n or complete[d]}
+    changed, drops = to_write(candidates, {d: n for d, (n, _) in stored.items()},
+                              allow_lower=allow_lower)
+    rows = [(d, n, complete[d]) for d, n in changed]
+    rows.extend((d, n, True) for d, n in candidates.items()
+                if complete[d] and stored.get(d) == (n, False))
+    return sorted(rows), drops
+
+
+def load_stored(dsn: str) -> dict[date, tuple[int, bool]]:
     with connect(dsn) as conn:
-        return dict(conn.execute("SELECT day, commits FROM agents.git_commits_daily").fetchall())
+        return {d: (n, complete) for d, n, complete in
+                conn.execute("SELECT day, commits, complete FROM agents.git_commits_daily").fetchall()}
 
 
 def _ledger_zone() -> tzinfo:
@@ -306,7 +334,8 @@ def _ledger_zone() -> tzinfo:
 
 
 def run(cfg: Config, *, dry_run: bool, allow_lower: bool = False, now: datetime | None = None,
-        tz: tzinfo | None = None) -> dict[str, Any]:
+        tz: tzinfo | None = None, local_only: bool = False,
+        defer_remotes_until: date | None = None) -> dict[str, Any]:
     now = now or datetime.now(timezone.utc)
     # the heartbeat comes first, so the watchdog also sees a run that fails before the scan
     with job_heartbeat(cfg, NAME, datetime.now(timezone.utc), dry_run=dry_run) as beat:
@@ -314,28 +343,91 @@ def run(cfg: Config, *, dry_run: bool, allow_lower: bool = False, now: datetime 
             raise AutError("git-days needs [git_days] identities in config.toml")
         dsn = None if dry_run else cfg.require_pg("git-days")
         tz = tz or _ledger_zone()
-        state = load_state()
-        wm = collector_wm(state, NAME)
-        kept = wm.get("stores")
-        prev = [n for n in kept if isinstance(n, int)] if isinstance(kept, list) else []
-        found = scan_all(cfg, tz)
-        why = refusal(found, prev, allow_lower=allow_lower)
-        days = day_counts(found.commits, cfg.git_days_since,
-                          now.astimezone(tz).date() - timedelta(days=1))
-        report = {"stores": found.stores, "failed": found.failed, "days": days, "written": 0,
-                  "refused": why, "lowered": 0, "lowered_by": 0}
-        if dsn is None:
-            return report
-        if why:
-            raise AutError(f"git-days: not writing: {why}")
-        rows, drops = to_write(days, load_stored(dsn), allow_lower=allow_lower)
-        report["lowered"], report["lowered_by"] = len(drops), sum(drops)
-        write_many(dsn, INSERT_SQL, [(d, n, now) for d, n in rows])
-        beat.events = report["written"] = len(rows)
-        # --allow-lower is the deliberate reset: the store history starts again from this run
+        deferred = local_only or (defer_remotes_until is not None
+                                  and now.astimezone(tz).date() < defer_remotes_until)
+        cache_path = state_path().with_name('git-days-sources.json')
+        if not dry_run:
+            if cache_path.exists() and not RepoKeys(cfg.repo_key_salt, create=False).of('git-days'):
+                raise AutError('git-days: restore the salt belonging to the identity cache')
+            require_readable_salt(cfg.repo_key_salt, dsn, cfg.machine)
+        keys = RepoKeys(cfg.repo_key_salt, create=not dry_run)
+        if dry_run and not cache_path.exists() and keys.of('git-days') is None:
+            keys = RepoKeys('git-days temporary preview; never persisted')
+
+        def key(identity: str) -> str:
+            value = keys.of('git-days/v1/' + identity)
+            if value is None:
+                raise AutError('git-days: a readable repository salt is required')
+            return value
+
+        policy = json.dumps([cfg.git_days_identities, cfg.git_days_shared_authors,
+                             cfg.git_days_exclude_dirs, cfg.git_days_since.isoformat(), str(tz)])
+        with nullcontext() if dry_run else _locked(cache_path, blocking=False):
+            return _collect(cfg, now, tz, dsn, beat, cache_path, key, policy,
+                            deferred=deferred, allow_lower=allow_lower)
+
+
+def _collect(cfg: Config, now: datetime, tz: tzinfo, dsn: str | None, beat: JobBeat,
+             cache_path: Path, key: Callable[[str], str], policy: str, *,
+             deferred: bool, allow_lower: bool) -> dict[str, Any]:
+    try:
+        cache = load_cache(cache_path, key('policy/' + policy), reset=allow_lower)
+    except ValueError as exc:
+        raise AutError(str(exc)) from exc
+    state = load_state()
+    wm = collector_wm(state, NAME)
+    kept = wm.get("stores")
+    prev = [n for n in kept if isinstance(n, int)] if isinstance(kept, list) else []
+    found = scan_all(cfg, tz, defer_remotes=deferred)
+    snapshots: list[Snapshot] = []
+    for identity, source, skipped in found.sources:
+        sid = key('source/' + identity)
+        prior_source = cache['sources'].get(sid)
+        history = prior_source['stores'] if prior_source else []
+        why_source = refusal(source, history, allow_lower=allow_lower)
+        status: Status = 'deferred' if skipped else 'complete' if why_source is None else \
+            'partial' if source.commits else 'failed'
+        snapshots.append(Snapshot(sid, status, {key('commit/' + sha): day
+                                                for sha, day in source.commits.items()}, source.stores))
+    partial = any(s.status != 'complete' for s in snapshots)
+    why = None if partial else refusal(found, prev, allow_lower=allow_lower)
+    if not found.stores and not cache['commits']:
+        why = 'the scan found no repositories'
+    if allow_lower and partial:
+        why = '--allow-lower needs every configured source freshly complete'
+    until = now.astimezone(tz).date() - timedelta(days=1)
+    if why:
+        if dsn is not None:
+            raise AutError(f'git-days: not writing: {why}')
+        return {'stores': found.stores, 'failed': found.failed,
+                'days': day_counts(found.commits, cfg.git_days_since, until),
+                'written': 0, 'refused': why, 'partial': partial, 'lowered': 0, 'lowered_by': 0}
+    updated, complete = merge_sources(cache, snapshots, cfg.git_days_since, until,
+                                       now, reset=allow_lower)
+    source_ids = sorted(s.source_id for s in snapshots)
+    if not partial:
+        updated['baseline_sources'] = source_ids
+    if prev and updated['baseline_sources'] != source_ids:
+        # Old aggregate history must pass once for these sources before partial reads prove zeros.
+        complete = dict.fromkeys(complete, False)
+    days = day_counts({sha: date.fromisoformat(day) for sha, day in updated['commits'].items()},
+                      cfg.git_days_since, until)
+    report = {"stores": found.stores, "failed": found.failed, "days": days, "written": 0,
+              "refused": None, "partial": partial, "complete": complete, "lowered": 0, "lowered_by": 0}
+    if dsn is None:
+        return report
+    rows, drops = coverage_rows(days, complete, load_stored(dsn), allow_lower=allow_lower)
+    report["lowered"], report["lowered_by"] = len(drops), sum(drops)
+    write_many(dsn, INSERT_SQL, [(d, n, now, c) for d, n, c in rows])
+    atomic_write_text(cache_path, json.dumps(updated, sort_keys=True))
+    beat.events = report["written"] = len(rows)
+    wm.update(last_attempt=now.isoformat(), partial_pending=partial)
+    if partial:
+        beat.status, beat.error = 'degraded', 'GitSourcesPartial'
+    else:
         wm.update(stores=([] if allow_lower else prev)[-(KEEP_STORES - 1):] + [found.stores],
                   last_ok=now.isoformat())
-        save_state(state, [NAME])
+    save_state(state, [NAME])
     return report
 
 
@@ -343,6 +435,8 @@ def print_report(report: dict[str, Any], *, dry_run: bool) -> None:
     head = "git-days DRY-RUN (nothing written)" if dry_run else \
         f"git-days: wrote {report['written']} days"
     print(f"{head}: {report['stores']} object stores read, {report['failed']} could not be read")
+    if report.get('partial'):
+        print('    source coverage is incomplete; known commits retained, missing days remain unknown')
     if report.get("lowered"):
         print(f"    {report['lowered']} day(s) would go down ({report['lowered_by']:,} commits in "
               "all); not written. `aut git-days --allow-lower` rewrites them")
@@ -366,7 +460,8 @@ def _older(stamp: object, now: datetime, gap: timedelta) -> bool:
         return True
 
 
-def run_if_due(cfg: Config, now: datetime | None = None) -> None:
+def run_if_due(cfg: Config, now: datetime | None = None, *,
+               defer_remotes_until: date | None = None) -> None:
     """From `aut scan`: once the last good run is DUE_AFTER old and the last attempt RETRY_AFTER
     old. Never fails the scan. A manual `aut git-days` calls run() and always runs."""
     if not cfg.git_days_enabled:
@@ -375,11 +470,13 @@ def run_if_due(cfg: Config, now: datetime | None = None) -> None:
         now = now or datetime.now(timezone.utc)
         state = load_state()
         wm = collector_wm(state, NAME)
-        if not (_older(wm.get("last_ok"), now, DUE_AFTER)
+        if not ((wm.get('partial_pending') is True or _older(wm.get("last_ok"), now, DUE_AFTER))
                 and _older(wm.get("last_attempt"), now, RETRY_AFTER)):
             return
         wm["last_attempt"] = now.isoformat()
         save_state(state, [NAME])
-        print_report(run(cfg, dry_run=False), dry_run=False)
+        report = run(cfg, dry_run=False, defer_remotes_until=defer_remotes_until) \
+            if defer_remotes_until else run(cfg, dry_run=False)
+        print_report(report, dry_run=False)
     except Exception as exc:
         print(f"aut: warning: git-days did not run: {redacted_error(exc)}", file=sys.stderr)

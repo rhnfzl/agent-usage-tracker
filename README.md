@@ -226,6 +226,7 @@ Read the [full privacy and network-call reference](docs/reference.md#privacy-mod
 | `aut scan` | Deliver new usage and activity |
 | `aut export --out usage.csv` | Export local usage without a sink |
 | `aut git-days --dry-run` | Preview daily commit counts across configured clones |
+| `aut git-days --local-only` | Collect available local commits while remote machines are offline; mark incomplete coverage |
 | `aut inspect --day YYYY-MM-DD` | Inspect the local evidence behind a day's episodes |
 | `aut backup --check` | Verify your configured restic repository |
 

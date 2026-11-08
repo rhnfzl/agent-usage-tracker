@@ -20,13 +20,13 @@ from pathlib import Path
 
 import pytest
 
-from agent_usage_tracker import episode_store, inspector, outcomes, push
+from agent_usage_tracker import episode_store, git_days, inspector, outcomes, push
 from agent_usage_tracker.config import Config
 from agent_usage_tracker.event import (ActivityEvent, EventSession, TimeInterval,
                                        UsageEvent)
 from agent_usage_tracker.label import run as label_run
 from agent_usage_tracker.label.tasks import Source
-from agent_usage_tracker.sink import connect
+from agent_usage_tracker.sink import connect, write_many
 
 DSN = os.environ.get("AUT_TEST_PG_DSN")
 pytestmark = pytest.mark.skipif(not DSN, reason="AUT_TEST_PG_DSN is not set")
@@ -71,6 +71,21 @@ CREATE TABLE agents.episode_correction (
     b_session text, attrs jsonb NOT NULL);
 CREATE TABLE agents.daily_note (
     day date PRIMARY KEY, text text NOT NULL, model_id text NOT NULL, created_at timestamptz NOT NULL);
+CREATE TABLE agents.git_commit_day (
+    day date NOT NULL, commits integer NOT NULL CHECK (commits >= 0),
+    scanned_at timestamptz NOT NULL, complete boolean NOT NULL DEFAULT true,
+    PRIMARY KEY (day, scanned_at));
+CREATE VIEW agents.git_commits_daily AS
+WITH latest_complete AS (
+    SELECT DISTINCT ON (day) day, scanned_at FROM agents.git_commit_day
+    WHERE complete ORDER BY day, scanned_at DESC
+), candidates AS (
+    SELECT g.day, g.commits, g.complete, g.scanned_at FROM agents.git_commit_day g
+    LEFT JOIN latest_complete c USING (day)
+    WHERE c.day IS NULL OR g.scanned_at >= c.scanned_at
+)
+SELECT DISTINCT ON (day) day, commits, complete FROM candidates
+ORDER BY day, commits DESC, complete DESC, scanned_at DESC;
 ALTER TABLE agents.event_session ADD CHECK (run_origin IN ('interactive', 'automated', 'subagent', 'unknown'));
 ALTER TABLE agents.time_interval ADD CHECK (source IN ('aw', 'manual')), ADD CHECK (end_ts > ts);
 ALTER TABLE agents.collector_scan ADD CHECK (status IN ('ok', 'error'));
@@ -136,6 +151,19 @@ def test_heartbeat_inserts(dsn):
     for _ in range(2):
         push.send_scan_rows(dsn, [row])
     assert _rows(dsn, "collector_scan") == 1
+
+
+def test_git_daily_coverage_round_trip(dsn):
+    day = T0.date()
+    for n, complete, seconds in ((3, False, 0), (3, True, 1), (2, False, 2)):
+        write_many(dsn, git_days.INSERT_SQL, [(day, n, T0 + timedelta(seconds=seconds), complete)])
+    assert git_days.load_stored(dsn) == {day: (3, True)}
+    write_many(dsn, git_days.INSERT_SQL, [(day, 5, T0 + timedelta(seconds=3), False)])
+    assert git_days.load_stored(dsn) == {day: (5, False)}
+    rows, drops = git_days.coverage_rows({day: 5}, {day: True}, git_days.load_stored(dsn))
+    assert rows == [(day, 5, True)] and not drops
+    write_many(dsn, git_days.INSERT_SQL, [(d, n, T0 + timedelta(seconds=4), c) for d, n, c in rows])
+    assert git_days.load_stored(dsn) == {day: (5, True)}
 
 
 def test_a_degraded_heartbeat_does_not_lose_the_scan_on_the_deployed_check(dsn):
