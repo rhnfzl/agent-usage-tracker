@@ -106,6 +106,64 @@ def test_delivery_failure_does_not_advance_progress(context, monkeypatch):
     assert apply(context, p["job_id"])["complete"]
 
 
+@pytest.mark.parametrize("group_size,groups", [(1, [10, 10, 3]), (15, [10, 10, 3]),
+                                             (25, [20, 3]), (200, [23])])
+def test_profile_prefetch_preserves_ten_row_acknowledgements(context, monkeypatch, group_size, groups):
+    c = context
+    c["requests"] = [request(f"u{i:02}") for i in range(23)]
+    prepared, acknowledgements = [], []
+
+    class Prefetched(c["backend"]):
+        runtime = SimpleNamespace(group_size=group_size)
+
+        def prepare_requests(self, requests, deadline):
+            prepared.append([r.unit_id for r in requests])
+
+    c["backend"] = Prefetched
+    p = prepare(c)
+    progress = c["root"] / p["job_id"] / "progress.json"
+
+    def deliver(dsn, events):
+        acknowledgements.append((json.loads(progress.read_text())["next"], len(events)))
+        c["sent"].extend(events)
+
+    monkeypatch.setattr(replay, "send_activity_rows", deliver)
+    assert apply(c, p["job_id"])["complete"]
+    assert [len(group) for group in prepared] == groups
+    assert acknowledgements == [(0, 10), (10, 10), (20, 3)]
+    assert len({e.event_id for e in c["sent"]}) == 23
+
+def test_prefetched_delivery_failure_restarts_after_last_acknowledgement(context, monkeypatch):
+    c = context
+    c["requests"] = [request(f"u{i:02}") for i in range(23)]
+    prepared = []
+
+    class Prefetched(c["backend"]):
+        runtime = SimpleNamespace(group_size=200)
+
+        def prepare_requests(self, requests, deadline):
+            prepared.append(len(requests))
+
+    c["backend"] = Prefetched
+    p = prepare(c)
+    calls = []
+
+    def deliver(dsn, events):
+        calls.append(len(events))
+        if len(calls) == 2:
+            raise RuntimeError("second delivery failed")
+        c["sent"].extend(events)
+
+    monkeypatch.setattr(replay, "send_activity_rows", deliver)
+    with pytest.raises(RuntimeError, match="second delivery"):
+        apply(c, p["job_id"])
+    assert json.loads((c["root"] / p["job_id"] / "progress.json").read_text())["next"] == 10
+    monkeypatch.setattr(replay, "send_activity_rows", lambda dsn, events: c["sent"].extend(events))
+    assert apply(c, p["job_id"])["complete"]
+    assert prepared == [23, 13]
+    assert len(c["sent"]) == len({e.event_id for e in c["sent"]}) == 23
+
+
 def test_budget_resumes_after_acknowledged_batch(context, monkeypatch):
     context["requests"] = [request(f"u{i:02}") for i in range(25)]
     clock = [0]

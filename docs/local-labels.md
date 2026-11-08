@@ -85,8 +85,35 @@ Only local decision backends are accepted. Nothing is fitted or downloaded durin
 Recipes support one model (`single`), or three or five distinct models combined by voting
 (`majority`) or saved weighted scores (`stack`). Weights and temperatures come from the saved
 recipe; applying it does not train the models or fit a new combination.
-Members run in batches, one model at a time. Scores at or below the saved minimum stay unknown;
+By default, members run in batches, one model at a time. Scores at or below the saved minimum stay unknown;
 the minimum is at least 0.5. These scores are not validated accuracy estimates.
+
+#### Optional parallel scoring
+
+Large local jobs can reuse loaded models across more requests. On macOS, an optional private
+`label-local-runtime.json` beside `config.toml` can enable two model workers for a measured recipe.
+It changes execution only. Models, prompts, temperatures, cutoffs and label provenance stay the same.
+Keep study inputs, measurements and this machine-specific file outside the public repository.
+
+The file has `version: 1` and a `tasks` object keyed by task name. Each task entry contains:
+
+- `recipe_sha256`: SHA-256 of its exact `label-local.json` task object, encoded with Python's
+  `json.dumps(row, sort_keys=True, allow_nan=False)` defaults.
+- `workers`: `2`, and `group_size`: an integer from `1` to `200`.
+- `benchmark_sha256`: the SHA-256 of the private qualification report for these settings.
+- `members`: the recipe's members in their original order. Each entry repeats `backend`,
+  `model_id` and `model_rev`, and adds its measured `peak_memory_mb` in decimal megabytes.
+
+Qualify each task separately using identical inputs and final decisions before enabling it.
+A missing, invalid or stale entry retains serial scoring. Admission requires the two largest
+member peaks multiplied by 1.5, plus 1 GiB per worker, while retaining 15% of total memory.
+Insufficient memory also retains serial scoring. Workers check the memory floor and deadline
+before loading and between requests. Cancellation waits for worker cleanup before releasing
+the shared local-scoring lock. An occupied lock never starts a competing serial run.
+
+Replay can prefetch the configured group while still delivering and acknowledging ten rows at
+a time. Only acknowledged delivery advances its saved cursor. Interrupted groups are rescored
+from that cursor; their scores are not persisted. Normal runs retain their existing delivery size.
 
 Rows use `working.local.<task>` and policy `local-decision-v1`, with original unit timestamps,
 weight 1 and model/policy provenance. They describe eligible local inputs, not all activity.
