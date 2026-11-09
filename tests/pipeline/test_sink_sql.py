@@ -250,6 +250,109 @@ def test_label_source_reads_and_note(dsn, episode):
         assert conn.execute("SELECT text FROM agents.daily_note").fetchall() == [("first",)]
 
 
+def test_episode_readiness_excludes_scans_completed_during_the_rebuild(dsn):
+    cfg = Config(machine="snapshot-test", agents=(), webhook_url=None, webhook_secret=None,
+                 pg_dsn=dsn, home=Path("."))
+    before, during = T0 + timedelta(hours=3), T0 + timedelta(hours=4, minutes=10)
+    rows = [
+        ("snapshot-test", "claude_code", before, before + timedelta(minutes=1), "ok"),
+        ("snapshot-test", "claude_code", during, during + timedelta(minutes=1), "ok"),
+        ("other-machine", "claude_code", during, during + timedelta(minutes=1), "ok"),
+        ("sink", "episode_link", T0 + timedelta(hours=4), T0 + timedelta(hours=5), "ok"),
+        ("sink", "episode_link", T0 + timedelta(hours=6), T0 + timedelta(hours=7), "error"),
+    ]
+    with connect(dsn) as conn:
+        for row in rows:
+            conn.execute("INSERT INTO agents.collector_scan (machine, collector, started_at, "
+                         "finished_at, status, events, human) VALUES (%s, %s, %s, %s, %s, 0, 0)", row)
+        conn.commit()
+    assert Source(cfg).episodes_ready() == before
+    with connect(dsn) as conn:
+        conn.execute("INSERT INTO agents.collector_scan (machine, collector, started_at, "
+                     "finished_at, status, events, human) VALUES ('sink', 'episode_link', "
+                     "%s, %s, 'ok', 0, 0)", (T0 + timedelta(hours=8), T0 + timedelta(hours=9)))
+        conn.commit()
+    assert Source(cfg).episodes_ready() == during
+
+
+def test_a_rebuild_without_a_covered_machine_scan_does_not_use_another_episode(dsn):
+    cfg = Config(machine="uncovered-test", agents=(), webhook_url=None, webhook_secret=None,
+                 pg_dsn=dsn, home=Path("."))
+    with connect(dsn) as conn:
+        conn.execute("INSERT INTO agents.collector_scan (machine, collector, started_at, "
+                     "finished_at, status, events, human) VALUES ('sink', 'episode_link', "
+                     "%s, %s, 'ok', 0, 0)", (T0 + timedelta(hours=20), T0 + timedelta(hours=21)))
+        conn.execute("INSERT INTO agents.collector_scan (machine, collector, started_at, "
+                     "finished_at, status, events, human) VALUES ('uncovered-test', 'claude_code', "
+                     "%s, %s, 'ok', 0, 0)",
+                     (T0 + timedelta(hours=20, minutes=10), T0 + timedelta(hours=20, minutes=11)))
+        conn.execute("INSERT INTO agents.episode VALUES (%s, %s, %s, 1, 1, 1, 0, 0, 'no_code', "
+                     "'git', false)", (uuid.UUID("0f0f0f0f-0000-4000-8000-000000000004"),
+                                       T0 + timedelta(hours=22), T0 + timedelta(hours=23)))
+        conn.commit()
+    assert Source(cfg).episodes_ready() is None
+
+
+@pytest.mark.parametrize("agent", ["codex", "pi", "cursor_cli"])
+def test_local_episode_readiness_uses_supported_collectors_without_expanding_the_teacher(dsn, agent):
+    cfg = Config(machine=f"local-only-{agent}", agents=(agent,), webhook_url=None,
+                 webhook_secret=None, pg_dsn=dsn, home=Path("."))
+    scanned = T0 + timedelta(hours=29)
+    with connect(dsn) as conn:
+        conn.execute("INSERT INTO agents.collector_scan (machine, collector, started_at, "
+                     "finished_at, status, events, human) VALUES (%s, %s, %s, %s, 'ok', 0, 0)",
+                     (cfg.machine, agent, scanned, scanned + timedelta(minutes=1)))
+        conn.execute("INSERT INTO agents.collector_scan (machine, collector, started_at, "
+                     "finished_at, status, events, human) VALUES (%s, 'episode_link', "
+                     "%s, %s, 'ok', 0, 0)",
+                     (f"sink-{agent}", T0 + timedelta(hours=30), T0 + timedelta(hours=31)))
+        conn.commit()
+    assert Source(cfg, local_context=True).episodes_ready() == scanned
+    assert Source(cfg).episodes_ready() is None
+
+
+def test_local_episode_readiness_waits_for_stale_and_uncovered_mixed_collectors(dsn):
+    cfg = Config(machine="mixed-collectors", agents=("claude_code", "codex", "pi"),
+                 webhook_url=None, webhook_secret=None, pg_dsn=dsn, home=Path("."))
+    claude, codex, pi = (T0 + timedelta(days=n) for n in (3, 4, 2))
+    with connect(dsn) as conn:
+        for collector, at, status in (("claude_code", claude, "ok"), ("codex", codex, "ok"),
+                                      ("pi", codex, "error")):
+            conn.execute("INSERT INTO agents.collector_scan (machine, collector, started_at, "
+                         "finished_at, status, events, human) VALUES (%s, %s, %s, %s, %s, 0, 0)",
+                         (cfg.machine, collector, at, at + timedelta(minutes=1), status))
+        conn.execute("INSERT INTO agents.collector_scan (machine, collector, started_at, "
+                     "finished_at, status, events, human) VALUES ('sink-mixed', 'episode_link', "
+                     "%s, %s, 'ok', 0, 0)", (T0 + timedelta(days=10), T0 + timedelta(days=10, hours=1)))
+        conn.commit()
+    assert Source(cfg, local_context=True).episodes_ready() is None
+    assert Source(cfg).episodes_ready() == claude
+    with connect(dsn) as conn:
+        conn.execute("INSERT INTO agents.collector_scan (machine, collector, started_at, "
+                     "finished_at, status, events, human) VALUES (%s, 'pi', %s, %s, 'ok', 0, 0)",
+                     (cfg.machine, pi, pi + timedelta(minutes=1)))
+        conn.commit()
+    assert Source(cfg, local_context=True).episodes_ready() == pi
+
+
+def test_local_episode_readiness_waits_for_a_session_without_scan_receipts(dsn):
+    cfg = Config(machine="missing-scan", agents=("claude_code", "pi"), webhook_url=None,
+                 webhook_secret=None, pg_dsn=dsn, home=Path("."))
+    scanned = T0 + timedelta(days=2)
+    with connect(dsn) as conn:
+        conn.execute("INSERT INTO agents.collector_scan (machine, collector, started_at, "
+                     "finished_at, status, events, human) VALUES (%s, 'claude_code', "
+                     "%s, %s, 'ok', 0, 0)", (cfg.machine, scanned, scanned + timedelta(minutes=1)))
+        conn.execute("INSERT INTO agents.collector_scan (machine, collector, started_at, "
+                     "finished_at, status, events, human) VALUES ('sink-missing', 'episode_link', "
+                     "%s, %s, 'ok', 0, 0)", (T0 + timedelta(days=12), T0 + timedelta(days=12, hours=1)))
+        conn.execute("INSERT INTO agents.event_session (event_id,machine,agent,session_id,run_origin) "
+                     "VALUES ('missing-scan-pi',%s,'pi','unscanned-session','interactive')", (cfg.machine,))
+        conn.commit()
+    assert Source(cfg, local_context=True).episodes_ready() is None
+    assert Source(cfg).episodes_ready() == scanned
+
+
 def test_inspect_day_means_a_member_row_that_day_not_span_overlap(dsn, episode):
     wide = uuid.UUID("0f0f0f0f-0000-4000-8000-000000000002")
     with connect(dsn) as conn:

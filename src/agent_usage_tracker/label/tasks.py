@@ -195,18 +195,29 @@ class Source:
                 for ep in self.episodes(since) if ep["id"] in ids and ep["outcome"] == "no_code"}
 
     def episodes_ready(self) -> datetime | None:
-        """Up to when agents.episode holds this machine's data: the start of this machine's last
-        Claude Code scan delivered before the last episode rebuild (a collector_scan row with
-        collector 'episode_link', written by the sink's nightly job). Without that row, the newest
-        episode activity. None on an empty sink."""
+        """The oldest latest covered scan across this machine's observed text sources.
+
+        A successful episode_link receipt bounds scans by rebuild start. An observed source
+        without a covered successful scan holds the watermark. Only legacy sinks without a
+        successful rebuild receipt fall back to the newest episode activity.
+        """
         dsn = self.cfg.require_pg("label")
-        rows = _sql(dsn, "SELECT max(s.started_at) FROM agents.collector_scan s "
-                    "WHERE s.machine = %s AND s.collector = 'claude_code' AND s.status = 'ok' "
-                    "AND s.finished_at <= (SELECT max(finished_at) FROM agents.collector_scan "
-                    "WHERE collector = 'episode_link' AND status = 'ok')", (self.cfg.machine,))
-        if rows and rows[0][0] is not None:
-            return rows[0][0]
-        rows = _sql(dsn, "SELECT max(last_ts) FROM agents.episode", ())
+        rows = _sql(dsn, "WITH client AS (SELECT %s::text AS machine, %s::text[] AS collectors), "
+                    "rebuilt AS (SELECT max(started_at) AS started_at "
+                    "FROM agents.collector_scan WHERE collector = 'episode_link' AND status = 'ok') "
+                    ", needed AS (SELECT s.collector FROM agents.collector_scan s, client c "
+                    "WHERE s.machine = c.machine AND s.collector = ANY(c.collectors) "
+                    "UNION SELECT e.agent FROM agents.event_session e, client c "
+                    "WHERE e.machine = c.machine AND e.agent = ANY(c.collectors)), "
+                    "covered AS (SELECT n.collector, max(s.started_at) AS ready "
+                    "FROM needed n CROSS JOIN client c LEFT JOIN agents.collector_scan s "
+                    "ON s.machine = c.machine AND s.collector = n.collector AND s.status = 'ok' "
+                    "AND s.finished_at <= (SELECT started_at FROM rebuilt) GROUP BY n.collector) "
+                    "SELECT CASE WHEN r.started_at IS NULL "
+                    "THEN (SELECT max(last_ts) FROM agents.episode) "
+                    "WHEN EXISTS (SELECT 1 FROM covered WHERE ready IS NULL) THEN NULL "
+                    "ELSE (SELECT min(ready) FROM covered) END FROM rebuilt r",
+                    (self.cfg.machine, sorted(self.context_agents)))
         return rows[0][0] if rows else None
 
     def activity(self, sessions: list[str], since: datetime, until: datetime) -> list[dict[str, Any]]:
