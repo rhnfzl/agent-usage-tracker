@@ -23,6 +23,13 @@ The model reads the text on this machine and only the label is sent.
 Saved calibration applies only to its exact task and prompt version. Older choices run
 uncalibrated until explicitly replaced. Episode-based day tasks wait for a known rebuild.
 
+The sink's daily refresh records a successful `episode_link` row in `agents.collector_scan`.
+Only Mac scans completed before that refresh starts can advance episode-based labels.
+Scans completed during the refresh wait for the next successful rebuild.
+If a known rebuild covers no successful scan from this machine, episode-based labels wait.
+Local estimates use the oldest covered scan across this machine's observed, supported text sources.
+A source seen in scan history or session records needs a covered successful scan. Teacher and export paths remain Claude-only.
+
 The steps below create and evaluate a calibrated model choice. They are not prerequisites for
 using an existing provisional local recipe. `aut label teach` can send sampled Claude Code text
 through your signed-in `claude -p` account and spend its budget. Other agents' text is excluded
@@ -89,8 +96,63 @@ Only local decision backends are accepted. Nothing is fitted or downloaded durin
 Recipes support one model (`single`), or three or five distinct models combined by voting
 (`majority`) or saved weighted scores (`stack`). Weights and temperatures come from the saved
 recipe; applying it does not train the models or fit a new combination.
-Members run in batches, one model at a time. Scores at or below the saved minimum stay unknown;
+By default, members run in batches, one model at a time. Scores at or below the saved minimum stay unknown;
 the minimum is at least 0.5. These scores are not validated accuracy estimates.
+
+#### Optional writing attribute
+
+`writing_activity` records whether an episode day's retained human requests ask for a prose
+deliverable, such as README instructions or a report document. It can accompany any work category.
+Routine chat explanations, code changes, prompt changes, messages and tickets do not count.
+The task reads only retained human requests and the last agent reply. Missing human text leaves
+the unit unavailable. It does not classify ActivityWatch blocks or replace work categories.
+
+Opt in by adding `writing_activity` to `label_tasks`. Keep its recipe alone in
+`label-local-writing.json` beside `config.toml`, using the same `local-decision-v1` structure.
+The prompt version is `writing_activity@1/p2`. Keeping this recipe separate preserves existing
+tasks' policy identities and progress. It also supports normal local runs and historical replay:
+
+```sh
+aut label run --local-estimates --task writing_activity
+aut label replay --task writing_activity --since 2026-01-01 --until 2026-02-01
+```
+
+A boolean task's recipe can include `binary_decision_threshold` with `label` and `value`.
+For example, `{"label": "writing", "value": 0.25}` moves the positive decision boundary to 0.25.
+Choose this value on development examples and check separate examples before activation.
+It shifts combined log odds without training the model. `minimum_score` then applies to the
+shifted score; a tie or a score at or below that minimum stays unknown. The shifted score is
+a decision score, not a calibrated probability. Omitting the setting preserves existing scoring.
+Rows use `working.local.writing_activity` and retain provisional, unverified provenance.
+Live writing runs require `--local-estimates`; ordinary calibrated runs leave this task disabled.
+Dashboard consumers must explicitly support this separate attribute before displaying it.
+
+#### Optional parallel scoring
+
+Large local jobs can reuse loaded models across more requests. On macOS, an optional private
+`label-local-runtime.json` beside `config.toml` can enable two model workers for a measured recipe.
+It changes execution only. Models, prompts, temperatures, cutoffs and label provenance stay the same.
+Keep study inputs, measurements and this machine-specific file outside the public repository.
+
+The file has `version: 1` and a `tasks` object keyed by task name. Each task entry contains:
+
+- `recipe_sha256`: SHA-256 of its exact `label-local.json` task object, encoded with Python's
+  `json.dumps(row, sort_keys=True, allow_nan=False)` defaults.
+- `workers`: `2`, and `group_size`: an integer from `1` to `200`.
+- `benchmark_sha256`: the SHA-256 of the private qualification report for these settings.
+- `members`: the recipe's members in their original order. Each entry repeats `backend`,
+  `model_id` and `model_rev`, and adds its measured `peak_memory_mb` in decimal megabytes.
+
+Qualify each task separately using identical inputs and final decisions before enabling it.
+A missing, invalid or stale entry retains serial scoring. Admission requires the two largest
+member peaks multiplied by 1.5, plus 1 GiB per worker, while retaining 15% of total memory.
+Insufficient memory also retains serial scoring. Workers check the memory floor and deadline
+before loading and between requests. Cancellation waits for worker cleanup before releasing
+the shared local-scoring lock. An occupied lock never starts a competing serial run.
+
+Replay can prefetch the configured group while still delivering and acknowledging ten rows at
+a time. Only acknowledged delivery advances its saved cursor. Interrupted groups are rescored
+from that cursor; their scores are not persisted. Normal runs retain their existing delivery size.
 
 Rows use `working.local.<task>` and policy `local-decision-v1`, with original unit timestamps,
 weight 1 and model/policy provenance. They describe eligible local inputs, not all activity.

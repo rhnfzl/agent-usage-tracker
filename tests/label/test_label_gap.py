@@ -4,7 +4,7 @@ this machine are counted, not dropped without a word."""
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 
 import pytest
 
@@ -69,24 +69,18 @@ def test_gap_days_are_labelled_after_the_rebuild_not_before(tmp_path, sink, read
             [f"e1:{GAP.astimezone().date().isoformat()}"]
 
 
-def test_episodes_ready_reads_the_rebuild_then_the_newest_episode(tmp_path, monkeypatch):
+def test_episodes_ready_uses_one_database_snapshot(tmp_path, monkeypatch):
     seen: list[tuple[str, tuple]] = []
-    answers: dict[str, object] = {"collector_scan": None, "agents.episode": None}
 
     def fake_sql(dsn, sql, params):
         seen.append((sql, params))
-        key = "collector_scan" if "collector_scan" in sql else "agents.episode"
-        return [(answers[key],)]
+        return [(None,)]
 
     monkeypatch.setattr(tasks, "_sql", fake_sql)
     src = tasks.Source(_cfg(tmp_path))
     assert src.episodes_ready() is None                 # an empty sink: day tasks wait
-    assert seen[0][1] == ("test",)                      # this machine's scans only
-    t1, t2 = datetime(2026, 10, 3, 12, tzinfo=timezone.utc), datetime(2026, 10, 5, tzinfo=timezone.utc)
-    answers["agents.episode"] = t1
-    assert src.episodes_ready() == t1                   # no rebuild record: the newest episode
-    answers["collector_scan"] = t2
-    assert src.episodes_ready() == t2                   # the rebuild record wins
+    assert len(seen) == 1                              # marker and legacy fallback share one snapshot
+    assert seen[0][1] == ("test", ["claude_code"])      # teacher and export remain Claude-only
 
 
 def test_steers_without_local_text_are_counted(tmp_path, sink, capsys):  # noqa: F811

@@ -848,6 +848,12 @@ They never use the frozen Sonnet policy. `provisional` is true, `human_verified`
 are false, and `source_scope` is `ongoing_local_eligible`. Weight is 1 per eligible unit.
 `policy_id`, `source_eval_sha256`, input hashes and member revisions identify the saved recipe.
 `native_score` is the unrounded combined score, not validated accuracy; `p` remains rounded.
+The optional `working.local.writing_activity` task is a separate boolean episode-day attribute.
+Its dedicated `label-local-writing.json` recipe does not change other tasks' policy identities.
+It requires complete retained human text, reads no ActivityWatch blocks, and preserves main categories.
+Normal runs require `--local-estimates` for this task, preserving its provisional provenance.
+An optional `binary_decision_threshold` shifts a boolean task's combined log odds before deciding.
+The recipe's minimum applies after that shift; the resulting score is not a calibrated probability.
 A score at or below the recipe minimum becomes `label: unknown` and `below_tau: true`.
 Steer timestamps remain the event time; assessed outcomes retain the episode start time.
 No public view may silently combine this ongoing coverage with the frozen historical frame.

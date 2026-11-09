@@ -18,7 +18,8 @@ from ..repo_keys import RepoKeys
 from ..state import LockBusy, _locked, atomic_write_text
 from .backends import BackendUnavailable
 from .core import Choice, Request, data_dir, decide, label_event, local_midnight
-from .local import TASK_NAMES, LocalBackend, decorate, load_policy, reserve_label_time
+from .local import (TASK_NAMES, LocalBackend, decorate, load_policy, reserve_label_time,
+                    writing_policy_path)
 from .tasks import Source, units
 
 BATCH = 10
@@ -75,7 +76,7 @@ def prepare(cfg: Config, task: str, since: date, until: date, *, src: Source | N
         raise AutError("label replay: choose a local task and a nonempty range of completed dates")
     cfg.require_pg("label replay preview")
     identity = _identity(cfg)
-    policy, policy_id = load_policy()
+    policy, policy_id = load_policy(writing_policy_path()) if task == "writing_activity" else load_policy()
     if task not in policy["tasks"]:
         raise AutError("label replay: this task has no saved local recipe")
     start, end = local_midnight(since), local_midnight(until)
@@ -139,8 +140,8 @@ def _resume(cfg: Config, job_id: str, directory: Path, apply: bool, budget_s: in
         raise AutError("label replay: job snapshot or cursor changed; refusing to continue")
     if manifest["machine"] != cfg.machine or manifest["identity"] != _identity(cfg):
         raise AutError("label replay: machine identity or repository salt changed")
-    policy, _current_id = load_policy()
     task = manifest["task"]
+    policy, _current_id = load_policy(writing_policy_path()) if task == "writing_activity" else load_policy()
     if _digest(policy["tasks"].get(task)) != _digest(manifest["task_policy"]):
         raise AutError("label replay: the task recipe changed; prepare a new job")
     if not apply or progress["next"] == len(manifest["requests"]):
@@ -150,15 +151,25 @@ def _resume(cfg: Config, job_id: str, directory: Path, apply: bool, budget_s: in
                                              manifest["policy_id"], cfg)
     deadline = time.monotonic() + budget_s
     delivered = 0
+    prepared: list[Request] = []
+    prepared_start = progress["next"]
     try:
         while progress["next"] < len(manifest["requests"]):
             if time.monotonic() >= deadline:
                 return _report(manifest, progress, delivered, "budget")
-            chunk = [Request(**r) for r in manifest["requests"][progress["next"]:
-                                                               progress["next"] + BATCH]]
-            for req in chunk:
-                req.rev = f"replay:{job_id}:{req.rev or ''}"
-            backend.prepare_requests(chunk, deadline)
+            if not prepared or progress["next"] >= prepared_start + len(prepared):
+                prepared_start = progress["next"]
+                group_size = getattr(getattr(backend, "runtime", None), "group_size", BATCH)
+                prefetch = max(BATCH, group_size // BATCH * BATCH)
+                prepared = [
+                    Request(**r)
+                    for r in manifest["requests"][prepared_start : prepared_start + prefetch]
+                ]
+                for req in prepared:
+                    req.rev = f"replay:{job_id}:{req.rev or ''}"
+                backend.prepare_requests(prepared, deadline)
+            offset = progress["next"] - prepared_start
+            chunk = prepared[offset : offset + BATCH]
             events = []
             for req in chunk:
                 if time.monotonic() >= deadline:

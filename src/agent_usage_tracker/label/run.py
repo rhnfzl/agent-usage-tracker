@@ -17,7 +17,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from ..config import LABEL_NOTE, Config
+from ..config import LABEL_NOTE, AutError, Config
 from ..episode_store import Episode
 from ..event import ActivityEvent
 from ..push import job_heartbeat, send_activity_rows
@@ -28,12 +28,12 @@ from .backends import BackendUnavailable, make_backend
 from .core import (Backend, Choice, NoteBackend, current_labels, data_dir, decide, label_event,
                    load_choice, local_days, local_midnight)
 from .tasks import OUTCOME_DAYS, TASKS, Source, SourceUnavailable, Task, units
-from .local import LocalBackend, decorate, load_policy, reserve_label_time
+from .local import LocalBackend, decorate, load_policy, reserve_label_time, writing_policy_path
 from .covered_run import covered_outcomes
 
 BATCH = 50
 # The day tasks built from agents.episode, which the sink rebuilds once a night: they wait for it.
-_EPISODE_TASKS = frozenset({"work_category", LABEL_NOTE})
+_EPISODE_TASKS = frozenset({"work_category", "writing_activity", LABEL_NOTE})
 # One task's counts, read as 0 when unset, plus `labels`: the rows per label.
 TaskReport = defaultdict[str, Any]
 NAME = "label"
@@ -217,6 +217,8 @@ def _label_one(run: _Run, name: str, since: datetime | None, now: datetime, choi
     """One task's report, and the error that stopped only it: its watermark stays, the others go
     on, and the heartbeat row records it."""
     try:
+        if name == "writing_activity" and not run.local_estimates:
+            raise BackendUnavailable("label: writing_activity requires --local-estimates")
         if name != LABEL_NOTE:
             start, until = _window(name, run.wm, since, now, run.ready,
                 mature_outcomes=run.local_estimates and run.cfg.label_mature_outcomes)
@@ -260,17 +262,24 @@ def run_label(cfg: Config, tasks: list[str] | None = None, since: datetime | Non
     now = now or started
     src = src or Source(cfg, local_context=local_estimates)
     loaded: dict[tuple[str | None, str | None, str | None, str | None], Backend] = {}
-    policy, policy_id = load_policy() if local_estimates else ({}, "")
+    names = tasks if tasks is not None else cfg.label_tasks
+    policy, policy_id = load_policy() if local_estimates and set(names) != {"writing_activity"} else ({}, "")
     if local_estimates and not dry_run:
         labelled_at = reserve_label_time(data_dir() / "label" / "replay", started)
 
     def default_backend(task: str, choice: Choice) -> Backend:
         if local_estimates:
-            key = (task, "local", policy_id, None)
+            task_policy, task_policy_id = policy, policy_id
+            if task == "writing_activity":
+                try:
+                    task_policy, task_policy_id = load_policy(writing_policy_path())
+                except AutError as exc:
+                    raise BackendUnavailable(str(exc)) from exc
+            key = (task, "local", task_policy_id, None)
             if key not in loaded:
-                if task not in policy["tasks"]:
+                if task not in task_policy["tasks"]:
                     raise BackendUnavailable("label: task has no saved local decision recipe")
-                loaded[key] = LocalBackend(task, policy["tasks"][task], policy_id, cfg)
+                loaded[key] = LocalBackend(task, task_policy["tasks"][task], task_policy_id, cfg)
             return loaded[key]
         # one model load per run, shared across tasks; an encoder is trained for one task alone
         k = (task if choice.backend == "encoder" else None, choice.backend,
@@ -283,7 +292,6 @@ def run_label(cfg: Config, tasks: list[str] | None = None, since: datetime | Non
     state = load_state()
     state_name = "label_local" if local_estimates else NAME
     wm = collector_wm(state, state_name)
-    names = tasks if tasks is not None else cfg.label_tasks
     run = _Run(cfg=cfg, dsn=dsn, src=src, dry_run=dry_run,
                deadline=time.monotonic() + cfg.label_budget_s, wm=wm, state=state,
                cache=load_json_dict(_cache_path()), labelled_at=labelled_at,

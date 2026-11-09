@@ -370,7 +370,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p_lback.add_argument("--task", choices=LABEL_TASK_NAMES, required=True)
     p_lback.add_argument("--days", type=int, required=True)
     p_replay = lab_sub.add_parser("replay", help="preview or resume a private historical local job")
-    p_replay.add_argument("--task", choices=("steer_intent", "work_category", "soft_outcome"))
+    p_replay.add_argument("--task", choices=("steer_intent", "work_category", "soft_outcome", "writing_activity"))
     p_replay.add_argument("--since", type=date.fromisoformat, help="first local date, inclusive")
     p_replay.add_argument("--until", type=date.fromisoformat, help="last local date, exclusive")
     p_replay.add_argument("--job", help="saved private job ID instead of a new range")
