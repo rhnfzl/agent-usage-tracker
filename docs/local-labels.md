@@ -23,6 +23,13 @@ The model reads the text on this machine and only the label is sent.
 Saved calibration applies only to its exact task and prompt version. Older choices run
 uncalibrated until explicitly replaced. Episode-based day tasks wait for a known rebuild.
 
+The sink's daily refresh records a successful `episode_link` row in `agents.collector_scan`.
+Only Mac scans completed before that refresh starts can advance episode-based labels.
+Scans completed during the refresh wait for the next successful rebuild.
+If a known rebuild covers no successful scan from this machine, episode-based labels wait.
+Local estimates use the oldest covered scan across this machine's observed, supported text sources.
+A source seen in scan history or session records needs a covered successful scan. Teacher and export paths remain Claude-only.
+
 The steps below create and evaluate a calibrated model choice. They are not prerequisites for
 using an existing provisional local recipe. `aut label teach` can send sampled Claude Code text
 through your signed-in `claude -p` account and spend its budget. Other agents' text is excluded
