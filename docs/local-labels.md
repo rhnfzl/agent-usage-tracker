@@ -33,14 +33,18 @@ from that cloud teacher. Review the [privacy rules](reference.md#privacy-model) 
 3. `aut label review --task steer_intent` lets you answer gold labels on a local page.
 4. `aut label eval --task steer_intent` scores every model that is on disk, says which it left out
    and how to fetch them, and prints a table of quality, speed and memory, with a mark on the Pareto
-   frontier and on models that fail a floor. Scores are saved, so a rerun calls a model only for new
-   gold and tuning needs no model.
+   frontier and on models that fail a floor. Scores are reused only when the full input and its
+   revision match. Changed evidence and older cache rows without an input hash are scored again.
 5. `aut label choose --task steer_intent --model kev-4b` writes your pick, with its calibration and
    thresholds, into `label.json`. Without `--model` it prints the table and a recommendation and
    writes nothing. Without a choice a task runs uncalibrated and every row is marked below
    threshold. `aut label eval --task steer_intent --final --model M` is the last check, on days
    nothing else has read.
 6. Add the task to `label_tasks` and set `AUT_LABEL=1` in `scan.env` for the nightly run.
+
+Label runs return a nonzero exit code when evidence is unavailable or their time budget ends.
+Completed batches remain saved. The scheduler retries unfinished work after the next successful scan,
+including work waiting for the episode rebuild.
 
 Details and the stored row: [CONTRACT.md](../CONTRACT.md#labels-activity_event-kind-label-aut-label).
 

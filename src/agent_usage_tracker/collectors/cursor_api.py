@@ -21,7 +21,6 @@ from __future__ import annotations
 import base64
 import json
 import sqlite3
-import sys
 import time
 import urllib.error
 import urllib.parse
@@ -170,26 +169,32 @@ def _page_events(batch: list[Any], uid: object, since: int) -> tuple[list[UsageE
 
 def _fetch_events(cookie: str, team_id: int, uid: object, since: int, start: int,
                   end: int) -> tuple[list[UsageEvent], int]:
-    """(this user's events in [start, end], the newest one's time, else `since`)."""
+    """Read a complete window, splitting on saturation; an irreducible cap refuses an ACK."""
     events: list[UsageEvent] = []
     newest = since
     for page in range(1, _MAX_PAGES + 1):
+        # Boundary events stay inside the request whether the API uses inclusive or strict dates.
         body = {"teamId": team_id, "userId": uid, "page": page, "pageSize": _PAGE,
-                "startDate": start, "endDate": end}
+                "startDate": start - 1, "endDate": end + 1}
         data = _post(cookie, "get-filtered-usage-events", body)
         batch = data.get("usageEventsDisplay") if isinstance(data, dict) else None
-        if not batch:
-            break
-        got, fresh_rows, page_newest = _page_events(batch, uid, since)
+        if not isinstance(batch, list):
+            raise CollectorUnavailable("cursor_api: invalid usage page; watermark unchanged")
+        bounded = [raw for raw in batch if isinstance(raw, dict)
+                   and start <= safe_int(raw.get("timestamp")) <= end]
+        got, _, page_newest = _page_events(bounded, uid, since)
         events += got
         newest = max(newest, page_newest)
-        if fresh_rows == 0 or len(batch) < _PAGE:
-            break
-    else:
-        # 20k events inside one day's window: never seen in practice. Flag it, never orphan quietly.
-        print(f"aut: cursor_api: reached the {_MAX_PAGES}-page cap in one day's window; older "
-              "events of that day may be unread.", file=sys.stderr)
-    return events, newest
+        if len(batch) < _PAGE:
+            return events, newest
+    if start >= end:
+        raise CollectorUnavailable("cursor_api: page cap reached within one millisecond; "
+                                   "cannot prove completeness, watermark unchanged")
+    events.clear()
+    middle = (start + end) // 2
+    left, left_newest = _fetch_events(cookie, team_id, uid, since, start, middle)
+    right, right_newest = _fetch_events(cookie, team_id, uid, since, middle + 1, end)
+    return left + right, max(left_newest, right_newest)
 
 
 def collect(cfg: Config, wm: dict[str, Any]) -> Iterator[tuple[list[UsageEvent], Callable[[], None]]]:
@@ -219,9 +224,6 @@ def collect(cfg: Config, wm: dict[str, Any]) -> Iterator[tuple[list[UsageEvent],
             # A closed window moves the watermark to its end (the next starts there, so an event
             # exactly on the edge is read twice and deduped). The open window ends at the newest
             # event, as before, so an event Cursor records late is still picked up.
-            # shortcut: assumes the API's endDate is inclusive (unchecked against the real API),
-            # and a day over the 20k page cap still loses the rest (warned); upgrade by splitting
-            # a capped window in half if that warning ever shows up.
             mark = hi if hi < now else newest
 
             def advance_watermark(w: dict[str, Any] = wm, n: int = mark) -> None:

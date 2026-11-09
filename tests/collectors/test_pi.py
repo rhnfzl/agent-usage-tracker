@@ -10,6 +10,7 @@ Locks the rules:
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 from pathlib import Path
 
@@ -106,11 +107,11 @@ def test_pi_activity() -> None:
         assert set(turns) == {"u1", "u2", "u3", "u4"}, turns    # u5 is still open
         ts, t1 = turns["u1"]
         assert (ts, t1["duration_ms"], t1["message_count"], t1["tool_calls"], t1["tool_errors"],
-                t1["by_tool"]) == (T(5), 4000, 5, 2, 1, {"bash": 1, "read": 1}), t1
+                t1["by_tool"]) == (T(1), 4000, 5, 2, 1, {"bash": 1, "read": 1}), t1
         assert "hook_blocks" not in t1
-        assert turns["u2"][0] == T(9)                          # closed by the abort
-        assert (turns["u3"][0], turns["u3"][1]["duration_ms"]) == (T(12), 2000)   # by next user
-        assert (turns["u4"][0], turns["u4"][1]["duration_ms"]) == (T(15), 2000)   # retry, stop
+        assert turns["u2"][0] == T(6)                          # stable turn start
+        assert (turns["u3"][0], turns["u3"][1]["duration_ms"]) == (T(10), 2000)
+        assert (turns["u4"][0], turns["u4"][1]["duration_ms"]) == (T(13), 2000)
     _run(check)
 
 
@@ -137,6 +138,42 @@ def test_pi_carries_across_scans() -> None:
         assert c.attrs["sha"] == "0a1b2c3" and c.attrs["repo_key"]
         [u] = _usage(second)
         assert (u.project, u.session.session_id, u.session.turn_id) == ("repo", SID, "u1")
+
+
+@pytest.mark.parametrize("stop", ["error", "toolUse"])
+def test_pi_idle_turn_publishes_at_start_and_retries_transactionally(tmp_path, stop):
+    f = _pi_file(tmp_path)
+    _write_jsonl(f, [_hdr(SID, "/x/repo"), _pu("u1", T(1), "go"),
+                     _pa("a1", T(2), stop, tokens=1)])
+    wm = {}
+    assert not _acts(_collect(pi, tmp_path, wm), "turn")
+    os.utime(f, (1_600_000_000, 1_600_000_000))
+    before = json.dumps(wm, sort_keys=True)
+    failed = [e for events, commit in pi.collect(_cfg(tmp_path), wm) for e in events]
+    assert json.dumps(wm, sort_keys=True) == before
+    [turn] = _acts(failed, "turn")
+    assert (turn.ts, turn.attrs["duration_ms"], turn.attrs["message_count"]) == (T(1), 1000, 2)
+    assert _collect(pi, tmp_path, wm) == failed
+    assert _collect(pi, tmp_path, wm) == []
+
+
+def test_pi_idle_snapshot_keeps_pending_commit_and_matches_full_read(tmp_path):
+    f = _pi_file(tmp_path)
+    head = [_hdr(SID, "/x/repo"), _pu("u1", T(1), "go"),
+            _pa("a1", T(2), "toolUse", ("k1", "bash", {"command": "git commit -m x"}), tokens=1)]
+    tail = [_pr("r1", T(3), "k1", "[feat/x 1a2b3c4] x"), _pa("a2", T(4), "stop", tokens=1)]
+    _write_jsonl(f, head)
+    os.utime(f, (1_600_000_000, 1_600_000_000))
+    wm = {}
+    first = _collect(pi, tmp_path, wm)
+    assert len(_acts(first, "turn")) == 1
+    _append(f, tail)
+    second = _collect(pi, tmp_path, wm)
+    [commit] = _acts(second, "commit")
+    assert commit.attrs["sha"] == "1a2b3c4"
+    combined = {e.event_id: e for e in first + second}
+    full = {e.event_id: e for e in _collect(pi, tmp_path)}
+    assert combined == full
 
 
 def test_pi_watermark_with_an_old_dev_is_not_read_again() -> None:

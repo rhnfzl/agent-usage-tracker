@@ -128,6 +128,68 @@ def _activity(eid: str, kind: str, session: str = "s1", **attrs) -> ActivityEven
                          session_id=session, turn_id=None, attrs=attrs, machine="t")
 
 
+def test_covered_snapshots_update_legacy_rows_without_duplicate_timestamps(dsn):
+    from dataclasses import replace
+    legacy = replace(_activity("legacy-pi-turn", "turn", tool_calls=1, tool_errors=0), agent="pi")
+    push.send_activity_rows(dsn, [legacy])
+    corrected = replace(legacy, ts=(T0 - timedelta(minutes=1)).isoformat(),
+                        attrs={"tool_calls": 2, "tool_errors": 1,
+                               "revision_sources": ["a", "b"]})
+    push.send_activity_rows(dsn, [corrected])
+    stale = replace(corrected, attrs={"tool_calls": 1, "tool_errors": 0,
+                                     "revision_sources": ["a"]})
+    push.send_activity_rows(dsn, [stale, corrected])
+    with connect(dsn) as conn:
+        rows = conn.execute("SELECT ts, attrs FROM agents.activity_event WHERE event_id=%s",
+                            (legacy.event_id,)).fetchall()
+    assert len(rows) == 1
+    assert rows[0][0] == T0
+    assert rows[0][1] == corrected.attrs
+
+
+def test_insert_only_writer_defers_corrections_until_column_grant(dsn):
+    from dataclasses import replace
+    role = "snapshot_writer_" + uuid.uuid4().hex
+    # The scratch DSN uses a role in its URI; preserve the endpoint and database.
+    from urllib.parse import urlsplit, urlunsplit
+    uri = urlsplit(dsn)
+    writer_dsn = urlunsplit(uri._replace(netloc=role + "@" + uri.netloc.rsplit("@", 1)[-1]))
+    with connect(dsn) as conn:
+        conn.execute(f'CREATE ROLE "{role}" LOGIN')
+        conn.execute(f'GRANT USAGE ON SCHEMA agents TO "{role}"')
+        conn.execute(f'GRANT INSERT, SELECT ON agents.activity_event TO "{role}"')
+        conn.commit()
+    try:
+        first = replace(_activity("restricted-turn", "turn", tool_calls=1, tool_errors=0,
+                                  revision_sources=["a"]), agent="cursor_cli")
+        push.send_activity_rows(writer_dsn, [first])
+        corrected = replace(first, attrs={"tool_calls": 2, "tool_errors": 0,
+                                          "revision_sources": ["a", "b"]})
+        push.send_activity_rows(writer_dsn, [corrected, _activity("restricted-ordinary", "commit")])
+        cfg = Config(machine="t", agents=(), pg_dsn=writer_dsn, webhook_url=None,
+                     webhook_secret=None, home=Path("."))
+        assert push.outbox_status() == {"activity": 1}
+        assert push.replay_outbox(cfg) == 0
+        assert push.outbox_status() == {"activity": 1}
+        with connect(dsn) as conn:
+            assert conn.execute("SELECT attrs->>'tool_calls' FROM agents.activity_event "
+                                "WHERE event_id='restricted-turn'").fetchone()[0] == "1"
+            assert conn.execute("SELECT count(*) FROM agents.activity_event "
+                                "WHERE event_id='restricted-ordinary'").fetchone()[0] == 1
+            conn.execute(f'GRANT UPDATE(attrs) ON agents.activity_event TO "{role}"')
+            conn.commit()
+        assert push.replay_outbox(cfg) == 1
+        assert push.outbox_status() == {}
+        with connect(dsn) as conn:
+            assert conn.execute("SELECT attrs->>'tool_calls' FROM agents.activity_event "
+                                "WHERE event_id='restricted-turn'").fetchone()[0] == "2"
+    finally:
+        with connect(dsn) as conn:
+            conn.execute(f'DROP OWNED BY "{role}"')
+            conn.execute(f'DROP ROLE "{role}"')
+            conn.commit()
+
+
 def test_scan_rows_insert_once(dsn):
     session = EventSession("s1", None, "interactive", "t1")
     batch = [UsageEvent(event_id="u1", ts=T0.isoformat(), agent="claude_code", model="m",

@@ -1,0 +1,370 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="artifact-kind" content="status">
+  <meta name="artifact-audience" content="human">
+  <meta name="artifact-created" content="2026-11-09">
+  <meta name="artifact-source" content="local">
+  <meta name="artifact-read-time" content="8 min">
+  <!-- Gallery card text. Leave empty to auto-derive from the summary block; fill for a sharper one-liner. -->
+  <meta name="artifact-summary" content="Seventeen stateful mechanisms corrected, with recovery and compatibility checks across the full inventory.">
+  <meta name="artifact-keywords" content="">
+  <title>State reliability fixes</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ctext y='13' font-size='13'%3E📍%3C/text%3E%3C/svg%3E">
+  <script>
+    (function(){try{var r=document.documentElement;r.classList.add('theme-js');var t=localStorage.getItem('hh-theme');if(t==='dark'||t==='light')r.dataset.theme=t;}catch(e){}})();
+  </script>
+  <style>
+:root {
+      color-scheme: light;                     /* base = light, renders on any engine; dark tokens live in the @media screen blocks appended after this constant */
+      /* surfaces: cool off-white, slight blue-grey hue bias (never pure grey/white) */
+      --bg: #f6f8fb; --surface: #ffffff; --surface-2: #f2f5f9; --surface-3: #e9eef4;
+      /* ink: navy-biased grey ramp (never pure black) */
+      --ink: #172033; --ink-2: #3c4657; --muted: #5a6577; --faint: #66707f;  /* --faint is text-safe AA (4.7:1 on --bg) */
+      /* structure */
+      --line: #dbe2ec; --line-strong: #c6cfdc;
+      /* brand accent (#226fb2) + tint */
+      --accent: #226fb2; --accent-2: #1b5e97; --accent-bg: #eef5fb; --accent-line: #b9d5ec;
+      /* severity: fg / tint-bg / tint-line triples (semantic color only) */
+      --crit: #c0342a; --crit-bg: #fbeae8; --crit-line: #f0c4be;
+      --high: #a84522; --high-bg: #fbeee6; --high-line: #f0cdba;  /* fg contrast-locked to tint (5.2:1) */
+      --warn: #845d06; --warn-bg: #f9f1d8; --warn-line: #e8d69a;  /* fg contrast-locked to tint (5.2:1) */
+      --good: #2d7a55; --good-bg: #e9f5ee; --good-line: #b6ddc6;
+      --info: #226fb2; --info-bg: #eef5fb; --info-line: #b9d5ec;
+      --neutral: #5a6577; --neutral-bg: #eef1f5; --neutral-line: #d7dde6;
+      /* legacy aliases: keep every existing selector below valid (safe incremental migration) */
+      --blue: var(--accent); --soft: var(--surface-2);
+      --orange: var(--high); --green: var(--good);
+      --rose-bg: var(--high-bg); --rose-line: var(--high);
+      --emerald-bg: var(--good-bg); --emerald-line: var(--good);
+      /* elevation */
+      --shadow-sm: 0 1px 2px rgba(23,32,51,.05);
+      --shadow: 0 1px 2px rgba(23,32,51,.05), 0 8px 24px rgba(23,32,51,.06);
+      /* radius */
+      --radius: 10px; --radius-sm: 6px; --radius-lg: 14px;
+      /* spacing scale */
+      --s-1:4px; --s-2:6px; --s-3:8px; --s-4:12px; --s-5:14px; --s-6:16px; --s-7:18px; --s-8:20px; --s-9:24px; --s-10:32px; --s-12:48px;
+      /* families: display serif for h1/numbers, sans body (NOT led by Inter), mono kickers */
+      --display: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, ui-serif, serif;
+      --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", "Helvetica Neue", sans-serif;
+      --mono: ui-monospace, "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
+      /* fluid type scale: only the 3 biggest levels clamp; body & below fixed so copy never wobbles */
+      --fs-h1: clamp(2rem, 1.35rem + 2.6vw, 3.2rem);
+      --fs-h2: clamp(1.3rem, 1.15rem + .7vw, 1.6rem);
+      --fs-h3: 1.05rem; --fs-lede: clamp(1.05rem, 1rem + .35vw, 1.18rem);
+      --fs-body: 1rem; --fs-sm: .875rem; --fs-cap: .72rem;
+      --lh-body: 1.62; --ls-caps: .1em;
+      font-family: var(--sans);
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; color: var(--ink); background: var(--bg); font-family: var(--sans); line-height: var(--lh-body); accent-color: var(--accent); text-rendering: optimizeLegibility; -webkit-font-smoothing: antialiased; font-feature-settings: "kern", "liga"; }
+    main { width: min(1060px, calc(100vw - clamp(2rem, 8vw, 5rem))); margin: 0 auto; padding: clamp(28px,5vw,56px) 0 clamp(64px,10vw,96px); }
+    header { border-bottom: 1px solid var(--line); padding-bottom: var(--s-9); margin-bottom: var(--s-10); }
+    .eyebrow { font-family: var(--mono); color: var(--accent); font-size: var(--fs-cap); font-weight: 600; text-transform: uppercase; letter-spacing: .14em; }
+    h1 { margin: 10px 0 12px; font-family: var(--display); font-size: var(--fs-h1); font-weight: 800; line-height: 1.05; letter-spacing: -.02em; }
+    h2 { margin: 0 0 12px; font-size: var(--fs-h2); font-weight: 700; letter-spacing: -.01em; }
+    h3 { margin: 18px 0 8px; font-size: var(--fs-h3); font-weight: 600; color: var(--ink); }
+    h1, h2, h3 { text-wrap: balance; }
+    p { color: var(--ink-2); line-height: var(--lh-body); max-width: 72ch; text-wrap: pretty; }
+    li { max-width: 72ch; }
+    a { color: var(--accent); }
+    :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+    .lead-summary { background: var(--surface-2); border-left: 4px solid var(--accent); padding: 20px 22px; border-radius: var(--radius); margin: 16px 0 32px; box-shadow: var(--shadow-sm); }
+    .lead-summary h2 { color: var(--accent); margin-bottom: 12px; }
+    .lead-summary ul { margin: 0; padding-left: 20px; }
+    .lead-summary li { margin-bottom: 8px; color: var(--ink-2); line-height: 1.55; }
+    .lead-summary li strong { color: var(--accent); }
+    nav.toc { background: var(--surface-2); border: 1px solid var(--line); border-radius: var(--radius); padding: 14px 20px; margin: 16px 0 32px; }
+    nav.toc ol { margin: 8px 0 0; padding-left: 22px; columns: 2; column-gap: 24px; }
+    nav.toc li { margin-bottom: 4px; }
+    nav.toc a { color: var(--accent); text-decoration: none; }
+    nav.toc a:hover { text-decoration: underline; }
+    section.section { margin-top: clamp(32px,5vw,52px); }
+    section[id] { scroll-margin-top: var(--s-9); }
+    section:target > h2 { color: var(--accent-2); }
+    .grid-cols-2, .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: var(--s-6); }
+    .grid-3 { display: grid; grid-template-columns: repeat(3,1fr); gap: var(--s-6); }
+    /* grid items default to min-width:auto and will not shrink below a wide child (a long <pre> or code
+       line), pushing the page past a phone viewport. min-width:0 lets the child's overflow-x:auto scroll. */
+    .grid-cols-2 > *, .grid-2 > *, .grid-3 > *, .compare-before, .compare-after { min-width: 0; }
+    .compare-before { background: var(--high-bg); border-left: 4px solid var(--high); border-radius: var(--radius); padding: 16px; }
+    .compare-after { background: var(--good-bg); border-left: 4px solid var(--good); border-radius: var(--radius); padding: 16px; }
+    .compare-before > strong:first-child, .compare-after > strong:first-child { display: block; margin-bottom: 8px; font-family: var(--mono); font-size: var(--fs-cap); letter-spacing: .08em; text-transform: uppercase; }
+    .compare-before > strong:first-child { color: var(--high); }
+    .compare-after > strong:first-child { color: var(--good); }
+    table { width: 100%; border-collapse: collapse; border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; }
+    th, td { padding: 12px 14px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; font-variant-numeric: tabular-nums; }
+    th { background: var(--surface-2); color: var(--muted); font-family: var(--mono); font-size: var(--fs-cap); text-transform: uppercase; letter-spacing: .08em; }
+    tr:last-child td { border-bottom: 0; }
+    .table-scroll { overflow-x: auto; border-radius: var(--radius); }
+    .table-scroll table { display: table; }
+    code { background: var(--surface-2); border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 2px 5px; font-family: var(--mono); font-size: .88em; overflow-wrap: anywhere; }
+    pre { background: #0f172a; color: #e2e8f0; border-radius: var(--radius); padding: 14px; overflow: auto; border: 1px solid var(--line); }
+    pre code { background: transparent; border: 0; color: inherit; }
+    .mermaid svg { max-width: 100%; height: auto; }
+    /* Mermaid node labels clip on the right when the page's kerning / ligatures / letter-spacing widen the
+       final SVG text past mermaid's own measurement. Neutralize those inside the diagram, and let a label
+       spill into the node's padding rather than be cut off. */
+    .mermaid text, .mermaid .nodeLabel, .mermaid .edgeLabel,
+    .mermaid foreignObject div, .mermaid foreignObject span, .mermaid foreignObject p {
+      font-feature-settings: normal; font-variant-ligatures: none; letter-spacing: normal; text-rendering: auto;
+    }
+    .mermaid foreignObject { overflow: visible; }
+    .mermaid:not([data-processed]) { font-family: var(--mono); font-size: var(--fs-sm); white-space: pre; overflow-x: auto; background: var(--surface-2); border: 1px dashed var(--line-strong); border-radius: var(--radius); padding: var(--s-6); color: var(--muted); }
+    /* shipped diagram: inline SVG in a scroll wrapper, mermaid/source kept in an adjacent <details>.
+       The wrapper's overflow-x contains a too-wide diagram to its own scrollbar instead of the page. */
+    figure.diagram { margin: var(--s-7) 0; }
+    .diagram-scroll { overflow-x: auto; }
+    .diagram-scroll svg { max-width: 100%; height: auto; display: block; margin: 0 auto; }
+    .diagram-src { margin-top: var(--s-4); }
+    .diagram-src summary { cursor: pointer; color: var(--muted); font-size: var(--fs-sm); }
+    .diagram-src pre { white-space: pre; overflow-x: auto; }
+    .needs-verification { display: inline-block; font-family: var(--mono); padding: 2px 8px; border-radius: var(--radius-sm); font-size: var(--fs-cap); font-weight: 700; background: var(--warn-bg); color: var(--warn); border: 1px solid var(--warn-line); }
+    /* responsive overrides for components live next to the component (in _EXTRA_SCAFFOLD_STYLE) */
+    @media (max-width: 820px) {
+      .grid-cols-2, .grid-2, .grid-3 { grid-template-columns: 1fr; }
+      nav.toc ol { columns: 1; }
+      table { display: block; overflow-x: auto; }
+    }
+    .theme-toggle { display:none; }
+    .theme-js .theme-toggle { position:fixed; top:16px; right:16px; z-index:100; width:40px; height:40px; padding:0; display:inline-flex; align-items:center; justify-content:center; font:inherit; font-size:18px; line-height:1; cursor:pointer; background:var(--surface-2, var(--soft)); color:var(--muted); border:1px solid var(--line); border-radius:999px; }
+    .theme-js .theme-toggle:hover { color:var(--ink); border-color:var(--line-strong, var(--line)); }
+    .theme-js .theme-toggle:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+    .theme-toggle::before { content:"\263E"; }
+    :root[data-theme="dark"] .theme-toggle::before { content:"\2600"; }
+    @media (prefers-color-scheme:dark){ :root:not([data-theme]) .theme-toggle::before{ content:"\2600"; } }
+    @media print { .theme-toggle { display:none; } }
+    @media screen {
+      :root[data-theme="dark"] {
+        color-scheme: dark;
+        --bg:#0f1522; --surface:#161e2e; --surface-2:#1c2536; --surface-3:#232e42;
+        --ink:#e8edf5; --ink-2:#c3ccdb; --muted:#96a2b5; --faint:#8593a8;
+        --line:#253145; --line-strong:#33415a;
+        --accent:#6aa8dd; --accent-2:#85bce6; --accent-bg:#152740; --accent-line:#2c4a6b;
+        --crit:#f19488; --crit-bg:#351d22; --crit-line:#6b3936;
+        --high:#eda06b; --high-bg:#33251a; --high-line:#6b4a30;
+        --warn:#d8b45c; --warn-bg:#312a16; --warn-line:#665626;
+        --good:#74c99b; --good-bg:#16301f; --good-line:#2e5c42;
+        --info:#6aa8dd; --info-bg:#152740; --info-line:#2c4a6b;
+        --neutral:#9aa6ba; --neutral-bg:#232c3c; --neutral-line:#3a465a;
+        --shadow-sm:0 1px 2px rgba(0,0,0,.35);
+        --shadow:0 4px 14px rgba(0,0,0,.45), 0 1px 3px rgba(0,0,0,.3);
+      }
+    }
+    @media screen and (prefers-color-scheme: dark) {
+      :root:not([data-theme]) {
+        color-scheme: dark;
+        --bg:#0f1522; --surface:#161e2e; --surface-2:#1c2536; --surface-3:#232e42;
+        --ink:#e8edf5; --ink-2:#c3ccdb; --muted:#96a2b5; --faint:#8593a8;
+        --line:#253145; --line-strong:#33415a;
+        --accent:#6aa8dd; --accent-2:#85bce6; --accent-bg:#152740; --accent-line:#2c4a6b;
+        --crit:#f19488; --crit-bg:#351d22; --crit-line:#6b3936;
+        --high:#eda06b; --high-bg:#33251a; --high-line:#6b4a30;
+        --warn:#d8b45c; --warn-bg:#312a16; --warn-line:#665626;
+        --good:#74c99b; --good-bg:#16301f; --good-line:#2e5c42;
+        --info:#6aa8dd; --info-bg:#152740; --info-line:#2c4a6b;
+        --neutral:#9aa6ba; --neutral-bg:#232c3c; --neutral-line:#3a465a;
+        --shadow-sm:0 1px 2px rgba(0,0,0,.35);
+        --shadow:0 4px 14px rgba(0,0,0,.45), 0 1px 3px rgba(0,0,0,.3);
+      }
+    }
+.meta-ribbon { display:flex; flex-wrap:wrap; gap:var(--s-4) var(--s-9); padding:var(--s-5) var(--s-7); margin:0 0 var(--s-9); background:var(--surface); border:1px solid var(--line); border-radius:var(--radius); box-shadow:var(--shadow-sm); font-size:var(--fs-sm); color:var(--muted); }
+    .meta-ribbon span { white-space:normal; overflow-wrap:anywhere; }
+    .meta-ribbon strong { color:var(--faint); font-family:var(--mono); font-size:var(--fs-cap); letter-spacing:.1em; text-transform:uppercase; font-weight:600; margin-right:var(--s-2); }
+    .read-map { background:var(--surface); border:1px solid var(--line); border-radius:var(--radius); padding:var(--s-5) var(--s-7); margin:0 0 var(--s-9); font-size:var(--fs-sm); color:var(--ink); box-shadow:var(--shadow-sm); }
+    .read-map div { margin:var(--s-1) 0; }
+    .read-map strong { color:var(--accent); font-family:var(--mono); font-size:var(--fs-cap); letter-spacing:.08em; text-transform:uppercase; margin-right:var(--s-2); }
+    .read-map a { color:var(--accent); }
+    .provenance { margin-top:var(--s-12); padding-top:var(--s-7); border-top:1px solid var(--line); font-size:var(--fs-sm); color:var(--faint); }
+    .provenance code { background:transparent; border:0; color:var(--ink); font-family:var(--mono); }
+    .provenance a { color:var(--accent); text-decoration:none; }
+    .callout { border:1px solid var(--line); border-left:4px solid var(--muted); background:var(--surface-2); border-radius:var(--radius); padding:var(--s-4) var(--s-6); margin:var(--s-6) 0; }
+    .callout > strong:first-child { display:block; margin-bottom:var(--s-1); font-family:var(--mono); font-size:var(--fs-cap); text-transform:uppercase; letter-spacing:.08em; }
+    .callout-note { border-left-color:var(--accent); background:var(--accent-bg); }
+    .callout-note > strong:first-child { color:var(--accent); }
+    .callout-note > strong:first-child::before { content:"📌 "; content:"📌 " / ""; }
+    .callout-tip { border-left-color:var(--good); background:var(--good-bg); }
+    .callout-tip > strong:first-child { color:var(--good); }
+    .callout-tip > strong:first-child::before { content:"💡 "; content:"💡 " / ""; }
+    .callout-warning { border-left-color:var(--warn); background:var(--warn-bg); }
+    .callout-warning > strong:first-child { color:var(--warn); }
+    .callout-warning > strong:first-child::before { content:"⚠️ "; content:"⚠️ " / ""; }
+    .callout-important { border-left-color:var(--crit); background:var(--crit-bg); }
+    .callout-important > strong:first-child { color:var(--crit); }
+    .callout-important > strong:first-child::before { content:"❗ "; content:"❗ " / ""; }
+    /* ---- collapsible (appendix lane) ---- */
+    details { background:var(--surface); border:1px solid var(--line); border-radius:var(--radius); padding:0 var(--s-6); margin:var(--s-6) 0; }
+    summary { cursor:pointer; padding:var(--s-4) 0; font-weight:600; color:var(--accent); }
+    summary:hover { color:var(--accent-2); }
+    details[open] > summary { border-bottom:1px solid var(--line); margin-bottom:var(--s-4); }
+    #layout-audit { position:fixed; left:0; right:0; bottom:0; z-index:9999; margin:0; padding:var(--s-3) var(--s-5); background:var(--warn-bg); color:var(--warn); border-top:1px solid var(--warn-line); font-size:var(--fs-sm); text-align:center; }
+    #layout-audit[hidden] { display:none; }
+    #layout-audit code { background:var(--surface); }
+    .confidence { display:inline-block; font-family:var(--mono); padding:2px 8px; border-radius:var(--radius-sm); font-size:var(--fs-cap); font-weight:700; border:1px solid transparent; }
+    .confidence-high { background:var(--good-bg); color:var(--good); border-color:var(--good-line); }
+    .confidence-medium { background:var(--accent-bg); color:var(--accent); border-color:var(--accent-line); }
+    .confidence-low { background:var(--warn-bg); color:var(--warn); border-color:var(--warn-line); }
+    /* components own their measure via grid tracks; the 72ch cap applies to open prose only */
+    .keycard p, .card p, .tile p, .metric p, .compare-before p, .compare-after p, .callout p { max-width:none; }
+    /* ---- KPI tiles (shared: incident .metrics/.metric inherit these) ---- */
+    .tiles, .metrics { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:var(--s-5); margin:var(--s-8) 0; }
+    .tile, .metric { position:relative; overflow:hidden; background:var(--surface); border:1px solid var(--line); border-radius:var(--radius); padding:var(--s-7) var(--s-7) var(--s-6); box-shadow:var(--shadow-sm); }
+    .tile::before { content:""; position:absolute; inset:0 auto 0 0; width:4px; background:var(--sv,var(--accent)); }
+    .tile .n, .metric strong { display:block; font-family:var(--display); font-size:clamp(1.8rem,4vw,2.4rem); font-weight:800; line-height:1; color:var(--sv,var(--ink)); font-variant-numeric:tabular-nums; }
+    .tile .k, .metric span { display:block; font-family:var(--mono); font-size:var(--fs-cap); letter-spacing:.12em; text-transform:uppercase; color:var(--muted); font-weight:600; margin-top:var(--s-3); }
+    .tile .d { font-size:.8rem; color:var(--faint); margin-top:var(--s-1); }
+    .tile.crit{--sv:var(--crit);} .tile.high{--sv:var(--high);} .tile.warn{--sv:var(--warn);} .tile.good{--sv:var(--good);} .tile.info{--sv:var(--accent);} .tile.neutral{--sv:var(--neutral);}
+    /* ---- stripe / accent cards ---- */
+    .card { background:var(--surface); border:1px solid var(--line); border-radius:var(--radius); padding:var(--s-7) var(--s-8); box-shadow:var(--shadow-sm); }
+    .card.tint-info { background:var(--info-bg); border-color:var(--info-line); }
+    .card.tint-good { background:var(--good-bg); border-color:var(--good-line); }
+    .card.tint-high { background:var(--high-bg); border-color:var(--high-line); }
+    .card.tint-crit { background:var(--crit-bg); border-color:var(--crit-line); }
+    .stripe { position:relative; padding-left:var(--s-7); }
+    .stripe::before { content:""; position:absolute; left:0; top:.35rem; bottom:.35rem; width:3px; border-radius:3px; background:var(--accent); }
+    .stripe.crit::before{background:var(--crit);} .stripe.high::before{background:var(--high);} .stripe.warn::before{background:var(--warn);} .stripe.good::before{background:var(--good);}
+    /* ---- keycard: big number + prose ---- */
+    .keycard { display:grid; grid-template-columns:auto minmax(0,1fr); gap:var(--s-8); align-items:center; margin:var(--s-9) 0; padding:var(--s-8) var(--s-9); background:var(--surface); border:1px solid var(--line-strong); border-left:4px solid var(--sv,var(--accent)); border-radius:var(--radius); box-shadow:var(--shadow); }
+    /* Robust to any child count. Two children happened to land correctly by auto-placement;
+       a THIRD wrapped back into column 1, whose `auto` width then grew to fit a paragraph of
+       prose and starved the 1fr column down to a one-word-per-line ribbon. Pin the hero to
+       column 1 for the full height and stack everything else in column 2, so adding a second
+       paragraph is not a silent layout break. */
+    .keycard > * { grid-column:2; min-width:0; }
+    .keycard > :first-child:is(.big,.kind,.sev,.chip) { grid-column:1; grid-row:1/-1; }
+    .keycard .big { font-family:var(--display); font-size:clamp(2.4rem,7vw,3.4rem); font-weight:800; line-height:.95; color:var(--sv,var(--accent)); font-variant-numeric:tabular-nums; }
+    .keycard .big small { display:block; margin-top:var(--s-2); font-family:var(--mono); font-size:var(--fs-sm); font-weight:600; letter-spacing:.04em; text-transform:uppercase; color:var(--muted); }
+    .keycard p b { color:var(--ink); }
+    .keycard.crit{--sv:var(--crit);} .keycard.high{--sv:var(--high);} .keycard.good{--sv:var(--good);} .keycard.info{--sv:var(--accent);}
+    /* ---- severity / status chips ---- */
+    .chip { display:inline-block; font-family:var(--mono); font-size:var(--fs-cap); font-weight:700; padding:2px 8px; border-radius:var(--radius-sm); letter-spacing:.04em; font-variant-numeric:tabular-nums; border:1px solid transparent; }
+    .chip.crit{color:var(--crit);background:var(--crit-bg);border-color:var(--crit-line);}
+    .chip.high{color:var(--high);background:var(--high-bg);border-color:var(--high-line);}
+    .chip.warn{color:var(--warn);background:var(--warn-bg);border-color:var(--warn-line);}
+    .chip.good{color:var(--good);background:var(--good-bg);border-color:var(--good-line);}
+    .chip.info{color:var(--accent);background:var(--accent-bg);border-color:var(--accent-line);}
+    .chip.neutral{color:var(--muted);background:var(--neutral-bg);border-color:var(--neutral-line);font-weight:600;}
+    /* ---- cross-links / chain caption / inline mono ---- */
+    .chain { font-family:var(--mono); font-size:.8rem; color:var(--accent); font-weight:600; margin-top:var(--s-4); }
+    .crosslink { font-weight:600; }
+    .crosslink::before { content:"→ "; color:var(--accent); }
+    code.m { font-family:var(--mono); color:var(--muted); background:var(--surface-2); padding:1px 6px; border-radius:var(--radius-sm); }
+    /* ---- opt-in sticky nav rail: author wraps {nav}{body} in <div class="railed"> ---- */
+    .railed { display:grid; grid-template-columns:220px minmax(0,1fr); gap:clamp(24px,4vw,48px); align-items:start; }
+    .railed nav.toc { position:sticky; top:24px; margin:0; }
+    .railed nav.toc ol { columns:1; }
+    @media (max-width:900px) { .railed { grid-template-columns:1fr; } .railed nav.toc { position:static; } }
+    /* component responsive overrides live HERE (after the base rules, in the later-injected _EXTRA) so they win the cascade */
+    @media (max-width:820px) {
+      .keycard { grid-template-columns:1fr; gap:var(--s-5); }
+      /* single column now, so release the explicit placement or it would conjure an
+         implicit second column and put the hero back beside the text */
+      .keycard > *, .keycard > :first-child:is(.big,.kind,.sev,.chip) { grid-column:1; grid-row:auto; }
+      .tiles, .metrics { grid-template-columns:1fr 1fr; }
+    }
+    @media (max-width:460px) { .tiles, .metrics { grid-template-columns:1fr; } }
+    /* ---- sparkline: area fill, faint grid, emphasized endpoint ---- */
+    .spark { color:var(--accent); overflow:visible; }
+    .spark .line { stroke:currentColor; stroke-width:2; fill:none; }
+    .spark .fill { fill:currentColor; opacity:.12; }
+    .spark .grid { stroke:var(--line); stroke-width:1; }
+    .spark .dot { fill:currentColor; }
+    .spark.good { color:var(--good); } .spark.warn { color:var(--warn); } .spark.crit { color:var(--crit); }
+    /* ---- bar rows / progress meter ---- */
+    .bars { display:grid; grid-template-columns:max-content 1fr max-content; gap:var(--s-2) var(--s-4); align-items:center; margin:var(--s-6) 0; }
+    .bars dt { font-family:var(--mono); font-size:var(--fs-sm); color:var(--muted); margin:0; }
+    /* min-width:0 + wrap: if a plain <dd> paragraph is fed to this progress grid by mistake,
+       it wraps and degrades instead of forcing a max-content column and blowing out the page
+       (a chip + description definition list belongs in .deflist, not .bars). */
+    .bars dd { margin:0; min-width:0; overflow-wrap:anywhere; }
+    .bars .val { font-variant-numeric:tabular-nums; font-size:var(--fs-sm); }
+    .bars .track, .progress { background:var(--surface-2); border-radius:999px; overflow:hidden; min-width:60px; margin:0; }
+    .bars .fill, .progress .fill { display:block; height:12px; border-radius:inherit; background:var(--sv,var(--accent)); width:var(--w,50%); }
+    .fill.crit { --sv:var(--crit); } .fill.high { --sv:var(--high); } .fill.warn { --sv:var(--warn); } .fill.good { --sv:var(--good); }
+    /* ---- definition list: chip/label + wrapping description (risks, key terms, glossary rows) ----
+       Use this, NOT .bars, for a <dl> of label + prose. .bars is a 3-col progress grid whose
+       max-content columns never wrap a long <dd>; .deflist is a 2-col grid whose 1fr description
+       column wraps and caps at a readable measure. Collapses to one column on narrow screens. */
+    .deflist { display:grid; grid-template-columns:max-content 1fr; gap:var(--s-4) var(--s-6); align-items:baseline; margin:var(--s-6) 0; }
+    .deflist dt { margin:0; }
+    .deflist dd { margin:0; color:var(--ink-2); max-width:72ch; min-width:0; overflow-wrap:anywhere; }
+    @media (max-width:560px){ .deflist{ grid-template-columns:1fr; gap:var(--s-2); } .deflist dd{ margin:0 0 var(--s-5); } }
+    /* ---- delta: direction glyph is AT-hidden; carry direction in the text (signed value) ---- */
+    .delta { font-family:var(--mono); font-size:var(--fs-sm); font-weight:700; font-variant-numeric:tabular-nums; }
+    .delta.good { color:var(--good); } .delta.bad { color:var(--crit); } .delta.flat { color:var(--muted); }
+    .delta.up::before { content:"▲ "; content:"▲ " / ""; }
+    .delta.down::before { content:"▼ "; content:"▼ " / ""; }
+    .delta.flat::before { content:"→ "; content:"→ " / ""; }
+    /* ---- opt-in button (prototype controls); never restyles bare <button> ---- */
+    .btn { font:inherit; padding:var(--s-2) var(--s-6); border:1px solid var(--accent-line); border-radius:var(--radius-sm); background:var(--accent-bg); color:var(--accent-2); font-weight:600; cursor:pointer; }
+    .btn:hover { background:var(--accent); color:#fff; }
+    /* print lives at the END of the later-injected constant so it wins every cascade tie */
+    @media print {
+      nav.toc, .read-map, #layout-audit { display: none; }
+      .railed { display: block; }
+      pre { background: var(--surface-2); color: var(--ink); border: 1px solid var(--line); }
+      section.section, table, figure, pre, .callout, .compare-before, .compare-after, .metric, .tile, .card, .keycard, .chip, .confidence, .timeline .event, details { break-inside: avoid; }
+      a[href^="http"]::after { content: " (" attr(href) ")"; font-size: .85em; color: var(--muted); }
+      .kind, .sev, .callout, .compare-before, .compare-after, .meta-ribbon, .needs-verification, .chip, .tile, .card, .keycard, .stripe, .confidence, .timeline .actor, .lead-summary, .spark, .bars, .progress, .delta { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+      details:not([open])::details-content { content-visibility: visible; display: block; }
+    }
+  </style>
+<script type="module">
+    /* Self-contained by default: fetch Mermaid from the CDN ONLY if this page actually has a
+       diagram. A diagram-free artifact makes ZERO network calls and renders fully offline; add
+       a <div class="mermaid"> later and it still renders (the guard checks the DOM at load). */
+    if (document.querySelector(".mermaid")) {
+      const { default: mermaid } = await import("https://cdn.jsdelivr.net/npm/mermaid@10.9.1/dist/mermaid.esm.min.mjs");
+      /* Pick the palette at load from the resolved theme (data-theme, else the OS preference).
+         Diagrams render to static SVG, so this matches the page on load; a mid-session toggle
+         re-themes them on the next reload. Keep both sets in sync with the :root light/dark tokens. */
+      const _root = document.documentElement;
+      const _dark = _root.dataset.theme ? _root.dataset.theme === "dark"
+                                        : window.matchMedia("(prefers-color-scheme: dark)").matches;
+      const _lightVars = { primaryColor: "#eef5fb", primaryBorderColor: "#b9d5ec", primaryTextColor: "#172033", lineColor: "#5a6577", fontFamily: "inherit", fontSize: "14px" };
+      const _darkVars = { primaryColor: "#152740", primaryBorderColor: "#2c4a6b", primaryTextColor: "#e8edf5", lineColor: "#96a2b5", fontFamily: "inherit", fontSize: "14px" };
+      mermaid.initialize({ startOnLoad: false, securityLevel: "loose", theme: "base",
+        flowchart: { htmlLabels: true, padding: 12, useMaxWidth: true },
+        themeVariables: _dark ? _darkVars : _lightVars });
+      await mermaid.run();   /* module scripts defer, so the DOM is parsed; run() renders every .mermaid once */
+    }
+  </script>
+<style>section{margin-bottom:30px}table{min-width:650px}th,td{text-align:left;vertical-align:top}td{padding:12px}td:first-child{min-width:210px}tr:nth-child(even){background:var(--surface-2)}</style></head>
+<body data-human-html-artifact="true">
+  <button class="theme-toggle" type="button" aria-label="Switch theme" title="Toggle light / dark"></button>
+  <main><header><p class="eyebrow">Status · 9 November 2026</p><h1>State reliability fixes</h1><p>Failed work remains recoverable, and late activity no longer disappears after an idle scan.</p></header>
+<div class="meta-ribbon" data-meta-ribbon="true"><span><strong>Base</strong> a46470c</span><span><strong>Branch</strong> docs/implicit-state-machines</span><span><strong>State</strong> Local changes, not deployed</span></div>
+<section id="lead-summary" data-summary="true" class="lead-summary"><h2>What changes</h2><ul><li>Seventeen inventory entries receive corrections; the other thirty-five retain their existing protocols.</li><li>Delivery recovery, turn accounting, scheduled retries, and cached evidence now have regression coverage.</li><li>Existing INSERT/SELECT database roles keep delivering. They queue turn corrections until the optional column grant is available.</li><li>External deployments and source records remain outside this checkout. The limits section states what local verification cannot prove.</li></ul></section>
+<nav class="toc" aria-label="On this page"><strong>Contents</strong><ol><li><a href="#behavior">Resulting behavior</a></li><li><a href="#inventory">All 52 inventory entries</a></li><li><a href="#verification">Verification</a></li><li><a href="#limits">Limits and rollout</a></li></ol></nav>
+<section id="behavior"><h2>Resulting behavior</h2><ul><li>Webhook-only collection writes unsupported rows to a private SQLite queue before acknowledging them. Status shows pending rows.</li><li>Replay deletes queued rows only after database commit. Stale snapshots cannot replace fuller turn evidence.</li><li>Cursor and Pi keep one aggregate per turn. Published timestamps and human prompt identities stay stable across resumed reads.</li><li>The scheduler serializes runs, retries incomplete daily work, and closes only its own SSH child.</li><li>Evaluation scores follow changed inputs. Missing clones stay undecided; negative PR answers remain eligible for a later lookup.</li></ul></section>
+<section id="inventory"><h2>All 52 inventory entries</h2><p>These were stateful mechanisms, not 52 independent defects. Retained means no concrete failure required changing that protocol.</p><div class="table-scroll" style="overflow-x:auto"><table><thead><tr><th>Inventory entry</th><th>Disposition</th><th>Evidence or reason</th></tr></thead><tbody><tr><td><a href="2026-11-08-understanding-implicit-state-machines.html#machine-1-1">1.1 Batch acknowledgement</a></td><td>Retained</td><td>Retained protocol or source constraint. Existing regression coverage remains in the full suite.</td></tr><tr><td><a href="2026-11-08-understanding-implicit-state-machines.html#machine-1-2">1.2 Collector drain loop</a></td><td>Retained</td><td>Retained protocol or source constraint. Existing regression coverage remains in the full suite.</td></tr><tr><td><a href="2026-11-08-understanding-implicit-state-machines.html#machine-1-3">1.3 Transport delivery protocol</a></td><td>Corrected</td><td>Durable delivery queue; explicit retry and visible pending counts.<br><a href="../../tests/pipeline/test_push_outbox.py">Regression tests</a></td></tr><tr><td><a href="2026-11-08-understanding-implicit-state-machines.html#machine-1-4">1.4 Scan health and heartbeat</a></td><td>Corrected</td><td>Incomplete labels report a failed heartbeat and nonzero exit.<br><a href="../../tests/label/test_label.py">Regression tests</a></td></tr><tr><td><a href="2026-11-08-understanding-implicit-state-machines.html#machine-1-5">1.5 State recovery and ownership</a></td><td>Retained</td><td>Retained protocol or source constraint. Existing regression coverage remains in the full suite.</td></tr><tr><td><a href="2026-11-08-understanding-implicit-state-machines.html#machine-1-6">1.6 Repository identity initialization</a></td><td>Retained</td><td>Retained protocol or source constraint. Existing regression coverage remains in the full suite.</td></tr><tr><td><a href="2026-11-08-understanding-implicit-state-machines.html#machine-2-1">2.1 File tail lifecycle</a></td><td>Retained</td><td>Retained protocol or source constraint. Existing regression coverage remains in the full suite.</td></tr><tr><td><a href="2026-11-08-understanding-implicit-state-machines.html#machine-2-2">2.2 Collector state migration</a></td><td>Retained</td><td>Retained protocol or source constraint. Existing regression coverage remains in the full suite.</td></tr><tr><td><a href="2026-11-08-understanding-implicit-state-machines.html#machine-2-3">2.3 Session, model, and turn attribution</a></td><td>Retained</td><td>Retained protocol or source constraint. Existing regression coverage remains in the full suite.</td></tr><tr><td><a href="2026-11-08-understanding-implicit-state-machines.html#machine-2-4">2.4 Copied and imported history boundary</a></td><td>Retained</td><td>Retained protocol or source constraint. Existing regression coverage remains in the full suite.</td></tr><tr><td><a href="2026-11-08-understanding-implicit-state-machines.html#machine-2-5">2.5 Legacy prompt recognition</a></td><td>Corrected</td><td>Legacy loop state survives chunk boundaries.<br><a href="../../tests/collectors/test_activity.py">Regression tests</a></td></tr><tr><td><a href="2026-11-08-understanding-implicit-state-machines.html#machine-3-1">3.1 Claude turn and link lifecycle</a></td><td>Retained</td><td>Retained protocol or source constraint. Existing regression coverage remains in the full suite.</td></tr><tr><td><a href="2026-11-08-understanding-implicit-state-machines.html#machine-3-2">3.2 Interrupt and queued-prompt carryover</a></td><td>Corrected</td><td>Queued prompt hashes survive chunk boundaries and are consumed.<br><a href="../../tests/collectors/test_activity.py">Regression tests</a></td></tr><tr><td><a href="2026-11-08-understanding-implicit-state-machines.html#machine-3-3">3.3 Pending tool-call correlation</a></td><td>Retained</td><td>Retained protocol or source constraint. Existing regression coverage remains in the full suite.</td></tr><tr><td><a href="2026-11-08-understanding-implicit-state-machines.html#machine-3-4">3.4 Tool deduplication and repeated-call detection</a></td><td>Corrected</td><td>Current open-turn tool IDs survive long turns without a truncation cap.<br><a href="../../tests/collectors/test_activity.py">Regression tests</a></td></tr><tr><td><a href="2026-11-08-understanding-implicit-state-machines.html#machine-3-5">3.5 Turn link evidence</a></td><td>Retained</td><td>Retained protocol or source constraint. Existing regression coverage remains in the full suite.</td></tr><tr><td><a href="2026-11-08-understanding-implicit-state-machines.html#machine-3-6">3.6 Pi turn lifecycle</a></td><td>Corrected</td><td>Idle Pi snapshots preserve pending calls and remain correctable.<br><a href="../../tests/collectors/test_pi.py">Regression tests</a></td></tr><tr><td><a href="2026-11-08-understanding-implicit-state-machines.html#machine-3-7">3.7 Cursor root-list turn reconstruction</a></td><td>Corrected</td><td>Late Cursor work revises covered aggregates with stable IDs and timestamps.<br><a href="../../tests/collectors/test_cursor_cli.py">Regression tests</a></td></tr><tr><td><a href="2026-11-08-understanding-implicit-state-machines.html#machine-4-1">4.1 Automated Cursor registration</a></td><td>Retained</td><td>Retained protocol or source constraint. Existing regression coverage remains in the full suite.</td></tr><tr><td><a href="2026-11-08-understanding-implicit-state-machines.html#machine-4-2">4.2 SDK terminal-run acknowledgement</a></td><td>Retained</td><td>Retained protocol or source constraint. Existing regression coverage remains in the full suite.</td></tr><tr><td><a href="2026-11-08-understanding-implicit-state-machines.html#machine-4-3">4.3 Cursor API catch-up and pagination</a></td><td>Corrected</td><td>Capped windows split; indivisible saturation refuses acknowledgement.<br><a href="../../tests/collectors/test_cursor_api.py">Regression tests</a></td></tr><tr><td><a href="2026-11-08-understanding-implicit-state-machines.html#machine-5-1">5.1 ActivityWatch settled-range cursor</a></td><td>Retained</td><td>Retained protocol or source constraint. Existing regression coverage remains in the full suite.</td></tr><tr><td><a href="2026-11-08-understanding-implicit-state-machines.html#machine-5-2">5.2 ActivityWatch retention backlog</a></td><td>Retained</td><td>Retained protocol or source constraint. Existing regression coverage remains in the full suite.</td></tr><tr><td><a href="2026-11-08-understanding-implicit-state-machines.html#machine-5-3">5.3 macOS lookup circuit breaker</a></td><td>Retained</td><td>Retained protocol or source constraint. Existing regression coverage remains in the full suite.</td></tr><tr><td><a href="2026-11-08-understanding-implicit-state-machines.html#machine-5-4">5.4 Active-time block builder</a></td><td>Retained</td><td>Retained protocol or source constraint. Existing regression coverage remains in the full suite.</td></tr><tr><td><a href="2026-11-08-understanding-implicit-state-machines.html#machine-6-1">6.1 Label task window and acknowledgement</a></td><td>Corrected</td><td>Missing episode rebuilds and budget cuts remain retryable.<br><a href="../../tests/label/test_label_gap.py">Regression tests</a></td></tr><tr><td><a href="2026-11-08-understanding-implicit-state-machines.html#machine-6-2">6.2 Cached label unit lifecycle</a></td><td>Retained</td><td>Retained protocol or source constraint. Existing regression coverage remains in the full suite.</td></tr><tr><td><a href="2026-11-08-understanding-implicit-state-machines.html#machine-6-3">6.3 Prompt and reply interval attribution</a></td><td>Corrected</td><td>Ambiguous Cursor prompt context is omitted rather than assigned incorrectly.<br><a href="../../tests/label/test_label_context.py">Regression tests</a></td></tr><tr><td><a href="2026-11-08-understanding-implicit-state-machines.html#machine-6-4">6.4 Evidence snapshot cache</a></td><td>Retained</td><td>Retained protocol or source constraint. Existing regression coverage remains in the full suite.</td></tr><tr><td><a href="2026-11-08-understanding-implicit-state-machines.html#machine-6-5">6.5 Current-label selection</a></td><td>Retained</td><td>Retained protocol or source constraint. Existing regression coverage remains in the full suite.</td></tr><tr><td><a href="2026-11-08-understanding-implicit-state-machines.html#machine-7-1">7.1 Frozen historical replay</a></td><td>Retained</td><td>Retained protocol or source constraint. Existing regression coverage remains in the full suite.</td></tr><tr><td><a href="2026-11-08-understanding-implicit-state-machines.html#machine-7-2">7.2 Recent/mature outcome coverage</a></td><td>Retained</td><td>Retained protocol or source constraint. Existing regression coverage remains in the full suite.</td></tr><tr><td><a href="2026-11-08-understanding-implicit-state-machines.html#machine-7-3">7.3 Local label generation clock</a></td><td>Retained</td><td>Retained protocol or source constraint. Existing regression coverage remains in the full suite.</td></tr><tr><td><a href="2026-11-08-understanding-implicit-state-machines.html#machine-8-1">8.1 Local ensemble batch lifecycle</a></td><td>Retained</td><td>Retained protocol or source constraint. Existing regression coverage remains in the full suite.</td></tr><tr><td><a href="2026-11-08-understanding-implicit-state-machines.html#machine-8-2">8.2 Lazy model resource lifecycle</a></td><td>Retained</td><td>Retained protocol or source constraint. Existing regression coverage remains in the full suite.</td></tr><tr><td><a href="2026-11-08-understanding-implicit-state-machines.html#machine-8-3">8.3 llama-server process lifecycle</a></td><td>Corrected</td><td>Dead servers restart on the next request; spawn failures close resources.<br><a href="../../tests/label/test_label_models.py">Regression tests</a></td></tr><tr><td><a href="2026-11-08-understanding-implicit-state-machines.html#machine-8-4">8.4 Teacher budget and failure breaker</a></td><td>Retained</td><td>Retained protocol or source constraint. Existing regression coverage remains in the full suite.</td></tr><tr><td><a href="2026-11-08-understanding-implicit-state-machines.html#machine-8-5">8.5 Teacher and evaluation progress</a></td><td>Corrected</td><td>Scores require the same complete request hash, including its revision.<br><a href="../../tests/label/test_label_reliability.py">Regression tests</a></td></tr><tr><td><a href="2026-11-08-understanding-implicit-state-machines.html#machine-9-1">9.1 Gold annotation queue and undo</a></td><td>Retained</td><td>Retained protocol or source constraint. Existing regression coverage remains in the full suite.</td></tr><tr><td><a href="2026-11-08-understanding-implicit-state-machines.html#machine-9-2">9.2 Local HTTP save and shutdown</a></td><td>Retained</td><td>Retained protocol or source constraint. Existing regression coverage remains in the full suite.</td></tr><tr><td><a href="2026-11-08-understanding-implicit-state-machines.html#machine-10-1">10.1 Commit outcome lifecycle (named states)</a></td><td>Corrected</td><td>A missing clone produces undecided, preserving prior known outcomes.<br><a href="../../tests/outcomes/test_outcome_reliability.py">Regression tests</a></td></tr><tr><td><a href="2026-11-08-understanding-implicit-state-machines.html#machine-10-2">10.2 Outcome uncertainty and cache retention</a></td><td>Corrected</td><td>Negative PR answers cannot permanently hide a later merge.<br><a href="../../tests/outcomes/test_outcome_reliability.py">Regression tests</a></td></tr><tr><td><a href="2026-11-08-understanding-implicit-state-machines.html#machine-10-3">10.3 Git source coverage lifecycle (named statuses)</a></td><td>Retained</td><td>Retained protocol or source constraint. Existing regression coverage remains in the full suite.</td></tr><tr><td><a href="2026-11-08-understanding-implicit-state-machines.html#machine-10-4">10.4 Daily Git ledger acknowledgement</a></td><td>Retained</td><td>Retained protocol or source constraint. Existing regression coverage remains in the full suite.</td></tr><tr><td><a href="2026-11-08-understanding-implicit-state-machines.html#machine-10-5">10.5 Git-days due and retry scheduler</a></td><td>Retained</td><td>Retained protocol or source constraint. Existing regression coverage remains in the full suite.</td></tr><tr><td><a href="2026-11-08-understanding-implicit-state-machines.html#machine-10-6">10.6 Remote Git output parser</a></td><td>Retained</td><td>Retained protocol or source constraint. Existing regression coverage remains in the full suite.</td></tr><tr><td><a href="2026-11-08-understanding-implicit-state-machines.html#machine-10-7">10.7 Commit shell-directory parser</a></td><td>Retained</td><td>Retained protocol or source constraint. Existing regression coverage remains in the full suite.</td></tr><tr><td><a href="2026-11-08-understanding-implicit-state-machines.html#machine-11-1">11.1 Scheduled scan retry marker</a></td><td>Corrected</td><td>Kernel locking prevents overlap; tunnel failures support systemd retry.<br><a href="../../tests/pipeline/test_scan_wrapper.py">Regression tests</a></td></tr><tr><td><a href="2026-11-08-understanding-implicit-state-machines.html#machine-11-2">11.2 Once-per-day outcomes and labels</a></td><td>Corrected</td><td>Daily markers record success; incomplete work retries after the next scan.<br><a href="../../tests/pipeline/test_scan_wrapper.py">Regression tests</a></td></tr><tr><td><a href="2026-11-08-understanding-implicit-state-machines.html#machine-11-3">11.3 SSH tunnel ownership</a></td><td>Corrected</td><td>Cleanup targets only the owned tunnel process on normal exit and signals.<br><a href="../../tests/pipeline/test_scan_wrapper.py">Regression tests</a></td></tr><tr><td><a href="2026-11-08-understanding-implicit-state-machines.html#machine-11-4">11.4 Backup attempt and last-good status</a></td><td>Retained</td><td>Retained protocol or source constraint. Existing regression coverage remains in the full suite.</td></tr><tr><td><a href="2026-11-08-understanding-implicit-state-machines.html#machine-11-5">11.5 Backup retention and weekly prune</a></td><td>Retained</td><td>Retained protocol or source constraint. Existing regression coverage remains in the full suite.</td></tr></tbody></table></div></section><section id="verification"><h2>Verification</h2><p id="verification-result"><strong>896 tests passed in 248.71 seconds</strong> on macOS with Python 3.13, including PostgreSQL 16 integration tests. No tests were skipped in this run.</p><p>Ruff 0.15.11 passed. Mypy 2.4.1 passed across 57 source files with optional installed packages excluded, matching the minimal CI type-checking scope. Bash syntax, whitespace, documentation links, and HTML validation passed. Two independent reviews have no unresolved findings in the corrected paths.</p><p>The final report was inspected at desktop and phone widths. The phone viewport has no page overflow, and all 52 disposition rows are present.</p><p>Regression cases failed before their corresponding fixes. PostgreSQL 16 scratch tests also cover legacy timestamps, restricted INSERT/SELECT roles, deferred updates, and replay after a column grant.</p><p>Independent correctness and contract reviews found timestamp, machine-copy, Linux retry, heartbeat, and documentation gaps. Each receives a regression or a direct documentation correction.</p></section>
+<section id="limits"><h2>Limits and rollout</h2><p>Update the installed package before copying the new scheduled wrapper; the wrapper calls <code>aut scan-job</code>.</p><p>Apply <a href="../../packaging/sql/turn-snapshot-grant.sql">the optional UPDATE(attrs) grant</a> as the database administrator to enable covered corrections. Until then, normal delivery continues and corrections remain queued. Run <code>aut retry-delivery</code> afterward.</p><p>No deployed grants, installed schedules, real agent logs, account APIs, or model weights were changed or tested. Database checks use a disposable local PostgreSQL instance.</p><p>Deleted source blobs cannot be reconstructed. Indivisible API page saturation stops safely for operator recovery. SIGKILL cannot execute cleanup. Source-coverage hashes grow with a turn.</p><p>Crash recovery still uses at-least-once delivery and stable sink identities. That is a required safety property, rather than a defect to remove.</p></section>
+<footer class="provenance" data-provenance="true"><p>Generated by Codex on 9 November 2026. Human review pending. Source: local worktree against a46470c.</p><details><summary>Request</summary><p>Fix all concrete issues from the attached state-machine inventory while preserving user, developer, and agent experience.</p></details><script type="application/ld+json" id="provenance">{"@context": "https://schema.org/", "@type": "CreativeWork", "@id": "urn:aut:state-reliability:2026-11-09", "artifactKind": "status", "prompt": "Fix all concrete issues in the attached state-machine inventory while preserving UX, DX and AX", "dateCreated": "2026-11-09", "creator": {"@type": "SoftwareApplication", "name": "Codex"}, "reviewer": "pending", "reviewState": "unreviewed", "source": "local worktree against a46470c"}</script></footer>  </main>
+<div id="layout-audit" hidden role="status">⚠ This artifact overflows horizontally at this width - wrap wide tables / diagrams / <code>pre</code> blocks so they scroll, or they will clip on a phone.</div>
+  <script>
+    (function () {
+      var el = document.getElementById('layout-audit');
+      if (!el) return;
+      function check() { el.hidden = !(document.documentElement.scrollWidth > window.innerWidth + 2); }
+      window.addEventListener('DOMContentLoaded', check);
+      window.addEventListener('resize', check);
+    })();
+  </script>
+  <script>
+    (function(){
+      var btn=document.querySelector('.theme-toggle'); if(!btn) return;
+      function cur(){ return document.documentElement.dataset.theme || (window.matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light'); }
+      function label(){ btn.setAttribute('aria-label', cur()==='dark'?'Switch to light theme':'Switch to dark theme'); }
+      label();
+      btn.addEventListener('click', function(){
+        var next=cur()==='dark'?'light':'dark';
+        document.documentElement.dataset.theme=next;
+        try{ localStorage.setItem('hh-theme', next); }catch(e){}
+        label();
+      });
+    })();
+  </script>
+</body>
+</html>

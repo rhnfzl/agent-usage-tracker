@@ -65,7 +65,7 @@ from . import backup, cursor_run, git_days, inspector, manual_time, outcomes, pr
 from .collectors import REGISTRY
 from .config import (ALL_AGENTS, LABEL_DAYS, LABEL_DECISION_TASKS, LABEL_TASK_NAMES, AutError,
                      Config, load_config, config_path)
-from .push import is_operational_failure, redacted_error, webhook_url_allowed
+from .push import is_operational_failure, outbox_status, redacted_error, replay_outbox, webhook_url_allowed
 from .state import collector_wm, load_state
 
 
@@ -130,6 +130,9 @@ def cmd_status(cfg: Config, agents: Sequence[str], args: argparse.Namespace) -> 
     print(f"webhook       : {webhook_state}")
     print(f"pg fallback   : {'configured' if cfg.has_pg else 'not set'}")
     print(f"backup        : {backup.describe()}")
+    pending = outbox_status()
+    print(f"delivery queue: {sum(pending.values())} pending rows"
+          + (f" ({', '.join(f'{kind}: {n}' for kind, n in sorted(pending.items()))})" if pending else ""))
     print("watermarks    :")
     for name in agents:
         print(f"    {name:<12} {REGISTRY[name].describe(cfg, collector_wm(state, name))}")
@@ -144,6 +147,8 @@ def cmd_outcomes(cfg: Config, args: argparse.Namespace) -> None:
     report = outcomes.run_outcomes(cfg, refresh=args.fetch or cfg.outcome_fetch,
                                    dry_run=args.dry_run)
     outcomes.print_outcomes(report, dry_run=args.dry_run)
+    if not args.dry_run and any(report.get(k) for k in outcomes._READ_FAILURES):
+        raise AutError("outcomes: some reads failed; completed results saved, retry remaining work")
 
 
 def cmd_outcome(cfg: Config, args: argparse.Namespace) -> None:
@@ -179,9 +184,11 @@ def _label_run(cfg: Config, args: argparse.Namespace) -> None:
     report = label_run.run_label(cfg, tasks, local_midnight(since) if since else None,
                                  dry_run=dry, local_estimates=getattr(args, "local_estimates", False))
     label_run.print_report(report, dry_run=dry)
-    failed = [name for name, c in report.items() if c["failed"]]
+    failed = [name for name, c in report.items()
+              if any(c.get(flag) for flag in ("failed", "unavailable", "cut"))]
     if failed:
-        raise AutError(f"label: could not run {', '.join(failed)} (reasons above)")
+        raise AutError(f"label: could not run {', '.join(failed)} to completion; "
+                       "saved progress will resume (reasons above)")
 
 
 def _label_bakeoff(cfg: Config, args: argparse.Namespace) -> None:
@@ -256,12 +263,25 @@ def cmd_cursor_run(args: argparse.Namespace) -> None:
     cursor_run.run(args.model, args.workspace, sys.stdin)
 
 
-_NO_CONFIG_COMMANDS = {"sync-prices": cmd_sync_prices, "cursor-run": cmd_cursor_run}
+def cmd_scan_job(args: argparse.Namespace) -> None:
+    from . import scheduled
+    code = scheduled.main()
+    if code:
+        raise SystemExit(code)
+
+
+def cmd_delivery_retry(cfg: Config, args: argparse.Namespace) -> None:
+    print(f"delivery queue: sent {replay_outbox(cfg)} rows")
+
+
+_NO_CONFIG_COMMANDS = {"sync-prices": cmd_sync_prices, "cursor-run": cmd_cursor_run,
+                       "scan-job": cmd_scan_job}
 _AGENT_COMMANDS = {"scan": cmd_scan, "backfill": cmd_backfill, "export": cmd_export,
                    "status": cmd_status}
 _COMMANDS = {"time": cmd_time_add, "outcomes": cmd_outcomes, "outcome": cmd_outcome,
              "inspect": cmd_inspect, "episodes": cmd_episodes, "label": cmd_label,
-             "history-steers": cmd_history_steers, "backup": cmd_backup, "git-days": cmd_git_days}
+             "history-steers": cmd_history_steers, "backup": cmd_backup, "git-days": cmd_git_days,
+             "retry-delivery": cmd_delivery_retry}
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -271,6 +291,8 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument('--git-defer-remotes-until', type=date.fromisoformat,
                         help='skip Git SSH sources before this ledger date; scan/git-days only')
     sub = parser.add_subparsers(dest="cmd", required=True)
+    sub.add_parser("scan-job", help="run the locked scheduled scan and retry unfinished daily jobs")
+    sub.add_parser("retry-delivery", help="send deferred session/activity/time rows using pg_dsn")
     p_scan = sub.add_parser("scan", help="push new usage since the watermark")
     p_scan.add_argument("--dry-run", action="store_true", help="parse + report, send nothing")
     p_back = sub.add_parser("backfill",

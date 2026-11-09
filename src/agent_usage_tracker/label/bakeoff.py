@@ -16,11 +16,13 @@ which writes that model's saved result into label.json, which the nightly run re
 from __future__ import annotations
 
 import json
+import hashlib
 import math
 import random
 import sys
 import time
 from collections import Counter
+from dataclasses import asdict
 from datetime import date, datetime, timezone
 from typing import Any, Iterable, NamedTuple, Sequence
 
@@ -189,18 +191,22 @@ def _score(backend: Backend, reqs: Sequence[Request],
     """(unit_id -> raw distribution, speed): saved scores, and the model only for units without
     one. model_rev must be final by now, so run its prepare() first. The first call is the warm-up
     (load plus one decision), timed apart; when this run timed no more calls than `prev` did,
-    prev's speed stands. shortcut: a unit whose state changed after it was scored (an episode's
-    req.rev) keeps its saved score; upgrade by keying rows on rev."""
+    prev's speed stands. Only a score of the same complete request can be reused."""
     p = scores_path(reqs[0].task, backend.model_id, backend.model_rev, reqs[0].prompt_ver,
                     getattr(backend, "protocol", ""))
-    saved = {r["unit_id"]: r["dist"] for r in read_jsonl(p)}
+    cached = {(r["unit_id"], r.get("input_hash")): r["dist"] for r in read_jsonl(p)}
+    saved: dict[str, Dist] = {}
     times = []
     for r in reqs:
-        if r.unit_id not in saved:
+        digest = hashlib.sha256(json.dumps(asdict(r), sort_keys=True,
+                                           allow_nan=False).encode()).hexdigest()
+        if (r.unit_id, digest) in cached:
+            saved[r.unit_id] = cached[r.unit_id, digest]
+        else:
             t0 = time.monotonic()
             saved[r.unit_id] = backend.distribution(r)
             times.append(time.monotonic() - t0)
-            append_jsonl(p, {"unit_id": r.unit_id, "dist": saved[r.unit_id]})
+            append_jsonl(p, {"unit_id": r.unit_id, "input_hash": digest, "dist": saved[r.unit_id]})
     warm = times[1:]
     if prev and prev.get("n_timed", 0) >= len(warm):
         return saved, {k: prev.get(k) for k in ("s_per_decision", "load_s", "peak_mb", "n_timed")}

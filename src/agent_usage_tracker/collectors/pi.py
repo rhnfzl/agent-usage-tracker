@@ -14,8 +14,11 @@ the header cwd (the encoded directory name cannot be decoded: Pi uses dashes for
 from __future__ import annotations
 
 import glob
+import hashlib
+import json
 import os
 import re
+import time
 from collections import Counter
 from pathlib import Path
 from typing import Any, Iterator, TypedDict
@@ -24,7 +27,7 @@ from ..config import Config
 from ..event import Row, ActivityKind, Batch, ActivityEvent, EventSession, UsageEvent, make_event_id
 from ..repo_keys import RepoKeys
 from ..state import parse_record
-from .activity_common import (Link, TurnAgg, add_call, best_effort, blank_tool_tally, drop_raw_shas,
+from .activity_common import (IDLE_S, Link, TurnAgg, add_call, best_effort, blank_tool_tally, drop_raw_shas,
                               first_record, human_event, ms_between, pad_pending, pop_pending,
                               record_commits, text_of, tool_key, turn_attrs)
 from .commits import commit_call, commit_dir, commit_shas
@@ -111,14 +114,27 @@ class _Activity:
             event_id=make_event_id(NAME, kind, f"{self.sid}|{seed}"), ts=str_or_none(ts), agent=NAME,
             kind=kind, session_id=self.sid, turn_id=turn, attrs=attrs))
 
-    def _close(self, end: object) -> None:
-        turn = self.carried.pop("open")
-        self._emit("turn", end, turn["id"], turn["id"], {
+    def _snapshot(self, end: object) -> None:
+        """Publish the same keyed turn again only when its source coverage or aggregates change."""
+        turn = self.carried["open"]
+        revision = {"revision_sources": sorted(turn["sources"])} if turn.get("sources") else {}
+        attrs = {
             "duration_ms": ms_between(turn["ts"], end), "message_count": turn["n"],
-            **turn_attrs(self.carried.get("agg") or blank_tool_tally())})
-        link = Link(self.keys, self.carried.pop("link", {}))
+            **turn_attrs(self.carried.get("agg") or blank_tool_tally()), **revision}
+        link = Link(self.keys, self.carried.setdefault("link", {}))
         link.place(3, self.keys.of_cwd(self.cwd))
-        self._emit("link", end, turn["id"], turn["id"], link.attrs("interactive"))
+        link_attrs = {**link.attrs("interactive"), **revision}
+        fingerprint = hashlib.sha256(json.dumps([attrs, link_attrs], sort_keys=True).encode()).hexdigest()
+        if turn.get("published") != fingerprint:
+            # A stable start timestamp lets idle and terminal snapshots address the same sink row.
+            self._emit("turn", turn["ts"], turn["id"], turn["id"], attrs)
+            self._emit("link", turn["ts"], turn["id"], turn["id"], link_attrs)
+            turn["published"] = fingerprint
+
+    def _close(self, end: object) -> None:
+        self._snapshot(end)
+        self.carried.pop("open")
+        self.carried.pop("link", None)
         self.carried.pop("agg", None)
         self.carried.pop("pend", None)       # a commit call unanswered at turn end never will be
 
@@ -139,7 +155,13 @@ class _Activity:
             link.note_text(text_of(content))
         if role == "user":
             self._prompt(ts, eid, content, sess, open_)
-        elif role in ("assistant", "toolResult"):
+            open_ = carried["open"]
+        if open_ and (source := self.keys.of(
+                f"pi:source:{self.sid}:{json.dumps(o, sort_keys=True)}")):
+            sources = open_.setdefault("sources", [])
+            if source not in sources:
+                sources.append(source)
+        if role in ("assistant", "toolResult"):
             if open_:
                 open_["n"] += 1
                 open_["last"] = ts
@@ -331,6 +353,23 @@ def _fresh_state(st: os.stat_result) -> FileState:
     return {"off": 0, "ino": st.st_ino, "model": None}
 
 
+def _idle_snapshot(path: str, cur: FileState, keys: RepoKeys) -> list[ActivityEvent]:
+    """An idle EOF publishes a snapshot but keeps pending calls for a resumed session."""
+    carried = cur.get("act") or {}
+    if not carried.get("open"):
+        return []
+    try:
+        st = os.stat(path)
+    except OSError:
+        return []
+    if cur["off"] < st.st_size or time.time() - st.st_mtime < IDLE_S:
+        return []
+    hdr = cur.get("hdr") or header({}, path)
+    act = _Activity(carried, hdr["id"], hdr["cwd"], keys)
+    act._snapshot(carried["open"]["last"])
+    return act.events
+
+
 def collect(cfg: Config, wm: dict[str, Any]) -> Iterator[Batch]:
     if not sessions_dir(cfg.home).exists():
         return
@@ -340,9 +379,9 @@ def collect(cfg: Config, wm: dict[str, Any]) -> Iterator[Batch]:
     def chunk_rows(path: str, cur: FileState, _off: int, lines: list[bytes],
                    skipped: Counter[str]) -> list[Row]:
         events = _chunk_rows(path, lines, cur, keys, skipped)
-        # shortcut: the last open turn of a file is emitted only when a later scan reads its end
-        # (or the next prompt); a session left on an error or a tool call keeps it open for good.
+        events += _idle_snapshot(path, cur, keys)
         _trim_state(cur)
         return events
 
-    yield from file_batches(NAME, session_files(cfg.home), wm["files"], _fresh_state, chunk_rows)
+    yield from file_batches(NAME, session_files(cfg.home), wm["files"], _fresh_state, chunk_rows,
+                            revisit=lambda cur: bool((cur.get("act") or {}).get("open")))

@@ -9,6 +9,8 @@ import threading
 import urllib.error
 from pathlib import Path
 
+import pytest
+
 from agent_usage_tracker.event import CollectorUnavailable
 from test_collectors import _cfg
 
@@ -198,7 +200,7 @@ def test_a_long_gap_with_more_than_the_page_cap_loses_nothing(monkeypatch) -> No
         marks.append(wm["since_ms"])
     assert len(seen) == 25_000                            # none lost to the page cap
     assert len(marks) > 1 and marks == sorted(marks)      # the bookmark moves after each window
-    assert all(c["endDate"] - c["startDate"] <= cursor_api._WINDOW_MS for c in calls)
+    assert all(c["endDate"] - c["startDate"] <= cursor_api._WINDOW_MS + 2 for c in calls)
     assert since + 24_999 * 100_000 <= wm["since_ms"] < now   # past the newest event, never `now`
     assert [e for b, _ in cursor_api.collect(cfg, wm) for e in b
             if e.event_id not in seen] == []              # a rerun finds nothing new
@@ -224,3 +226,50 @@ def test_a_crash_mid_gap_resumes_at_the_last_window(monkeypatch) -> None:
     assert wm["since_ms"] == since + cursor_api._WINDOW_MS
     rest = {e.event_id for b, c in cursor_api.collect(cfg, wm) for e in b}
     assert len(rest) == 5 * 24 - 24                       # the next run starts at that window
+
+
+@pytest.mark.parametrize("exclusive", [False, True])
+def test_capped_window_splits_and_keeps_boundary_events(monkeypatch, exclusive):
+    from agent_usage_tracker.collectors import cursor_api
+    events = [{"owningUser": "u1", "timestamp": str(i), "model": "m",
+               "conversationId": f"c{i}", "tokenUsage": {"inputTokens": 1}}
+              for i in range(100, 121)]
+    calls = []
+    api = _fake_api(events, calls)
+
+    def post(cookie, name, body):
+        if exclusive and name != "get-me":
+            body = {**body, "startDate": body["startDate"] + 1,
+                    "endDate": body["endDate"] - 1}
+        return api(cookie, name, body)
+
+    monkeypatch.setattr(cursor_api, "_post", post)
+    monkeypatch.setattr(cursor_api, "_PAGE", 3)
+    monkeypatch.setattr(cursor_api, "_MAX_PAGES", 2)
+    found, newest = cursor_api._fetch_events("cookie", 1, "u1", 100, 100, 120)
+    assert {e.event_id for e in found} == {
+        cursor_api._map_event(e, "u1").event_id for e in events}
+    assert len(found) == len(events)
+    assert newest == 120
+    assert len(calls) < 100
+
+
+def test_same_timestamp_over_cap_refuses_watermark_ack(monkeypatch):
+    from agent_usage_tracker.collectors import cursor_api
+    events = [{"owningUser": "u1", "timestamp": "100", "model": "m",
+               "conversationId": f"c{i}", "tokenUsage": {"inputTokens": 1}}
+              for i in range(7)]
+    calls = []
+    cfg = _cfg(Path("/tmp"))
+    cfg.cursor_api = True
+    monkeypatch.setattr(cursor_api, "_auth", lambda cfg: ("cookie", 1))
+    monkeypatch.setattr(cursor_api, "_post", _fake_api(events, calls))
+    monkeypatch.setattr(cursor_api, "_now_ms", lambda: 120)
+    monkeypatch.setattr(cursor_api, "_PAGE", 3)
+    monkeypatch.setattr(cursor_api, "_MAX_PAGES", 2)
+    wm = {"since_ms": 100}
+    with pytest.raises(CollectorUnavailable, match="cap"):
+        for _batch, commit in cursor_api.collect(cfg, wm):
+            commit()
+    assert wm == {"since_ms": 100}
+    assert len(calls) < 30

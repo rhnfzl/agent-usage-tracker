@@ -94,6 +94,10 @@ The dry run parses logs and reports totals without sending rows.
 Real scans advance their watermark only after delivery succeeds.
 Repeated delivery is safe because the sink deduplicates event IDs.
 
+Webhook-only scans keep session, activity, and time rows in a private local delivery queue.
+`aut status` shows pending rows. After configuring PostgreSQL, scans replay them automatically;
+`aut retry-delivery` also retries the queue directly. Keep the state directory in your backups.
+
 For a full configuration, start from [`config.example.toml`](config.example.toml).
 Put secrets in your local configuration or environment, never in this repository.
 Scheduled jobs do not inherit your shell environment; configure their secrets separately.
@@ -178,6 +182,9 @@ The supplied timers scan every 15 minutes on macOS and Windows, or every 10 minu
 The macOS scan also catches up at login and after sleep.
 
 The optional wrapper adds SSH tunnelling, retries, daily commit outcomes, and local labels.
+Update the installed package before copying a new wrapper; the wrapper calls `aut scan-job`.
+The scheduler prevents overlapping runs and records daily success only after each step completes.
+Failed or unfinished daily steps retry after the next successful scan.
 Local scheduled labels require `AUT_LABEL=1` and `AUT_LABEL_MODE=local` in `scan.env`, plus saved recipes.
 An interrupted historical replay resumes when you invoke its saved job again; preparing a job does not install a scheduler.
 

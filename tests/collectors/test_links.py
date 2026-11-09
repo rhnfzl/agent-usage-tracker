@@ -345,10 +345,13 @@ def test_pi_link() -> None:
             msg("a3", 6, "assistant", [{"type": "text", "text": "ok"}], stopReason="stop"),
         ])
         links = {e.turn_id: e.attrs for e in _links(_run_mod(pi, home))}
+        sources = links["u1"]["revision_sources"]
+        assert len(sources) == 4 and all(len(source) == 64 for source in sources)
         assert links["u1"] == {"repo_key": K1, "branch_key": _bk(K1, "feat/AB-2"),
                                "ticket_keys": [_key("AB-2")],
                                "sha_refs": [_sk(SHA_A), _sk("abcd123")],
-                               "commit_keys": [_sk("abcd123")], "pr_keys": [], "role": "seed"}, links
+                               "commit_keys": [_sk("abcd123")], "pr_keys": [], "role": "seed",
+                               "revision_sources": sources}, links
         assert links["u2"]["sha_refs"] == [] and links["u2"]["repo_key"] == K1, links
 
 
@@ -358,10 +361,13 @@ def test_cursor_link() -> None:
     def check(home, repo):
         links = {(e.session_id, e.turn_id): e.attrs for e in _links(tc._collect(home))}
         k = _key("example.com/owner/repo")
+        sources = links[(tc.A, "r1")]["revision_sources"]
+        assert len(sources) == 5 and all(len(source) == 64 for source in sources)
         assert links[(tc.A, "r1")] == {
             "repo_key": k, "branch_key": _bk(k, "feature/ABC-1-clientname"),
             "ticket_keys": [_key("ABC-1")], "sha_refs": [_sk("1a2b3c4")],
-            "commit_keys": [_sk("1a2b3c4")], "pr_keys": [], "role": "seed"}, links[(tc.A, "r1")]
+            "commit_keys": [_sk("1a2b3c4")], "pr_keys": [], "role": "seed",
+            "revision_sources": sources}, links[(tc.A, "r1")]
         assert links[(tc.B, "rb")]["role"] == "child", links
         assert links[(tc.A, "r3")]["repo_key"] is None, links      # no working_directory
     tc._run(check)

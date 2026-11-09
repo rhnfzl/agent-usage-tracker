@@ -252,6 +252,89 @@ def test_llama_server_that_dies_while_loading_says_why(tmp_path, monkeypatch):
 
 
 @posix_only
+def test_llama_server_restarts_dead_child_on_next_distribution(tmp_path, monkeypatch):
+    exe = _fake(tmp_path, monkeypatch)
+    b = backends.LlamaServer("o/m", "rev", "m.gguf", str(exe))
+    try:
+        assert b.distribution(BOOL)["relevant"] == 0.75
+        dead, old_log = b._proc, b._log
+        dead.kill()
+        dead.wait(timeout=5)
+        assert b.distribution(CHOICE) == {"x": 0.5, "y": 0.5}
+        assert old_log.closed
+        assert len(_started(tmp_path)) == 2
+        assert b._proc.pid != dead.pid
+    finally:
+        b.close()
+
+
+@posix_only
+def test_llama_server_stops_after_one_failed_restart(tmp_path, monkeypatch):
+    exe = _fake(tmp_path, monkeypatch)
+    b = backends.LlamaServer("o/m", "rev", "m.gguf", str(exe))
+    try:
+        b.distribution(BOOL)
+        b._proc.kill()
+        b._proc.wait(timeout=5)
+        exe.write_text(exe.read_text().replace("if False:", "if True:", 1))
+        with pytest.raises(backends.BackendUnavailable, match="stopped loading.*failed to load"):
+            b.distribution(CHOICE)
+        assert b._proc is None
+        assert b._log is None
+    finally:
+        b.close()
+
+
+@posix_only
+def test_llama_server_spawn_failure_closes_startup_log(tmp_path, monkeypatch):
+    exe = _fake(tmp_path, monkeypatch)
+    b = backends.LlamaServer("o/m", "rev", "m.gguf", str(exe))
+    prepare = b.prepare
+    logs = []
+    temporary_file = backends.tempfile.TemporaryFile
+
+    def record_log():
+        log = temporary_file()
+        logs.append(log)
+        return log
+
+    def remove_executable_after_preparation():
+        model = prepare()
+        exe.unlink()
+        return model
+
+    monkeypatch.setattr(backends.tempfile, "TemporaryFile", record_log)
+    monkeypatch.setattr(b, "prepare", remove_executable_after_preparation)
+    try:
+        with pytest.raises(backends.BackendUnavailable, match="could not start llama-server"):
+            b.distribution(BOOL)
+        assert b._proc is None and b._log is None
+        assert len(logs) == 1 and logs[0].closed
+        b.close()
+        b.close()
+    finally:
+        for log in logs:
+            log.close()
+
+
+@posix_only
+def test_llama_server_close_reaps_dead_child_and_clears_log(tmp_path, monkeypatch):
+    exe = _fake(tmp_path, monkeypatch)
+    b = backends.LlamaServer("o/m", "rev", "m.gguf", str(exe))
+    try:
+        b.distribution(BOOL)
+        proc, log = b._proc, b._log
+        proc.kill()
+        b.close()
+        b.close()
+        assert proc.poll() is not None
+        assert log.closed
+        assert _gone(proc.pid)
+    finally:
+        b.close()
+
+
+@posix_only
 def test_llama_server_refusal_is_clear_and_stops_it(tmp_path, monkeypatch):
     exe = _fake(tmp_path, monkeypatch, refuse=True)
     b = backends.LlamaServer("o/m", "rev", "m.gguf", str(exe))

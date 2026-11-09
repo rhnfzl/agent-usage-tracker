@@ -224,6 +224,7 @@ def test_pg_one_transaction() -> None:
 def test_webhook_skips_sessions_once(monkeypatch) -> None:
     with tempfile.TemporaryDirectory() as d:
         home = Path(d)
+        monkeypatch.setenv("AUT_STATE", str(home / "state.json"))
         _fixture(home)
         batch = _events(home)
         posted: list = []
@@ -235,6 +236,7 @@ def test_webhook_skips_sessions_once(monkeypatch) -> None:
             send(batch)
         assert len(posted) == 2
         assert err.getvalue().count("\n") == 1 and "session" in err.getvalue(), err.getvalue()
+        assert push.outbox_status()["session"] == len(batch)
 
 
 def _with_state(fn):

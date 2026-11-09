@@ -218,6 +218,32 @@ def test_cursor_prompts_followup_ids_and_no_unverifiable_reply(tmp_path):
     assert all(value.before == value.after == "" for value in got.values())
 
 
+def test_cursor_ambiguous_base_prompt_is_omitted_but_blob_followup_stays_exact(tmp_path):
+    import hashlib
+    first, follow = _prompt("r1", "first"), _prompt("r1", "followup")
+    _store(tmp_path, A, [[first, follow], [follow]])
+    mid = hashlib.sha256(json.dumps(follow).encode()).hexdigest()
+    base = make_event_id("cursor_cli", "steer", f"{A}|r1")
+    extra = make_event_id("cursor_cli", "steer", f"{A}|r1|{mid}")
+    keys = tasks.Source(_cfg(tmp_path)).keys
+    got = context.cursor_context(tmp_path, {A}, {base, extra}, UNTIL, keys)
+    assert base not in got
+    assert got[extra].text.strip() == "followup"
+
+
+def test_cursor_followup_blob_can_resolve_even_if_only_its_root_survives(tmp_path):
+    import hashlib
+    first, follow = _prompt("r1", "first"), _prompt("r1", "followup")
+    _store(tmp_path, A, [[follow]], extra=[first])
+    mid = hashlib.sha256(json.dumps(follow).encode()).hexdigest()
+    base = make_event_id("cursor_cli", "steer", f"{A}|r1")
+    extra = make_event_id("cursor_cli", "steer", f"{A}|r1|{mid}")
+    keys = tasks.Source(_cfg(tmp_path)).keys
+    got = context.cursor_context(tmp_path, {A}, {base, extra}, UNTIL, keys)
+    assert base not in got
+    assert got[extra].text.strip() == "followup"
+
+
 def test_cursor_read_is_sqlite_read_only(tmp_path, monkeypatch):
     path = _store(tmp_path, A, [[_prompt("r", "hello")]])
     before = path.read_bytes()

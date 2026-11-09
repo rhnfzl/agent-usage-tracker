@@ -29,77 +29,10 @@ set -u
 export PATH="${PATH:-/usr/bin:/bin}:/opt/homebrew/bin:/usr/local/bin"
 
 CONF="$HOME/.config/agent-usage-tracker"
-LOG="$CONF/scan.log"
-MARK="$CONF/retry-pending"
-[ -f "$CONF/scan.env" ] && . "$CONF/scan.env"
-
-AUT="${AUT_BIN:-$HOME/.local/bin/aut}"
-HOST="${AUT_TUNNEL_HOST:-}"
-SPEC="${AUT_TUNNEL_SPEC:-}"
-ts() { date "+%Y-%m-%dT%H:%M:%S"; }
-
-opened=""
-if [ -n "$HOST" ]; then
-  if [ -z "$SPEC" ]; then
-    # Misconfiguration, not an outage. Fail loudly and do NOT arm the marker, or the retry job
-    # would spin on it forever.
-    echo "$(ts) AUT_TUNNEL_HOST is set but AUT_TUNNEL_SPEC is not; refusing to scan" >>"$LOG"
-    exit 2
-  fi
-  port="${SPEC%%:*}"
-  if ! nc -z localhost "$port" 2>/dev/null; then
-    if ssh -f -N -o ExitOnForwardFailure=yes -o ConnectTimeout=15 -L "$SPEC" "$HOST" 2>>"$LOG"
-    then
-      opened=1
-      sleep 2
-    else
-      echo "$(ts) tunnel FAILED; armed retry-pending (retries until the host is reachable)" >>"$LOG"
-      touch "$MARK"
-      exit 0        # an unreachable host is not a scan failure; the retry job owns the next try
-    fi
-  fi
+# Export sourced settings to the installed Python runtime that owns locking and child cleanup.
+set -a
+if [ -f "$CONF/scan.env" ]; then
+  . "$CONF/scan.env" || exit 2
 fi
-
-echo "$(ts) scan start" >>"$LOG"
-"$AUT" scan >>"$LOG" 2>&1
-rc=$?
-echo "$(ts) scan done (exit $rc)" >>"$LOG"
-
-# `aut scan` exits non-zero when delivery fails: push.py raises, and neither run_scan() nor
-# main() swallows it. The watermark is not advanced for the undelivered batch, so the retry
-# re-sends it and the sink discards the repeat on event_id.
-if [ "$rc" -eq 0 ]; then rm -f "$MARK"; else touch "$MARK"; fi
-
-# Once a day after a delivered scan: `aut outcomes` (commit outcomes from the local clones). A
-# separate step with its own heartbeat (collector `outcomes`), so it never changes the scan's exit
-# code. One attempt a day, failed or not: a failure is in its heartbeat row and the log, and
-# retrying it after every scan would redo the whole clone pass all day. outcome_fetch = true in
-# config.toml fetches first.
-DAYMARK="$CONF/outcomes-day"
-if [ "$rc" -eq 0 ] && [ "$(cat "$DAYMARK" 2>/dev/null)" != "$(date +%F)" ]; then
-  date +%F >"$DAYMARK"
-  echo "$(ts) outcomes start" >>"$LOG"
-  "$AUT" outcomes >>"$LOG" 2>&1
-  orc=$?    # before "$(ts)" below, which resets $?
-  echo "$(ts) outcomes done (exit $orc)" >>"$LOG"
-fi
-
-# Once a day after a delivered scan, only where AUT_LABEL=1: `aut label run` (the tasks in
-# label_tasks, inside label_budget_s). After outcomes, and the same rules: a separate step with its
-# own heartbeat (collector `label`), never the scan's exit code, one attempt a day.
-LABELMARK="$CONF/label-day"
-if [ "$rc" -eq 0 ] && [ "${AUT_LABEL:-}" = "1" ] \
-    && [ "$(cat "$LABELMARK" 2>/dev/null)" != "$(date +%F)" ]; then
-  date +%F >"$LABELMARK"
-  echo "$(ts) label start" >>"$LOG"
-  if [ "${AUT_LABEL_MODE:-calibrated}" = "local" ]; then
-    "$AUT" label run --local-estimates >>"$LOG" 2>&1
-  else
-    "$AUT" label run >>"$LOG" 2>&1
-  fi
-  lrc=$?
-  echo "$(ts) label done (exit $lrc)" >>"$LOG"
-fi
-
-[ -n "$opened" ] && pkill -f "$SPEC" 2>/dev/null
-exit "$rc"
+set +a
+exec "${AUT_BIN:-$HOME/.local/bin/aut}" scan-job

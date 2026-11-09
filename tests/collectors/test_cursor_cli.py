@@ -286,10 +286,13 @@ def test_cli_activity() -> None:
         assert sorted(turns) == [(A, "r1"), (A, "r2"), (A, "r3"), (B, "rb")], sorted(turns)
         t1 = turns[(A, "r1")]
         assert t1.event_id == _eid("turn", f"{A}|r1") and t1.ts == "2026-07-20T09:05:00+02:00"
+        sources = t1.attrs["revision_sources"]
+        assert len(sources) == 5 and all(len(source) == 64 for source in sources)
         assert t1.attrs == {"tool_calls": 3, "tool_errors": 1, "hook_blocks": 0,
                             "by_tool": {"Shell": 1, "Read": 1, "mcp": 1},
                             "max_identical_run": 1, "retry_flag": False,
-                            "runaway_flag": False, "run_origin": "interactive"}, t1.attrs
+                            "runaway_flag": False, "run_origin": "interactive",
+                            "revision_sources": sources}, t1.attrs
         t2 = turns[(A, "r2")].attrs
         assert (t2["tool_calls"], t2["tool_errors"], t2["hook_blocks"], t2["by_tool"]) == \
             (3, 1, 1, {"SwitchMode": 1, "Shell": 1, "Subagent": 1}), t2
@@ -413,6 +416,118 @@ def test_unlisted_prompt_waits_while_active() -> None:
         [t] = [e for e in _acts(later, "turn") if e.turn_id == "q2"]
         assert t.attrs["tool_calls"] == 2, t.attrs
     _run(check)
+
+
+def test_idle_turn_accepts_late_calls_commits_and_followups(tmp_path):
+    prompt = _prompt("q1", "first")
+    head = [prompt, _calls(("c1", "Read", {}))]
+    _store(tmp_path, C, [head])
+    wm = {}
+    first = _collect(tmp_path, wm)
+    [before] = _acts(first, "turn")
+    followup = _prompt("q1", "also commit")
+    tail = [followup, _calls(("c2", "Shell", {"command": "git commit -m x"})),
+            _result("c2", "Shell", "Exit code: 0\nCommand output:\n[feat/x 1a2b3c4] x")]
+    _store(tmp_path, C, [head, head + tail])
+    second = _collect(tmp_path, wm)
+    [after] = _acts(second, "turn")
+    assert (after.event_id, after.turn_id, after.attrs["tool_calls"]) == (
+        before.event_id, "q1", 2)
+    assert set(before.attrs["revision_sources"]) < set(after.attrs["revision_sources"])
+    assert [e.attrs["sha"] for e in _acts(second, "commit")] == ["1a2b3c4"]
+    human = {e.event_id for e in first + second if isinstance(e, UsageEvent)}
+    assert human == {make_event_id(NAME, "human", C, "q1"),
+                     make_event_id(NAME, "human", C, "q1", _blob(followup))}
+    assert _collect(tmp_path, wm) == []
+    assert "also commit" not in json.dumps(wm)
+
+
+def test_legacy_done_turn_is_recomputed_without_changing_human_ids(tmp_path):
+    _store(tmp_path, C, [[_prompt("q1", "first"), _calls(("c1", "Read", {}))]])
+    path = str(next((tmp_path / ".cursor").rglob("store.db")))
+    con = sqlite3.connect(path)
+    root = cursor_cli.chat_meta(con)["latestRootBlobId"]
+    con.close()
+    wm = {"chats": {path: {"root": root, "done": ["q1"], "open": 0}}}
+    [turn] = _acts(_collect(tmp_path, wm), "turn")
+    assert turn.event_id == make_event_id(NAME, "turn", f"{C}|q1")
+    assert turn.attrs["tool_calls"] == 1
+
+
+def test_legacy_watermark_recovers_original_prompt_from_its_root(tmp_path, monkeypatch):
+    first, follow = _prompt("r1", "first"), _prompt("r1", "followup")
+    path = _store(tmp_path, C, [[first]])
+    con = sqlite3.connect(path)
+    root = cursor_cli.chat_meta(con)["latestRootBlobId"]
+    con.close()
+    wm = {"chats": {str(path): {"root": root, "done": ["r1"], "open": 0}}}
+    _store(tmp_path, C, [[first], [follow]])
+    read_lists = cursor_cli.root_lists
+    monkeypatch.setattr(cursor_cli, "root_lists", lambda con: sorted(
+        read_lists(con), key=lambda seq: _blob(follow) not in seq))
+    rows = _collect(tmp_path, wm)
+    humans = {e.event_id for e in rows if isinstance(e, UsageEvent)}
+    assert humans == {make_event_id(NAME, "human", C, "r1"),
+                      make_event_id(NAME, "human", C, "r1", _blob(follow))}
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_rewritten_followup_keeps_its_published_human_id(tmp_path, monkeypatch, legacy):
+    first, follow = _prompt("r1", "first"), _prompt("r1", "followup")
+    _store(tmp_path, C, [[first, follow]])
+    wm = {}
+    original = _collect(tmp_path, wm)
+    if legacy:
+        next(iter(wm["chats"].values())).pop("snapshots")
+    rewritten = {**follow, "extra": "ignored"}
+    _store(tmp_path, C, [[first, follow], [first, rewritten]])
+    read_lists = cursor_cli.root_lists
+    monkeypatch.setattr(cursor_cli, "root_lists", lambda con: sorted(
+        read_lists(con), key=lambda seq: _blob(rewritten) not in seq))
+    later = _collect(tmp_path, wm)
+    assert {e.event_id for e in later if isinstance(e, UsageEvent)} == {
+        e.event_id for e in original if isinstance(e, UsageEvent)}
+
+
+def test_missing_original_prompt_does_not_invent_human_rows(tmp_path):
+    first = _prompt("r1", "first", "Monday, Jul 20, 2026, 9:05 AM (UTC)")
+    _store(tmp_path, C, [[first]])
+    wm = {}
+    original = _collect(tmp_path, wm)
+    _store(tmp_path, C, [[_prompt("r1", "followup"),
+                          _calls(("late", "Shell", {"command": "git commit -m x"})),
+                          _result("late", "Shell", "Exit code: 0\nCommand output:\n"
+                                  "[feat/x 1a2b3c4] x")]])
+    later = _collect(tmp_path, wm)
+    assert not [e for e in later if isinstance(e, UsageEvent)]
+    assert [e.attrs["sha"] for e in _acts(later, "commit")] == ["1a2b3c4"]
+    [before], [after] = _acts(original, "turn"), _acts(later, "turn")
+    assert not set(before.attrs["revision_sources"]) <= set(after.attrs["revision_sources"])
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_missing_original_prompt_keeps_commit_and_rejection_timestamps(tmp_path, legacy):
+    first = _prompt("r1", "first", "Monday, Jul 20, 2026, 9:05 AM (UTC)")
+    activity = [_calls(("commit", "Shell", {"command": "git commit -m x"}),
+                       ("reject", "SwitchMode", {})),
+                _result("commit", "Shell", "Exit code: 0\nCommand output:\n[feat/x 1a2b3c4] x"),
+                _result("reject", "SwitchMode", "Mode switch was rejected by the user")]
+    _store(tmp_path, C, [[first, *activity]])
+    wm = {}
+    original = _collect(tmp_path, wm)
+    if legacy:
+        next(iter(wm["chats"].values())).pop("snapshots")
+        _store(tmp_path, C, [[first, *activity, _prompt("r1", "followup")]])
+        _collect(tmp_path, wm)
+    _store(tmp_path, C, [[_prompt("r1", "followup"), *activity]])
+    later = _collect(tmp_path, wm)
+
+    def ordinary(rows):
+        return {(row.kind, row.event_id, row.ts) for row in _acts(rows)
+                if row.kind in {"commit", "rejection"}}
+
+    assert ordinary(original) == ordinary(later)
+    assert {row.ts for row in _acts(later)} == {"2026-07-20T09:05:00+00:00"}
 
 
 def test_sdk_runs() -> None:

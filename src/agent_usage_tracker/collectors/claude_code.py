@@ -41,6 +41,7 @@ class FileState(TypedDict, total=False):
     off: int
     ino: int
     turn: str               # the turn the next record belongs to, until its next user record
+    old_loop_seen: bool
     act: ActivityState
 
 
@@ -366,15 +367,28 @@ def _human_row(o: dict[str, Any], text: str, path: str, sess: EventSession,
     return row, (act.steer(o, uid, text, sess), _USAGE_CMD in text)
 
 
+def _old_loop_before(path: str, off: int) -> bool:
+    """Recover the missing flag from an older watermark without re-emitting historical prompts."""
+    if not off:
+        return False
+    with open(path, "rb") as stream:
+        while stream.tell() < off:
+            raw = stream.readline(off - stream.tell())
+            if not raw:
+                break
+            o = parse_record(raw)
+            text = human_text(o) if o else None
+            if o and text is not None and is_old_loop(o, text):
+                return True
+    return False
+
+
 def _chunk_rows(path: str, base: Path, lines: list[bytes], from_start: bool, cur: FileState,
                 keys: RepoKeys, skipped: Counter[str]) -> list[Row]:
     """All rows of one file's new lines, read from byte 0 or not; updates `cur`, the private copy
     of its watermark entry."""
     best: dict[str, UsageEvent] = {}
     human: list[UsageEvent] = []
-    # shortcut: counted per scan chunk, so an old file read in two chunks keeps two /loops;
-    # harmless while old files are complete on disk and scanned once.
-    old_loops = 0
     ident = _file_identity(base, path)
     # turn_id is carried across chunks in the file's watermark entry, so a turn that began in an
     # earlier scan is not lost.
@@ -398,9 +412,9 @@ def _chunk_rows(path: str, base: Path, lines: list[bytes], from_start: bool, cur
                 if text is None:
                     continue
                 if is_old_loop(o, text):
-                    old_loops += 1
-                    if old_loops > 1:        # you typed the first; the rest are firings
+                    if cur.get("old_loop_seen"):    # only the first was typed
                         continue
+                    cur["old_loop_seen"] = True
                 row, steer = _human_row(o, text, path, sess, act)
                 human.append(row)
                 steers.append(steer)
@@ -443,6 +457,8 @@ def collect(cfg: Config, wm: dict[str, Any]) -> Iterator[Batch]:
 
     def chunk_rows(path: str, cur: FileState, off: int, lines: list[bytes],
                    skipped: Counter[str]) -> list[Row]:
+        if "old_loop_seen" not in cur:
+            cur["old_loop_seen"] = _old_loop_before(path, off)
         return _chunk_rows(path, base, lines, not off, cur, keys, skipped)
 
     yield from file_batches(NAME, glob.glob(str(base / "**" / "*.jsonl"), recursive=True),

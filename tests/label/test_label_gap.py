@@ -57,6 +57,7 @@ def test_gap_days_are_labelled_after_the_rebuild_not_before(tmp_path, sink, read
                             src=FakeSource(cfg, steers, (), ready=ready),
                             now=NOW)
         assert rep["work_category"]["rows"] == 0
+        assert rep["work_category"]["unavailable"] == 1
         wm = json.loads((tmp_path / "state.json").read_text())["collectors"]["label"]
         assert wm["work_category"] == wm0               # the gap days are not skipped for good
         # the next night: the rebuild has the gap's episodes

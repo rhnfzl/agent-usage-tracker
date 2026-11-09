@@ -222,12 +222,22 @@ def _label_one(run: _Run, name: str, since: datetime | None, now: datetime, choi
                 mature_outcomes=run.local_estimates and run.cfg.label_mature_outcomes)
             if TASKS[name].window == "recent":
                 until = now  # All recent and mature requests in this run share one as-of time.
-            return _run_task(run, TASKS[name], choice, backend_for(name, choice), start, until), None
-        note_start, note_end = _day_window(name, run.wm, since, now, run.ready)
-        backend = backend_for(name, choice)
-        if not isinstance(backend, NoteBackend):    # label.json can name the encoder for it
-            raise BackendUnavailable(f"label: {name} needs a backend that can write text")
-        return _run_notes(run, backend, note_start, note_end), None
+            report = _run_task(run, TASKS[name], choice, backend_for(name, choice), start, until)
+        else:
+            start, until = _day_window(name, run.wm, since, now, run.ready)
+            backend = backend_for(name, choice)
+            if not isinstance(backend, NoteBackend):    # label.json can name the encoder for it
+                raise BackendUnavailable(f"label: {name} needs a backend that can write text")
+            report = _run_notes(run, backend, start, until)
+        if name in _EPISODE_TASKS and until is not None \
+                and until < local_midnight(now.astimezone().date()):
+            report["unavailable"] = 1
+            stopped = SourceUnavailable("waiting for the episode rebuild")
+            print(f"aut: label {name}: {stopped}; saved progress will resume", file=sys.stderr)
+            return report, stopped
+        if report["cut"]:
+            return report, TimeoutError("label time budget reached")
+        return report, None
     except SourceUnavailable as exc:
         print(f"aut: label {name}: {exc}; retried on the next run", file=sys.stderr)
         return defaultdict(int, unavailable=1), exc
