@@ -150,12 +150,14 @@ def test_covered_snapshots_update_legacy_rows_without_duplicate_timestamps(dsn):
 def test_insert_only_writer_defers_corrections_until_column_grant(dsn):
     from dataclasses import replace
     role = "snapshot_writer_" + uuid.uuid4().hex
+    password = uuid.uuid4().hex
     # The scratch DSN uses a role in its URI; preserve the endpoint and database.
     from urllib.parse import urlsplit, urlunsplit
     uri = urlsplit(dsn)
-    writer_dsn = urlunsplit(uri._replace(netloc=role + "@" + uri.netloc.rsplit("@", 1)[-1]))
+    writer_dsn = urlunsplit(uri._replace(
+        netloc=f"{role}:{password}@" + uri.netloc.rsplit("@", 1)[-1]))
     with connect(dsn) as conn:
-        conn.execute(f'CREATE ROLE "{role}" LOGIN')
+        conn.execute(f'CREATE ROLE "{role}" LOGIN PASSWORD \'{password}\'')
         conn.execute(f'GRANT USAGE ON SCHEMA agents TO "{role}"')
         conn.execute(f'GRANT INSERT, SELECT ON agents.activity_event TO "{role}"')
         conn.commit()

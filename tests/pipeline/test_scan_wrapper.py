@@ -36,6 +36,7 @@ from pathlib import Path
 sys.path.insert(0, {str(ROOT / "src")!r})
 home = Path.home()
 if sys.argv[1:] == ["scan-job"]:
+    time.sleep(float(os.environ.get("AUT_TEST_BOOT_DELAY", "0")))
     from agent_usage_tracker.cli import main
     sys.exit(main())
 command = sys.argv[1]
@@ -73,15 +74,19 @@ def test_failed_daily_job_retries_until_success(scheduled, command, marker):
                                                          else "label run") == 2
 
 
-def test_overlapping_wrappers_skip_without_repeating_daily_work(scheduled):
+@pytest.mark.parametrize("startup_delay", [0, 2.1])
+def test_overlapping_wrappers_skip_without_repeating_daily_work(scheduled, startup_delay):
     home, conf, env = scheduled
     (home / "hold").touch()
     first = subprocess.Popen(["/bin/bash", str(WRAPPER)], env=env)
     try:
         wait_for(lambda: (home / "started").exists())
-        second = subprocess.Popen(["/bin/bash", str(WRAPPER)], env=env)
+        second = subprocess.Popen(["/bin/bash", str(WRAPPER)],
+                                  env={**env, "AUT_TEST_BOOT_DELAY": str(startup_delay)})
         try:
-            assert second.wait(timeout=2) == 0
+            assert second.wait(timeout=10) == 0
+            assert first.poll() is None
+            assert (home / "calls").read_text().splitlines() == ["scan"]
         finally:
             if second.poll() is None:
                 second.terminate()
