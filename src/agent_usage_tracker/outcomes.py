@@ -49,7 +49,6 @@ from .state import state_path, atomic_write_text, load_json_dict
 
 CACHE_NAME = "outcomes_cache.json"
 _CACHE_V = 2                 # 2: a failed git read no longer counts as a survival score
-_GH_STABLE_S = 60 * DAY      # a "no merged PR" answer is cached once the commit is this old
 _SHA = re.compile(r"^[0-9a-f]{7,40}$")
 _WORKERS = 8
 MANUAL = {"shipped": "shipped", "ruled-out": "ruled_out", "open": "open"}
@@ -225,12 +224,8 @@ def _decide(a: _Anchor, now_ts: float, cache: dict[str, Any], use_gh: bool,
         return o, None
     young = now_ts - a.ts < DECIDE_S
     if a.pick is None:
-        # shortcut: a commit no local clone holds counts as abandoned after day 14; right for
-        # work never pushed, wrong for a repo not cloned on this machine. Upgrade with an
-        # 'unknown' state in commit_outcome (and the linker) if that share grows. sticky:
-        # a commit that later goes missing (clone moved, pre-amend SHA pruned) keeps its state.
-        o["state"], o["sticky"] = ("undecided" if young else "abandoned"), True
-        stats["abandoned_not_found"] += not young
+        # A missing clone cannot prove abandonment; retain any prior decision.
+        o["sticky"] = True
         return o, None
     _c, read, full = a.pick
     target = full if full in read.on_default else read.twin.get(full)
@@ -245,15 +240,16 @@ def _ask_gh(job: _GhJob, now_ts: float, cache: dict[str, Any]) -> _JobResult:
     k = f"gh:{full}"
     looked = 0
     merged: bool | None
-    if k in cache:
-        merged = bool(cache[k])
+    if cache.get(k) is True:
+        merged = True
     else:
+        cache.pop(k, None)
         merged = gh_merged(github_slug, full)
         looked = 1
         if merged is None:          # gh could not answer: decide nothing, keep what is stored
             return _JobResult("undecided", None, True, {"gh_lookups": 1, "gh_failed": 1})
-        if merged or now_ts - ts >= _GH_STABLE_S:
-            cache[k] = merged       # a merge never undoes itself; an old "no" stays no
+        if merged:
+            cache[k] = True
     state: OutcomeState = "merged" if merged else "open" if on_branch else "abandoned"
     return _JobResult(state, None, False, {"gh_lookups": looked, "gh_failed": 0})
 
@@ -337,6 +333,7 @@ def _cache_path() -> Path:
 def _load_cache() -> dict[str, Any]:
     """The cache; survivals of an older version are dropped, so they are measured again."""
     cache = load_json_dict(_cache_path())
+    cache = {k: v for k, v in cache.items() if not k.startswith("gh:") or v is True}
     if cache.get("v") != _CACHE_V:
         cache = {k: v for k, v in cache.items() if k.startswith("gh:")}
         cache["v"] = _CACHE_V

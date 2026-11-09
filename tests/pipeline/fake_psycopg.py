@@ -24,6 +24,17 @@ class _Cur:
             raise RuntimeError("insert failed")
         self.log.append((sql, list(rows)))
 
+    def execute(self, sql, params=()):
+        if self.fail_on and self.fail_on in sql:
+            raise RuntimeError("insert failed")
+        return self
+
+    def fetchall(self):
+        return []
+
+    def fetchone(self):
+        return None
+
 
 @contextlib.contextmanager
 def _fake_psycopg(log, fail_on=None):

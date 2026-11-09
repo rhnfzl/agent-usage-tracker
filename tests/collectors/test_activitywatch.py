@@ -435,7 +435,8 @@ def test_delivery_one_transaction_and_webhook_note(monkeypatch) -> None:
         hook([ti])
         hook([usage, ti])
     assert posted == [[usage]], "time rows never go over the webhook"
-    assert err.getvalue().count("not sent over the webhook") == 1, err.getvalue()
+    assert err.getvalue().count("queued privately") == 1, err.getvalue()
+    assert push.outbox_status() == {"time": 1}
 
     # webhook first, pg_dsn too: usage over the webhook, the time rows still land in Postgres
     posted, log = [], []
@@ -445,7 +446,10 @@ def test_delivery_one_transaction_and_webhook_note(monkeypatch) -> None:
         both([usage, ti])
     assert posted == [[usage]]
     assert [x if x == "commit" else x[0].split(" (")[0] for x in log] == [
+        "INSERT INTO agents.time_interval", "commit",
         "INSERT INTO agents.time_interval", "commit"], log
+    assert log[0][1] == log[2][1]  # Deferred and current copies keep the same sink identity.
+    assert push.outbox_status() == {}
 
 
 def test_titles_kept_for_good_by_default() -> None:

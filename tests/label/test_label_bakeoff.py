@@ -139,7 +139,7 @@ def test_scores_are_saved_without_text_and_reused(tmp_path, monkeypatch, no_sink
         assert len(files) == 1 and files[0].name.startswith(f"{TASK}.fake-oracle.")
         rows = evalset.read_jsonl(files[0])
         assert {r["unit_id"] for r in rows} == set(open_units)
-        assert all(set(r) == {"unit_id", "dist"} for r in rows)
+        assert all(set(r) == {"unit_id", "input_hash", "dist"} for r in rows)
         assert WORD not in files[0].read_text()
         # a rerun loads no model and gives the same numbers, the speed of the first run included
         o2 = Oracle()

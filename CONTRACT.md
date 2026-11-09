@@ -230,8 +230,9 @@ Delivery: over `transport.pg_dsn`, usage rows and session rows are written on on
 **one transaction** (`ON CONFLICT (event_id) DO NOTHING` for sessions), so a failure stores
 neither and the watermark does not move. The webhook carries usage only: with a `pg_dsn` too, the
 session rows of the batch go over `pg_dsn` in one transaction with its activity and time rows, and
-a failure there leaves the watermark in place. A webhook-only machine skips them and says so once
-on stderr.
+a failure there leaves the watermark in place. A webhook-only machine durably queues these rows
+beside its state file before advancing the watermark. `aut status` reports the pending count.
+Scans with PostgreSQL and `aut retry-delivery` replay the queue and delete rows after sink commit.
 
 History: `aut backfill --sessions-only [--agents claude_code,codex,pi,cursor_cli] [--dry-run]` re-reads every file from
 the start on a throwaway watermark (the live one is neither read nor saved) and sends **only**
@@ -262,7 +263,8 @@ identity rules above; `ts` is the source record's own timestamp; `event_id` is
 Rules worth knowing:
 
 - `via=queued`: `promptSource == "queued"`, or (no `promptSource`, older files) the same text was
-  enqueued earlier in the scan chunk by a `queue-operation` or a `queued_command` attachment.
+  enqueued earlier in the file by a `queue-operation` or a `queued_command` attachment.
+  Pending hashes survive scan boundaries and are consumed when their prompt arrives.
   Slash, bash and skill prefixes win over the prompt source.
 - `after_interrupt`: the previous non-meta user record in the file was an interrupt.
 - Hook denials (`PreToolUse:... hook error`) are not rejections; they count in the turn's
@@ -305,7 +307,7 @@ Rules worth knowing:
   as `mcp`: a server label is free text and can name an employer or a client.
 - Activity extraction is best effort: a record whose extraction raises is skipped and counted (one
   stderr line per pass), and never holds back the usage and session rows of its file.
-- Tool block ids seen in the open turn (the newest 200) ride in the watermark until the turn ends,
+- All tool block ids seen in the current open turn ride in the watermark until the turn ends,
   so a block Claude Code re-logs just after a scan boundary counts once. A subagent file never
   gets a `turn_duration`, so its turn counters are not kept in the watermark.
 - Turn aggregates cover the records since the previous turn end in the same file, carried across
@@ -360,12 +362,15 @@ are the shared code in `collectors/commits.py`, `collectors/activity_common.py` 
 |---|---|---|
 | `steer` | each prompt counted as human (seeded like it); `via` always `typed`; `words`, `chars`, `images` (attached images), `after_interrupt` (an interrupt since the previous prompt) | each user message: `via` `skill` (text opens `<skill name="`), `queued` (the previous message is a toolResult: typed while the agent ran), else `typed`; `words`, `chars`, `after_interrupt` (the previous assistant record was aborted) |
 | `interrupt` | `turn_aborted` with reason `interrupted`; no attrs | assistant `stopReason == "aborted"`; `during_tool` (the entry before it is a toolResult) |
-| `turn` | `task_complete`: `duration_ms` from the record, else `task_started` to `task_complete`; `tool_calls` and `by_tool` from the model's tool calls (`function_call`, `custom_tool_call`; an `mcp__` namespace or a name containing `__`, the older CLI form, counts as `mcp`) plus `McpToolCall` items whose id matches no MCP call of the turn (Codex Desktop logs most MCP calls only as items); `tool_errors` from `CommandExecution` items with `exit_code != 0` and `McpToolCall` items with status `failed` (command items run inside a tool call, so they are not counted as calls) | derived: one per user message, from it to the first `stop` / `aborted` / `length` assistant record, else to the last entry before the next user message (an `error` followed by another assistant record is a retry, not an end); `duration_ms` = end ts minus prompt ts, `message_count` (the prompt, assistant and toolResult messages), tool aggregates from `toolCall` blocks, `tool_errors` from `toolResult.isError`. The last open turn of a file is emitted on a later scan |
+| `turn` | `task_complete`: `duration_ms` from the record, else `task_started` to `task_complete`; `tool_calls` and `by_tool` from the model's tool calls (`function_call`, `custom_tool_call`; an `mcp__` namespace or a name containing `__`, the older CLI form, counts as `mcp`) plus `McpToolCall` items whose id matches no MCP call of the turn (Codex Desktop logs most MCP calls only as items); `tool_errors` from `CommandExecution` items with `exit_code != 0` and `McpToolCall` items with status `failed` (command items run inside a tool call, so they are not counted as calls) | derived: one per user message, from it to the first `stop` / `aborted` / `length` assistant record, else to the last entry before the next user message (an `error` followed by another assistant record is a retry, not an end); `duration_ms` = end ts minus prompt ts, `message_count` (the prompt, assistant and toolResult messages), tool aggregates from `toolCall` blocks, `tool_errors` from `toolResult.isError`. A fully read file idle for an hour publishes a provisional snapshot; later activity can extend it |
 | `commit` | `CommandExecution` item: its shell script and `aggregated_output`, `repo_key` from the command's own directory, else the item's `cwd` | `bash` toolCall paired with its toolResult by `toolCallId`; `repo_key` from the command's own directory, else the header `cwd` |
 | `compaction` | `ContextCompaction` item; no attrs | `compaction` record: `tokens_before` |
 | `invoke` | not possible (no skill tool; reading a skill file is a guess) | a user message opening `<skill name="X">`: `skill` = X |
 | `rejection` | not possible: no user approval decisions are logged (an automatic reviewer decides) | not possible: Pi has no permission prompt |
 | `pr` | not possible: no PR record | not possible from structured data (only by parsing `gh pr create` output, skipped) |
+
+Pi turn/link snapshots use the prompt timestamp. Idle publication retains pending tool calls and
+aggregates until a terminal reply or the next prompt closes the turn.
 
 Also not possible: Codex `during_tool`, `hook_blocks`, `message_count` and a compaction
 `trigger`; Pi `hook_blocks`, a compaction `trigger` and a `slash_command` / `bash_input` split of
@@ -378,9 +383,10 @@ A chat store keeps its messages as JSON blobs and lists them in order in protobu
 new list, so older messages sit only in older roots: every root list that is no prefix of another
 is read, and a message seen in several lists counts once. Messages after a prompt belong to its
 turn (`turn_id` = its requestId) and take its timestamp. The store has no turn-end record, so a
-turn is emitted, all its rows at once and only once (the chat's watermark entry keeps the emitted
-requestIds), when a later prompt follows it or the chat has been idle for an hour. Seeds are
-`session_id|...`.
+turn is published when a later prompt follows it or the chat has been idle for an hour.
+The watermark keeps snapshot fingerprints and published prompt anchors. Later changes refresh
+covered turn/link snapshots and emit new ordinary activity with stable IDs and timestamps.
+Seeds are `session_id|...`.
 
 | kind | Cursor CLI | Cursor SDK |
 |---|---|---|
@@ -396,11 +402,15 @@ Known gaps: a prompt no surviving root lists (its history was dropped) still giv
 steer rows but no turn row, once the chat is idle (until then it may be a new prompt whose root is
 not written yet). A message after a summary and before the next prompt sits in no turn
 (about 5% of tool calls when measured). A tool call logged under a prompt more than an hour after
-the chat went quiet is lost.
+the chat went quiet is reread when the root changes. Turn and link snapshots retain their event IDs.
 
 Delivery: over `transport.pg_dsn` in the same transaction as the usage and session rows of that
-batch, `ON CONFLICT (event_id, ts) DO NOTHING` (the writer has INSERT only). A webhook-only machine
-skips them with the same one-line note as session rows. History: `aut backfill --activity-only
+batch. Ordinary events use `ON CONFLICT (event_id, ts) DO NOTHING`.
+Cursor and Pi turn/link rows include `revision_sources`, HMAC hashes of their source records.
+A replacement must cover all stored sources and cannot reduce tool calls or tool errors.
+Transactions serialize replacements by event ID and preserve the original stored timestamp.
+Corrections need `UPDATE(attrs)` permission; INSERT/SELECT writers queue them durably until permitted.
+A webhook-only machine queues activity with session and time rows. History: `aut backfill --activity-only
 [--dry-run]` works exactly like `--sessions-only` (both flags may be given together) and never
 sends usage rows. For `cursor_cli` the first normal `aut scan` also sends its human rows, which no
 collector sent before.
@@ -422,9 +432,9 @@ commit's `(state, survival)` differs from its latest stored row.
 | `reverted` | merged, and a commit on any branch says `This reverts commit X` for it or its twin within 14 days after the merge (a revert before the merge does not count) |
 | `reworked` | merged and `survival < 0.5` |
 | `open` | reachable from a local or remote branch, not from the default branch |
-| `abandoned` | reachable from no branch, no twin, no merged PR; also a commit no local clone holds |
+| `abandoned` | found locally but reachable from no branch, no twin, no merged PR |
 | `superseded` | reachable from no branch and the session's next commit row was an `--amend` (the pre-amend SHA) |
-| `undecided` | under 14 days since the merge (merged) or since the commit row (everything else); also a merged commit whose default ref was last updated before merge + 14 days, a commit gh could not answer for, and a commit whose clone git could not read or whose survival it could not measure |
+| `undecided` | under 14 days since the merge (merged) or since the commit row (everything else); also a missing local clone, stale default ref, failed gh/git read, or unmeasured survival |
 
 - `sha` is the commit row's form (often abbreviated); `repo_key` is the row's, else the key of the
   clone that holds the SHA, else `''`. A clone counts as holding a SHA only when its committer
@@ -434,7 +444,7 @@ commit's `(state, survival)` differs from its latest stored row.
   commit before merge + 14 days, only once the default ref was updated after that time (its tip
   is newer, its FETCH_HEAD is newer, or this run fetched it). It is computed once and cached by
   full SHA in `outcomes_cache.json` next to the state file (saved before the sink is written),
-  with gh answers (a "no" only once the commit is 60 days old). A failed git read is never
+  with positive gh answers. Negative PR answers are rechecked because an old PR can still merge. A failed git read is never
   cached or scored; the next run measures again. A cache from before that rule is measured
   again once, keeping its gh answers. A file gone from the base commit counts as 0
   lines alive.
@@ -604,8 +614,8 @@ up. Limit: a browser missing from the defaults is classified by its bundle (ofte
 Delivery: over `transport.pg_dsn` in the same transaction as the usage, session and activity
 rows of the batch, `ON CONFLICT (event_id, ts) DO NOTHING`. With a webhook and a `pg_dsn`, the
 webhook carries the usage and the activity and time rows of the same batch still go over
-`pg_dsn`, with the batch's session rows. A webhook-only machine skips them with the same one-line note; there is no backfill for
-time, so it does not send time.
+`pg_dsn`, with the batch's session rows. A webhook-only machine queues them durably with session
+and activity rows, including intervals that cannot be reconstructed later.
 
 ## What a label prompt reads
 
@@ -727,7 +737,7 @@ sent and never holding text; a unit's text is rebuilt from this machine's logs w
 | `<task>.jsonl` (gold) | `unit_id`, `gold` (a candidate), `labeller` (`human`), `date`, `task_ver`; a later row for a unit wins |
 | `<task>.eval.jsonl` | one bake-off record per backend (below), with its `ts` |
 | `<task>.final.jsonl` | one record per `aut label eval --final`; only that command reads or writes it |
-| `scores/<task>.<model>.<hash>.jsonl` | one file per task, `model_id`, `model_rev`, `prompt_ver` and decision protocol: `unit_id`, `dist` (the raw distribution) |
+| `scores/<task>.<model>.<hash>.jsonl` | one file per task, `model_id`, `model_rev`, `prompt_ver` and decision protocol: `unit_id`, `input_hash` (the complete request, including revision), `dist` (the raw distribution) |
 
 `aut label teach --task T --n N [--budget-usd X] [--days D]` gives up to N units of the last D
 days (default 90; stratified by unit type and day) the local model's raw distribution, and, for
@@ -746,8 +756,8 @@ disagreement come up as often as common labels; the page shows gold per label ag
 
 `aut label eval --task T [--days D]` scores every backend (each model of the README's table that is
 on disk, and the encoder once trained) on the gold units. A model that cannot run here is left out
-with a line that says why, and the others go on. Saved scores are re-used: the model is
-called only for gold units it has no score for, and tuning needs no model. A new `model_rev`,
+with a line that says why, and the others go on. Saved scores are reused only for the same complete
+request. Changed evidence and legacy rows without `input_hash` are scored again. A new `model_rev`,
 `prompt_ver` or decision protocol starts a new score file.
 
 - **Final test days.** About 20% of the days (by a stable hash; a title is its own group, by

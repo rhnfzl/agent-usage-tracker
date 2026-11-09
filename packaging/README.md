@@ -126,15 +126,16 @@ EOF
 
 Then point `transport.pg_dsn` at `localhost:15432`. The wrapper reuses a tunnel that is already
 up and only tears down one it opened itself, so it is safe to run alongside an interactive
-session. An unreachable host arms the retry marker rather than counting as a scan failure —
-which is exactly the case this pairs with, since a laptop off the VPN cannot reach the host at all.
+session. An unreachable host arms the retry marker and returns nonzero.
+launchd watches the marker; systemd retries the failed job.
 
 ### Commit outcomes once a day
 
-After a delivered scan the wrapper tries `aut outcomes` once per calendar day (marker
-`outcomes-day` in the config dir, written before the attempt, so a failing run waits for the next
-day and shows up as an error heartbeat), as its own step with its own heartbeat row (collector
-`outcomes`). It reads the clones under `outcome_repo_roots` (default `["~/projects"]`); set
+Update AUT before installing the wrapper; it calls `aut scan-job`.
+An operating-system lock prevents overlapping wrappers. The scheduler records `outcomes-day`
+only after success. Failed reads retry after the next successful scan, with their own heartbeat
+(collector `outcomes`). Labels follow the same rule, including incomplete time-budget runs.
+The scheduler reads clones under `outcome_repo_roots` (default `["~/projects"]`); set
 `outcome_fetch = true` in `config.toml` to `git fetch` them (30 s each, failures skipped) and ask
 `gh` about merged pull requests first. Turn it on for the machine that runs this: without a
 fetch, merged commits wait while the local default branch is older than merge + 14 days, and a

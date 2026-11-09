@@ -17,7 +17,7 @@ from .config import Config
 from .event import (ActivityEvent, Batch, CollectorUnavailable, Row, TimeInterval, UsageEvent,
                     parse_ts, valid_ts)
 from .push import (COLUMNS, ScanStatus, deliver_scan_rows, error_type_name, make_sender,
-                   redacted_error, scan_row, send_activity_rows, send_session_rows)
+                   redacted_error, replay_outbox, scan_row, send_activity_rows, send_session_rows)
 from .repo_keys import refuse_new_salt, require_readable_salt
 from .state import collector_wm, load_state, save_state
 
@@ -159,6 +159,8 @@ def run_scan(cfg: Config, agents: Sequence[str], *, dry_run: bool) -> dict[str, 
         refuse_new_salt(cfg.repo_key_salt, cfg.pg_dsn, cfg.machine)
     else:
         require_readable_salt(cfg.repo_key_salt, cfg.pg_dsn, cfg.machine)
+        if cfg.pg_dsn:
+            replay_outbox(cfg)
     report: dict[str, AgentTally] = {}
     scan_rows: list[dict[str, Any]] = []      # one heartbeat row per collector that ran (agents.collector_scan)
 

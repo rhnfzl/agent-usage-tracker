@@ -168,8 +168,8 @@ gap, a backup and a new laptop, see [docs/new-laptop.md](new-laptop.md).
 
 For more than the bare scan, run the wrapper `packaging/launchd/aut-scan.sh` instead (macOS
 and Linux; on systemd set `ExecStart=/bin/bash %h/.config/agent-usage-tracker/aut-scan.sh`).
-Copy it to `~/.config/agent-usage-tracker/`. It needs `nc` and `ssh` on `PATH` when a tunnel is
-set. Each run it:
+Update the installed package, then copy the wrapper to `~/.config/agent-usage-tracker/`.
+It calls `aut scan-job` and needs `ssh` on `PATH` when a tunnel is set. Each run it:
 
 1. opens an SSH tunnel to the sink if one is configured, reusing one already up;
 2. runs `aut scan`, and on a failed push leaves `retry-pending` and exits non-zero. On macOS
@@ -179,7 +179,16 @@ set. Each run it:
 4. once a day after that, where `AUT_LABEL=1`, runs `aut label run`;
 5. logs every step with timestamps to `scan.log`.
 
-Each daily step is tried once per day, failed or not, and never changes the scan's exit code.
+Each daily step records its day only after success. Failures and incomplete label work retry
+after the next successful scan. Daily steps never change the scan's exit code.
+An operating-system lock prevents overlapping wrappers. Normal exit, SIGINT, and SIGTERM clean up
+only the SSH child started by that wrapper. SIGKILL and power loss cannot execute cleanup.
+
+`aut status` shows the pending delivery queue. Webhook-only session, activity, and time rows
+remain in private SQLite storage beside the state file. Configure `transport.pg_dsn` to replay
+them during scans, or run `aut retry-delivery`. Keep this queue until its pending count reaches zero.
+Covered Cursor and Pi corrections need `UPDATE(attrs)` on `agents.activity_event`.
+An INSERT/SELECT writer continues sending ordinary rows and queues corrections until that grant is available.
 
 Timer jobs do not inherit your shell environment, so per-machine settings go in
 `~/.config/agent-usage-tracker/scan.env`, which the wrapper sources. Keep secrets out of it;
@@ -320,9 +329,9 @@ goes ahead, and libpq may fall back to plaintext. Add `sslmode=require` to the D
 link such as Tailscale, `sslmode=disable` says that is intended and silences it.
 
 **The tunnel.** `AUT_TUNNEL_HOST` without `AUT_TUNNEL_SPEC` makes the wrapper refuse to scan
-(exit 2, logged in `scan.log`). An unreachable host is not a failure: the wrapper arms
-`retry-pending` and exits 0. On macOS the retry job then tries again. On systemd exit 0 does not
-trigger `Restart=on-failure`, so the next try waits for the next timer run. Only the wrapper opens the tunnel:
+(exit 2, logged in `scan.log`). An unreachable host returns a nonzero exit code and arms
+`retry-pending`. On macOS the retry job tries again. On systemd the nonzero exit triggers
+`Restart=on-failure`. Only the wrapper opens the tunnel:
 before running `aut outcomes`, `aut inspect` or another `pg_dsn` command by hand, open it
 yourself (`ssh -f -N -L <spec> <host>`).
 

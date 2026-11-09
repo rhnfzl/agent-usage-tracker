@@ -22,6 +22,8 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+import pytest
+
 from agent_usage_tracker import scan
 from agent_usage_tracker.collectors import claude_code
 from agent_usage_tracker.collectors import claude_code_activity as act
@@ -497,11 +499,68 @@ def test_relogged_blocks_across_scans() -> None:
         [t] = _acts(second, "turn")
         assert (t.attrs["tool_calls"], t.attrs["tool_errors"]) == (2, 1), t.attrs
         assert "act" not in wm["files"][str(f)], wm["files"][str(f)]     # reset at turn end
-        # bounded while a turn stays open
+        # Retain the current turn, then drop its IDs together at turn end.
         with f.open("a") as fh:
             fh.write(json.dumps(_tools("m9", *[_use(f"z{i}", "Read") for i in range(250)])) + "\n")
         _collect(home, wm)
-        assert len(wm["files"][str(f)]["act"]["seen"]) == act._SEEN_MAX
+        assert len(wm["files"][str(f)]["act"]["seen"]) == 250
+
+
+def test_queued_prompt_hashes_carry_until_consumed(tmp_path):
+    f = tmp_path / ".claude/projects/-p/S1.jsonl"
+    attached = "then verify the attachment"
+    _write_jsonl(f, [
+        _base(type="queue-operation", operation="enqueue", content=QUEUED),
+        _base(type="attachment", attachment={"type": "queued_command", "prompt": attached}),
+    ])
+    wm = {}
+    _collect(tmp_path, wm)
+    assert QUEUED not in json.dumps(wm) and attached not in json.dumps(wm)
+    with f.open("a") as stream:
+        for row in (_user("h1", QUEUED), _user("h2", attached)):
+            stream.write(json.dumps(row) + "\n")
+    before = json.dumps(wm, sort_keys=True)
+    failed = [e for rows, callback in claude_code.collect(_cfg(tmp_path), wm) for e in rows]
+    assert json.dumps(wm, sort_keys=True) == before
+    assert [e.attrs["via"] for e in _acts(failed, "steer")] == ["queued", "queued"]
+    assert _collect(tmp_path, wm) == failed
+    with f.open("a") as stream:
+        stream.write(json.dumps(_user("h3", QUEUED)) + "\n")
+    assert [e.attrs["via"] for e in _acts(_collect(tmp_path, wm), "steer")] == ["typed"]
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_old_loop_firings_do_not_count_again_in_later_scans(tmp_path, legacy):
+    f = tmp_path / ".claude/projects/-p/S1.jsonl"
+    loop = "<command-message>loop</command-message>\n<command-name>/loop</command-name>"
+    _write_jsonl(f, [_user("loop1", loop)])
+    wm = {}
+    first = _collect(tmp_path, wm)
+    if legacy:
+        wm["files"][str(f)].pop("old_loop_seen", None)
+    with f.open("a") as stream:
+        for row in (_user("loop2", loop), _user("typed", "continue")):
+            stream.write(json.dumps(row) + "\n")
+    live = first + _collect(tmp_path, wm)
+    assert [e.event_id for e in _humans(live)] == [
+        make_event_id(NAME, "human", "loop1"), make_event_id(NAME, "human", "typed")]
+    assert {e.event_id for e in _humans(live)} == {e.event_id for e in _humans(_collect(tmp_path))}
+
+
+def test_all_open_turn_tool_ids_survive_scan_boundary(tmp_path):
+    f = tmp_path / ".claude/projects/-p/S1.jsonl"
+    _write_jsonl(f, [_user("h1", "go"), _tools("first", _use("x0", "Read")),
+                     _result("r0", "x0", "failed", err=True),
+                     _tools("many", *[_use(f"x{i}", "Read") for i in range(1, 250)])])
+    wm = {}
+    _collect(tmp_path, wm)
+    with f.open("a") as stream:
+        for row in (_tools("relog", _use("x0", "Read")),
+                    _result("r0b", "x0", "failed", err=True), _turn_end("td1", 9, 3)):
+            stream.write(json.dumps(row) + "\n")
+    [turn] = _acts(_collect(tmp_path, wm), "turn")
+    assert (turn.attrs["tool_calls"], turn.attrs["tool_errors"]) == (250, 1)
+    assert "seen" not in wm["files"][str(f)].get("act", {})
 
 
 def test_relog_after_turn_end_counts_once() -> None:

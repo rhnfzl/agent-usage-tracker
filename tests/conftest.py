@@ -9,6 +9,12 @@ import pytest
 
 
 @pytest.fixture(autouse=True)
+def private_state(tmp_path, monkeypatch):
+    """Delivery recovery tests must never read or replay this user's actual outbox."""
+    monkeypatch.setenv("AUT_STATE", str(tmp_path / "state.json"))
+
+
+@pytest.fixture(autouse=True)
 def _sink_has_no_repo_keys(monkeypatch):
     """A scan with no salt file asks the sink whether this machine already has repo keys
     (repo_keys.require_readable_salt). The tests' DSNs reach no sink: answer "none". A test of that

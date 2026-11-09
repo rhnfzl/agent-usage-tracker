@@ -18,13 +18,14 @@ from __future__ import annotations
 
 import copy
 import glob
+import hashlib
 import json
 import os
 import re
 import sqlite3
 import time
 from collections import Counter
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Generator, Iterable, Iterator, NotRequired, TypedDict
@@ -177,6 +178,7 @@ class _Turn:
     """One requestId's turn. A prompt no surviving root lists has no tool messages to read and
     emits no turn or link row (`listed` False)."""
     msg: dict[str, Any]
+    prompt_id: str | None = None
     closed: bool = False
     listed: bool = True
     agg: TurnAgg = field(default_factory=blank_tool_tally)
@@ -184,10 +186,11 @@ class _Turn:
     cids: set[object] = field(default_factory=set)           # tool calls counted, by toolCallId
     more: dict[str, Any] = field(default_factory=dict)         # follow-up prompt text -> (blob id, message)
     link: dict[str, Any] = field(default_factory=dict)
+    sources: set[str] = field(default_factory=set)
 
 
 class _Activity:
-    """One chat's activity extractor. Rows wait on the _Turn: it is emitted only once closed."""
+    """One chat's activity extractor. Publish rows with each complete turn snapshot."""
 
     def __init__(self, keys: RepoKeys) -> None:
         self.keys = keys
@@ -248,7 +251,8 @@ class _Activity:
 
 
 def _read_list(seq: tuple[str, ...], msgs: dict[str, dict[str, Any]], done: set[str], act: _Activity,
-               turns: dict[str, _Turn], seen: set[str]) -> None:
+               turns: dict[str, _Turn], seen: set[str],
+               prompts: dict[str, str] | None = None) -> None:
     """One root list: its prompts open and close turns, its other messages belong to the open one."""
     rid = None
     for mid in seq:
@@ -260,46 +264,51 @@ def _read_list(seq: tuple[str, ...], msgs: dict[str, dict[str, Any]], done: set[
             if rid and rid != r:
                 turns[rid].closed = True
             rid = r
-            turn = turns.setdefault(r, _Turn(m))
+            first = (prompts or {}).get(r, mid)
+            turn = turns.setdefault(r, _Turn(msgs.get(first, {}), prompt_id=first))
+            turn.sources.add(mid)
+            if first in msgs:
+                turn.sources.add(first)
             # A prompt sent while the turn runs reuses its requestId. A blob with the first
             # prompt's text is a rewrite of it, not a new prompt.
-            # shortcut: "first" is the first one seen in list order, so a follow-up that sits
-            # only in a list sorting before the original's swaps their ids; upgrade if
-            # backfill and live steer ids ever disagree.
+            # Published turns retain their original prompt blob when later root order changes.
             text = text_of(m.get("content"))
             if m is not turn.msg and text != text_of(turn.msg.get("content")):
                 turn.more.setdefault(text, (mid, m))
         elif rid and rid not in done and mid not in seen:
             seen.add(mid)
+            turns[rid].sources.add(mid)
             best_effort(act.errors, act.record, m, turns[rid])
 
 
 def _read_turns(lists: list[tuple[str, ...]], msgs: dict[str, dict[str, Any]], done: set[str],
-                act: _Activity) -> dict[str, _Turn]:
-    """Every requestId's turn, its activity read unless the turn was already sent."""
+                act: _Activity, prompts: dict[str, str] | None = None) -> dict[str, _Turn]:
+    """Every requestId's turn, preserving any supplied original prompt anchors."""
     turns: dict[str, _Turn] = {}
     seen: set[str] = set()
     for seq in lists:
-        _read_list(seq, msgs, done, act, turns, seen)
-    for m in msgs.values():             # a prompt no surviving root lists
+        _read_list(seq, msgs, done, act, turns, seen, prompts)
+    for mid, m in msgs.items():             # a prompt no surviving root lists
         r = request_id(m)
         if r and r not in turns:
-            turns[r] = _Turn(m, listed=False)
+            first = (prompts or {}).get(r, mid)
+            turns[r] = _Turn(msgs.get(first, {}), prompt_id=first, listed=False,
+                             sources={mid})
     return turns
 
 
 def _turn_rows(rid: str, turn: _Turn, sid: str, human: bool, origin: _TurnOrigin, created: str | None,
-               keys: RepoKeys) -> list[Row]:
-    """The rows of one closed turn."""
+               keys: RepoKeys, ts: str | None) -> list[Row]:
+    """The rows of one publishable turn snapshot."""
     rows: list[Row] = []
-    ts = prompt_ts(text_of(turn.msg.get("content")), created)
 
     def emit(kind: ActivityKind, seed: str, attrs: dict[str, Any], at: str | None = ts) -> None:
         rows.append(ActivityEvent(event_id=make_event_id(NAME, kind, f"{sid}|{seed}"), ts=at,
                                   agent=NAME, kind=kind, session_id=sid, turn_id=rid, attrs=attrs))
     # the first prompt keeps the (sid, rid) ids; a follow-up adds its blob id to them
     prompts = [((), turn.msg)] + [((mid,), pm) for mid, pm in turn.more.values()]
-    for extra, pm in prompts if human else ():
+    # A missing original blob cannot establish which surviving prompts were human follow-ups.
+    for extra, pm in prompts if human and turn.msg else ():
         ptext = text_of(pm.get("content"))
         pts = prompt_ts(ptext, created)
         q = USER_QUERY.search(ptext)
@@ -316,14 +325,19 @@ def _turn_rows(rid: str, turn: _Turn, sid: str, human: bool, origin: _TurnOrigin
     for kind, seed, attrs in turn.acts:
         emit(kind, seed, attrs)
     if turn.listed:
-        emit("turn", rid, {**turn_attrs(turn.agg), "hook_blocks": turn.agg["hooks"], **origin})
-        emit("link", rid, Link(keys, turn.link).attrs(origin["run_origin"]))
+        # The sink replaces this snapshot only when its keyed source coverage contains the old one.
+        sources = sorted(k for mid in turn.sources
+                         if (k := keys.of(f"cursor_cli:source:{sid}:{mid}")))
+        revision = {"revision_sources": sources} if sources else {}
+        emit("turn", rid, {**turn_attrs(turn.agg), "hook_blocks": turn.agg["hooks"], **origin,
+                           **revision})
+        emit("link", rid, {**Link(keys, turn.link).attrs(origin["run_origin"]), **revision})
     return rows
 
 
 def _closed_turn_rows(path: str, con: sqlite3.Connection, meta: dict[str, Any], cur: dict[str, Any], idle: bool,
           keys: RepoKeys) -> tuple[list[Row], Counter[str]]:
-    """Rows of every turn that closed since the last scan; updates `cur` (a copy) in place."""
+    """Publish new or changed turn snapshots; update `cur`, a private checkpoint copy."""
     sid = str_or_none(meta.get("agentId")) or os.path.basename(os.path.dirname(path))
     # A subagent chat's prompts are its parent agent talking, not a person. Its parent is in
     # subagentInfo.parentAgentId, but it has no usage or human row to carry a session row.
@@ -341,17 +355,44 @@ def _closed_turn_rows(path: str, con: sqlite3.Connection, meta: dict[str, Any], 
             "parent_session_id": parent if isinstance(parent, str) and _UUID.fullmatch(parent) else None})
     done = set(cur.get("done", ()))
     act = _Activity(keys)
-    turns = _read_turns(lists, msgs, done, act)
+    snapshots = cur.setdefault("snapshots", {})
+    prompts = {rid: snapshot["prompt"] for rid, snapshot in snapshots.items()}
+    previous = con.execute("SELECT data FROM blobs WHERE id = ?", (cur.get("root"),)).fetchone()
+    if previous:
+        try:
+            ids = _field1_ids(bytes(previous[0]))
+        except (ValueError, IndexError, TypeError):
+            ids = ()
+        for mid in ids:
+            if r := request_id(msgs.get(mid, {})):
+                prompts.setdefault(r, mid)
+                text = text_of(msgs[mid].get("content"))
+                if text != text_of(msgs.get(prompts[r], {}).get("content")) \
+                        and (key := keys.of(f"cursor_cli:prompt:{sid}:{r}:{text}")):
+                    snapshot = snapshots.setdefault(r, {"prompt": prompts[r]})
+                    snapshot.setdefault("followups", {}).setdefault(key, mid)
+    turns = _read_turns(lists, msgs, set(), act, prompts)
     events: list[Row] = []
     for rid, turn in turns.items():
-        # The store has no turn-end record, so a turn ends at the next prompt or once the chat sits
-        # idle: a running one, or a prompt newer than the root that will list it, is not closed early.
-        # shortcut: a tool call logged under a prompt more than IDLE_S after the chat went quiet is
-        # lost (turn rows are insert-only); upgrade if Cursor ever logs a turn end in the store.
-        if rid in done or not (turn.closed or idle):
+        # Idle publishes a revisable snapshot because Cursor has no turn-end record.
+        if not (turn.closed or idle or rid in done):
+            continue
+        snapshot = snapshots.get(rid, {})
+        followups = dict(snapshot.get("followups", {}))
+        for text, (mid, pm) in turn.more.items():
+            if key := keys.of(f"cursor_cli:prompt:{sid}:{rid}:{text}"):
+                turn.more[text] = (followups.setdefault(key, mid), pm)
+        # Ordinary activity rows also need their original timestamp if the prompt blob disappears.
+        ts = snapshot.get("ts", prompt_ts(text_of(turn.msg.get("content")), created))
+        rows = _turn_rows(rid, turn, sid, human, origin, created, keys, ts)
+        fingerprint = hashlib.sha256(json.dumps(
+            [asdict(row) for row in rows], sort_keys=True).encode()).hexdigest()
+        snapshots[rid] = {"prompt": turn.prompt_id, "followups": followups,
+                          "ts": ts, "fingerprint": fingerprint}
+        if snapshot.get("fingerprint") == fingerprint:
             continue
         done.add(rid)
-        events += _turn_rows(rid, turn, sid, human, origin, created, keys)
+        events += rows
     cur["done"] = sorted(done)
     cur["open"] = sum(r not in done for r in turns)
     return events, act.errors
@@ -413,12 +454,12 @@ def _read_chat(path: str, prev: dict[str, Any], keys: RepoKeys) -> tuple[list[An
     try:
         meta = chat_meta(con)
         if meta is None or (meta.get("latestRootBlobId") == prev.get("root")
-                            and not prev.get("open")):
+                            and not prev.get("open") and "snapshots" in prev):
             return None
         # A deep copy: only advance_watermark() may publish this chat's state into the watermark.
         cur = copy.deepcopy(prev)
-        cur["root"] = meta.get("latestRootBlobId")
         events, errs = _closed_turn_rows(path, con, meta, cur, time.time() - _mtime(path) >= IDLE_S, keys)
+        cur["root"] = meta.get("latestRootBlobId")
         return events, cur, errs
     finally:
         con.close()

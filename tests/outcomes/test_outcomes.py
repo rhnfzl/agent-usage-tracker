@@ -161,8 +161,8 @@ def test_null_key_resolution_needs_matching_time():
         got = _states(outs)
         assert got[s["A"][:7]] == ("merged", 1.0, key), got
         assert len(outs) == 3 and oc.Counter(o["state"] for o in outs)["merged"] == 1, outs  # written once
-        assert got[s["F"][:9]] == ("abandoned", None, ""), got      # unresolved: no key
-        assert got["abcdef1234"] == ("abandoned", None, ""), got
+        assert got[s["F"][:9]] == ("undecided", None, ""), got      # unresolved: no key
+        assert got["abcdef1234"] == ("undecided", None, ""), got
         assert stats["null_key_resolved"] == 1 and stats["not_found"] == 2, stats
 
 
@@ -288,7 +288,7 @@ def test_merge_time_is_when_it_landed_and_base_is_first_parent():
 
 def test_final_state_is_kept_when_the_commit_goes_missing():
     outs, _ = oc.evaluate([_row("abcdef1234", None, 40, short=10)], [], NOW, cache={})
-    assert outs[0]["state"] == "abandoned" and outs[0]["sticky"], outs
+    assert outs[0]["state"] == "undecided" and outs[0]["sticky"], outs
     for st in ("merged", "superseded", "reworked", "undecided"):
         stored = {("abcdef1234", "somekey"): (st, None)}            # scored under a clone key
         assert oc.pending(outs, stored) == [], st

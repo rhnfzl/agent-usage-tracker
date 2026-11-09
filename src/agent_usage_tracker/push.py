@@ -5,9 +5,9 @@ fall back to direct Postgres (transport.pg_dsn) when it fails, or go to Postgres
 webhook. Everything else (session, activity, time, outcome, label and heartbeat rows) goes over
 pg_dsn only. All of it is idempotent at the sink via ON CONFLICT, so re-delivery is harmless.
 
-A sender that cannot deliver RAISES, so the watermark is not committed and the events are re-sent
-on the next scan. The one exception is a webhook-only machine: it has no route for the non-usage
-rows, so they are skipped with one stderr note and the watermark still moves.
+A sender that cannot deliver or durably queue rows raises, so the watermark stays unchanged.
+Webhook-only machines keep session, activity and time rows in a private local SQLite outbox.
+Postgres delivery replays that outbox before sending new rows.
 
 Delivery is strict on purpose: redirects are NOT followed (a 3xx that turns the POST into a
 GET could otherwise look like success and advance the watermark over data the sink never
@@ -17,12 +17,15 @@ stored), and any non-2xx is a hard failure.
 from __future__ import annotations
 
 import json
+import os
+import sqlite3
 import sys
 import urllib.error
 import urllib.request
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Callable, Iterator, Literal
 from urllib.parse import urlparse
 
@@ -32,6 +35,7 @@ from .event import ActivityEvent, Row, TimeInterval, UsageEvent
 from .net import HTTP_ERRORS, LOCAL_HOSTS, NoRedirect
 from .redact import redact
 from .sink import connect, write_many
+from .state import state_path
 
 # Column order shared with the homelab schema (agents.usage_event). Keep in sync.
 COLUMNS = (
@@ -108,6 +112,185 @@ _SESSION_SQL = _insert_sql(SESSION_TABLE, SESSION_COLUMNS, "event_id")
 _ACTIVITY_SQL = _insert_sql(ACTIVITY_TABLE, ACTIVITY_COLUMNS, "event_id, ts")
 _TIME_SQL = _insert_sql(TIME_TABLE, TIME_COLUMNS, "event_id, ts")
 _SCAN_SQL = _insert_sql(SCAN_TABLE, SCAN_COLUMNS, "machine, collector, finished_at")
+_OUTBOX_TYPES = {"session": (_SESSION_SQL, SESSION_COLUMNS),
+                 "activity": (_ACTIVITY_SQL, ACTIVITY_COLUMNS), "time": (_TIME_SQL, TIME_COLUMNS)}
+_OUTBOX_BATCH = 500
+
+
+def outbox_path() -> Path:
+    """Private deferred sink rows, kept independently of collector watermarks."""
+    return state_path().parent / "delivery-outbox" / "pending.sqlite3"
+
+
+@contextmanager
+def _outbox() -> Iterator[sqlite3.Connection]:
+    path = outbox_path()
+    try:
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        os.chmod(path.parent, 0o700)
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT, 0o600)
+        os.close(fd)
+        os.chmod(path, 0o600)
+        conn = sqlite3.connect(path, timeout=30)
+        try:
+            conn.execute("PRAGMA secure_delete=ON")
+            conn.execute("CREATE TABLE IF NOT EXISTS pending ("
+                         "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+                         "kind TEXT NOT NULL, event_id TEXT NOT NULL, ts TEXT NOT NULL, "
+                         "payload TEXT NOT NULL, UNIQUE(kind, event_id, ts))")
+            yield conn
+        finally:
+            conn.close()
+    except (sqlite3.Error, OSError, ValueError, KeyError, TypeError) as exc:
+        raise DeliveryError("local delivery outbox failed; watermark unchanged. "
+                            f"Keep {path} and fix its storage or permissions: {exc}") from exc
+
+
+def outbox_status() -> dict[str, int]:
+    """Pending rows by sink type. Corrupt or unreadable storage raises, never appears empty."""
+    if not outbox_path().exists():
+        return {}
+    with _outbox() as conn:
+        return dict(conn.execute("SELECT kind, COUNT(*) FROM pending GROUP BY kind"))
+
+
+def _queue_rest(batch: list[Row]) -> None:
+    with _outbox() as conn:
+        with conn:
+            conn.execute("BEGIN IMMEDIATE")
+            for event in batch:
+                if isinstance(event, UsageEvent):
+                    row = event.session_row()
+                    if row is None:
+                        continue
+                    kind = "session"
+                else:
+                    row = asdict(event)
+                    kind = "activity" if isinstance(event, ActivityEvent) else "time"
+                snapshot = (kind == "activity" and row["kind"] in ("turn", "link")
+                            and "revision_sources" in row["attrs"])
+                if snapshot:
+                    _revision_sources(row["attrs"])
+                    old = conn.execute("SELECT payload FROM pending "
+                                       "WHERE kind=? AND event_id=? AND ts=?",
+                                       (kind, event.event_id, event.ts or "")).fetchone()
+                    if old and not _snapshot_covers(json.loads(old[0])["attrs"], row["attrs"]):
+                        continue
+                conn.execute("INSERT INTO pending(kind, event_id, ts, payload) VALUES (?, ?, ?, ?) "
+                             "ON CONFLICT(kind, event_id, ts) DO UPDATE SET payload=excluded.payload "
+                             "WHERE ?", (kind, event.event_id, event.ts or "",
+                                         json.dumps(row, sort_keys=True), snapshot))
+
+
+def replay_outbox(cfg: Config) -> int:
+    """Replay a finite FIFO snapshot, at most 500 rows in memory, deleting after PG commit only."""
+    dsn = cfg.require_pg("outbox replay")
+    if not outbox_path().exists():
+        return 0
+    delivered = 0
+    deferred = False
+    after = 0
+    with _outbox() as conn:
+        ceiling = conn.execute("SELECT COALESCE(MAX(rowid), 0) FROM pending").fetchone()[0]
+        while True:
+            with conn:
+                # A writer cannot replace a row between its delivery and local acknowledgement.
+                conn.execute("BEGIN IMMEDIATE")
+                pending = conn.execute("SELECT rowid, kind, payload FROM pending "
+                                       "WHERE rowid > ? AND rowid <= ? ORDER BY rowid LIMIT ?",
+                                       (after, ceiling, _OUTBOX_BATCH)).fetchall()
+                if not pending:
+                    break
+                records = [(rowid, kind, json.loads(payload)) for rowid, kind, payload in pending]
+                blocked: set[int] = set()
+                with connect(dsn) as pg:
+                    with pg.cursor() as cur:
+                        for kind, (sql, columns) in _OUTBOX_TYPES.items():
+                            rows = [row for _, k, row in records if k == kind]
+                            if kind == "activity":
+                                waiting = _write_activities(cur, rows)
+                                keys = {(r["event_id"], r["ts"]) for r in waiting}
+                                blocked.update(rowid for rowid, k, row in records if k == kind
+                                               and (row["event_id"], row["ts"]) in keys)
+                            elif rows:
+                                cur.executemany(sql, [_params(row, columns) for row in rows])
+                        if any(kind not in _OUTBOX_TYPES for _, kind, _ in pending):
+                            raise DeliveryError("unknown row type in local delivery outbox")
+                    pg.commit()
+                conn.executemany("DELETE FROM pending WHERE rowid=?",
+                                 [(r[0],) for r in pending if r[0] not in blocked])
+            delivered += len(pending) - len(blocked)
+            deferred |= bool(blocked)
+            after = pending[-1][0]
+    if deferred:
+        _snapshot_permission_note()
+    return delivered
+
+
+def _snapshot_permission_note() -> None:
+    print(f"aut: note: turn/link snapshot updates queued privately at {outbox_path()}; "
+          "the sink role needs UPDATE(attrs) on agents.activity_event. "
+          "Grant that permission, then run aut scan to replay them.", file=sys.stderr)
+
+
+def _write_activities(cur: Any, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Ordinary events are immutable; covered turn snapshots may refresh their aggregate counts."""
+    snapshots, ordinary = [], []
+    deferred = []
+    can_update = None
+    for row in rows:
+        if row["kind"] in ("turn", "link") and "revision_sources" in row["attrs"]:
+            snapshots.append(row)
+        else:
+            ordinary.append(row)
+    if ordinary:
+        cur.executemany(_ACTIVITY_SQL, [_params(row, ACTIVITY_COLUMNS) for row in ordinary])
+    for row in sorted(snapshots, key=lambda r: r["event_id"]):
+        _revision_sources(row["attrs"])
+        cur.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (row["event_id"],))
+        # Match event_id alone because older Pi snapshots used the turn's end timestamp.
+        cur.execute("SELECT ts, agent, kind, machine, attrs FROM agents.activity_event "
+                    "WHERE event_id=%s", (row["event_id"],))
+        existing = cur.fetchall()
+        if not existing:
+            cur.executemany(_ACTIVITY_SQL, [_params(row, ACTIVITY_COLUMNS)])
+            continue
+        for ts, agent, kind, machine, attrs in existing:
+            if (agent, kind) != (row["agent"], row["kind"]):
+                raise DeliveryError("turn snapshot event identity conflicts with an existing row")
+        for ts, agent, kind, machine, attrs in existing:
+            if attrs != row["attrs"] and _snapshot_covers(attrs, row["attrs"]):
+                if can_update is None:
+                    cur.execute("SELECT has_column_privilege(current_user, "
+                                "'agents.activity_event', 'attrs', 'UPDATE')", ())
+                    can_update = bool(cur.fetchone()[0])
+                if not can_update:
+                    deferred.append(row)
+                    break
+                cur.execute("UPDATE agents.activity_event SET attrs=%s::jsonb "
+                            "WHERE event_id=%s AND ts=%s",
+                            (json.dumps(row["attrs"], sort_keys=True), row["event_id"], ts))
+    return deferred
+
+
+def _revision_sources(attrs: dict[str, Any]) -> set[str]:
+    sources = attrs.get("revision_sources")
+    if not isinstance(sources, list) or not sources or any(
+            not isinstance(source, str) or not source for source in sources):
+        raise DeliveryError("turn snapshot has invalid revision source coverage")
+    return set(sources)
+
+
+def _snapshot_covers(old: dict[str, Any], new: dict[str, Any]) -> bool:
+    """A shorter or divergent scan cannot replace a more complete turn snapshot."""
+    sources = _revision_sources(new)
+    if "revision_sources" in old and not _revision_sources(old) <= sources:
+        return False
+    for key in ("tool_calls", "tool_errors"):
+        before, after = old.get(key, 0), new.get(key, 0)
+        if type(before) is not int or type(after) is not int or after < before:
+            return False
+    return True
 
 
 def _split(batch: list[Row]) -> tuple[list[UsageEvent], list[ActivityEvent], list[TimeInterval]]:
@@ -117,12 +300,13 @@ def _split(batch: list[Row]) -> tuple[list[UsageEvent], list[ActivityEvent], lis
 
 
 def insert_pg(dsn: str, batch: list[Row], with_usage: bool = True) -> None:
-    """Usage rows, their session rows, and the activity and time rows of the batch in ONE
-    transaction: all land or none does, so a raise leaves the watermark where it was and the batch
-    is re-sent. with_usage=False: the webhook already carried the usage rows."""
+    """Deliver rows together; durably queue covered snapshot changes lacking UPDATE permission.
+    A raise leaves the watermark unchanged, so committed rows retry with stable IDs.
+    with_usage=False: the webhook already carried the usage rows."""
     usage, acts, times = _split(batch)
     rows = [_params(e.to_dict(), COLUMNS) for e in usage] if with_usage else []
     sessions = _session_rows(usage)
+    deferred = []
     with connect(dsn) as conn:
         with conn.cursor() as cur:
             if rows:
@@ -130,15 +314,19 @@ def insert_pg(dsn: str, batch: list[Row], with_usage: bool = True) -> None:
             if sessions:
                 cur.executemany(_SESSION_SQL, sessions)
             if acts:
-                cur.executemany(_ACTIVITY_SQL, [_params(asdict(a), ACTIVITY_COLUMNS) for a in acts])
+                deferred = _write_activities(cur, [asdict(a) for a in acts])
             if times:
                 cur.executemany(_TIME_SQL, [_params(asdict(t), TIME_COLUMNS) for t in times])
         conn.commit()
+    if deferred:
+        _queue_rest([ActivityEvent(**row) for row in deferred])
+        _snapshot_permission_note()
 
 
 def send_activity_rows(dsn: str, acts: list[ActivityEvent]) -> None:
     """Activity rows only (the activity backfill). Idempotent on (event_id, ts); raises on failure."""
-    write_many(dsn, _ACTIVITY_SQL, [_params(asdict(a), ACTIVITY_COLUMNS) for a in acts])
+    if acts:
+        insert_pg(dsn, list(acts))
 
 
 def send_session_rows(dsn: str, events: list[UsageEvent]) -> None:
@@ -187,8 +375,12 @@ class _Sender:
     def __init__(self, cfg: Config) -> None:
         self.cfg = cfg
         self.note_shown = self.fallback_shown = False
+        self.replayed = False
 
     def __call__(self, batch: list[Row]) -> None:
+        if self.cfg.pg_dsn and not self.replayed:
+            replay_outbox(self.cfg)
+            self.replayed = True
         if not batch:
             return
         cfg = self.cfg
@@ -226,12 +418,12 @@ class _Sender:
             return
         if self.cfg.pg_dsn:
             insert_pg(self.cfg.pg_dsn, batch, with_usage=False)
-        elif not self.note_shown:
-            # shortcut: the webhook carries usage only; upgrade when a machine runs
-            # webhook-only (time rows have no backfill, so that machine loses them).
-            self.note_shown = True
-            print("aut: note: session/activity/time rows not sent over the webhook "
-                  "(needs transport.pg_dsn)", file=sys.stderr)
+        else:
+            _queue_rest(batch)
+            if not self.note_shown:
+                self.note_shown = True
+                print(f"aut: note: session/activity/time rows queued privately at {outbox_path()}; "
+                      "set transport.pg_dsn and run aut scan to replay them.", file=sys.stderr)
 
 
 def make_sender(cfg: Config) -> Callable[[list[Row]], None]:

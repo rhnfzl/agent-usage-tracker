@@ -25,7 +25,6 @@ from ._util import MS_PER_S, dict_or_empty, str_or_none
 
 _INTERRUPT = "[Request interrupted"
 _REJECTED = "The user doesn't want to proceed"
-_SEEN_MAX = 20     # open-turn tool ids carried across scans (re-logs land within ~40 lines)
 
 
 class ActivityState(TypedDict, total=False):
@@ -33,7 +32,8 @@ class ActivityState(TypedDict, total=False):
     intr: bool             # the last user-side record was an interrupt
     agg: TurnAgg
     pend: dict[str, list[Any]]  # commit tool_use_id -> pop_pending's list
-    seen: list[str]        # the open turn's newest tool block ids
+    seen: list[str]        # tool block ids of the open turn only
+    queued: list[str]      # hashes of queued prompts not consumed yet
     link: dict[str, Any]
     wt: list[Any]               # [repo_key, branch_key] of the worktree the session is in
     lo: dict[str, Any]               # the open link turn: last record's uid, ts, session and origin
@@ -56,16 +56,14 @@ class Activity:
         self.agg: TurnAgg = s.get("agg") or blank_tool_tally()
         self.pend: dict[str, Any] = s.get("pend") or {}
         # Tool block ids already counted. Within a chunk the set spans turns (Claude Code re-logs
-        # history after a turn ends). Across scans only the open turn's newest _SEEN_MAX ids are
-        # carried, which is where a re-log split by a scan boundary lands; this keeps the state small.
+        # history after a turn ends). Across scans only the open turn's ids are carried, and
+        # turn_duration clears them, so old turns do not accumulate in the watermark.
         # shortcut: subagent files carry none (they never close a turn, so the ids would never be
         # dropped); a subagent block re-logged across a scan boundary can count twice.
         carried_ids = [i for i in (s.get("seen") or []) if isinstance(i, str)]
         self.seen: dict[str, None] = dict.fromkeys(carried_ids)
         self.open_ids: list[str] = carried_ids
-        # shortcut: per chunk only. An enqueue in an earlier scan is not seen; upgrade if the
-        # queued split drifts from a full re-read.
-        self.queued: set[str] = set()
+        self.queued: set[str] = set(s.get("queued") or ())
         self.link = Link(keys, s.get("link") or {})
         self.wt: list[Any] | None = s.get("wt")
         self.lo: dict[str, Any] | None = s.get("lo")
@@ -81,7 +79,9 @@ class Activity:
         if self.pend:
             s["pend"] = self.pend
         if self.open_ids and not self.subagent:
-            s["seen"] = self.open_ids[-_SEEN_MAX:]
+            s["seen"] = self.open_ids
+        if self.queued:
+            s["queued"] = sorted(self.queued)
         if self.link.s:
             s["link"] = self.link.s
         if self.wt:
@@ -218,6 +218,10 @@ class Activity:
 
     def _steer(self, o: dict[str, Any], uid: str, text: str, sess: EventSession) -> ActivityEvent:
         s, ps = text.lstrip(), o.get("promptSource")
+        prompt_hash = text_sha256(text)
+        queued = ps == "queued" or (ps is None and prompt_hash in self.queued)
+        if queued:
+            self.queued.discard(prompt_hash)
         if s.startswith("<bash-input>"):
             via = "bash_input"
         elif s.startswith("<skill>"):
@@ -227,7 +231,7 @@ class Activity:
         elif ps == "suggestion_accepted":
             via = "suggestion_accepted"
         # promptSource says so on newer files; older ones only show the earlier enqueue.
-        elif ps == "queued" or (ps is None and text_sha256(text) in self.queued):
+        elif queued:
             via = "queued"
         else:
             via = "typed"

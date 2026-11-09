@@ -1,0 +1,37 @@
+{
+  "count": 2,
+  "artifacts": [
+    {
+      "date": "2026-11-09",
+      "kind": "status",
+      "slug": "state-reliability-fixes",
+      "title": "State reliability fixes",
+      "summary": "Seventeen stateful mechanisms corrected, with recovery and compatibility checks across the full inventory.",
+      "keywords": [
+        "status",
+        "state",
+        "reliability",
+        "fixes"
+      ],
+      "source": "local",
+      "href": "2026-11-09-status-state-reliability-fixes.html"
+    },
+    {
+      "date": "2026-11-08",
+      "kind": "understanding",
+      "slug": "implicit-state-machines",
+      "title": "Implicit state machines",
+      "summary": "52 stateful workflows and protocols across 11 families, with transitions, persistence, and source links.",
+      "keywords": [
+        "state machines",
+        "watermarks",
+        "delivery",
+        "collectors",
+        "labels",
+        "retries"
+      ],
+      "source": "Local source a46470c",
+      "href": "2026-11-08-understanding-implicit-state-machines.html"
+    }
+  ]
+}

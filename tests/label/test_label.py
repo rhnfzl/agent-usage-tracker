@@ -94,6 +94,7 @@ def test_time_budget_and_error_heartbeat(tmp_path, sink):
         rep = run.run_label(cfg, ["steer_intent"], src=src, backend_for=lambda t, c: ById(),
                             now=NOW)
         assert rep["steer_intent"]["rows"] == 0 and rep["steer_intent"]["cut"] == 1
+        assert sink.scans[-1]["status"] == "error"
 
         class Boom(ById):
             def letter_logits(self, prompt, letters):
@@ -360,28 +361,41 @@ def test_cli_and_config(tmp_path, monkeypatch):
 
 
 @pytest.mark.skipif(os.name == "nt", reason="aut-scan.sh is a POSIX shell script")
-def test_scan_script_runs_label_once_a_day_where_enabled():
+@pytest.mark.parametrize("mode", ["calibrated", "local"])
+def test_scan_script_runs_label_once_a_day_where_enabled(mode):
     with tempfile.TemporaryDirectory() as d:
         home = Path(d)
         conf = home / ".config" / "agent-usage-tracker"
         conf.mkdir(parents=True)
         calls = home / "calls"
         fake = home / "aut"
-        fake.write_text(f'#!/bin/sh\necho "$*" >>"{calls}"\n')
+        fake.write_text(f'''#!{sys.executable}
+import sys
+from pathlib import Path
+sys.path.insert(0, {str(REPO / "src")!r})
+if sys.argv[1:] == ["scan-job"]:
+    from agent_usage_tracker.cli import main
+    sys.exit(main())
+with Path({str(calls)!r}).open("a") as out:
+    out.write(" ".join(sys.argv[1:]) + "\\n")
+sys.exit(3 if sys.argv[1] != "scan" and (Path.home() / "fail-daily").exists() else 0)
+''')
         fake.chmod(0o755)
         env = {"HOME": str(home), "PATH": os.environ.get("PATH", "/usr/bin:/bin")}
         (conf / "scan.env").write_text(f"AUT_BIN={fake}\n")
         script = str(REPO / "packaging" / "launchd" / "aut-scan.sh")
         subprocess.run(["bash", script], env=env, check=True)
         assert "label run" not in calls.read_text()
-        (conf / "scan.env").write_text(f"AUT_BIN={fake}\nAUT_LABEL=1\n")
+        (conf / "scan.env").write_text(
+            f"AUT_BIN={fake}\nAUT_LABEL=1\nAUT_LABEL_MODE={mode}\n")
         subprocess.run(["bash", script], env=env, check=True)
         subprocess.run(["bash", script], env=env, check=True)
         lines = calls.read_text().splitlines()
-        assert lines.count("label run") == 1 and lines.count("outcomes") == 1
-        assert lines.index("outcomes") < lines.index("label run")
+        label_command = "label run --local-estimates" if mode == "local" else "label run"
+        assert lines.count(label_command) == 1 and lines.count("outcomes") == 1
+        assert lines.index("outcomes") < lines.index(label_command)
         # a failed step logs its own exit status, not the one of the timestamp
-        fake.write_text(f'#!/bin/sh\necho "$*" >>"{calls}"\n[ "$1" = scan ] || exit 3\n')
+        (home / "fail-daily").touch()
         for mark in ("label-day", "outcomes-day"):
             (conf / mark).unlink()
         subprocess.run(["bash", script], env=env, check=True)

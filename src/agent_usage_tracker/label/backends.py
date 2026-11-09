@@ -508,6 +508,7 @@ class LlamaServer:
         self._proc: subprocess.Popen[bytes] | None = None
         self._url = ""
         self._log: IO[bytes] | None = None
+        self._sigterm_registered = False
 
     def prepare(self) -> Path:
         """The GGUF, checked before anything starts: an empty -m starts llama-server's router mode,
@@ -542,11 +543,17 @@ class LlamaServer:
             port = s.getsockname()[1]
         self._url = f"http://127.0.0.1:{port}"
         self._log = tempfile.TemporaryFile()     # anonymous: gone when closed, whatever it logged
-        _stop_on_sigterm(self.close)
-        self._proc = proc = subprocess.Popen(  # nosec B603 # the configured binary, no shell
-            [shutil.which(self.binary) or self.binary, "-m", str(path), "--host", "127.0.0.1",
-             "--port", str(port), "-c", "8192", "-np", "1", "--no-kv-unified", "-ngl", "999"],
-            stdout=self._log, stderr=subprocess.STDOUT)
+        if not self._sigterm_registered:
+            _stop_on_sigterm(self.close)
+            self._sigterm_registered = True
+        try:
+            self._proc = proc = subprocess.Popen(  # nosec B603 # configured binary, no shell
+                [shutil.which(self.binary) or self.binary, "-m", str(path), "--host", "127.0.0.1",
+                 "--port", str(port), "-c", "8192", "-np", "1", "--no-kv-unified", "-ngl", "999"],
+                stdout=self._log, stderr=subprocess.STDOUT)
+        except OSError as exc:
+            self.close()
+            raise BackendUnavailable(f"label: could not start llama-server: {exc}") from None
         atexit.register(self.close)
         deadline = time.monotonic() + LLAMA_LOAD_S
         while time.monotonic() < deadline:
@@ -566,6 +573,8 @@ class LlamaServer:
         raise BackendUnavailable(f"label: llama-server did not load {self.file} in {LLAMA_LOAD_S} s")
 
     def distribution(self, req: Request) -> dict[str, float]:
+        if self._proc is not None and self._proc.poll() is not None:
+            self.close()
         if self._proc is None:
             self._start()
         post = urllib.request.Request(self._url + "/v1/systemone",
@@ -589,23 +598,30 @@ class LlamaServer:
     def peak_memory_mb(self) -> float:
         """shortcut: the server's RSS now, at least the file size, since RSS misses Metal buffers;
         not a true peak. Upgrade with a Metal counter from the server."""
-        out = "" if self._proc is None else subprocess.run(  # nosec B603, B607 # fixed argv, no shell
-            ["ps", "-o", "rss=", "-p", str(self._proc.pid)], capture_output=True, text=True).stdout
-        return max(self.size_mb or 0, round(int(out.strip() or 0) * 1024 / 1e6))
+        try:
+            out = "" if self._proc is None else subprocess.run(  # nosec B603, B607 # fixed argv
+                ["ps", "-o", "rss=", "-p", str(self._proc.pid)], capture_output=True,
+                text=True, timeout=5).stdout
+            return max(self.size_mb or 0, round(int(out.strip() or 0) * 1024 / 1e6))
+        except (OSError, subprocess.SubprocessError, ValueError):
+            return self.size_mb or 0
 
     def close(self) -> None:
         proc, self._proc = self._proc, None
-        if proc is None:
-            return
         atexit.unregister(self.close)
-        proc.terminate()
         try:
-            proc.wait(30)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait()
-        if self._log is not None:
-            self._log.close()
+            if proc is not None:
+                if proc.poll() is None:
+                    proc.terminate()
+                try:
+                    proc.wait(30)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait()
+        finally:
+            log, self._log = self._log, None
+            if log is not None:
+                log.close()
 
 
 def encoder_path(task: str) -> Path:

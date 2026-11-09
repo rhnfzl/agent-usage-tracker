@@ -288,21 +288,42 @@ def cursor_context(home: Path, sessions: set[str], want: set[str],
             messages = cursor_cli.messages(con, {i for seq in lists for i in seq})
             if sid in automated_sessions():
                 continue
-            turns = cursor_cli._read_turns(lists, messages, set(), cursor_cli._Activity(keys))
-            for rid, turn in turns.items():
-                prompts = [((), turn.msg)] + [((mid,), pm) for mid, pm in turn.more.values()]
-                for extra, prompt in prompts:
-                    eid = make_event_id("cursor_cli", "steer", "|".join((sid, rid, *extra)))
-                    if eid not in want:
-                        continue
-                    text = text_of(prompt.get("content"))
-                    query = cursor_cli.USER_QUERY.search(text)
-                    value = Context(query[1] if query else text)
-                    # Cursor messages have no trustworthy per-reply timestamp. Omit replies
-                    # rather than attach a later reply or one from another surviving branch.
-                    if eid in out and out[eid] != value:
-                        ambiguous.add(eid)
-                    out[eid] = value
+            first_ids: set[str] = set()
+            listed = {mid for seq in lists for mid in seq}
+            for seq in lists:
+                seen_requests: set[str] = set()
+                for mid in seq:
+                    rid = cursor_cli.request_id(messages.get(mid, {}))
+                    if rid and rid not in seen_requests:
+                        first_ids.add(mid)
+                        seen_requests.add(rid)
+            bases: dict[str, set[str]] = {}
+            prompts: list[tuple[str, str]] = []
+            for mid, prompt in messages.items():
+                rid = cursor_cli.request_id(prompt)
+                if not rid:
+                    continue
+                text = text_of(prompt.get("content"))
+                query = cursor_cli.USER_QUERY.search(text)
+                text = query[1] if query else text
+                # Blob-suffixed IDs identify their text even if a later root starts with that blob.
+                prompts.append((make_event_id("cursor_cli", "steer", f"{sid}|{rid}|{mid}"), text))
+                if mid in first_ids or mid not in listed:
+                    bases.setdefault(rid, set()).add(text)
+            for rid, texts in bases.items():
+                eid = make_event_id("cursor_cli", "steer", f"{sid}|{rid}")
+                if len(texts) != 1:
+                    ambiguous.add(eid)
+                else:
+                    prompts.append((eid, next(iter(texts))))
+            for eid, text in prompts:
+                if eid not in want:
+                    continue
+                value = Context(text)
+                # Reply order is unknown; conflicting base prompt interpretations are omitted too.
+                if eid in out and out[eid] != value:
+                    ambiguous.add(eid)
+                out[eid] = value
         except (sqlite3.DatabaseError, TypeError, ValueError, IndexError) as exc:
             raise CollectorUnavailable("cursor_cli: invalid context store") from exc
         finally:
