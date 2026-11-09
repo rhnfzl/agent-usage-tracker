@@ -144,6 +144,8 @@ Collection does not require models, annotation, or cloud spending.
 Saved local recipes can combine models; they are not automatically fitted or selected for you.
 The MLX backends require Apple silicon. GGUF backends use a separately installed `llama-server`.
 AUT never downloads weights during classification.
+An optional [writing attribute](docs/local-labels.md#optional-writing-attribute) records explicit
+requests for prose deliverables alongside the main work category, using a separate local recipe.
 
 With a saved local recipe:
 

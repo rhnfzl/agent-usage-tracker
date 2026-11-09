@@ -21,7 +21,11 @@ from .core import PROMPT_VER, Backend, Choice, Request, calibrate, data_dir, sof
 from .tasks import TASKS
 
 POLICY = "local-decision-v1"
-TASK_NAMES = {"steer_intent", "work_category", "soft_outcome"}
+TASK_NAMES = {"steer_intent", "work_category", "soft_outcome", "writing_activity"}
+
+
+def writing_policy_path() -> Path:
+    return config_path().with_name("label-local-writing.json")
 
 
 def reserve_label_time(root: Path, now: datetime) -> str:
@@ -62,14 +66,25 @@ def _require(condition: Any) -> None:
 
 
 def load_policy(path: Path | None = None) -> tuple[dict[str, Any], str]:
+    explicit = path is not None
+    path = path or config_path().with_name("label-local.json")
     try:
-        obj = json.loads((path or config_path().with_name("label-local.json")).read_text())
+        obj = json.loads(path.read_text())
         _require(obj["version"] == POLICY and obj["tasks"])
+        if "writing_activity" in obj["tasks"]:
+            _require(explicit and set(obj["tasks"]) == {"writing_activity"})
         for task, row in obj["tasks"].items():
             _require(task in TASK_NAMES)
             _require(row["prompt_ver"] == f"{task}@{TASKS[task].ver}/p{PROMPT_VER}")
             _require(_number(row["minimum_score"]) and 0.5 <= row["minimum_score"] <= 1)
             _require(re.fullmatch(r"[a-f0-9]{64}", row["source_eval_sha256"]))
+            if "binary_decision_threshold" in row:
+                boundary = row["binary_decision_threshold"]
+                _require(TASKS[task].decision == "boolean" and len(TASKS[task].candidates) == 2)
+                _require(isinstance(boundary, dict) and set(boundary) == {"label", "value"})
+                _require(isinstance(boundary["label"], str)
+                         and boundary["label"] in {c for c, _ in TASKS[task].candidates})
+                _require(_number(boundary["value"]) and 1e-6 < boundary["value"] < 1 - 1e-6)
             recipe = row["recipe"]
             _require(re.fullmatch(r"[a-zA-Z0-9._-]{1,100}", recipe["id"]))
             _require(recipe["method"] in {"single", "majority", "stack"})
@@ -99,7 +114,7 @@ def load_policy(path: Path | None = None) -> tuple[dict[str, Any], str]:
         return obj, digest
     except (AssertionError, KeyError, TypeError, ValueError, OSError, AttributeError) as exc:
         raise AutError(
-            "label: invalid or missing label-local.json; local estimates stay disabled"
+            f"label: invalid or missing {path.name}; local estimates stay disabled"
         ) from exc
 
 
@@ -263,6 +278,12 @@ class LocalBackend:
                 or abs(sum(dist.values()) - 1) > 1e-5
             ):
                 raise BackendUnavailable("label: saved local recipe returned invalid scores")
+            if boundary := self.row.get("binary_decision_threshold"):
+                threshold = boundary["value"]
+                scores[item.unit_id] = calibrate(dist, platt={
+                    "yes": boundary["label"], "a": 1.,
+                    "b": -math.log(threshold / (1 - threshold)),
+                })
         self._scores = scores
         self._offset += len(batch)
 

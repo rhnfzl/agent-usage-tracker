@@ -88,6 +88,34 @@ recipe; applying it does not train the models or fit a new combination.
 By default, members run in batches, one model at a time. Scores at or below the saved minimum stay unknown;
 the minimum is at least 0.5. These scores are not validated accuracy estimates.
 
+#### Optional writing attribute
+
+`writing_activity` records whether an episode day's retained human requests ask for a prose
+deliverable, such as README instructions or a report document. It can accompany any work category.
+Routine chat explanations, code changes, prompt changes, messages and tickets do not count.
+The task reads only retained human requests and the last agent reply. Missing human text leaves
+the unit unavailable. It does not classify ActivityWatch blocks or replace work categories.
+
+Opt in by adding `writing_activity` to `label_tasks`. Keep its recipe alone in
+`label-local-writing.json` beside `config.toml`, using the same `local-decision-v1` structure.
+The prompt version is `writing_activity@1/p2`. Keeping this recipe separate preserves existing
+tasks' policy identities and progress. It also supports normal local runs and historical replay:
+
+```sh
+aut label run --local-estimates --task writing_activity
+aut label replay --task writing_activity --since 2026-01-01 --until 2026-02-01
+```
+
+A boolean task's recipe can include `binary_decision_threshold` with `label` and `value`.
+For example, `{"label": "writing", "value": 0.25}` moves the positive decision boundary to 0.25.
+Choose this value on development examples and check separate examples before activation.
+It shifts combined log odds without training the model. `minimum_score` then applies to the
+shifted score; a tie or a score at or below that minimum stays unknown. The shifted score is
+a decision score, not a calibrated probability. Omitting the setting preserves existing scoring.
+Rows use `working.local.writing_activity` and retain provisional, unverified provenance.
+Live writing runs require `--local-estimates`; ordinary calibrated runs leave this task disabled.
+Dashboard consumers must explicitly support this separate attribute before displaying it.
+
 #### Optional parallel scoring
 
 Large local jobs can reuse loaded models across more requests. On macOS, an optional private
