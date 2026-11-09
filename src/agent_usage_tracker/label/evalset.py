@@ -30,7 +30,7 @@ from .tasks import TASKS, Source, units
 T = TypeVar("T")
 # Gold per label, (floor, target), as the gold page shows them. AW titles: 150 per class.
 FLOORS = {"work_category": (30, 50), "steer_intent": (30, 50), "soft_outcome": (30, 30),
-          "aw_title_relevance": (150, 150)}
+          "aw_title_relevance": (150, 150), "writing_activity": (30, 50)}
 FOLDS = 5
 FINAL_PCT = 20               # share of the days kept for `aut label eval --final`
 
