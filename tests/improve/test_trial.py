@@ -98,3 +98,86 @@ def test_interrupt_kills_and_reaps_the_owned_child(tmp_path, monkeypatch):
         if children and children[0].poll() is None:
             children[0].kill()
             children[0].wait()
+
+
+def agent_spec(tmp_path, *, accepts=True):
+    roots = {name: tmp_path / name for name in ("baseline", "candidate")}
+    for root in roots.values():
+        root.mkdir()
+        (root / "input.txt").write_text("untouched")
+    oracle = tmp_path / "accept.py"
+    oracle.write_text("from pathlib import Path\nimport sys\n"
+                      "assert (Path(sys.argv[1])/'input.txt').read_text() == 'done'\n"
+                      + ("" if accepts else "raise SystemExit(1)\n"))
+    script = ("import json,sys; from pathlib import Path; "
+              "assert Path('input.txt').read_text()=='untouched'; "
+              "Path('input.txt').write_text('done'); "
+              "Path(sys.argv[1]).write_text(json.dumps({'tool_calls':2,'interventions':0}))")
+    spec = {"version": 1, "kind": "agent_task",
+        "directories": {k: str(v) for k, v in roots.items()}, "repeats": 2,
+        "files": {k: {"input.txt": hashlib.sha256(b"untouched").hexdigest()} for k in roots},
+        "cases": [{"id": "edit", "argv": [sys.executable, "-c", script, "{metrics_file}"],
+                   "timeout_s": 5, "acceptance_argv": [sys.executable, str(oracle), "{workspace}"],
+                   "acceptance_files": {str(oracle): hashlib.sha256(oracle.read_bytes()).hexdigest()}}]}
+    return spec, roots, oracle
+
+
+def test_agent_trials_use_fresh_inputs_and_independent_acceptance(tmp_path):
+    spec, roots, _ = agent_spec(tmp_path)
+    store = Store(tmp_path / "private")
+    key = store.put("trial_specs", spec)
+    result = run_trial(store, key, execute=True)
+    assert result["complete"] and result["trial_kind"] == "agent_task"
+    assert result["accepted"] == {"baseline": 2, "candidate": 2}
+    rows = [store.get("trial_results", key) for key in store.keys("trial_results")]
+    assert len({row["workspace"] for row in rows}) == 4
+    assert all(row["metrics"] == {"tool_calls": 2, "interventions": 0} for row in rows)
+    assert all((root / "input.txt").read_text() == "untouched" for root in roots.values())
+    assert run_trial(store, key, execute=True)["executed"] == 0
+
+
+def test_agent_exit_success_cannot_replace_independent_acceptance(tmp_path):
+    spec, _, _ = agent_spec(tmp_path, accepts=False)
+    store = Store(tmp_path / "private")
+    report = run_trial(store, store.put("trial_specs", spec), execute=True)
+    assert report["accepted"] == {"baseline": 0, "candidate": 0}
+    assert all(not store.get("trial_results", key)["acceptance"]["accepted"]
+               for key in store.keys("trial_results"))
+
+
+def test_agent_trial_rejects_changed_or_unprotected_acceptance_code(tmp_path):
+    spec, roots, oracle = agent_spec(tmp_path)
+    store = Store(tmp_path / "private")
+    oracle.write_text("print('changed')")
+    with pytest.raises(AutError, match="acceptance.*changed"):
+        run_trial(store, store.put("trial_specs", spec), execute=True)
+    spec["cases"][0]["acceptance_files"] = {str(roots["baseline"] / "input.txt"):
+        hashlib.sha256(b"untouched").hexdigest()}
+    spec["cases"][0]["acceptance_argv"] = [sys.executable,
+        str(roots["baseline"] / "input.txt"), "{workspace}"]
+    with pytest.raises(AutError, match="outside"):
+        run_trial(store, store.put("trial_specs", spec), execute=True)
+
+
+def test_agent_cannot_poison_independent_python_acceptance_imports(tmp_path):
+    spec, _, _ = agent_spec(tmp_path, accepts=False)
+    poison = ("Path('src').mkdir(); "
+              "Path('src/sitecustomize.py').write_text('import os; os._exit(0)'); ")
+    spec["cases"][0]["argv"][2] = spec["cases"][0]["argv"][2].replace(
+        "Path(sys.argv[1])", poison + "Path(sys.argv[1])")
+    store = Store(tmp_path / "private")
+    assert run_trial(store, store.put("trial_specs", spec), execute=True)["accepted"] == {
+        "baseline": 0, "candidate": 0}
+
+
+def test_invalid_metrics_are_terminal_failures_and_not_rerun(tmp_path):
+    spec, _, _ = agent_spec(tmp_path)
+    spec["cases"][0]["argv"][2] = spec["cases"][0]["argv"][2].replace(
+        "'tool_calls':2", "'tool_calls':'invented'")
+    store = Store(tmp_path / "private")
+    key = store.put("trial_specs", spec)
+    first = run_trial(store, key, execute=True)
+    assert first["complete"] and first["accepted"] == {"baseline": 0, "candidate": 0}
+    assert all(store.get("trial_results", k)["validation_error"]
+               for k in store.keys("trial_results"))
+    assert run_trial(store, key, execute=True)["executed"] == 0

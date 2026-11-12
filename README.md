@@ -190,6 +190,7 @@ aut improve status
 
 Local judging uses cached models through the existing label extra.
 Read the [private improvement guide](docs/improvement.md) before judging, staging changes, or executing trials.
+The guide covers executable judge references, independent agent-task acceptance, and stable wheel installations.
 
 ## Scheduling
 

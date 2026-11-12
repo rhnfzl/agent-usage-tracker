@@ -45,6 +45,8 @@ Diagnosis never downloads weights or calls a remote model.
 Apple silicon and a working MLX runtime are required.
 The process acquires AUT's shared `replay-model.lock` without waiting and checks memory headroom.
 Busy inference leaves work deferred.
+Both CLI commands, `diagnose` and `run`, enforce a hard subprocess deadline.
+The Python `diagnose` function checks elapsed time between calls; callers must provide a deadline wrapper when needed.
 
 Separate criteria cover avoidable recovery and completion supported by evidence.
 Cases mix failed and clean user attempts. Each attempt ends at a recorded turn boundary or the next prompt.
@@ -66,6 +68,9 @@ Its output must use the expected schema and cite existing event IDs.
 It cannot supply executable commands or change files.
 Incomplete completion evidence remains unknown.
 All model results are provisional estimates, including agreement between models.
+An explanatory model can veto a decision, but cannot upgrade model disagreement into pass or fail.
+Invalid reviews retain their bounded, redacted responses in private `review_attempts` records.
+One schema repair is allowed. Both attempts count against the model-call and time budgets.
 They are not human labels or calibrated accuracy measurements.
 Ask a human only when evidence cannot settle a required fact, authority, or preference.
 The private `inbox.html` shows escaped review text and case identifiers.
@@ -130,6 +135,55 @@ Trial environments exclude inherited secrets and use the condition's `src` direc
 Command checks do not establish an agent behaviour or productivity improvement.
 Those claims need controlled agent tasks, untouched evaluation cases, repeated trials, and fresh follow-up work.
 
+### Agent tasks
+
+Set `kind` to `agent_task` for a trial with independent acceptance checks.
+Provide a nonempty `files` hash map for both conditions. Each execution gets a fresh copy of only those files.
+Each case also needs `acceptance_argv` and `acceptance_files`.
+The latter maps absolute acceptance-script and input paths to their SHA-256 hashes.
+Keep acceptance code outside both templates and the agent's writable workspace.
+The runner checks these hashes before and after acceptance execution.
+Acceptance runs outside the writable workspace without its Python import path.
+Use `{workspace}` as a complete acceptance argv element to pass the workspace path.
+Malformed metrics and acceptance failures remain terminal trial results on resume.
+
+The trusted agent runner receives `{metrics_file}` as one complete argv element.
+This path sits outside the agent workspace. The runner writes a JSON object there:
+
+```json
+{"tool_calls": 3, "interventions": 0}
+```
+
+Capture these values from the agent runner. Do not ask the agent to grade its own activity.
+Command success alone cannot pass a task. Independent acceptance and valid metrics must also succeed.
+Results retain each workspace, execution, acceptance check, elapsed time, and metrics.
+Condition summaries include failed runs and missing metrics. They do not establish an improvement automatically.
+
+## Validate the judges
+
+Use executable facts where possible. Freeze reference evidence and oracle inputs before observing model results.
+A reference specification contains `version: 1`, `split` (`development` or `holdout`), and `references`.
+Each reference has `evidence_sha256`, `rubric`, and `expected` (`pass`, `fail`, or `unknown`).
+The evidence digest covers the case's events, coverage, and omitted-event count using AUT's canonical JSON.
+Provide `oracle_argv`, absolute `oracle_cwd`, `oracle_files` (absolute path/hash map), and `timeout_s`.
+Include `{reference_input}` as a complete oracle argv element.
+The runner supplies an immutable JSON file containing evidence and rubric, without expected labels.
+The trusted oracle checks this evidence independently and returns a `references` array.
+Each result includes `rubric`, `expected`, and `evidence_sha256_parts` (four 16-character strings).
+The digest parts preserve exact identity through text redaction. Their order and labels must match the frozen references.
+Oracle inputs and the supplied evidence are checked again after execution.
+
+```bash
+aut improve validate --spec-file /private/references.json --diagnosis DIAGNOSIS_ID
+aut improve validate --spec-file /private/references.json --diagnosis DIAGNOSIS_ID --execute
+```
+
+Execution requires explicit opt-in because oracle commands are executable operator input.
+Reports separate detected failures, missed failures, false alarms, abstentions, and missing judgments.
+Abstaining on a known failure counts as a missed failure. Missing judgments prevent rate calculations.
+Synthetic reference results do not measure real-work accuracy or grant patch authority.
+The split label does not prove independence. Any suite used to tune prompts becomes development data.
+
 ## Run a bounded cycle
 
 ```bash
@@ -148,3 +202,26 @@ Schedule the command with an existing operating-system timer.
 Use an absolute executable and explicit private store path.
 Keep budgets small until review quality and operating costs are measured.
 Evidence remains until deliberately removed. Configure backups and retention separately.
+
+### Install a stable runtime
+
+Build a wheel, then install it outside the development checkout using cached dependencies:
+
+```bash
+uv build --wheel
+python -m agent_usage_tracker.improve.runtime \
+  --wheel dist/agent_usage_tracker-0.1.0-py3-none-any.whl \
+  --store "$HOME/.local/share/aut/improve" \
+  --runtime-root "$HOME/.local/share/aut/improve-runtime"
+```
+
+Use `--constraints /private/requirements.lock` to keep dependency versions fixed across builds.
+The installer excludes the old project-wheel reference from dependency constraints.
+It verifies the installed module and wheel hash using Python's isolated mode.
+It saves the resolved dependency lock and refuses unmanaged or changed existing runtimes.
+Installation is offline and leaves older releases available for rollback.
+
+Point the operating-system timer at the returned `python` path with `-I -m agent_usage_tracker.cli`.
+Use the private store as its working directory. The worker no longer depends on a source-checkout path.
+Verify an installed run before changing the timer. Preserve the previous timer configuration for rollback.
+Local MLX inference still requires Apple silicon. Base commands need the existing cross-platform CI matrix before broader distribution.

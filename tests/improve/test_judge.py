@@ -192,3 +192,90 @@ def test_failure_session_also_supplies_a_clean_complete_control(tmp_path):
     control = next(row for row in rows if row["trigger"] == "control")
     assert control["coverage"]["complete"]
     assert {event["id"] for event in control["events"]} == {"p2", "a2", "b2"}
+
+
+def test_expected_exploration_cannot_justify_an_avoidable_recovery_failure():
+    case = {"events": [{"id": "result", "kind": "result"}]}
+    with pytest.raises(AutError, match="cause"):
+        validate_review(case, {"verdict": "fail", "cause": "expected_exploration",
+            "evidence_ids": ["result"], "rationale": "A bounded useful retry."},
+            rubric="avoidable_recovery")
+
+
+@pytest.mark.parametrize("review_verdict", ["pass", "fail"])
+def test_explanatory_model_cannot_upgrade_decision_model_disagreement(
+        tmp_path, monkeypatch, review_verdict):
+    from types import SimpleNamespace
+    from agent_usage_tracker.improve import judge
+
+    monkeypatch.setattr(judge, "config_path", lambda: tmp_path / "config/config.toml")
+    monkeypatch.setattr(judge, "memory_guard", lambda: None)
+    monkeypatch.setattr(judge, "MlxLetter", lambda name: SimpleNamespace(
+        model_rev="one", prepare=lambda: None, close=lambda: None))
+    monkeypatch.setattr(judge, "_llm_review", lambda *args: {
+        "verdict": review_verdict, "cause": "model", "rationale": "One model's opinion",
+        "evidence_ids": ["p", "r"]})
+
+    class Backend:
+        model_rev = "one"
+
+        def __init__(self, name):
+            self.model_id = name
+
+        def distribution(self, request):
+            return {"pass": .99 if self.model_id == "one" else .005,
+                    "unknown": .005 if self.model_id == "one" else .99, "fail": .005}
+
+    store = Store(tmp_path / "private")
+    sid = store.put("sessions", {"agent": "codex", "session_id": "s", "origin": "interactive",
+        "coverage": {"complete": True}, "events": [
+            {"id": "p", "kind": "prompt", "text": "Check it", "call_id": ""},
+            {"id": "r", "kind": "reply", "text": "Checked", "call_id": ""}]})
+    audit = store.put("audits", {"session_ids": [sid]})
+    result = judge.diagnose(store, audit, models=("one", "two"), explain_model="local",
+                            backend_for=Backend)
+    assert result["verdicts"] == {"pass": 0, "fail": 0, "unknown": 2}
+
+
+def test_review_schema_repair_respects_call_budget_and_preserves_errors(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from agent_usage_tracker.improve import judge
+
+    monkeypatch.setattr(judge, "RUBRICS", {"avoidable_recovery": ("Question", "Definitions")})
+    monkeypatch.setattr(judge, "config_path", lambda: tmp_path / "config/config.toml")
+    monkeypatch.setattr(judge, "memory_guard", lambda: None)
+    monkeypatch.setattr(judge, "MlxLetter", lambda name: SimpleNamespace(
+        model_rev="one", prepare=lambda: None, close=lambda: None))
+    attempts = []
+
+    def review(*args):
+        attempts.append(args)
+        if len(attempts) == 1:
+            raise AutError("invalid citations\nrejected local response")
+        return {"verdict": "fail", "cause": "model", "rationale": "Repeated known failure",
+                "evidence_ids": ["p", "r"]}
+
+    monkeypatch.setattr(judge, "_llm_review", review)
+
+    class Backend:
+        model_rev = "one"
+
+        def __init__(self, name):
+            self.model_id = name
+
+        def distribution(self, request):
+            return {"pass": .005, "fail": .99, "unknown": .005}
+
+    store = Store(tmp_path / "private")
+    sid = store.put("sessions", {"agent": "codex", "session_id": "s", "origin": "interactive",
+        "coverage": {"complete": True}, "events": [
+            {"id": "p", "kind": "prompt", "text": "Check it", "call_id": ""},
+            {"id": "r", "kind": "reply", "text": "Checked", "call_id": ""}]})
+    audit = store.put("audits", {"session_ids": [sid]})
+    result = judge.diagnose(store, audit, models=("one", "two"), explain_model="local",
+                            max_calls=4, backend_for=Backend)
+    assert result["calls"] == 4
+    assert result["verdicts"]["fail"] == 1
+    judgment = store.get("judgments", result["judgment_ids"][0])
+    assert judgment["review_errors"] == ["invalid citations\nrejected local response"]
+    assert attempts[1][-1] == "invalid citations"

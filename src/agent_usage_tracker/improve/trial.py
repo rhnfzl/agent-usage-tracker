@@ -4,10 +4,15 @@ from __future__ import annotations
 
 import os
 import random
+import json
+import shutil
 import signal
+import statistics
+import sys
 import subprocess
 import threading
 import time
+import uuid
 from pathlib import Path
 from types import FrameType
 from typing import Any
@@ -19,10 +24,13 @@ from .proposals import file_digest
 from .store import Store, digest
 
 
-def command(argv: list[str], cwd: Path, timeout_s: float) -> dict[str, Any]:
+def command(argv: list[str], cwd: Path, timeout_s: float, *,
+            source_pythonpath: bool = True) -> dict[str, Any]:
     env = {k: v for k, v in os.environ.items()
            if k in {"PATH", "HOME", "LANG", "LC_ALL", "TZ", "SYSTEMROOT", "TEMP", "TMP"}}
-    env.update(PYTHONPATH=str(cwd / "src"), PYTHONDONTWRITEBYTECODE="1", HF_HUB_OFFLINE="1")
+    env.update(PYTHONDONTWRITEBYTECODE="1", HF_HUB_OFFLINE="1")
+    if source_pythonpath:
+        env["PYTHONPATH"] = str(cwd / "src")
     started = time.monotonic()
     process: subprocess.Popen[bytes] | None = None
     timed_out = False
@@ -93,7 +101,7 @@ def _spec(store: Store, spec_id: str) -> dict[str, Any]:
     spec = store.get("trial_specs", spec_id)
     try:
         directories = spec["directories"]
-        if spec["version"] != 1 or spec["kind"] != "command_check" \
+        if spec["version"] != 1 or spec["kind"] not in {"command_check", "agent_task"} \
                 or set(directories) != {"baseline", "candidate"}:
             raise ValueError
         roots = [Path(value).resolve() for value in directories.values()]
@@ -116,9 +124,85 @@ def _spec(store: Store, spec_id: str) -> dict[str, Any]:
                 raise ValueError
             if type(case["timeout_s"]) not in (int, float) or not 0 < case["timeout_s"] <= 300:
                 raise ValueError
+            if spec["kind"] == "agent_task":
+                if not all(spec.get("files", {}).get(name) for name in directories):
+                    raise ValueError
+                accept = case["acceptance_argv"]
+                if not isinstance(accept, list) or not accept or any(
+                        not isinstance(arg, str) or "\0" in arg for arg in accept):
+                    raise ValueError
+                if "{metrics_file}" not in argv or not case["acceptance_files"]:
+                    raise ValueError
+                _acceptance_inputs(case, roots)
     except (KeyError, TypeError, ValueError) as exc:
         raise AutError("improve: invalid trusted trial specification") from exc
     return spec
+
+
+def _acceptance_inputs(case: dict[str, Any], roots: list[Path], cwd: Path | None = None) -> None:
+    for index, arg in enumerate(case["acceptance_argv"]):
+        path = Path(arg)
+        if not path.is_absolute() and cwd is None:
+            continue
+        path = ((cwd or Path.cwd()) / path).resolve()
+        if path.is_file() and not (
+            index == 0 and path.resolve() == Path(sys.executable).resolve()
+        ) and path not in {Path(p).resolve() for p in case["acceptance_files"]}:
+            raise AutError("improve: acceptance command input is not frozen")
+    for name, expected in case["acceptance_files"].items():
+        path = Path(name)
+        if not path.is_absolute() or any(path.resolve().is_relative_to(root) for root in roots):
+            raise AutError("improve: acceptance inputs must stay outside agent templates")
+        if not path.is_file() or file_digest(path) != expected:
+            raise AutError("improve: acceptance input changed")
+
+
+def _agent_run(store: Store, spec: dict[str, Any], case: dict[str, Any], condition: str,
+               key: str, deadline: float) -> dict[str, Any]:
+    source = Path(spec["directories"][condition]).resolve()
+    directory = store.root / "agent_runs" / key / uuid.uuid4().hex
+    workspace = directory / "workspace"
+    workspace.mkdir(mode=0o700, parents=True)
+    for name, expected in spec["files"][condition].items():
+        src, target = (source / name).resolve(), workspace / name
+        if not src.is_relative_to(source) or not target.resolve().is_relative_to(workspace):
+            raise AutError("improve: agent fixture path escapes its workspace")
+        if file_digest(src) != expected:
+            raise AutError("improve: agent fixture changed")
+        target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        shutil.copyfile(src, target)
+        target.chmod(src.stat().st_mode & 0o700)
+    metrics_path = directory / "metrics.json"
+    argv = [str(metrics_path) if arg == "{metrics_file}" else arg for arg in case["argv"]]
+    result = command(argv, workspace, min(case["timeout_s"], max(.01, deadline-time.monotonic())))
+    execution_id = store.put("agent_executions", {"workspace": str(workspace), **result})
+    acceptance = None
+    metrics = None
+    error = None
+    try:
+        roots = [Path(p).resolve() for p in spec["directories"].values()]
+        _acceptance_inputs(case, roots, directory)
+        accept_argv = [str(workspace) if arg == "{workspace}" else arg
+                       for arg in case["acceptance_argv"]]
+        acceptance = command(accept_argv, directory,
+                             min(30, max(.01, deadline-time.monotonic())), source_pythonpath=False)
+        _acceptance_inputs(case, roots, directory)
+        if metrics_path.is_file():
+            if metrics_path.stat().st_size > 16384 or metrics_path.is_symlink():
+                raise ValueError
+            metrics = json.loads(metrics_path.read_text())
+            if set(metrics) != {"tool_calls", "interventions"} or any(
+                    type(value) is not int or value < 0 for value in metrics.values()):
+                raise ValueError
+        else:
+            raise ValueError("missing agent metrics")
+    except (AutError, OSError, ValueError, TypeError, AttributeError) as exc:
+        error = redact(str(exc)) or "invalid captured agent metrics"
+        metrics = None
+    return {**result, "execution_id": execution_id, "workspace": str(workspace),
+            "acceptance": acceptance, "metrics": metrics, "validation_error": error,
+            "accepted": bool(result["accepted"] and acceptance and acceptance["accepted"]
+                             and metrics is not None and error is None)}
 
 
 def run_trial(store: Store, spec_id: str, *, execute: bool = False,
@@ -158,8 +242,10 @@ def run_trial(store: Store, spec_id: str, *, execute: bool = False,
                             target = (root / relative).resolve()
                             if not target.is_relative_to(root) or file_digest(target) != expected:
                                 raise AutError("improve: trial input changed; prepare a new specification")
-                        result = {**identity, "evaluation_key": key,
-                                  **command(case["argv"], root, min(case["timeout_s"], remaining))}
+                        outcome = (_agent_run(store, spec, case, condition, key, deadline)
+                                   if spec["kind"] == "agent_task" else
+                                   command(case["argv"], root, min(case["timeout_s"], remaining)))
+                        result = {**identity, "evaluation_key": key, **outcome}
                         store.put("trial_results", result)
                         results[key] = result
                         executed += 1
@@ -168,6 +254,15 @@ def run_trial(store: Store, spec_id: str, *, execute: bool = False,
               "accepted": {condition: sum(row["condition"] == condition and row["accepted"]
                                           for row in results.values()) for condition in directories},
               "timeouts": sum(row["timeout"] for row in results.values()),
-              "trial_kind": "command_check", "agent_behaviour_verified": False}
+              "trial_kind": spec["kind"], "agent_behaviour_verified": False}
+    if spec["kind"] == "agent_task":
+        report["conditions"] = {name: {
+            "runs": len(rows := [r for r in results.values() if r["condition"] == name]),
+            "median_elapsed_s": statistics.median([r["elapsed_s"] for r in rows]) if rows else None,
+            "tool_calls": sum(r["metrics"]["tool_calls"] for r in rows if r.get("metrics")),
+            "interventions": sum(r["metrics"]["interventions"] for r in rows if r.get("metrics")),
+            "missing_metrics": sum(r.get("metrics") is None for r in rows),
+        } for name in directories}
+        report["improvement_established"] = False
     store.append("trial", **report)
     return report

@@ -10,11 +10,11 @@ from typing import Any
 
 from ..config import AutError
 from ..label.core import data_dir
-from .judge import diagnose
 from .proposals import prepare, stage
-from .schedule import inbox, run_once
+from .schedule import run_once
 from .store import Store, audit
 from .trial import run_trial
+from .validation import validate
 
 
 def register(sub: Any) -> None:
@@ -51,6 +51,10 @@ def register(sub: Any) -> None:
     source.add_argument("--spec-file", type=Path)
     trial.add_argument("--execute", action="store_true", help="execute the trusted argv cases")
     trial.add_argument("--budget-s", type=int, default=600)
+    reference = actions.add_parser("validate", help="check judgments against executable references")
+    reference.add_argument("--spec-file", type=Path, required=True)
+    reference.add_argument("--diagnosis", required=True)
+    reference.add_argument("--execute", action="store_true", help="execute the trusted reference oracle")
     actions.add_parser("status", help="show local progress counts without trace text")
 
 
@@ -60,10 +64,10 @@ def run(args: argparse.Namespace) -> None:
     if args.improve_cmd == "audit":
         result = audit(store, Path.home(), days=args.days, limit=args.limit, project=args.project)
     elif args.improve_cmd == "diagnose":
-        result = diagnose(store, args.audit, models=tuple(args.models.split(",")),
-                          limit=args.limit, budget_s=args.budget_s, max_calls=args.max_calls,
+        report = run_once(store, audit_id=args.audit, models=tuple(args.models.split(",")),
+                          case_limit=args.limit, budget_s=args.budget_s, max_calls=args.max_calls,
                           explain_model=args.explain_model)
-        inbox(store, result["judgment_ids"])
+        result = report.get("diagnosis", report)
     elif args.improve_cmd == "propose":
         key = prepare(store, args.case, args.scope, args.target,
                       args.before_file.read_text(), args.after_file.read_text())
@@ -83,6 +87,13 @@ def run(args: argparse.Namespace) -> None:
         result = run_once(store, days=args.days, limit=args.limit, case_limit=args.case_limit,
                           budget_s=args.budget_s, max_calls=args.max_calls,
                           models=tuple(args.models.split(",")), explain_model=args.explain_model)
+    elif args.improve_cmd == "validate":
+        try:
+            value = json.loads(args.spec_file.read_text())
+        except (OSError, ValueError) as exc:
+            raise AutError("improve: reference specification is not readable JSON") from exc
+        key = store.put("reference_specs", value)
+        result = validate(store, key, args.diagnosis, execute=args.execute)
     else:
         kinds = ("audits", "sessions", "cases", "judgments", "proposals", "trial_results")
         result = {"records": {kind: len(store.keys(kind)) for kind in kinds},

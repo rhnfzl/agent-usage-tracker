@@ -1,4 +1,7 @@
 import sys
+import json
+
+import pytest
 
 from agent_usage_tracker.improve.schedule import run_once
 from agent_usage_tracker.improve.store import Store
@@ -40,6 +43,19 @@ def test_failed_worker_preserves_its_diagnostic_output_privately(tmp_path, monke
     assert store.get("cycle_errors", result["error_id"])["output"] == failure["output"]
 
 
+def test_worker_does_not_require_a_source_checkout_as_working_directory(tmp_path, monkeypatch):
+    from agent_usage_tracker.improve import schedule
+
+    store = Store(tmp_path / "private")
+
+    def launch(argv, cwd, timeout):
+        assert cwd == store.root
+        return {"accepted": False, "timeout": True, "exit_code": -9}
+
+    monkeypatch.setattr(schedule, "command", launch)
+    assert run_once(store, budget_s=1)["status"] == "timeout"
+
+
 def test_inbox_shows_only_current_judgments_and_escapes_model_text(tmp_path):
     from agent_usage_tracker.improve.schedule import inbox
 
@@ -76,3 +92,18 @@ def test_worker_resumes_its_frozen_audit_after_a_budget_stop(tmp_path, monkeypat
     second = schedule._worker(store, policy_id, "second")
     assert second["status"] == "ok"
     assert second["audit"]["audit_id"] == audit_id
+
+
+def test_direct_diagnosis_preserves_the_scheduled_pending_audit(tmp_path, monkeypatch):
+    from agent_usage_tracker.improve import schedule
+
+    store = Store(tmp_path / "private")
+    audit_id = store.put("audits", {"session_ids": []})
+    pending = {"policy_id": "scheduled", "audit": {"audit_id": "other"}}
+    (store.root / "pending_cycle.json").write_text(json.dumps(pending))
+    policy = store.put("cycle_policies", {"audit_id": audit_id, "budget_s": 5,
+        "case_limit": 4, "max_calls": 4, "models": ["local"], "explain_model": None})
+    monkeypatch.setattr(schedule, "audit", lambda *a, **kw: pytest.fail("Direct diagnosis rescanned"))
+    monkeypatch.setattr(schedule, "diagnose", lambda *a, **kw: {"complete": True})
+    assert schedule._worker(store, policy, "direct")["audit"] == {"audit_id": audit_id}
+    assert json.loads((store.root / "pending_cycle.json").read_text()) == pending

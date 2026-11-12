@@ -45,19 +45,22 @@ def inbox(store: Store, judgment_ids: list[str]) -> None:
 def run_once(store: Store, *, days: int = 7, limit: int = 30, case_limit: int = 12,
              budget_s: int = 300, max_calls: int = 40,
              models: tuple[str, ...] = ("pplx-decider-flash", "clef-flash"),
-             explain_model: str | None = None) -> dict[str, Any]:
+             explain_model: str | None = None, audit_id: str | None = None) -> dict[str, Any]:
     if not 1 <= budget_s <= 3600:
         raise AutError("improve: cycle budget must be 1..3600 seconds")
     policy = {"version": 1, "days": days, "limit": limit, "case_limit": case_limit,
               "budget_s": budget_s, "max_calls": max_calls, "models": list(models),
               "explain_model": explain_model}
+    if audit_id is not None:
+        store.get("audits", audit_id)
+        policy["audit_id"] = audit_id
     key = store.put("cycle_policies", policy)
     run_id = uuid.uuid4().hex
     try:
         with _locked(store.root / "cycle", blocking=False):
-            argv = [sys.executable, "-m", "agent_usage_tracker.improve.schedule", "--root",
+            argv = [sys.executable, "-I", "-m", "agent_usage_tracker.improve.schedule", "--root",
                     str(store.root), "--policy", key, "--run-id", run_id]
-            result = command(argv, Path(__file__).resolve().parents[3], budget_s)
+            result = command(argv, store.root, budget_s)
             report: dict[str, Any] = {"status": "timeout" if result["timeout"] else "error",
                                       "policy_id": key, "exit_code": result["exit_code"]}
             if not result["accepted"]:
@@ -84,7 +87,11 @@ def _worker(store: Store, policy_id: str, run_id: str) -> dict[str, Any]:
     started = time.monotonic()
     pending_path = store.root / "pending_cycle.json"
     pending = json.loads(pending_path.read_text()) if pending_path.exists() else {}
-    if pending.get("policy_id") == policy_id and pending.get("audit"):
+    provided = policy.get("audit_id")
+    if provided:
+        store.get("audits", provided)
+        frozen = {"audit_id": provided}
+    elif pending.get("policy_id") == policy_id and pending.get("audit"):
         frozen = pending["audit"]
         store.get("audits", frozen["audit_id"])
     else:
@@ -96,7 +103,7 @@ def _worker(store: Store, policy_id: str, run_id: str) -> dict[str, Any]:
                       max_calls=policy["max_calls"], explain_model=policy["explain_model"])
     report = {"status": "ok" if judged["complete"] else "deferred",
               "policy_id": policy_id, "audit": frozen, "diagnosis": judged}
-    if judged["complete"]:
+    if judged["complete"] and not provided:
         atomic_write_text(pending_path, json.dumps({"policy_id": policy_id, "audit": None}) + "\n")
     atomic_write_text(store.root / "worker_result.json",
                       json.dumps({"run_id": run_id, "report": report}) + "\n")
