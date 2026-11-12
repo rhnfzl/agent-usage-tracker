@@ -252,6 +252,38 @@ def test_codex_activity() -> None:
     _run(check)
 
 
+@pytest.mark.parametrize("record_type,output", [
+    ("function_call_output", '{"exit_code": 2, "output": "failed"}'),
+    ("function_call_output", "Process exited with code 2\nOutput:\nfailed"),
+    ("custom_tool_call_output", '{"isError": true, "content": []}'),
+])
+def test_cli_result_errors_reach_turn_metrics(tmp_path, record_type, output):
+    path = tmp_path / ".codex/sessions/rollout-cli-result.jsonl"
+    _write_jsonl(path, [_meta("s", source="cli"),
+        _ev(T(0), type="task_started", turn_id="turn"),
+        _call(T(1), "exec_command", '{"cmd": "false"}', call_id="call"),
+        {"type": "response_item", "timestamp": T(2), "payload": {
+            "type": record_type, "call_id": "call", "output": output}},
+        _ev(T(3), type="task_complete", turn_id="turn")])
+    [turn] = _acts(_collect(codex, tmp_path), "turn")
+    assert (turn.attrs["tool_calls"], turn.attrs["tool_errors"]) == (1, 1)
+
+
+def test_cli_and_desktop_failure_copies_count_once_across_scans(tmp_path):
+    path = tmp_path / ".codex/sessions/rollout-error-copy.jsonl"
+    result = {"type": "response_item", "timestamp": T(2), "payload": {
+        "type": "function_call_output", "call_id": "call", "output": '{"isError": true}'}}
+    _write_jsonl(path, [_meta("s", source="vscode"),
+        _ev(T(0), type="task_started", turn_id="turn"),
+        _call(T(1), "lookup", '{}', call_id="call", namespace="mcp__test"), result])
+    wm = {}
+    _collect(codex, tmp_path, wm)
+    _append(path, [result, _item(T(3), "turn", type="McpToolCall", id="call",
+        arguments={}, status="failed"), _ev(T(4), type="task_complete", turn_id="turn")])
+    [turn] = _acts(_collect(codex, tmp_path, wm), "turn")
+    assert (turn.attrs["tool_calls"], turn.attrs["tool_errors"]) == (1, 1)
+
+
 def test_codex_carries_across_scans() -> None:
     # The scan boundary falls mid-turn, and the second scan resumes from a watermark saved before
     # identity was carried (no "meta"): the first line is re-read for it.

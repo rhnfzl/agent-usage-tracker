@@ -245,10 +245,32 @@ class TurnAgg(TypedDict):
     run: int               # length of the current run of identical calls
     max: int               # longest such run
     mcp_ids: NotRequired[list[Any]]   # codex: MCP call ids, to match the item Desktop logs again
+    error_ids: NotRequired[list[str]]
 
 
 def blank_tool_tally() -> TurnAgg:
     return {"calls": 0, "errors": 0, "hooks": 0, "by": {}, "last": None, "run": 0, "max": 0}
+
+
+def result_status(value: object, error: object = None) -> str:
+    """A missing result status is unknown, not evidence that a command worked."""
+    if error is True:
+        return "error"
+    parsed: Any = value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except ValueError:
+            match = re.search(r"^Process exited with code (-?\d+)\s*$", value, re.M)
+            if match:
+                return "success" if int(match[1]) == 0 else "error"
+    if isinstance(parsed, dict):
+        code = parsed.get("exit_code")
+        if type(code) is int:
+            return "success" if code == 0 else "error"
+        if parsed.get("isError") is True:
+            return "error"
+    return "success" if error is False else "unknown"
 
 
 def add_call(agg: TurnAgg, name: str, args: object) -> None:
