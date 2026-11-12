@@ -138,6 +138,8 @@ aut improve run --days 7 --limit 30 --case-limit 12 --budget-s 300 --max-calls 4
 
 This freezes evidence and resumes diagnosis in a subprocess with a hard deadline.
 Overlapping cycles return `busy`. Contention, exhausted budgets, and failures remain visible.
+Failed workers retain bounded, redacted diagnostics in private `cycle_errors` records.
+The command returns their identifiers without printing captured trace text.
 An interrupted or budget-limited cycle resumes its frozen audit before collecting another batch.
 The process writes `last_cycle.json` and refreshes `inbox.html`.
 It does not apply proposals, execute trial commands, or upload evidence.

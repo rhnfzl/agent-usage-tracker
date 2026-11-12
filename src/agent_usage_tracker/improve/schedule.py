@@ -60,6 +60,9 @@ def run_once(store: Store, *, days: int = 7, limit: int = 30, case_limit: int = 
             result = command(argv, Path(__file__).resolve().parents[3], budget_s)
             report: dict[str, Any] = {"status": "timeout" if result["timeout"] else "error",
                                       "policy_id": key, "exit_code": result["exit_code"]}
+            if not result["accepted"]:
+                report["error_id"] = store.put("cycle_errors", {
+                    "run_id": run_id, "policy_id": key, **result})
             if result["accepted"]:
                 try:
                     saved = json.loads((store.root / "worker_result.json").read_text())

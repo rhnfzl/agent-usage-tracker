@@ -27,6 +27,19 @@ def test_cycle_records_timeout_and_leaves_existing_evidence(tmp_path, monkeypatc
     assert (store.root / "last_cycle.json").exists()
 
 
+def test_failed_worker_preserves_its_diagnostic_output_privately(tmp_path, monkeypatch):
+    from agent_usage_tracker.improve import schedule
+
+    store = Store(tmp_path / "private")
+    failure = {"accepted": False, "timeout": False, "exit_code": 2,
+               "output": "model weights could not be read", "output_truncated": False}
+    monkeypatch.setattr(schedule, "command", lambda *args: failure)
+    result = run_once(store, budget_s=1)
+    assert result["status"] == "error"
+    assert "output" not in result
+    assert store.get("cycle_errors", result["error_id"])["output"] == failure["output"]
+
+
 def test_inbox_shows_only_current_judgments_and_escapes_model_text(tmp_path):
     from agent_usage_tracker.improve.schedule import inbox
 
