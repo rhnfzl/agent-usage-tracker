@@ -27,7 +27,7 @@ def prepare(store: Store, case_id: str, scope: Path, target: Path, before: str,
     if not target.is_relative_to(scope) or not target.is_file():
         raise AutError("improve: proposal target is outside its allowed scope")
     try:
-        original = target.read_text(encoding="utf-8")
+        original = target.read_bytes().decode("utf-8")
     except (OSError, UnicodeError) as exc:
         raise AutError("improve: proposal target is not readable text") from exc
     if not before or original.count(before) != 1 or before == after:
@@ -66,7 +66,7 @@ def stage(store: Store, proposal_id: str, candidate_root: Path) -> Path:
         raise AutError("improve: candidate contains unrelated changes")
     target.parent.mkdir(parents=True, exist_ok=True)
     mode = stat.S_IMODE(target.stat().st_mode if target.exists() else source.stat().st_mode)
-    atomic_write_text(target, proposal["after"], shared=True)
+    atomic_write_text(target, proposal["after"], shared=True, newline="")
     os.chmod(target, mode)
     store.append("proposal_staged", proposal_id=proposal_id, candidate=str(root))
     return target

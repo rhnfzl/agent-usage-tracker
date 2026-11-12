@@ -19,6 +19,7 @@ from ..state import LockBusy, _locked
 from .store import Store, digest
 
 VERSION = 8
+MAX_REVIEW_CHARS = 6000
 RUBRICS = {
     "avoidable_recovery": (
         "Does the observed attempt waste effort through avoidable recovery?",
@@ -218,6 +219,7 @@ def diagnose(store: Store, audit_id: str, *, models: tuple[str, ...] = (
               "cases": [row["case_id"] for row in rows], "rubrics": RUBRICS,
               "explain_model": explain_model,
               "explain_revision": explainer.model_rev if explainer else None,
+              "review_policy": {"only_failed_votes": True, "max_input_chars": MAX_REVIEW_CHARS},
               "minimum_raw_score": .7}
     job_id = store.put("diagnoses", policy)
     evaluator_id = digest({k: v for k, v in policy.items() if k not in {"audit_id", "cases"}})
@@ -285,9 +287,13 @@ def diagnose(store: Store, audit_id: str, *, models: tuple[str, ...] = (
                     review = None
                     review_errors = []
                     coverage = case["coverage"]
-                    can_review = result["verdict"] == "fail" or (
-                        result["verdict"] == "unknown" and coverage.get("complete")
-                        and not case["omitted_task_events"])
+                    can_review = result["verdict"] == "fail"
+                    review_skipped = None
+                    if can_review and explain_model and len(json.dumps(case, ensure_ascii=False)) \
+                            > MAX_REVIEW_CHARS:
+                        result["verdict"] = "unknown"
+                        can_review = False
+                        review_skipped = "review_input_limit"
                     if can_review and explain_model:
                         if calls >= max_calls or time.monotonic() >= deadline:
                             reason = "budget"
@@ -325,6 +331,7 @@ def diagnose(store: Store, audit_id: str, *, models: tuple[str, ...] = (
                     result.update(evaluation_key=key, job_id=job_id, case_id=case["case_id"],
                                   rubric=rubric, vote_ids=refs, review=review,
                                   review_errors=review_errors,
+                                  review_skipped=review_skipped,
                                   evidence_ids=[event["id"] for event in case["events"]],
                                   review_model=explain_model,
                                   review_model_rev=explainer.model_rev if explainer else None)

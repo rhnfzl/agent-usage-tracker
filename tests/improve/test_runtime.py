@@ -76,8 +76,8 @@ def test_installed_files_are_verified_without_relying_on_installer_archive_hashe
     library = tmp_path / "site-packages"
     target = library / "agent_usage_tracker/module.py"
     target.parent.mkdir(parents=True)
-    target.write_text("value = 7\n")
+    target.write_bytes(b"value = 7\n")
     runtime._verify_wheel(wheel, library)
-    target.write_text("value = 9\n")
+    target.write_bytes(b"value = 9\n")
     with pytest.raises(AutError, match="differs"):
         runtime._verify_wheel(wheel, library)

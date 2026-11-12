@@ -235,6 +235,7 @@ def test_explanatory_model_cannot_upgrade_decision_model_disagreement(
     result = judge.diagnose(store, audit, models=("one", "two"), explain_model="local",
                             backend_for=Backend)
     assert result["verdicts"] == {"pass": 0, "fail": 0, "unknown": 2}
+    assert result["calls"] == 4
 
 
 def test_review_schema_repair_respects_call_budget_and_preserves_errors(tmp_path, monkeypatch):
@@ -279,3 +280,10 @@ def test_review_schema_repair_respects_call_budget_and_preserves_errors(tmp_path
     judgment = store.get("judgments", result["judgment_ids"][0])
     assert judgment["review_errors"] == ["invalid citations\nrejected local response"]
     assert attempts[1][-1] == "invalid citations"
+    monkeypatch.setattr(judge, "MAX_REVIEW_CHARS", 1)
+    limited = judge.diagnose(store, audit, models=("one", "two"), explain_model="local",
+                             max_calls=4, backend_for=Backend)
+    assert limited["verdicts"]["unknown"] == 1
+    assert limited["calls"] == 2
+    assert len(attempts) == 2
+    assert store.get("judgments", limited["judgment_ids"][0])["review_skipped"] == "review_input_limit"

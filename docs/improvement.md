@@ -57,7 +57,7 @@ Clipping in an unrelated earlier attempt does not invalidate a complete later at
 This sample does not estimate population prevalence.
 Votes resume after interruption. Unchanged cases reuse judgments across later audits.
 
-Add a cached instruct model to review flagged and eligible uncertain cases:
+Add a cached instruct model to verify unanimous failure votes:
 
 ```bash
 aut improve diagnose --audit AUDIT_ID \
@@ -69,6 +69,8 @@ It cannot supply executable commands or change files.
 Incomplete completion evidence remains unknown.
 All model results are provisional estimates, including agreement between models.
 An explanatory model can veto a decision, but cannot upgrade model disagreement into pass or fail.
+Disagreements stay unknown without spending an explanatory-model call.
+Reviews over 6,000 serialized case characters stay unknown with `review_input_limit` recorded.
 Invalid reviews retain their bounded, redacted responses in private `review_attempts` records.
 One schema repair is allowed. Both attempts count against the model-call and time budgets.
 They are not human labels or calibrated accuracy measurements.
@@ -88,6 +90,7 @@ aut improve propose --case CASE_ID --scope /path/to/repo \
 The old span must match exactly once. The target must remain inside the explicit scope.
 Drafting saves original content, candidate content, diff, evidence, and rollback instructions.
 It does not modify the source file.
+Saved and staged content preserves exact UTF-8 newline bytes, including CRLF.
 Add `--candidate /path/to/isolated/worktree` to stage there.
 Staging rejects a changed source base, path escapes, and unrelated candidate edits.
 It cannot stage into the original scope itself.

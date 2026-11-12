@@ -70,7 +70,8 @@ def run(args: argparse.Namespace) -> None:
         result = report.get("diagnosis", report)
     elif args.improve_cmd == "propose":
         key = prepare(store, args.case, args.scope, args.target,
-                      args.before_file.read_text(), args.after_file.read_text())
+                      args.before_file.read_bytes().decode("utf-8"),
+                      args.after_file.read_bytes().decode("utf-8"))
         if args.candidate:
             stage(store, key, args.candidate)
         result = {"proposal_id": key, "staged": bool(args.candidate)}
