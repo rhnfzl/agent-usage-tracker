@@ -26,8 +26,9 @@ The first argument is a SQLite file path, not the private improvement `Store` ob
 Import receipts report accepted, duplicate, conflicting and crosscheck-excluded observations.
 OTLP imports also report unsupported instruments or points.
 
-SQLite files use mode 0600. Newly created parent directories use mode 0700.
-Choose a private location; AUT does not change permissions on existing parent directories.
+On POSIX, SQLite files use mode 0600. Newly created parent directories use mode 0700.
+On Windows, files inherit the parent directory's access control list (ACL).
+Choose a private location under your user profile. AUT does not rewrite existing directory permissions or Windows ACLs.
 
 ## Normalized schema, version 1
 

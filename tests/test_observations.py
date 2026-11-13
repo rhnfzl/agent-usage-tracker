@@ -1,4 +1,5 @@
 from agent_usage_tracker.observations import ingest, records, validate_record
+import os
 import pytest
 
 
@@ -24,7 +25,8 @@ def test_dedup_conflict(tmp_path):
     changed["output_tokens"] = 5
     assert ingest(db, [changed], source="sdk", stream="one", role="primary")["conflicts"] == 1
     assert records(db)[0]["input_tokens"] is None
-    assert db.stat().st_mode & 0o777 == 0o600
+    if os.name != "nt":  # Windows uses directory ACLs, not POSIX mode bits.
+        assert db.stat().st_mode & 0o777 == 0o600
 
 
 def test_strict():
