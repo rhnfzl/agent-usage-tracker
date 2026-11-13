@@ -1,5 +1,8 @@
 # Running `aut` on a timer
 
+For private diagnosis, use the [stable improvement runtime](../docs/improvement.md#install-a-stable-runtime).
+It keeps the private store separate and removes the timer's dependency on a development checkout.
+
 Install once per machine, then wire the per-OS timer. `aut scan` is idempotent and
 offline-safe, so a missed run just catches up next time.
 

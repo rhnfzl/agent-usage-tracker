@@ -177,6 +177,21 @@ Provisional charts describe estimates, not verified classification accuracy.
 The [model reference](docs/local-labels.md#the-models) lists supported backends, pinned downloads, runtime needs, and synthetic timing measurements.
 Choose and evaluate models for your own tasks; the timing table does not establish classification accuracy.
 
+## Private improvement (`aut improve`)
+
+Optional local diagnosis finds evidence of avoidable recovery and unsupported completion claims.
+It saves private evidence, provisional model judgments, scoped patch proposals, and controlled command checks.
+These records stay separate from the normal sink. Installed instructions do not change automatically.
+
+```bash
+aut improve audit --days 7 --limit 30
+aut improve status
+```
+
+Local judging uses cached models through the existing label extra.
+Read the [private improvement guide](docs/improvement.md) before judging, staging changes, or executing trials.
+The guide covers executable judge references, independent agent-task acceptance, and stable wheel installations.
+
 ## Scheduling
 
 Run AUT on each machine whose logs you want to collect.

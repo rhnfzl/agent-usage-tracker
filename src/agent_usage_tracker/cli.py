@@ -291,6 +291,8 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument('--git-defer-remotes-until', type=date.fromisoformat,
                         help='skip Git SSH sources before this ledger date; scan/git-days only')
     sub = parser.add_subparsers(dest="cmd", required=True)
+    from .improve.cli import register
+    register(sub)
     sub.add_parser("scan-job", help="run the locked scheduled scan and retry unfinished daily jobs")
     sub.add_parser("retry-delivery", help="send deferred session/activity/time rows using pg_dsn")
     p_scan = sub.add_parser("scan", help="push new usage since the watermark")
@@ -421,6 +423,10 @@ def _dispatch(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None
         parser.error('--git-defer-remotes-until applies only to scan and git-days')
     if args.agents and args.cmd not in _AGENT_COMMANDS:     # it would run over everything
         parser.error(f"--agents does not apply to {args.cmd}")
+    if args.cmd == "improve":
+        from .improve.cli import run
+        run(args)
+        return
     if args.cmd in _NO_CONFIG_COMMANDS:
         _NO_CONFIG_COMMANDS[args.cmd](args)
         return

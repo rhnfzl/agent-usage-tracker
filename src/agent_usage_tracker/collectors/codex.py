@@ -29,7 +29,7 @@ from ..repo_keys import RepoKeys, repo_identity
 from ..state import parse_record
 from .activity_common import (Link, TurnAgg, add_call, best_effort, blank_tool_tally, drop_raw_shas,
                               first_record, human_event, ms_between, record_commits, text_of,
-                              turn_attrs)
+                              result_status, turn_attrs)
 from .commits import commit_call, commit_dir, commit_shas
 from ._util import (MALFORMED_RECORD, count_field, dict_or_empty, file_batches, project_name,
                     safe_int, str_or_none)
@@ -276,6 +276,9 @@ class _Activity:
         self.carried.pop("start", None)
 
     def _tool_call(self, payload: dict[str, Any]) -> None:
+        if payload.get("type") in {"function_call_output", "custom_tool_call_output"}:
+            self._count_error(payload.get("call_id"), result_status(payload.get("output")) == "error")
+            return
         name = payload.get("name")
         if payload.get("type") in ("function_call", "custom_tool_call") and isinstance(name, str):
             # an MCP namespace is a server label (free text); other namespaces are codex's own.
@@ -287,12 +290,22 @@ class _Activity:
                 self.agg.setdefault("mcp_ids", []).append(payload.get("call_id"))
             add_call(self.agg, "mcp" if mcp else name, payload.get("arguments", payload.get("input")))
 
+    def _count_error(self, call_id: object, failed: bool) -> None:
+        if not failed:
+            return
+        if isinstance(call_id, str):
+            ids = self.agg.setdefault("error_ids", [])
+            if call_id in ids:
+                return
+            ids.append(call_id)
+        self.agg["errors"] += 1
+
     def _item(self, item: dict[str, Any], ts: object) -> None:
         typ = item.get("type")
         if typ == "CommandExecution":
             code = item.get("exit_code")
             err = isinstance(code, int) and code != 0
-            self.agg["errors"] += err
+            self._count_error(item.get("id"), err)
             script = script_of(item.get("command"))
             call = commit_call(script) if script else None
             out_text = item.get("aggregated_output")
@@ -308,7 +321,7 @@ class _Activity:
             # MCP function_call of the turn was already counted
             if item.get("id") not in self.agg.get("mcp_ids", ()):
                 add_call(self.agg, "mcp", item.get("arguments"))
-            self.agg["errors"] += item.get("status") == "failed"
+            self._count_error(item.get("id"), item.get("status") == "failed")
         elif typ == "ContextCompaction":
             self._emit("compaction", ts, str(item.get("id") or ts), {})
 

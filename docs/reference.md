@@ -1,5 +1,7 @@
 # Command and configuration reference
 
+The [private improvement guide](improvement.md) covers `aut improve` evidence, model review, proposals, trials, and bounded cycles.
+
 [Back to the README](../README.md) · [Local labels and model setup](local-labels.md)
 
 ## Commands

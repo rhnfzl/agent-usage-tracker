@@ -141,7 +141,8 @@ def _plain_write_mode(path: Path) -> int:
         return 0o666 & ~umask
 
 
-def atomic_write_text(path: Path, text: str, *, shared: bool = False) -> None:
+def atomic_write_text(path: Path, text: str, *, shared: bool = False,
+                      newline: str | None = None) -> None:
     """Write through a unique temp file and a rename, so a crash or a second process never leaves
     a half-written file. Creates the parent directory. The file is private to this user unless
     `shared`, for a file other users or services may read: then it gets the mode a plain write
@@ -149,7 +150,7 @@ def atomic_write_text(path: Path, text: str, *, shared: bool = False) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        with os.fdopen(fd, "w", encoding="utf-8", newline=newline) as fh:
             fh.write(text)
         if shared:
             os.chmod(tmp, _plain_write_mode(path))
