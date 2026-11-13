@@ -20,9 +20,9 @@ from .state import warn_if_group_readable
 # Must name what collectors.REGISTRY names (a test asserts it): collectors import this module, so
 # it cannot derive the list from the registry.
 ALL_AGENTS = ("claude_code", "codex", "cursor", "cursor_sdk", "cursor_api", "cursor_cli", "pi",
-              "activitywatch")
+              "activitywatch", "generic_sdk")
 # activitywatch reads window titles, so it is opt-in: a config without `agents` never enables it.
-DEFAULT_AGENTS = tuple(a for a in ALL_AGENTS if a != "activitywatch")
+DEFAULT_AGENTS = tuple(a for a in ALL_AGENTS if a not in ("activitywatch", "generic_sdk"))
 # Must name what label.tasks.TASKS names (tests/label/test_label_tasks.py asserts it): label.tasks imports
 # this module, so this module cannot derive the list from it.
 LABEL_DECISION_TASKS = ("work_category", "steer_intent", "soft_outcome", "aw_title_relevance",
@@ -90,6 +90,7 @@ class Config:
     cursor_db_path: str | None = None      # override Cursor's state.vscdb location
     cursor_human_only: bool = False        # `cursor` emits prompts only -> safe beside cursor_api
     cursor_sdk_manifests: str | None = None  # glob of orchestrator manifest.json files (SDK usage)
+    generic_sdk_paths: str | None = None  # explicit local normalized SDK JSONL file/glob
     cursor_api: bool = False               # opt-in: pull accurate usage from Cursor's dashboard API
     cursor_api_lookback_days: int = 90     # first-scan window when there is no watermark yet
     # Cloudflare Access service token (Pattern 2) so a machine can push through CF Access from
@@ -347,6 +348,7 @@ def _config_from(data: dict[str, Any], path: Path) -> Config:
         cursor_db_path=_resolve(data, "cursor_db_path"),
         cursor_human_only=_as_bool(data.get("cursor_human_only", False)),
         cursor_sdk_manifests=_resolve(data, "cursor_sdk_manifests"),
+        generic_sdk_paths=_text(data, "generic_sdk_paths"),
         cursor_api=_as_bool(data.get("cursor_api", False)),
         cursor_api_lookback_days=int(data.get("cursor_api_lookback_days") or 90),
         cf_access_client_id=_resolve(transport, "cf_access_client_id"),

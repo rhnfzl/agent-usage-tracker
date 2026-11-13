@@ -17,6 +17,7 @@ from typing import Any, Callable, Iterator
 from ..config import Config
 from ..event import Batch
 from . import activitywatch, claude_code, codex, cursor, cursor_api, cursor_cli, cursor_sdk, pi
+from . import generic_sdk
 from ._util import describe_files, describe_full_scan
 
 # Each collect() pass reads at most _MAX_LINES (50k) new lines per file (see collectors/_util.py),
@@ -39,6 +40,7 @@ class Collector:
 
 
 REGISTRY: dict[str, Collector] = {
+    generic_sdk.NAME: Collector(generic_sdk.collect, generic_sdk.describe, rows=_USAGE_ONLY),
     claude_code.NAME: Collector(claude_code.collect),
     codex.NAME: Collector(codex.collect),
     cursor.NAME: Collector(cursor.collect, describe_full_scan, rows=_USAGE_ONLY),

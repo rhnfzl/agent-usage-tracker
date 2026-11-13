@@ -149,12 +149,14 @@ def test_plaintext_url_to_another_host_warns_but_works() -> None:
 def test_default_agents_exclude_activitywatch(monkeypatch) -> None:
     assert "activitywatch" in ALL_AGENTS and "activitywatch" in REGISTRY
     assert "activitywatch" not in DEFAULT_AGENTS
-    assert set(DEFAULT_AGENTS) == set(ALL_AGENTS) - {"activitywatch"}
+    assert "generic_sdk" not in DEFAULT_AGENTS
+    assert set(DEFAULT_AGENTS) == set(ALL_AGENTS) - {"activitywatch", "generic_sdk"}
     with tempfile.TemporaryDirectory() as d:
         path = Path(d) / "config.toml"
         monkeypatch.setenv("AUT_CONFIG", str(path))
         path.write_text('machine = "m"\n')
         assert "activitywatch" not in load_config().agents
+        assert "generic_sdk" not in load_config().agents
         path.write_text('machine = "m"\nagents = ["activitywatch"]\n'
                         'activitywatch_deny_apps = ["Example Vault"]\n'
                         'activitywatch_categories = { "My Editor" = "editor" }\n')

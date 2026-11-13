@@ -130,3 +130,49 @@ Files are limited to 8 MiB, normalized records to 4096 bytes, batches to 10,000 
 and a store to 1,000,000 observations. Exceeding a bound fails instead of truncating evidence.
 The current reader returns the bounded store as a list; report memory grows with stored observations.
 No automatic retention deletion or publication occurs.
+
+## Opt-in SDK collection
+
+Applications can append normalized usage to a private local file without a vendor dependency.
+The producer must supply a stable event ID and a timezone-aware timestamp.
+
+```python
+from agent_usage_tracker.sdk import emit_usage
+
+emit_usage(
+    "/private/path/sdk.jsonl",
+    {"version": 1, "kind": "usage", "id": "request-42",
+     "timestamp": "2026-11-13T12:00:00Z",
+     "input_tokens": 20, "output_tokens": 10,
+     "cache_read_tokens": 0, "cache_write_tokens": 0},
+    producer="my-application", model="declared-model", provider="declared-provider",
+)
+```
+
+Enable it explicitly in the normal AUT configuration:
+
+```toml
+agents = ["generic_sdk"]
+generic_sdk_paths = "~/private/sdk/*.jsonl"
+```
+
+The SDK envelope accepts only version, producer, usage, model, provider and native_source.
+Use native_source for an event already represented by a native AUT collector.
+Known overlap with configured or selected collectors fails. Unknown overlap cannot establish independence.
+Do not mirror native logs into this collector without explicit source separation.
+
+Fresh input, cache-read, cache-write and output must all be known before a SQL usage row can be emitted.
+Reasoning remains a subset of output and is never added twice.
+Missing components and counter records produce visible unavailable or unsupported counts, without SQL usage.
+The observation importer can retain partial or counter evidence separately.
+
+Complete records use producer and event ID for identity, independent of file paths.
+Changed copies fail before delivery. Identical copies and delivery retries retain the same identity.
+Each bounded batch advances its watermark only after acknowledgment.
+The collector drains retained files for export and repeated scans. A partial final line remains pending.
+
+Use one writer per file and rotate before the 8 MiB file limit.
+The emitter refuses to append after an incomplete record.
+The collector retains up to one million identity digests and validates conflicts before delivery.
+Its scan memory grows with retained history. Removing unseen source data prevents later recovery.
+No credentials, network calls or new default collectors are added.

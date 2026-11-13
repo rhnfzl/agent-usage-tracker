@@ -10,6 +10,7 @@ import csv
 import json
 import sys
 from datetime import datetime, timezone
+from dataclasses import replace
 from typing import Any, Callable, Iterator, Sequence, TextIO, TypedDict
 
 from .collectors import REGISTRY, Collect, drain
@@ -153,6 +154,7 @@ class _CollectorPass:
 
 
 def run_scan(cfg: Config, agents: Sequence[str], *, dry_run: bool) -> dict[str, AgentTally]:
+    cfg = replace(cfg, agents=tuple(dict.fromkeys((*cfg.agents, *agents))))
     state = load_state()
     sender = None if dry_run else make_sender(cfg)
     if dry_run:     # a dry run still makes the salt (the collectors' RepoKeys)
@@ -278,6 +280,7 @@ def run_export(cfg: Config, agents: Sequence[str], out: TextIO) -> tuple[int, in
     an offline bulk backfill or a bridged load where the live transport is not wired yet.
     Returns (written, skipped, failed): skipped counts records with a missing/invalid ts, failed
     names the usage collectors with a source they could not read, so the CSV is partial."""
+    cfg = replace(cfg, agents=tuple(dict.fromkeys((*cfg.agents, *agents))))
     writer = csv.writer(out)
     writer.writerow(COLUMNS)
     n = skipped = 0
@@ -387,6 +390,7 @@ def run_history_backfill(cfg: Config, agents: Sequence[str], *, dry_run: bool,
     can differ from the stored ones (see the ts note in collectors/claude_code.py), and those would
     land as new duplicates. Works on a throwaway watermark, so the live one is neither read nor
     saved. ON CONFLICT makes a re-run free."""
+    cfg = replace(cfg, agents=tuple(dict.fromkeys((*cfg.agents, *agents))))
     dsn = "" if dry_run else cfg.require_pg("backfill --sessions-only/--activity-only without "
                                             "--dry-run")
     if dry_run:     # a dry run still makes the salt (the collectors' RepoKeys)

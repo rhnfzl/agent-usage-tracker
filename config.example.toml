@@ -1,3 +1,5 @@
+# Opt-in: add "generic_sdk" to agents and set an explicit local JSONL source.
+# generic_sdk_paths = "~/private/sdk/*.jsonl"
 # Copy to ~/.config/agent-usage-tracker/config.toml and edit.
 # SECRETS NEVER LIVE IN THIS REPO. Put real values in the local config file or the
 # environment; any "env:VAR" value is resolved at run time. That local file lives OUTSIDE
