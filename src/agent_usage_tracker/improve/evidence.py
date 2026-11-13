@@ -33,7 +33,8 @@ def _text(value: object) -> str:
 
 def read_session(path: Path, agent: str, max_bytes: int = BYTE_LIMIT,
                  since_epoch: float | None = None,
-                 imports: dict[str, datetime] | None = None) -> dict[str, Any]:
+                 imports: dict[str, datetime] | None = None, *,
+                 exclude_automated: bool = False) -> dict[str, Any] | None:
     if agent not in {"claude_code", "codex"} or max_bytes < 1:
         raise ValueError("choose a supported trace source and a positive byte limit")
     events: list[dict[str, Any]] = []
@@ -106,6 +107,9 @@ def read_session(path: Path, agent: str, max_bytes: int = BYTE_LIMIT,
                     session = str(payload.get("id") or payload.get("session_id") or session)
                     cwd = str(payload.get("cwd") or "")
                     origin = codex.run_origin(payload)
+                    # Audits discard these sources; avoid normalizing their private bodies first.
+                    if exclude_automated and origin in {"subagent", "automated"}:
+                        return None
                     if payload.get("forked_from_id"):
                         copied_until = int(payload.get("subagent_history_start_ordinal") or 0)
                 if line <= copied_until:

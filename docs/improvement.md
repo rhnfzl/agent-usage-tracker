@@ -18,6 +18,8 @@ Files are private, and the store's `.gitignore` excludes all contents. Never for
 
 The initial adapters read Claude Code and Codex logs.
 They omit positively identified automated sessions and sources active within the last two minutes.
+Codex sources identified as automated by their first session header skip body processing.
+Unknown sources retain the full evidence checks.
 The audit filters event timestamps, matches calls to results, and records source hashes.
 `--project /path/to/repo` restricts an audit to a readable repository and its worktrees.
 
