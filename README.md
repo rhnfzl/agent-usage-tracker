@@ -187,6 +187,9 @@ Private studies connect incident evidence, prospective trial policies and fresh 
 They preserve rejected runs and distinguish bounded code correctness from general productivity.
 See the [study guide](docs/improvement-studies.md) for commands and evidence requirements.
 
+Additional producers can supply private usage, quota and tool observations through the
+[local observation API](docs/observations.md). Quota snapshots remain separate from token usage.
+
 ```bash
 aut improve audit --days 7 --limit 30
 aut improve status
