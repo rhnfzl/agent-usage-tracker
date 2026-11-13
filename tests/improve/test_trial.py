@@ -181,3 +181,60 @@ def test_invalid_metrics_are_terminal_failures_and_not_rerun(tmp_path):
     assert all(store.get("trial_results", k)["validation_error"]
                for k in store.keys("trial_results"))
     assert run_trial(store, key, execute=True)["executed"] == 0
+
+
+def test_command_acceptance_hash_changed_before_execution_runs_nothing(tmp_path):
+    from agent_usage_tracker.improve.proposals import file_digest
+    baseline, candidate = tmp_path / 'baseline', tmp_path / 'candidate'
+    baseline.mkdir()
+    candidate.mkdir()
+    oracle = tmp_path / 'oracle.py'
+    oracle.write_text('pass\n')
+    store = Store(tmp_path / 'private')
+    spec = store.put('trial_specs', {'version': 1, 'kind': 'command_check',
+        'directories': {'baseline': str(baseline), 'candidate': str(candidate)}, 'repeats': 1,
+        'cases': [{'id': 'protected', 'argv': [sys.executable, str(oracle)], 'timeout_s': 2,
+                   'acceptance_files': {str(oracle): file_digest(oracle)}}]})
+    oracle.write_text('raise RuntimeError("changed")\n')
+    with pytest.raises(AutError, match='changed'):
+        run_trial(store, spec, execute=True)
+    assert store.keys('trial_results') == []
+
+
+def test_command_acceptance_mutation_keeps_rejected_attempt_receipt(tmp_path):
+    from agent_usage_tracker.improve.proposals import file_digest
+    baseline, candidate = tmp_path / 'baseline', tmp_path / 'candidate'
+    baseline.mkdir()
+    candidate.mkdir()
+    oracle = tmp_path / 'oracle.py'
+    oracle.write_text("from pathlib import Path\nPath(__file__).write_text('pass\\n')\n")
+    store = Store(tmp_path / 'private')
+    spec = store.put('trial_specs', {'version': 1, 'kind': 'command_check',
+        'directories': {'baseline': str(baseline), 'candidate': str(candidate)}, 'repeats': 1,
+        'cases': [{'id': 'mutates', 'argv': [sys.executable, str(oracle)], 'timeout_s': 2,
+                   'acceptance_files': {str(oracle): file_digest(oracle)}}]})
+    with pytest.raises(AutError, match='changed'):
+        run_trial(store, spec, execute=True)
+    rows = [store.get('trial_results', key) for key in store.keys('trial_results')]
+    assert len(rows) == 1
+    assert rows[0]['exit_code'] == 0
+    assert rows[0]['accepted'] is False
+    assert 'changed' in rows[0]['validation_error']
+
+
+def test_protected_command_changed_after_prospective_study_is_rejected(tmp_path):
+    from tests.improve.test_studies import fixture
+    from agent_usage_tracker.improve.proposals import file_digest
+    from agent_usage_tracker.improve.studies import create
+    store, policy = fixture(tmp_path)
+    oracle = tmp_path / 'frozen_acceptance.py'
+    oracle.write_text('pass\n')
+    trial = store.get('trial_specs', policy['trial_spec_id'])
+    trial['cases'][0]['argv'] = [sys.executable, str(oracle)]
+    trial['cases'][0]['acceptance_files'] = {str(oracle): file_digest(oracle)}
+    policy['trial_spec_id'] = store.put('trial_specs', trial)
+    create(store, policy)
+    oracle.write_text('print("changed after policy")\n')
+    with pytest.raises(AutError, match='changed'):
+        run_trial(store, policy['trial_spec_id'], execute=True)
+    assert store.keys('trial_results') == []

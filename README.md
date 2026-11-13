@@ -183,6 +183,10 @@ Optional local diagnosis finds evidence of avoidable recovery and unsupported co
 It saves private evidence, provisional model judgments, scoped patch proposals, and controlled command checks.
 These records stay separate from the normal sink. Installed instructions do not change automatically.
 
+Private studies connect incident evidence, prospective trial policies and fresh follow-up.
+They preserve rejected runs and distinguish bounded code correctness from general productivity.
+See the [study guide](docs/improvement-studies.md) for commands and evidence requirements.
+
 ```bash
 aut improve audit --days 7 --limit 30
 aut improve status

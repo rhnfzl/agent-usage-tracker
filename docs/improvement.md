@@ -4,6 +4,10 @@
 It keeps evidence, model estimates, proposals, and trial results in a private local store.
 Normal collection and the configured sink remain separate.
 
+[Private studies](improvement-studies.md) connect incidents, setup provenance, prospective trial
+policies, independent references and fresh follow-up. They report bounded supported, rejected or
+inconclusive effects without turning model estimates into general productivity claims.
+
 ## Freeze evidence
 
 ```bash

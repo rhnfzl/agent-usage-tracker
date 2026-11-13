@@ -15,6 +15,7 @@ from .schedule import run_once
 from .store import Store, audit
 from .trial import run_trial
 from .validation import validate
+from . import study_cli
 
 
 def register(sub: Any) -> None:
@@ -55,13 +56,16 @@ def register(sub: Any) -> None:
     reference.add_argument("--spec-file", type=Path, required=True)
     reference.add_argument("--diagnosis", required=True)
     reference.add_argument("--execute", action="store_true", help="execute the trusted reference oracle")
+    study_cli.register(actions)
     actions.add_parser("status", help="show local progress counts without trace text")
 
 
 def run(args: argparse.Namespace) -> None:
     root = args.root or Path(os.environ.get("AUT_IMPROVE_ROOT", str(data_dir() / "improve")))
     store = Store(root)
-    if args.improve_cmd == "audit":
+    if args.improve_cmd == "study":
+        result = study_cli.run(args, store)
+    elif args.improve_cmd == "audit":
         result = audit(store, Path.home(), days=args.days, limit=args.limit, project=args.project)
     elif args.improve_cmd == "diagnose":
         report = run_once(store, audit_id=args.audit, models=tuple(args.models.split(",")),
