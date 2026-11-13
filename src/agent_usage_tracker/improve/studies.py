@@ -139,14 +139,35 @@ def create(store: Store, value: dict[str, Any]) -> dict[str, Any]:
 
 def references(store: Store, study: dict[str, Any]) -> dict[str, Any]:
     frozen = [identity(store, key) for key in study["discovery_cases"] + study["control_cases"]]
-    lookup: dict[str, list[dict[str, str]]] = {}
-    for key in store.keys("cases"):
-        row = identity(store, key)
-        lookup.setdefault(row["evidence"], []).append({**row, "family":
-            study["task_families"].get(key, "")})
     reports = [store.get("reference_results", key) for key in study["reference_result_ids"]]
+    relevant = {row["evidence_sha256"] for report in reports for row in report["cases"]}
+    lookup: dict[str, list[dict[str, str]]] = {}
+    unattributable: set[str] = set()
+    unattributable_cases = 0
+    unindexable_cases = 0
+    for key in store.keys("cases") if relevant else []:
+        case = store.get("cases", key)
+        if not {"events", "coverage", "omitted_task_events"} <= case.keys():
+            unindexable_cases += 1
+            continue
+        evidence = evidence_key(case)
+        if evidence not in relevant:
+            continue
+        snapshot = case.get("session_snapshot")
+        session = store.get("sessions", snapshot) if snapshot is not None else {}
+        if not all(isinstance(session.get(name), str) and session[name].strip()
+                   for name in ("agent", "session_id")) or not isinstance(case["events"], list) \
+                or any(not isinstance(event, dict) for event in case["events"]):
+            unattributable.add(evidence)
+            unattributable_cases += 1
+            continue
+        row = identity(store, key)
+        lookup.setdefault(evidence, []).append({**row, "family":
+            study["task_families"].get(key, "")})
     development = [r for report in reports if report["split"] == "development"
                    for r in report["cases"]]
+    unknown_development = sum(not lookup.get(row["evidence_sha256"]) or
+                              row["evidence_sha256"] in unattributable for row in development)
     blocked = list(frozen)
     for row in development:
         blocked.extend(lookup.get(row["evidence_sha256"], []))
@@ -181,7 +202,8 @@ def references(store: Store, study: dict[str, Any]) -> dict[str, Any]:
             if report["split"] == "holdout":
                 holdout += 1
                 groups = lookup.get(row["evidence_sha256"], [])
-                if not groups or any(not g["family"] for g in groups):
+                if not groups or row["evidence_sha256"] in unattributable or any(
+                        not g["family"] for g in groups):
                     unknown += 1
                 if any(g["session"] == b["session"] or g["content"] == b["content"]
                        for g in groups for b in blocked) or any(
@@ -198,7 +220,10 @@ def references(store: Store, study: dict[str, Any]) -> dict[str, Any]:
     return {"rubrics": rubrics, "reports": study["reference_result_ids"],
         "duplicate_references": conflicts, "holdout_overlap": overlap,
         "unknown_holdout_groups": unknown,
-        "holdout_independence_verified": bool(holdout and not (overlap or unknown or conflicts)),
+        "unknown_development_groups": unknown_development,
+        "unattributable_reference_cases": unattributable_cases,
+        "unindexable_cases": unindexable_cases,
+        "holdout_independence_verified": bool(holdout and not (overlap or unknown or unknown_development or conflicts)),
         "human_calibrated": False, "scope": "Executable references only; human labels unknown."}
 
 

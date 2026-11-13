@@ -310,3 +310,70 @@ def test_overall_support_requires_mapped_fresh_disjoint_followup(tmp_path, famil
     assert report['scoped_decision'] == expected
     assert report['fresh_followup_supported'] == (family == 'independent')
     assert report['improvement_established'] is False
+
+
+def test_no_reference_assessment_does_not_scan_unrelated_legacy_cases(tmp_path, monkeypatch):
+    store, spec = fixture(tmp_path)
+    legacy_id = store.put('cases', {'version': 0, 'events': []})
+    sid = create(store, spec)['study_id']
+    original = store.keys
+
+    def keys(kind):
+        assert kind != 'cases', 'No reference results need no whole-case scan'
+        return original(kind)
+
+    monkeypatch.setattr(store, 'keys', keys)
+    report = assess(store, sid)['stages']['references']
+    assert report['rubrics'] == {}
+    assert report['holdout_independence_verified'] is False
+    assert store.get('cases', legacy_id) == {'version': 0, 'events': []}
+
+
+def test_relevant_legacy_holdout_remains_unattributable(tmp_path):
+    from agent_usage_tracker.improve.validation import evidence_key
+    store, spec = fixture(tmp_path)
+    legacy = {'events': [{'kind': 'prompt', 'text': 'old held-out work'}],
+              'coverage': {'complete': True}, 'omitted_task_events': 0}
+    legacy_id = store.put('cases', legacy)
+    evidence = evidence_key(legacy)
+    rid = store.put('reference_results', {'split': 'holdout', 'cases': [
+        {'rubric': 'avoidable_recovery', 'expected': 'pass', 'observed': 'pass',
+         'evidence_sha256': evidence}]})
+    spec['reference_result_ids'] = [rid]
+    report = assess(store, create(store, spec)['study_id'])['stages']['references']
+    assert report['rubrics']['avoidable_recovery']['total'] == 1
+    assert report['unattributable_reference_cases'] == 1
+    assert report['unknown_holdout_groups'] == 1
+    assert report['holdout_independence_verified'] is False
+    assert store.get('cases', legacy_id) == legacy
+
+
+def test_reference_compatibility_does_not_swallow_record_corruption(tmp_path):
+    from agent_usage_tracker.improve.validation import evidence_key
+    store, spec = fixture(tmp_path)
+    legacy = {'events': [], 'coverage': {}, 'omitted_task_events': 0}
+    legacy_id = store.put('cases', legacy)
+    rid = store.put('reference_results', {'split': 'holdout', 'cases': [
+        {'rubric': 'avoidable_recovery', 'expected': 'pass', 'observed': 'pass',
+         'evidence_sha256': evidence_key(legacy)}]})
+    spec['reference_result_ids'] = [rid]
+    sid = create(store, spec)['study_id']
+    store.path('cases', legacy_id).write_text('{}')
+    with pytest.raises(AutError, match='changed'):
+        assess(store, sid)
+
+
+def test_reference_summary_counts_unindexable_unrelated_legacy_case(tmp_path):
+    from agent_usage_tracker.improve.validation import evidence_key
+    store, spec = fixture(tmp_path)
+    store.put('cases', {'version': 0, 'events': []})
+    evidence = evidence_key(store.get('cases', spec['discovery_cases'][0]))
+    rid = store.put('reference_results', {'split': 'holdout', 'cases': [
+        {'rubric': 'avoidable_recovery', 'expected': 'fail', 'observed': 'fail',
+         'evidence_sha256': evidence}]})
+    spec['reference_result_ids'] = [rid]
+    report = assess(store, create(store, spec)['study_id'])['stages']['references']
+    assert report['unindexable_cases'] == 1
+    assert report['unattributable_reference_cases'] == 0
+    assert report['rubrics']['avoidable_recovery']['total'] == 1
+    assert report['holdout_independence_verified'] is False

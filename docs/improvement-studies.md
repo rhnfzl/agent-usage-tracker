@@ -92,6 +92,10 @@ Executable references establish only tested facts. Model agreement is not a refe
 Neither establishes general real-work accuracy or human calibration. Ask a human only when a
 required fact, authority or preference cannot be resolved from the available evidence.
 
+Legacy records without usable source attribution remain counted and unknown when relevant.
+Unrelated old cases do not block a study with no requested reference results.
+Missing attribution cannot establish holdout independence; accessed records still pass integrity checks.
+
 ## Check fresh work
 
 Prepare a separate trusted trial and new evidence cases after freezing the study policy:
