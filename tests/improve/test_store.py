@@ -137,3 +137,33 @@ def test_all_divergent_copies_are_ineligible_for_judging(tmp_path):
     rows = cases(store, result["audit_id"])
     assert len(rows) == 2
     assert all(not row["coverage"]["complete"] for row in rows)
+
+
+
+def test_audit_recent_window_keeps_complete_observed_attempt_eligible(tmp_path):
+    from agent_usage_tracker.improve.judge import cases
+
+    home = tmp_path / "home"
+    folder = home / ".codex/sessions"
+    folder.mkdir(parents=True)
+    records = [
+        {"type": "session_meta", "payload": {"id": "s", "source": "cli"}},
+        *[{"type": "padding", "text": "x" * 500} for _ in range(20)],
+        {"type": "event_msg", "payload": {"type": "user_message", "message": "Check it"}},
+        {"type": "response_item", "payload": {"type": "function_call", "call_id": "latest",
+         "name": "exec_command", "arguments": "false"}},
+        {"type": "response_item", "payload": {"type": "function_call_output", "call_id": "latest",
+         "output": "Process exited with code 1"}},
+        {"type": "event_msg", "payload": {"type": "agent_message", "message": "Failed"}},
+        {"type": "event_msg", "payload": {"type": "task_complete"}},
+    ]
+    for record in records:
+        record["timestamp"] = "2026-11-12T10:00:00Z"
+    (folder / "rollout-long.jsonl").write_text("".join(json.dumps(row) + "\n" for row in records))
+    store = Store(tmp_path / "private")
+    report = audit(store, home, idle_s=0, since_epoch=0, max_bytes=4096)
+    observed = cases(store, report["audit_id"])
+    assert len(observed) == 1
+    assert observed[0]["coverage"]["complete"]
+    assert not observed[0]["coverage"]["session_complete"]
+    assert observed[0]["coverage"]["prefix_omitted"]

@@ -23,7 +23,11 @@ Unknown sources retain the full evidence checks.
 The audit filters event timestamps, matches calls to results, and records source hashes.
 `--project /path/to/repo` restricts an audit to a readable repository and its worktrees.
 
-Each source read stops at 16 MiB. Captured events are redacted and limited to 6,000 characters.
+Each source read uses at most 16 MiB. Large sources retain their first metadata record and a
+line-aligned recent window. Source byte ranges and omitted prefixes remain explicit.
+Unknown fork ordinals cannot establish whether tail records are copied history, so those tails
+remain excluded. A complete observed attempt can be reviewed even when its whole session is incomplete.
+Captured events are redacted and limited to 6,000 characters.
 Coverage exposes incomplete lines, clipped events, missing results, and copied history.
 Completeness describes captured records, not proof of the model's full context.
 Pattern-based redaction can leave private code, paths, names, and credentials.
