@@ -273,6 +273,12 @@ The [full command reference](docs/reference.md#commands) includes backfills, out
 
 From a checkout:
 
+In restricted agent sessions, keep uv's cache inside the checkout before running these commands:
+
+```bash
+export UV_CACHE_DIR="$PWD/.agent-harness/uv-cache"
+```
+
 ```bash
 uv venv
 uv pip install -e ".[test,postgres]" ruff==0.15.11 mypy==2.4.1

@@ -2,7 +2,39 @@
 
 import json
 
+import pytest
+
 from agent_usage_tracker.improve.evidence import read_session
+
+
+def test_audit_can_skip_structurally_automated_codex_before_reading_body(tmp_path, monkeypatch):
+    from agent_usage_tracker.improve import evidence
+
+    path = write_log(tmp_path / "automated.jsonl", [
+        {"type": "session_meta", "payload": {"id": "automated", "source": "exec"}},
+        {"type": "event_msg", "payload": {"type": "user_message", "message": "private body"}},
+    ])
+    original = evidence.redact
+    seen = []
+
+    def track(text):
+        seen.append(text)
+        return original(text)
+
+    monkeypatch.setattr(evidence, "redact", track)
+    assert read_session(path, "codex", exclude_automated=True) is None
+    assert seen == []
+    assert read_session(path, "codex")["origin"] == "automated"
+    assert seen == ["private body"]
+
+
+@pytest.mark.parametrize("source", ["cli", "vscode", "future-client", {"future": "client"}])
+def test_audit_keeps_interactive_and_unknown_codex_sources(tmp_path, source):
+    path = write_log(tmp_path / "kept.jsonl", [
+        {"type": "session_meta", "payload": {"id": "kept", "source": source}},
+        {"type": "event_msg", "payload": {"type": "user_message", "message": "Keep this"}},
+    ])
+    assert read_session(path, "codex", exclude_automated=True) == read_session(path, "codex")
 
 
 def write_log(path, records):

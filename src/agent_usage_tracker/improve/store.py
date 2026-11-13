@@ -137,11 +137,11 @@ def audit(store: Store, home: Path, *, days: int = 7, limit: int = 40,
             continue
         try:
             evidence = read_session(path, agent, max_bytes=max_bytes, since_epoch=since,
-                                    imports=imports)
+                                    imports=imports, exclude_automated=True)
         except (OSError, ValueError, TypeError, OverflowError):
             counts["unreadable_sources"] += 1
             continue
-        if evidence["origin"] in {"subagent", "automated"}:
+        if evidence is None or evidence["origin"] in {"subagent", "automated"}:
             counts["automated_sources"] += 1
             continue
         if not evidence["events"]:
