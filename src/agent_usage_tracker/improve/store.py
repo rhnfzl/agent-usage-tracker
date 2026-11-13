@@ -137,7 +137,7 @@ def audit(store: Store, home: Path, *, days: int = 7, limit: int = 40,
             continue
         try:
             evidence = read_session(path, agent, max_bytes=max_bytes, since_epoch=since,
-                                    imports=imports, exclude_automated=True)
+                                    imports=imports, exclude_automated=True, recent=True)
         except (OSError, ValueError, TypeError, OverflowError):
             counts["unreadable_sources"] += 1
             continue

@@ -293,6 +293,8 @@ def _build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="cmd", required=True)
     from .improve.cli import register
     register(sub)
+    from .observation_cli import register as register_observations
+    register_observations(sub)
     sub.add_parser("scan-job", help="run the locked scheduled scan and retry unfinished daily jobs")
     sub.add_parser("retry-delivery", help="send deferred session/activity/time rows using pg_dsn")
     p_scan = sub.add_parser("scan", help="push new usage since the watermark")
@@ -426,6 +428,12 @@ def _dispatch(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None
     if args.cmd == "improve":
         from .improve.cli import run
         run(args)
+        return
+    if args.cmd == "observe":
+        from .observation_cli import run as run_observation
+        result = run_observation(args)
+        if result is not None:
+            print(result if isinstance(result, str) else json.dumps(result, sort_keys=True))
         return
     if args.cmd in _NO_CONFIG_COMMANDS:
         _NO_CONFIG_COMMANDS[args.cmd](args)

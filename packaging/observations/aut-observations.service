@@ -1,0 +1,18 @@
+[Unit]
+Description=Private AUT observation receiver
+After=network.target
+[Service]
+User=aut
+Group=aut
+StateDirectory=aut-observations
+StateDirectoryMode=0700
+UMask=0077
+EnvironmentFile=/etc/aut-observations.env
+ExecStart=/usr/local/bin/aut observe --db /var/lib/aut-observations/observations.sqlite3 serve
+Restart=on-failure
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+[Install]
+WantedBy=multi-user.target

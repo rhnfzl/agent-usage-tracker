@@ -134,6 +134,9 @@ def _spec(store: Store, spec_id: str) -> dict[str, Any]:
                 if "{metrics_file}" not in argv or not case["acceptance_files"]:
                     raise ValueError
                 _acceptance_inputs(case, roots)
+            elif "acceptance_files" in case:
+                for root in roots:
+                    _command_acceptance(case, roots, root)
     except (KeyError, TypeError, ValueError) as exc:
         raise AutError("improve: invalid trusted trial specification") from exc
     return spec
@@ -155,6 +158,15 @@ def _acceptance_inputs(case: dict[str, Any], roots: list[Path], cwd: Path | None
             raise AutError("improve: acceptance inputs must stay outside agent templates")
         if not path.is_file() or file_digest(path) != expected:
             raise AutError("improve: acceptance input changed")
+
+
+def _command_acceptance(case: dict[str, Any], roots: list[Path], cwd: Path) -> None:
+    if "acceptance_files" not in case:
+        return
+    if not isinstance(case["acceptance_files"], dict) or not case["acceptance_files"]:
+        raise AutError("improve: command acceptance files must be a nonempty hash map")
+    _acceptance_inputs({"acceptance_argv": case["argv"],
+                        "acceptance_files": case["acceptance_files"]}, roots, cwd)
 
 
 def _agent_run(store: Store, spec: dict[str, Any], case: dict[str, Any], condition: str,
@@ -242,13 +254,28 @@ def run_trial(store: Store, spec_id: str, *, execute: bool = False,
                             target = (root / relative).resolve()
                             if not target.is_relative_to(root) or file_digest(target) != expected:
                                 raise AutError("improve: trial input changed; prepare a new specification")
+                        roots = [Path(name).resolve() for name in directories.values()]
+                        if spec["kind"] == "command_check":
+                            _command_acceptance(case, roots, root)
                         outcome = (_agent_run(store, spec, case, condition, key, deadline)
                                    if spec["kind"] == "agent_task" else
                                    command(case["argv"], root, min(case["timeout_s"], remaining)))
+                        validation_error = None
+                        if spec["kind"] == "command_check" and "acceptance_files" in case:
+                            try:
+                                _command_acceptance(case, roots, root)
+                            except (AutError, OSError) as exc:
+                                validation_error = redact(str(exc))
+                                outcome.update(accepted=False, validation_error=validation_error)
                         result = {**identity, "evaluation_key": key, **outcome}
-                        store.put("trial_results", result)
+                        result_id = store.put("trial_results", result)
                         results[key] = result
                         executed += 1
+                        if validation_error is not None:
+                            store.append("trial_acceptance_rejected", spec_id=spec_id,
+                                         result_id=result_id, validation_error=validation_error)
+                            raise AutError("improve: protected command acceptance changed; "
+                                           f"rejected result {result_id}")
     report = {"spec_id": spec_id, "complete": len(results) == total,
               "finished": len(results), "total": total, "executed": executed,
               "accepted": {condition: sum(row["condition"] == condition and row["accepted"]
