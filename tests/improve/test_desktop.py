@@ -373,7 +373,11 @@ def test_completed_result_conflict_is_disputed_without_replacing_observation(tmp
     disputed = next(row for row in receipts if row["ingestion"]["conflicts"])
     assert disputed["persistence"] == "disputed"
     assert not disputed["coverage"]["complete"]
-    assert records(store.root / "observations.sqlite3")[0]["status"] == "ok"
+    assert records(store.root / "observations.sqlite3")[0]["status"] == "unknown"
+    import sqlite3
+    with sqlite3.connect(store.root / "observations.sqlite3") as db:
+        assert json.loads(db.execute("SELECT body FROM observations").fetchone()[0])["status"] == "ok"
+        assert json.loads(db.execute("SELECT body FROM tool_disputes").fetchone()[0])["status"] == "error"
 
 
 def test_mixed_conflicts_preserve_partial_writes_and_disputed_retry(tmp_path):
@@ -400,7 +404,9 @@ def test_mixed_conflicts_preserve_partial_writes_and_disputed_retry(tmp_path):
             AutError, match="some observations may already be stored; conflict unresolved"
         ):
             import_desktop(store, trace, None, MAPPING)
-        assert len(records(store.root / "observations.sqlite3")) == 2
+        points = records(store.root / "observations.sqlite3")
+        assert len(points) == 2
+        assert [point["status"] for point in points] == ["unknown", "ok"]
     receipts = [store.get("desktop_imports", key) for key in store.keys("desktop_imports")]
     disputed = [row for row in receipts if row["persistence"] == "disputed"]
     assert len(disputed) == 2
@@ -409,3 +415,43 @@ def test_mixed_conflicts_preserve_partial_writes_and_disputed_retry(tmp_path):
     assert {row["ingestion"]["duplicates"] for row in disputed} == {0, 1}
     assert all(row["ingestion"]["conflicts"] == 1 for row in disputed)
     assert all(row["task_acceptance"] == "unknown" for row in receipts)
+
+
+@pytest.mark.parametrize('late', [False, True])
+def test_outcome_dispute_stays_unknown_in_receipt_and_reports(tmp_path, late):
+    import sqlite3
+    from agent_usage_tracker.observations import records
+    from agent_usage_tracker.observation_report import build_report, public_draft
+    trace = write(tmp_path / 'trace.jsonl', [
+        event(0, 'trace.meta', schema=1),
+        event(1, 'command.start', command='click'),
+        event(2, 'command.end', command='click', ok=True),
+    ])
+    response = write(tmp_path / 'response.jsonl', [dict(
+        writer_pid=7, writer_proc_start_ms=900, command_seq=1,
+        response=dict(command='click', ok=False, error={}))])
+    store = Store(tmp_path / 'store')
+    db = store.root / 'observations.sqlite3'
+    if late:
+        import_desktop(store, trace, None, MAPPING)
+        with sqlite3.connect(db) as connection:
+            original = connection.execute('SELECT body FROM observations').fetchone()[0]
+        with pytest.raises(AutError, match='some observations may already be stored'):
+            import_desktop(store, trace, response, MAPPING)
+        with sqlite3.connect(db) as connection:
+            assert connection.execute('SELECT body FROM observations').fetchone()[0] == original
+        receipts = [store.get('desktop_imports', key) for key in store.keys('desktop_imports')]
+        receipt = next(row for row in receipts if row['coverage']['response_outcome_conflicts'])
+    else:
+        receipt = import_desktop(store, trace, response, MAPPING)
+    assert receipt['commands'][0]['status'] == 'unknown'
+    assert receipt['coverage']['response_outcome_conflicts'] == 1
+    assert receipt['commands'][0]['trace_ok'] is True
+    assert receipt['commands'][0]['response_ok'] is False
+    assert records(db)[0]['status'] == 'unknown'
+    report = build_report(db)
+    assert next(iter(report['tools'].values()))['unknown'] == 1
+    assert public_draft(report)['observed_tools']['desktop'] == dict(ok=0, error=0, unknown=1)
+    with pytest.raises(AutError, match='conflict'):
+        import_desktop(store, trace, None, MAPPING)
+    assert records(db)[0]['status'] == 'unknown'

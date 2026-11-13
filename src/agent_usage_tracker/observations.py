@@ -57,6 +57,10 @@ def _components_valid(r: dict[str, Any]) -> bool:
         known_input += r["cache_write_tokens"]
     if total is not None and known_input > total:
         return False
+    if total is not None and all(
+        r[key] is not None for key in ("input_tokens", "cache_read_tokens", "cache_write_tokens")
+    ) and known_input != total:
+        return False
     return not (
         r["reasoning_tokens"] is not None
         and r["output_tokens"] is not None
@@ -100,7 +104,7 @@ def validate_record(record: Any) -> dict[str, Any]:
         if "counter" in r:
             identifier(r["counter"])
         if not _components_valid(r):
-            raise ValueError("input component or reasoning subset exceeds total")
+            raise ValueError("input components disagree with total or reasoning subset exceeds total")
         if r.get("start") is not None and timestamp(r["start"]) >= timestamp(r["timestamp"]):
             raise ValueError("invalid usage window")
     if kind == "quota":
@@ -141,6 +145,11 @@ def _connect(store: str | Path) -> sqlite3.Connection:
         "(source TEXT, stream TEXT, role TEXT, representation TEXT, "
         "PRIMARY KEY(source, stream))"
     )
+    db.execute(
+        "CREATE TABLE IF NOT EXISTS tool_disputes "
+        "(source TEXT, stream TEXT, id TEXT, body TEXT, "
+        "PRIMARY KEY(source, stream, id))"
+    )
     return db
 
 
@@ -177,7 +186,18 @@ def ingest(
                     (source, stream, r["id"]),
                 ).fetchone()
                 if old:
-                    result["duplicates" if old == (body, role) else "conflicts"] += 1
+                    disputed = db.execute(
+                        "SELECT 1 FROM tool_disputes WHERE source=? AND stream=? AND id=?",
+                        (source, stream, r["id"]),
+                    ).fetchone()
+                    conflict = old != (body, role) or bool(disputed)
+                    if conflict and (r["kind"] == "tool" or json.loads(old[0])["kind"] == "tool"):
+                        # Retain conflicting evidence without rewriting the original observation.
+                        db.execute(
+                            "INSERT OR IGNORE INTO tool_disputes VALUES (?,?,?,?)",
+                            (source, stream, r["id"], body),
+                        )
+                    result["conflicts" if conflict else "duplicates"] += 1
                     continue
                 if ownership:
                     if mode is not None and ownership[1] is not None and mode != ownership[1]:
@@ -221,17 +241,32 @@ def ingest(
     return result
 
 
+def disputed_tool_ids(store: str | Path, *, source: str, stream: str) -> set[str]:
+    """Return quarantined identities without loading unrelated observations."""
+    db = _connect(store)
+    try:
+        return {row[0] for row in db.execute(
+            "SELECT DISTINCT id FROM tool_disputes WHERE source=? AND stream=?", (source, stream)
+        )}
+    finally:
+        db.close()
+
+
 def records(store: str | Path) -> list[dict[str, Any]]:
     """Return normalized evidence; only additive=True observations can feed totals."""
     db = _connect(store)
     try:
         rows = db.execute("SELECT source, stream, role, body FROM observations").fetchall()
+        disputed = set(db.execute("SELECT source, stream, id FROM tool_disputes").fetchall())
     finally:
         db.close()
     result = []
     for source, stream, role, body in rows:
         r = json.loads(body)
         r.update(source=source, stream=stream, role=role)
+        if r["kind"] == "tool" and (source, stream, r["id"]) in disputed:
+            r["status"] = "unknown"
+            r["disputed"] = True
         r["additive"] = (
             role == "primary"
             and r["kind"] == "usage"

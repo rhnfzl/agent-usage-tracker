@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from ..config import AutError
-from ..observations import ingest
+from ..observations import ingest, disputed_tool_ids
 from .store import Store, digest
 
 MAX_BYTES = 32 * 1024 * 1024
@@ -222,6 +222,8 @@ def import_desktop(
                 retry="unknown",
                 disposition_conflict=False,
                 response_code=None,
+                trace_ok=end.get("ok") if end is not None and type(end.get("ok")) is bool else None,
+                response_ok=None,
                 trace_code=end.get("code")
                 if end is not None and isinstance(end.get("code"), str) and end.get("code") in CODES
                 else None,
@@ -241,7 +243,9 @@ def import_desktop(
                     coverage["mismatched_responses"] += 1
                 else:
                     result.update(_disposition(response))
+                    result["response_ok"] = response["ok"]
                     if end is not None and response["ok"] != end.get("ok"):
+                        result["status"] = "unknown"
                         result["disposition_conflict"] = True
                         coverage["response_outcome_conflicts"] += 1
             stamp = anchor["ts_ms"]
@@ -321,6 +325,14 @@ def import_desktop(
         stream="commands",
         role="primary",
     )
+    if ingestion["conflicts"]:
+        disputed = disputed_tool_ids(
+            store.root / "observations.sqlite3", source="agent-desktop", stream="commands"
+        )
+        for command in commands:
+            if command["id"] in disputed:
+                command["status"] = "unknown"
+                command["disposition_conflict"] = True
     receipt["ingestion"] = ingestion
     receipt["persistence"] = "disputed" if ingestion["conflicts"] else "stored"
     receipt["success"] = not bool(ingestion["conflicts"])

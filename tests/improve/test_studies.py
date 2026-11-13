@@ -377,3 +377,29 @@ def test_reference_summary_counts_unindexable_unrelated_legacy_case(tmp_path):
     assert report['unattributable_reference_cases'] == 0
     assert report['rubrics']['avoidable_recovery']['total'] == 1
     assert report['holdout_independence_verified'] is False
+
+
+def test_byte_offsets_do_not_establish_study_or_followup_independence(tmp_path):
+    from agent_usage_tracker.improve.studies import identity
+    from agent_usage_tracker.improve.study_followup import followup
+    store, sid, follow_spec, _ = followup_fixture(tmp_path)
+    study = store.get('studies', sid)
+    original = store.get('cases', study['discovery_cases'][0])
+    original['events'][0]['byte_offset'] = 1000
+    first = store.put('cases', original)
+    copied = dict(original)
+    copied['session_snapshot'] = store.get('cases', follow_spec['evidence_cases'][0])['session_snapshot']
+    copied['events'] = [dict(original['events'][0], byte_offset=2000)]
+    copied_id = store.put('cases', copied)
+    assert identity(store, first)['content'] == identity(store, copied_id)['content']
+    study['control_cases'] = [copied_id]
+    study['task_families'] = {study['discovery_cases'][0]: 'editing', copied_id: 'review'}
+    for field in ('known_case_ids', 'created_at'):
+        study.pop(field)
+    with pytest.raises(AutError, match='copied'):
+        create(store, study)
+    follow_spec['evidence_cases'] = [copied_id]
+    follow_spec['task_families'] = {copied_id: 'review'}
+    follow_spec['trial_case_evidence'] = {'fresh': [copied_id]}
+    with pytest.raises(AutError, match='copied|source event'):
+        followup(store, sid, follow_spec)

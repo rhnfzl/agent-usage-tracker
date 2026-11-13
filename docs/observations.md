@@ -162,6 +162,7 @@ Known overlap with configured or selected collectors fails. Unknown overlap cann
 Do not mirror native logs into this collector without explicit source separation.
 
 Fresh input, cache-read, cache-write and output must all be known before a SQL usage row can be emitted.
+Their input components must equal a supplied inclusive input total. Inconsistent values fail before acknowledgment.
 Reasoning remains a subset of output and is never added twice.
 Missing components and counter records produce visible unavailable or unsupported counts, without SQL usage.
 The observation importer can retain partial or counter evidence separately.
@@ -245,6 +246,9 @@ Unpaired commands stay unknown in private receipts. They create no token usage o
 A later complete import can add the paired tool observation once.
 Repeated complete imports deduplicate across segments and sessions.
 Contradictory stored observations produce a disputed receipt and an error.
+Tool disputes are quarantined durably. Current reports show unknown outcomes, including after later identical retries.
+Original observations and the first conflicting observation remain preserved.
+Earlier unmarked disputes need evidence reimport to populate quarantine; historical receipts remain unchanged.
 That error states when some valid observations may already be stored.
 
 Desktop observations use `observations.sqlite3` inside the selected improvement root.

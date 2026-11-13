@@ -235,3 +235,18 @@ def test_late_backlog_conflict_delivers_nothing(tmp_path):
     with pytest.raises(AutError, match="conflict"):
         next(generic_sdk.collect(cfg(tmp_path), wm))
     assert wm == {}
+
+
+def test_inclusive_input_mismatch_refused_before_delivery_or_ack(tmp_path):
+    import json
+    path = tmp_path / 'events.jsonl'
+    bad = record(input_tokens=10, input_tokens_total=100, cache_read_tokens=0,
+                 cache_write_tokens=0, output_tokens=5)
+    with pytest.raises(ValueError):
+        emit_usage(path, bad, producer='app')
+    assert not path.exists()
+    path.write_text(json.dumps(dict(version=1, producer='app', usage=bad)) + '\n')
+    watermark = {}
+    with pytest.raises(AutError):
+        next(generic_sdk.collect(cfg(tmp_path), watermark))
+    assert watermark == {}

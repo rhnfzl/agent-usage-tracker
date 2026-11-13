@@ -233,3 +233,39 @@ def test_conflict_does_not_pin_representation_or_counter(tmp_path):
     later = dict(counter, id="d", timestamp="2026-11-13T14:00:00Z", input_tokens_total=25)
     assert ingest(db, [later], source="sdk", stream="one", role="primary")["accepted"] == 1
     assert records(db)[-1]["delta"]["input_tokens_total"] == 5
+
+
+@pytest.mark.parametrize('missing', ['input_tokens', 'cache_read_tokens', 'cache_write_tokens'])
+def test_partial_components_remain_unknown(missing):
+    value = dict(usage(), input_tokens=1, cache_read_tokens=2, cache_write_tokens=3)
+    value[missing] = None
+    normalized = validate_record(value)
+    assert normalized[missing] is None
+    assert normalized['input_tokens_total'] == 10
+
+
+def test_official_cache_creation_ambiguity_remains_valid():
+    value = dict(usage(), input_tokens_total=10, cache_read_tokens=5, cache_write_tokens=20)
+    normalized = validate_record(value)
+    assert normalized['input_tokens'] is None
+    assert normalized['cache_write_tokens'] == 20
+
+
+def test_tool_quarantine_is_durable_and_scoped(tmp_path):
+    import json
+    import sqlite3
+    db = tmp_path / 'db'
+    base = dict(version=1, kind='tool', id='t', timestamp='2026-01-01T00:00:00Z', status='ok')
+    options = dict(source='desktop', stream='commands', role='primary')
+    ingest(db, [base], **options)
+    assert ingest(db, [dict(base, status='error')], **options)['conflicts'] == 1
+    assert ingest(db, [base], **options)['conflicts'] == 1
+    assert ingest(db, [dict(base, status='unknown')], **options)['conflicts'] == 1
+    ingest(db, [base], source='other', stream='commands', role='primary')
+    points = {row['source']: row for row in records(db)}
+    assert points['desktop']['status'] == 'unknown'
+    assert points['desktop']['disputed'] is True
+    assert points['other']['status'] == 'ok'
+    with sqlite3.connect(db) as connection:
+        assert json.loads(connection.execute('SELECT body FROM tool_disputes').fetchone()[0])['status'] == 'error'
+        assert connection.execute('SELECT count(*) FROM tool_disputes').fetchone()[0] == 1

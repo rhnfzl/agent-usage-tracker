@@ -29,7 +29,7 @@ def identity(store: Store, case_id: str) -> dict[str, str]:
     case = store.get("cases", case_id)
     session = store.get("sessions", case["session_snapshot"])
     # Copies can change event ids, line numbers and snapshot coverage without changing the task.
-    content = [{k: v for k, v in event.items() if k not in {"id", "line", "timestamp"}}
+    content = [{k: v for k, v in event.items() if k not in {"id", "line", "byte_offset", "timestamp"}}
                for event in case["events"]]
     return {"session": digest([session["agent"], session["session_id"]]),
             "content": digest(content), "evidence": evidence_key(case)}
