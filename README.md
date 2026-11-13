@@ -188,7 +188,9 @@ They preserve rejected runs and distinguish bounded code correctness from genera
 See the [study guide](docs/improvement-studies.md) for commands and evidence requirements.
 
 Additional producers can supply private usage, quota and tool observations through the
-[local observation API](docs/observations.md). Quota snapshots remain separate from token usage.
+[observation guide](docs/observations.md). `aut observe` imports explicit files, renders private quota reports,
+and offers an opt-in authenticated receiver. Public exports are local drafts.
+Native desktop receipts use `aut improve desktop`; command success does not establish task acceptance.
 
 ```bash
 aut improve audit --days 7 --limit 30

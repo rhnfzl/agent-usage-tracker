@@ -176,3 +176,123 @@ The emitter refuses to append after an incomplete record.
 The collector retains up to one million identity digests and validates conflicts before delivery.
 Its scan memory grows with retained history. Removing unseen source data prevents later recovery.
 No credentials, network calls or new default collectors are added.
+
+## Import and inspect observations
+
+These commands read explicit local inputs and keep a separate private SQLite database.
+They do not load sink credentials or change normal scans.
+
+```bash
+aut observe --db ~/.local/share/aut/observations.sqlite3 import ~/private/usage.jsonl \
+  --format jsonl --source my-application --stream requests --role primary
+aut observe --db ~/.local/share/aut/observations.sqlite3 report --format html \
+  --out ~/.local/share/aut/observations.html
+aut observe --db ~/.local/share/aut/observations.sqlite3 report --format json
+```
+
+Use `--format otlp` for a supported OTLP JSON file.
+Use `--role crosscheck` for an alternative view of an already counted source.
+A source has one primary stream. Tool and usage identities must remain stable across retries.
+Changed copies produce conflicts. Valid records in a conflicting batch may already be durable.
+Inspect the returned receipt and retry identical records after resolving the conflict.
+
+Usage reports show complete component totals, known lower bounds and missing counts separately.
+Quota reports show latest remaining/limit values, units, reset times and freshness.
+A missing expiry stays unknown. A quota value never becomes consumed token usage.
+Tools retain separate source, stream and role groups.
+Their summed durations describe operation time, including nested operations, not elapsed task time.
+No tool count establishes human activity or business completion.
+
+Add `--improve-root /private/improvement-store` to `report` for immutable study and desktop receipts.
+The selected metric, scoped decision, unknowns and recorded costs remain separate from general productivity.
+Reports written with `--out` must be outside Git.
+
+## Native desktop evidence
+
+Native command evidence can explain recovery that a parent coding session only records as one tool call.
+It needs explicit parent association and trace coverage.
+
+```bash
+aut improve --root ~/.local/share/aut/desktop-evidence desktop \
+  --trace ~/private/desktop-segments --responses ~/private/desktop-responses.jsonl \
+  --mapping ~/private/desktop-mapping.json
+```
+
+The mapping contains exactly these nonempty identifiers:
+
+```json
+{"task_id":"task-42","session_id":"aut-session-7","parent_call_id":"call-3",
+ "desktop_session_id":"native-session-2"}
+```
+
+The adapter accepts raw Agent Desktop JSONL segments, a segment directory or a trace-show JSON envelope.
+Viewer exports with truncated or filtered events remain incomplete.
+Trace identities use writer PID, process start and sequence, with the explicit desktop session.
+A matching response companion has this shape:
+
+```json
+{"writer_pid":123,"writer_proc_start_ms":1794580000000,"command_seq":1,
+ "response":{"ok":false,"command":"click",
+ "error":{"code":"STALE_REF","disposition":{"delivery":"not_delivered","retry":"safe"}}}}
+```
+
+Use the actual command-start sequence and writer identity. Do not generate replacements for missing identity.
+A preflight failure can instead use `{"response": <actual envelope>}`.
+It remains sanitized orphan evidence, with unknown association, delivery and retry.
+UI text, arguments, titles, paths, screenshots and response bodies are not retained in normalized records.
+
+Unpaired commands stay unknown in private receipts. They create no token usage or completed tool point.
+A later complete import can add the paired tool observation once.
+Repeated complete imports deduplicate across segments and sessions.
+Contradictory stored observations produce a disputed receipt and an error.
+That error states when some valid observations may already be stored.
+
+Desktop observations use `observations.sqlite3` inside the selected improvement root.
+Pass that file to `aut observe --db` and the same root to `report --improve-root` to inspect both views.
+Command success never establishes task acceptance. Native operations remain separate from parent model tool calls.
+The adapter does not launch apps, request permissions, take screenshots or advise unsafe retries.
+
+## Optional receiver and hosted packaging
+
+Start the receiver only after supplying `AUT_OBSERVE_TOKEN` through the environment.
+Use a generated token of at least 16 non-whitespace characters.
+
+```bash
+aut observe --db ~/.local/share/aut/observations.sqlite3 serve
+```
+
+It defaults to `127.0.0.1:8766`. `--token-env NAME` selects another explicit environment variable.
+`GET /health` exposes health only. `GET /v1/report` requires bearer authentication.
+`POST /v1/ingest` requires the same authentication and exact `Content-Type: application/json`.
+A normalized request wraps records as follows:
+
+```json
+{"format":"jsonl","source":"my-application","stream":"requests","role":"primary",
+ "records":[{"version":1,"kind":"tool","id":"attempt-42",
+             "timestamp":"2026-11-13T12:00:00Z","status":"error"}]}
+```
+
+For OTLP JSON, use `format: "otlp"` and `payload` instead of `records`.
+Unknown wrapper fields, transfer encoding and ambiguous body lengths fail.
+Bodies are limited to 8 MiB. Sockets time out after five seconds.
+Success acknowledges durable storage. Conflicts return HTTP 409 with a partial-store receipt.
+An exact retry preserves identities and does not add usage twice.
+
+The receiver processes requests sequentially. Keep it internal.
+A nonloopback bind needs an authenticated TLS proxy and a private network boundary.
+[Inactive container and systemd examples](../packaging/observations/README.md) provide private persistent storage.
+No command above deploys a container, installs a service or changes an existing timer.
+
+## Local public draft
+
+```bash
+aut observe --db ~/.local/share/aut/observations.sqlite3 export-public \
+  --out ~/.local/share/aut/public-observations-draft.json
+```
+
+This writes a local draft and never publishes it.
+Its fixed fields contain timestamps, aggregate operation counts, study decisions and unknown coverage.
+Desktop and other operation counts remain separate. There is no combined parent/child total.
+Source identifiers, accounts, projects, session IDs, text, tokens, prices, costs and quotas are excluded.
+Selected scoped study results do not establish general productivity or representative error rates.
+Review the draft and its evidence before choosing public metrics.

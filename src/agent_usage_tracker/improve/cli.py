@@ -56,6 +56,10 @@ def register(sub: Any) -> None:
     reference.add_argument("--spec-file", type=Path, required=True)
     reference.add_argument("--diagnosis", required=True)
     reference.add_argument("--execute", action="store_true", help="execute the trusted reference oracle")
+    desktop = actions.add_parser("desktop", help="import private native-app command evidence")
+    desktop.add_argument("--trace", type=Path, required=True, help="raw trace file or segment directory")
+    desktop.add_argument("--responses", type=Path, help="local response companion JSONL")
+    desktop.add_argument("--mapping", type=Path, required=True, help="explicit task/session/parent JSON")
     study_cli.register(actions)
     actions.add_parser("status", help="show local progress counts without trace text")
 
@@ -65,6 +69,15 @@ def run(args: argparse.Namespace) -> None:
     store = Store(root)
     if args.improve_cmd == "study":
         result = study_cli.run(args, store)
+    elif args.improve_cmd == "desktop":
+        from .desktop import import_desktop
+        try:
+            mapping = json.loads(args.mapping.read_text())
+        except (OSError, ValueError) as exc:
+            raise AutError("improve: desktop mapping is not readable JSON") from exc
+        if not isinstance(mapping, dict):
+            raise AutError("improve: desktop mapping must be a JSON object")
+        result = import_desktop(store, args.trace, args.responses, mapping)
     elif args.improve_cmd == "audit":
         result = audit(store, Path.home(), days=args.days, limit=args.limit, project=args.project)
     elif args.improve_cmd == "diagnose":
