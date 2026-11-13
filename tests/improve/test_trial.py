@@ -223,7 +223,7 @@ def test_command_acceptance_mutation_keeps_rejected_attempt_receipt(tmp_path):
 
 
 def test_protected_command_changed_after_prospective_study_is_rejected(tmp_path):
-    from tests.improve.test_studies import fixture
+    from .test_studies import fixture
     from agent_usage_tracker.improve.proposals import file_digest
     from agent_usage_tracker.improve.studies import create
     store, policy = fixture(tmp_path)

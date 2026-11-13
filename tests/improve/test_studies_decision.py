@@ -1,5 +1,5 @@
 from agent_usage_tracker.improve.study_decision import measure
-from tests.improve.test_studies import followup_fixture
+from .test_studies import followup_fixture
 from agent_usage_tracker.improve.proposals import file_digest
 from agent_usage_tracker.improve.study_followup import followup
 
