@@ -68,6 +68,7 @@ def note_skips(skipped: Counter[str]) -> None:
             continue
         category = ("malformed_records" if key == "malformed" else
                     "unreadable_files" if key == "unreadable" else
+                    "missing_payloads" if key == "missing_payloads" else
                     "activity_errors" if key.startswith("activity:") else None)
         if category:
             observed.skipped[category] = min(_MAX_COUNT, observed.skipped[category] + count)

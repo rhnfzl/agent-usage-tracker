@@ -93,6 +93,9 @@ aut scan
 The dry run parses logs and reports totals without sending rows.
 Real scans advance their watermark only after delivery succeeds.
 Repeated delivery is safe because the sink deduplicates event IDs.
+Native JSONL collection drains a finite file snapshot, including all capped chunks present when each file is admitted.
+Later appends, new files and replaced files wait for the next run.
+On POSIX, acknowledged closed Cursor CLI stores skip SQLite reads while database and WAL metadata stay unchanged.
 
 Webhook-only scans keep session, activity, and time rows in a private local delivery queue.
 `aut status` shows pending rows. After configuring PostgreSQL, scans replay them automatically;

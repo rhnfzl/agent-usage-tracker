@@ -88,6 +88,9 @@ def _composers(cur: sqlite3.Cursor, skipped: Counter[str]) -> tuple[dict[str, di
         for key, val in cur.execute(
             "SELECT key, value FROM cursorDiskKV WHERE key LIKE 'composerData:%'"
         ):
+            if val is None:
+                skipped["missing_payloads"] += 1
+                continue
             try:
                 o = json.loads(val)
             except (ValueError, TypeError):
@@ -109,6 +112,9 @@ def _composers(cur: sqlite3.Cursor, skipped: Counter[str]) -> tuple[dict[str, di
 def _bubble_event(key: str, val: Any, comp: dict[str, dict[str, Any]], human_only: bool,
                   skipped: Counter[str]) -> UsageEvent | None:
     """The row of one bubble; None when it has none."""
+    if val is None:
+        skipped["missing_payloads"] += 1
+        return None
     try:
         o = json.loads(val)
         if not isinstance(o, dict):

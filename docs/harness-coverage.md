@@ -25,6 +25,10 @@ Commit and pull-request links do not establish an accepted task outcome.
 
 Missing, stale, malformed, future-dated and failed receipts remain distinct from a quiet successful pass.
 Parser losses remain visible even when useful usage rows were delivered.
+Cursor SQL NULL values appear as `missing_payloads` and a separate `source_payload_missing` warning.
+Their original deletion or write intent is unknown; they are not classified as malformed JSON.
+An empty value is not a confirmed deletion, recovered record or accepted task.
+Invalid non-null payloads still produce `parser_loss`. Missing-only input remains unknown, never idle.
 Pending delivery is reported separately. An existing SQLite WAL makes the queue probe unknown,
 because opening it could create sidecar files.
 

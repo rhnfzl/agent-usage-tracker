@@ -115,6 +115,18 @@ both transports, re-scans) never double-counts.
   record whose source line has no timestamp (they are counted as skipped, never pushed), so
   null never reaches the sink even though `UsageEvent.ts` is typed `str | None`.
 
+## Native file snapshot boundaries
+
+A scan, export or backfill must finish while agents continue writing.
+Each native JSONL collector admits files during its first pass and captures each admitted file's inode and length.
+Later passes drain every complete line through that length, including files larger than the per-pass line cap.
+Later appends and new files wait for the next run and retain their acknowledged checkpoint.
+Observed replacement or truncation invalidates only that file's checkpoint, forcing a fresh read on the next run.
+A partial final line remains unread until a later run sees it complete.
+Acknowledgement still controls watermark advancement. A failed delivery never advances that batch.
+Snapshot scope ends before control returns to a batch consumer and is restored after nested or cancelled iteration.
+Existing same-inode truncate-and-regrow detection limits remain unchanged.
+
 ## Per-agent reality (measured on real logs, 2026-07-18)
 
 | Agent | Source | Model | Timestamp | Notes |
@@ -397,6 +409,11 @@ Seeds are `session_id|...`.
 | `interrupt` | not possible: no record in the store. The transcript's `turn_ended` carries a status but no id or timestamp, and its count does not line up with the prompts, so it is not joined | a cancelled run is `turn` with `status` `cancelled` |
 | `pr` | skipped: only `gh pr create` output text | none |
 | `compaction`, `invoke` | not possible (no record; reading a skill file is a guess) | none |
+
+Closed Cursor CLI stores use a metadata cache on POSIX. It is published only with the acknowledged, fully read closed snapshot.
+The main database and WAL must retain their device, inode, size, modification/change timestamps and permissions; a journal prevents caching.
+Changed, open, incomplete or unstable stores are reread. Windows retains fresh SQLite reads because its change-time semantics cannot provide this guard.
+The cache establishes unchanged previously acknowledged data, not current SQLite lock health.
 
 Known gaps: a prompt no surviving root lists (its history was dropped) still gives its human and
 steer rows but no turn row, once the chat is idle (until then it may be a new prompt whose root is
@@ -905,6 +922,9 @@ People can change coding tools without assuming that a successful collector capt
   Changed nonempty issue sets emit a local stderr notice. Older writers cannot replace newer collector/report generations.
 - Receipts contain normalized counts and bounded diagnostics, never prompt/tool content or credentials.
   Human classifications are not independent human-origin proof; commit/PR links are not verified outcomes.
+- Cursor SQL NULL values are missing stored payloads, recorded as `missing_payloads` and a `source_payload_missing` warning.
+  Their original intent is unknown. Non-null invalid JSON, blobs and JSON `null` remain malformed records.
+  Missing payloads never establish an empty source or complete coverage.
 - A source with parser losses, missing evidence or unread metadata cannot become a quiet successful source.
   The existing sink heartbeat status keeps its original semantics; coverage adds a separate assessment.
 - Metadata budgets, depth limits, skipped symlinks, unsupported routes and uninspected roots remain explicit.

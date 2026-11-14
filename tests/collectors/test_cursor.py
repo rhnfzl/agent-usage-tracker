@@ -12,6 +12,8 @@ import sqlite3
 import tempfile
 from pathlib import Path
 
+import pytest
+
 from agent_usage_tracker.collectors import cursor
 from agent_usage_tracker.event import CollectorUnavailable
 from test_collectors import _cfg, _drain
@@ -145,3 +147,37 @@ def test_cursor_counts_a_composer_with_bad_bytes(capsys):
         cfg.cursor_db_path = str(db)
         assert [e.total_tokens for e in _drain(cursor.collect, cfg)] == [10]
     assert "1 malformed record(s)" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("human_only", [False, True])
+def test_cursor_distinguishes_missing_payloads_from_malformed_records(tmp_path, capsys, human_only):
+    from agent_usage_tracker.diagnostics import capture
+
+    db = tmp_path / "state.vscdb"
+    with sqlite3.connect(db) as con:
+        con.execute("CREATE TABLE cursorDiskKV (key TEXT UNIQUE, value BLOB)")
+        records = [
+            ("composerData:ordinary", json.dumps({"createdAt": 1700000000000})),
+            ("bubbleId:ordinary:human", json.dumps({"type": 1})),
+            ("bubbleId:ordinary:agent", json.dumps({
+                "tokenCount": {"inputTokens": 3, "outputTokens": 2}})),
+            ("composerData:empty", None),
+            ("bubbleId:ordinary:empty", None),
+        ]
+        records.extend((f"{key}{index}", payload)
+                       for key in ("composerData:bad", "bubbleId:ordinary:bad")
+                       for index, payload in enumerate(("not json", b"\xff\xfe", "null")))
+        con.executemany("INSERT INTO cursorDiskKV VALUES (?, ?)", records)
+    con.close()
+    cfg = _cfg(tmp_path)
+    cfg.cursor_db_path = str(db)
+    cfg.cursor_human_only = human_only
+    with capture() as observed:
+        events = _drain(cursor.collect, cfg)
+    expected = [("human", 0)] if human_only else [("agent", 5), ("human", 0)]
+    assert sorted((e.kind, e.total_tokens) for e in events) == expected
+    assert all(e.ts == "2023-11-14T22:13:20+00:00" for e in events)
+    assert observed.skipped == {"missing_payloads": 2, "malformed_records": 6}
+    warning = capsys.readouterr().err
+    assert "2 record(s) have no stored payload" in warning
+    assert "6 malformed record(s)" in warning

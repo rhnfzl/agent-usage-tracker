@@ -8,9 +8,12 @@ def test_skipped_records_reach_only_the_current_collector(capsys):
     from agent_usage_tracker.collectors._util import warn_skipped
 
     with diagnostics.capture() as observed:
-        warn_skipped("fixture", Counter({"malformed": 2, "activity:KeyError": 3}))
-    assert observed.skipped == {"malformed_records": 2, "activity_errors": 3}
-    assert "malformed record(s)" in capsys.readouterr().err
+        warn_skipped("fixture", Counter({"malformed": 2, "activity:KeyError": 3, "missing_payloads": 4}))
+    assert observed.skipped == {"malformed_records": 2, "activity_errors": 3,
+                                "missing_payloads": 4}
+    warning = capsys.readouterr().err
+    assert "malformed record(s)" in warning
+    assert "4 record(s) have no stored payload" in warning
     with diagnostics.capture() as later:
         pass
     assert not later.skipped

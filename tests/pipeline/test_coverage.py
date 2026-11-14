@@ -308,3 +308,22 @@ def test_catalog_is_research_not_parser_coverage(cfg):
     assert len(report["catalog"]) >= 17
     assert all(c["runtime_verified"] is False for c in report["catalog"])
     assert all(c["parser_coverage"] == "not_qualified_by_catalog" for c in report["catalog"])
+
+
+@pytest.mark.parametrize("human_count,activity_state,requests_observed", [
+    (0, "unknown", None), (1, "observed", True)])
+def test_missing_payload_receipt_keeps_source_gap_visible(
+        cfg, human_count, activity_state, requests_observed):
+    cfg.agents = ("cursor",)
+    coverage.save_scan_observations([row("cursor", human_classifications=human_count, diagnostics={
+        "skipped": {"missing_payloads": 2}, "clients": [], "client_overflow": False})])
+    report = coverage.build_report(cfg, now=NOW)
+    collector = next(c for c in report["collectors"] if c["collector"] == "cursor")
+    assert collector["observation"]["status"] == "ok"
+    assert collector["observation"]["diagnostics"]["skipped"] == {"missing_payloads": 2}
+    assert collector["observation"]["activity_state"] == activity_state
+    assert collector["capabilities"]["requests"]["observed"] is requests_observed
+    assert {"code": "source_payload_missing", "source_id": "collector:cursor",
+            "severity": "warning"} in report["issues"]
+    assert "parser_loss" not in codes(report)
+    assert report["completeness"] == "unknown"
