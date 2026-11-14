@@ -857,3 +857,34 @@ The recipe's minimum applies after that shift; the resulting score is not a cali
 A score at or below the recipe minimum becomes `label: unknown` and `below_tau: true`.
 Steer timestamps remain the event time; assessed outcomes retain the episode start time.
 No public view may silently combine this ongoing coverage with the frozen historical frame.
+
+
+## T3 app activity
+
+T3 users can count prompts and app runs across provider changes without counting mirrored native prompts twice.
+Historical metrics stay unchanged until an operator approves a prospective cutover.
+
+- `t3` reads `~/.t3/userdata/statev2.sqlite` with SQLite URI `mode=ro`, `query_only=ON`, and one consistent transaction.
+- Only v2 projection threads, runs, messages, provider threads, turn items, and `projection_projects` are queried. Auth and secret tables are never queried.
+- Collection requires `t3_activity_since`, a persisted timezone-aware timestamp. An installed T3 source without this setting reports degraded coverage without reading its database.
+- Only user-role messages with `createdBy=user` and `creationSource=web|mobile` prove human input. Agent, MCP, provider, and ambiguous server input does not.
+- In-run human corrections use the recorded run ID and matching app thread. An initiating message spanning several provider runs still needs proof for all those runs.
+- A strong native reference plus a linked confirmed human message and its run interval proves native overlap. Weak, missing, or conflicting bindings do not.
+- Ambiguous human messages remain undelivered and report a degraded count. A later binding allows delivery without resetting state.
+- Human rows contain zero tokens and no estimated cost. Steer attributes contain character and word counts, never text or paths. Project names use the worktree basename before the project root basename.
+- Canonical session IDs are `t3:<app-thread-id>` across providers. Confirmed app human provenance supplies interactive origin where native origin was unknown. Native usage event IDs, token values, models, providers, and costs remain unchanged.
+- Codex session headers with `originator=T3 Code` prove client provenance, not human input. After cutover, their unbound human, steer, and turn rows are quarantined. Token rows keep native IDs and values with unknown origin until stronger evidence appears. This also protects late-binding retries. Quarantine treats that native ID as T3-owned after cutover; a direct CLI resume of the same ID needs separate launch provenance.
+- Native human and steer rows inside proved intervals are omitted. Native session IDs outside those intervals, including imported history before the cutover, remain unchanged.
+- T3 owns completed app-run turn activity inside proved intervals. Native turn rows there are omitted, even if native logs arrive later. One app run is not one internal agent turn.
+- Turn item metadata supplies observed `tool_calls`, `tool_errors`, and `by_tool` category counts for command execution, dynamic tools, and file changes. Inputs, outputs, command text, and file paths are not selected. Errors cover failed item statuses and nonzero command exit codes. Retry sequences and unsupported counters remain unknown.
+- A native usage row explicitly marked automated or subagent keeps its native identity and origin. App evidence does not promote this origin.
+- Strongly linked agent-created app messages suppress native human, steer, and turn mirrors. Native token sessions keep their IDs and receive automated origin unless already automated or subagent. Ambiguous server/user provenance receives unknown origin.
+- Each projection query returns at most 100,000 rows, 1 MiB per record, and 16 MiB in total. SQLite bounds returned cells before Python allocation. Exceeding a limit degrades the source. Delivery pages contain at most 500 source messages or runs.
+- The watermark stores delivered message and run IDs only after acknowledged delivery. Retries retain stable event IDs. It never stores raw text.
+- A configured but missing database, malformed data or tables, and locked stores report degraded coverage. A tools directory without a database or configured cutover is not an installed app source.
+- Native Claude discovery includes absolute `homePath` values for `claudeAgent` instances in T3 settings. Configured aliases share one root. Existing default-path spelling and subagent identities remain unchanged. A `t3-code` client marker alone never proves a human prompt.
+- Local label context resolves T3 message IDs to private prompt and reply text. Label redaction and text limits apply before classification.
+- Historical native prompts already delivered to a sink are not deleted or rewritten. A historical reconciliation requires a separate reviewed target list.
+
+Public session views must group by canonical `session_id`, rather than `(agent, session_id)`, and count distinct session IDs across providers.
+The database views live in the infrastructure repository, outside this collector repository.

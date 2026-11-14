@@ -273,8 +273,10 @@ class Source:
             sessions = {s["session_id"] for s in mine}
             want = {s["event_id"] for s in mine}
             try:
-                paths = self._paths(agent, sessions)
-                if agent == "cursor_cli":
+                paths = [] if agent == "t3" else self._paths(agent, sessions)
+                if agent == "t3":
+                    values = context.t3_context(self.cfg.home, sessions, want, until)
+                elif agent == "cursor_cli":
                     values = context.cursor_context(self.cfg.home, sessions, want, until, self.keys,
                                                     paths=paths)
                 elif agent == "codex":

@@ -333,11 +333,16 @@ def _pi_logs(home: Path, sessions: set[str]) -> Iterator[tuple[str, str, dict[st
             yield hdr["id"], f, hdr
 
 
-def _session_logs(home: Path, sessions: set[str]) -> Iterator[tuple[str, str,
+def _session_logs(home: Path, sessions: set[str], failed: Counter[str]) -> Iterator[tuple[str, str,
                                                                     Callable[[Digest], None]]]:
     """(session id, agent name, the reader that fills a Digest) of each local log of a wanted
     session."""
-    for f in claude_code.main_session_files(home):
+    try:
+        claude_files = claude_code.main_session_files(home)
+    except Exception as exc:  # noqa: BLE001  # local discovery must not hide other providers
+        failed[type(exc).__name__] += 1
+        claude_files = []
+    for f in claude_files:
         if Path(f).stem in sessions:
             yield Path(f).stem, "Claude Code", partial(_digest_claude_log, f)
     names = codex.thread_names(home)
@@ -361,7 +366,7 @@ def local_info(home: Path, sessions: set[str]) -> dict[str, SessionView]:
     (state.vscdb) are not read; their sessions show no local text."""
     info: dict[str, SessionView] = {}
     failed: Counter[str] = Counter()
-    for sid, agent, read in _session_logs(home, sessions):
+    for sid, agent, read in _session_logs(home, sessions, failed):
         d = Digest(agent)
         try:
             read(d)

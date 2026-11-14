@@ -15,9 +15,11 @@ from typing import Any
 
 from ..collectors import claude_code, codex
 from ..config import AutError
+from ..event import CollectorUnavailable
 from ..git_safe import git_argv, git_env
 from ..state import _locked, atomic_write_text
 from .evidence import read_session
+from . import t3
 
 
 def canonical(value: Any) -> str:
@@ -101,6 +103,18 @@ def repository(path: Path) -> str | None:
         return None
 
 
+def _source_session(path: Path, agent: str, budget: int) -> str | None:
+    try:
+        with path.open("rb") as stream:
+            record = json.loads(stream.readline(min(budget, 65536)))
+        meta = record.get("payload", {}) if agent == "codex" else record
+        session = (meta.get("id") or meta.get("session_id")) if agent == "codex" \
+            else meta.get("sessionId", path.stem)
+        return session if isinstance(session, str) else None
+    except (OSError, ValueError, AttributeError):
+        return None
+
+
 def audit(store: Store, home: Path, *, days: int = 7, limit: int = 40,
           project: Path | None = None, idle_s: int = 120,
           since_epoch: float | None = None, max_bytes: int = 16 * 1024 * 1024) -> dict[str, Any]:
@@ -112,7 +126,12 @@ def audit(store: Store, home: Path, *, days: int = 7, limit: int = 40,
     counts: Counter[str] = Counter()
     for agent, discover in (("claude_code", claude_code.main_session_files),
                             ("codex", codex.session_files)):
-        for name in discover(home):
+        try:
+            discovered = discover(home)
+        except (OSError, CollectorUnavailable):
+            counts["unreadable_sources"] += 1
+            continue
+        for name in discovered:
             path = Path(name)
             try:
                 stamp = path.stat().st_mtime
@@ -131,17 +150,54 @@ def audit(store: Store, home: Path, *, days: int = 7, limit: int = 40,
     project_repo = repository(project) if project else None
     if project and project_repo is None:
         raise AutError("improve: project must be a readable local Git repository")
-    for _stamp, agent, path in sorted(files, reverse=True):
+    t3_rows, t3_counts = t3.snapshots(home, since=since, limit=limit,
+                                    idle_s=idle_s, max_bytes=max_bytes)
+    counts.update(t3_counts)
+    mirrors: dict[tuple[str, str], str] = {}
+    supplement_reads = 0
+    # App threads join provider handoffs; native mirrors remain referenced, not counted twice.
+    candidates: list[tuple[float, str, Path | dict[str, Any]]] = [
+        (0, "t3", row) for row in t3_rows]
+    candidates.extend(sorted(files, reverse=True))
+    for _stamp, agent, candidate in candidates:
         if len(sessions) >= limit:
-            counts["unread_sources"] += 1
-            continue
+            linked_identity = (agent, _source_session(candidate, agent, max_bytes)) \
+                if isinstance(candidate, Path) else None
+            if linked_identity not in mirrors or supplement_reads >= 2 * limit:
+                counts["unread_sources"] += 1
+                continue
+            supplement_reads += 1
         try:
-            evidence = read_session(path, agent, max_bytes=max_bytes, since_epoch=since,
-                                    imports=imports, exclude_automated=True, recent=True)
+            evidence = candidate if isinstance(candidate, dict) else read_session(
+                candidate, agent, max_bytes=max_bytes, since_epoch=since,
+                imports=imports, exclude_automated=True, recent=True)
         except (OSError, ValueError, TypeError, OverflowError):
             counts["unreadable_sources"] += 1
             continue
-        if evidence is None or evidence["origin"] in {"subagent", "automated"}:
+        if evidence is None:
+            counts["automated_sources"] += 1
+            continue
+        if (agent, evidence["session_id"]) in mirrors:
+            source = (agent, evidence["source"]["sha256"])
+            if source in seen:
+                counts["duplicates"] += 1
+                continue
+            seen.add(source)
+            primary_key = mirrors[(agent, evidence["session_id"])]
+            supplement = store.put("sessions", evidence)
+            primary = store.get("sessions", primary_key)
+            linked = set(primary.get("supplemental_sources", []))
+            linked.add(supplement)
+            primary["supplemental_sources"] = sorted(linked)
+            primary["source_family_link"] = "Native linkage is not proof of equivalent coverage."
+            updated_key = store.put("sessions", primary)
+            sessions[sessions.index(primary_key)] = updated_key
+            mirrors = {pair: updated_key if key == primary_key else key
+                       for pair, key in mirrors.items()}
+            copies[("t3", primary["session_id"])] = [updated_key]
+            counts["t3_native_mirrors"] += 1
+            continue
+        if evidence["origin"] in {"subagent", "automated"}:
             counts["automated_sources"] += 1
             continue
         if not evidence["events"]:
@@ -163,6 +219,8 @@ def audit(store: Store, home: Path, *, days: int = 7, limit: int = 40,
         identities[identity] = source[1]
         key = store.put("sessions", evidence)
         sessions.append(key)
+        if agent == "t3":
+            mirrors.update((tuple(pair), key) for pair in evidence.get("native_sessions", []))
         copies.setdefault(identity, []).append(key)
         coverage = evidence["coverage"]
         counts["complete_sessions"] += bool(coverage["complete"])
@@ -174,11 +232,13 @@ def audit(store: Store, home: Path, *, days: int = 7, limit: int = 40,
     ambiguous = sorted(key for group in copies.values() if len(group) > 1 for key in group)
     counts["complete_sessions"] = sum(store.get("sessions", key)["coverage"]["complete"]
                                      and key not in ambiguous for key in sessions)
-    manifest = {"version": 3, "session_ids": sorted(sessions),
+    manifest = {"version": 4, "session_ids": sorted(sessions),
                 "ambiguous_session_ids": ambiguous, "coverage": dict(counts),
                 "project": str(project.resolve()) if project else None,
                 "source_policy": {"days": days, "limit": limit, "max_bytes": max_bytes,
-                                  "idle_s": idle_s, "agents": ["claude_code", "codex"]}}
+                                  "idle_s": idle_s, "agents": ["t3", "claude_code", "codex"],
+                                  "additional_native_reads": 2 * limit,
+                                  "preference": "T3 app thread before native provider mirrors"}}
     key = store.put("audits", manifest)
     store.append("audit", audit_id=key, sessions=len(sessions), coverage=dict(counts))
     return {"audit_id": key, "sessions": len(sessions), **counts}

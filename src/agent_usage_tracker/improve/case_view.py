@@ -54,6 +54,12 @@ def write_case_view(store: Store, case_id: str) -> dict[str, Any]:
     path = Path(str(source.get("path", "")))
     source_link = (f'<a href="{escape(path.as_uri(), quote=True)}">Original local trace</a>'
                    if path.is_absolute() else "Original trace link unavailable")
+    supplements = []
+    for key in session.get("supplemental_sources", []):
+        store.get("sessions", key)
+        link = store.path("sessions", key).as_uri()
+        supplements.append(f'<p><a href="{escape(link, quote=True)}">Linked native snapshot</a>'
+                           ' (supplemental evidence, not a separate judge observation).</p>')
     blocks = []
     labels = {"prompt": "User request", "call": "Tool call", "result": "Tool result",
               "reply": "Assistant reply", "boundary": "Turn boundary", "compaction": "Compaction"}
@@ -61,6 +67,7 @@ def write_case_view(store: Store, case_id: str) -> dict[str, Any]:
         seen = event["id"] in selected
         location = (f"line {event['line']}" if event.get("line") is not None else
                     f"byte {event['byte_offset']}" if event.get("byte_offset") is not None else
+                    f"{event['table']} record {event['record_id']}" if event.get("record_id") else
                     "source position unavailable")
         title = labels.get(event["kind"], str(event["kind"]))
         details = "Used in model input" if seen else "Captured context omitted from model input"
@@ -96,7 +103,7 @@ def write_case_view(store: Store, case_id: str) -> dict[str, Any]:
             f'<p>{source_link}</p><p><code>{escape(str(source.get("path", "unavailable")))}</code></p>'
             f'<p>Recorded source hash: <code>{escape(str(source.get("sha256", "unavailable")))}</code></p>'
             f'<p><a href="{escape(snapshot.as_uri(), quote=True)}">Frozen source snapshot</a></p>'
-            '</details>' + ''.join(blocks) + '</main></body></html>')
+            + ''.join(supplements) + '</details>' + ''.join(blocks) + '</main></body></html>')
     target = store.path("case_views", case_id).with_suffix(".html")
     atomic_write_text(target, page)
     return {"case_id": case_id, "path": str(target), "captured_events": len(events),

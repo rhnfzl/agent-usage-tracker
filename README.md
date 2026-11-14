@@ -112,7 +112,8 @@ Preserve that salt in backups; replacing it breaks those cross-machine matches.
 
 | Agent | Source | Coverage and limits |
 |---|---|---|
-| Claude Code | `~/.claude/projects/` | Usage, prompts, sessions, activity, and links |
+| Claude Code | `~/.claude/projects/` and Claude homes configured in T3 | Usage, prompts, sessions, activity, and links |
+| T3 Code | `~/.t3/userdata/statev2.sqlite` | Confirmed app prompts and completed app runs after an explicit cutover; native logs retain token usage |
 | Codex | `~/.codex/sessions/` | Usage, reasoning tokens, prompts, sessions, activity, and links |
 | Pi | `~/.pi/agent/sessions/` | Usage, reasoning tokens, prompts, sessions, activity, and links |
 | Cursor CLI | `~/.cursor/chats/` and SDK run stores | Prompts, sessions, activity, and links; no token counts |
@@ -120,6 +121,18 @@ Preserve that salt in backups; replacing it breaks those cross-machine matches.
 | Cursor API | Your dashboard account, explicitly enabled | Token usage for the IDE and CLI; no prompt records |
 | Cursor SDK | Configured run manifests | Per-run usage from your SDK applications |
 | ActivityWatch | Your local server, explicitly enabled | Active-window intervals; review title privacy settings first |
+
+T3 activity collection requires an approved `t3_activity_since` timestamp in your local configuration:
+
+```toml
+t3_activity_since = "2026-11-15T00:00:00Z" # replace with your approved prospective cutover
+```
+
+Include `"t3"` beside your native collectors when `agents` is explicit.
+T3 uses confirmed web/mobile messages and strong native bindings to avoid mirrored prompts.
+Provider changes share one `t3:<app-thread-id>` session. Native logs remain the source of tokens and costs.
+T3 turns count completed app runs, which can contain several internal agent turns.
+Missing or ambiguous evidence reports degraded coverage. Existing history is not reconciled automatically.
 
 **Choose one Cursor token source:** `cursor`, `cursor_api`, or `cursor_sdk`.
 Combining them can double-count usage. `cursor_cli` has no tokens and can run beside any of them.
