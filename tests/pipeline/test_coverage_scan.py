@@ -1,0 +1,262 @@
+"""Coverage receipts expose real collection gaps without changing row ownership."""
+
+import json
+
+import pytest
+
+from agent_usage_tracker import cli, scan
+from agent_usage_tracker.collectors import Collector
+from test_cli import _recording_sender
+
+pytest_plugins = ["test_cli"]
+
+
+def test_doctor_json_is_readonly_and_keeps_transport_secrets_private(world, capsys):
+    before = {str(p): p.read_bytes() for p in world.rglob("*") if p.is_file()}
+    assert cli.main(["doctor", "--json"]) == 0
+    output = capsys.readouterr().out
+    report = json.loads(output)
+    assert report["version"] == 1
+    assert "postgresql://x" not in output
+    assert "capabilities" in str(report)
+    assert before == {str(p): p.read_bytes() for p in world.rglob("*") if p.is_file()}
+
+
+def test_scan_persists_parser_losses_beside_normalized_counts(world, monkeypatch):
+    from agent_usage_tracker import coverage
+
+    sent = _recording_sender(monkeypatch)
+    log = world / ".claude/projects/-p/s1.jsonl"
+    with log.open("a") as stream:
+        stream.write("{malformed}\n")
+    assert cli.main(["--agents", "claude_code", "scan"]) == 0
+    assert len(sent) == 1
+    observed = json.loads(coverage.observations_path().read_text())["collectors"]["claude_code"]
+    assert observed["usage_events"] == 1
+    assert observed["diagnostics"]["skipped"]["malformed_records"] == 1
+    report = json.loads(coverage.report_path().read_text())
+    assert any(issue["source_id"] == "collector:claude_code" for issue in report["issues"])
+
+
+def test_scan_dry_run_does_not_create_coverage_receipts(world):
+    from agent_usage_tracker import coverage
+
+    assert cli.main(["scan", "--dry-run"]) == 0
+    assert not coverage.observations_path().exists()
+    assert not coverage.report_path().exists()
+
+
+def test_collector_failure_still_records_coverage_and_preserves_exception(world, monkeypatch):
+    from agent_usage_tracker import coverage
+
+    _recording_sender(monkeypatch)
+
+    def broken(_cfg, _wm):
+        raise ValueError("fixture failure")
+        yield  # pragma: no cover
+
+    monkeypatch.setitem(scan.REGISTRY, "claude_code", Collector(broken))
+    with pytest.raises(ValueError, match="fixture failure"):
+        cli.main(["--agents", "claude_code", "scan"])
+    observed = json.loads(coverage.observations_path().read_text())["collectors"]["claude_code"]
+    assert observed["status"] == "error"
+    assert observed["error"] == "ValueError"
+
+
+def test_commit_link_does_not_certify_task_outcome(world):
+    from datetime import datetime, timezone
+    from agent_usage_tracker import coverage
+    from agent_usage_tracker.config import load_config
+
+    stamp = datetime.now(timezone.utc).isoformat()
+    coverage.save_scan_observations([{
+        "collector": "claude_code", "status": "ok", "error": None,
+        "started_at": stamp, "finished_at": stamp, "usage_events": 0,
+        "human_classifications": 0, "activity": {"commit": 1}, "diagnostics": {},
+    }])
+    report = coverage.build_report(load_config())
+    collector = next(row for row in report["collectors"] if row["collector"] == "claude_code")
+    assert collector["capabilities"]["outcomes"]["observed"] is None
+
+
+
+def test_uninspected_root_is_not_reported_available_when_budget_is_exhausted(world, monkeypatch):
+    from agent_usage_tracker import coverage
+    from agent_usage_tracker.config import load_config
+
+    monkeypatch.setattr(coverage, "MAX_ENTRIES", 1)
+    report = coverage.build_report(load_config())
+    codex = next(row for row in report["collectors"] if row["collector"] == "codex")
+    assert codex["roots"][0]["limited"]
+    assert codex["roots"][0]["status"] == "unknown"
+    source = next(row for row in report["sources"] if row["id"] == "native:codex")
+    assert source["availability"] == "unknown"
+
+
+def test_doctor_exposes_declared_links_without_inventing_request_counts(world):
+    from agent_usage_tracker import coverage, sources
+    from agent_usage_tracker.config import load_config
+
+    cfg = load_config()
+    link = {"source_id": "newapp", "native_session_id": "engine-one",
+            "harness_thread_id": "thread-one", "request_id": "request-one"}
+    sources.registry_path(cfg.home).write_text(json.dumps({
+        "version": 1, "sources": [{"id": "newapp", "harness": "arbitrary-harness",
+        "engine": "codex", "location": "local", "home": str(world / "engine")}],
+        "links": [link],
+    }))
+    report = coverage.build_report(cfg)
+    assert report["session_links"][0]["native_session_id"] == "engine-one"
+    assert report["session_links"][0]["association_scope"] == "declared_not_duplicate_or_human_proof"
+    assert next(c for c in report["collectors"] if c["collector"] == "codex")[
+        "observation"]["activity_state"] == "unknown"
+
+
+def test_status_points_to_the_coverage_report(world, capsys):
+    assert cli.main(["status"]) == 0
+    assert "aut doctor --json" in capsys.readouterr().out
+
+
+
+def test_nested_native_subagent_backlog_is_not_silently_omitted(world):
+    from agent_usage_tracker import coverage
+    from agent_usage_tracker.config import load_config
+
+    child = world / ".claude/projects/-p/parent/subagents/agent-child.jsonl"
+    child.parent.mkdir(parents=True)
+    child.write_text("{}\n")
+    report = coverage.build_report(load_config())
+    claude = next(row for row in report["collectors"] if row["collector"] == "claude_code")
+    assert claude["roots"][0]["files"] == 2
+    assert claude["roots"][0]["unread_bytes"] >= 3
+
+
+@pytest.mark.parametrize("kind", ["file", "fifo"])
+def test_invalid_native_root_type_is_unreadable(world, kind):
+    import os
+    from agent_usage_tracker import coverage
+    from agent_usage_tracker.config import load_config
+
+    path = world / ".codex/sessions"
+    path.parent.mkdir(parents=True)
+    if kind == "fifo":
+        if not hasattr(os, "mkfifo"):
+            pytest.skip("FIFO unavailable")
+        os.mkfifo(path)
+    else:
+        path.write_text("{}")
+    report = coverage.build_report(load_config())
+    source = next(row for row in report["sources"] if row["id"] == "native:codex")
+    assert source["availability"] == "unreadable"
+
+
+def test_delayed_older_scan_writer_cannot_replace_newer_counts(world):
+    from datetime import datetime, timedelta, timezone
+    from agent_usage_tracker import coverage
+
+    now = datetime.now(timezone.utc)
+    def row(stamp, count):
+        return {"collector": "codex", "status": "ok", "error": None,
+                "started_at": stamp.isoformat(), "finished_at": stamp.isoformat(),
+                "usage_events": count, "human_classifications": 0,
+                "activity": {}, "diagnostics": {}}
+    coverage.save_scan_observations([row(now, 2)])
+    coverage.save_scan_observations([row(now - timedelta(minutes=1), 0)])
+    stored = json.loads(coverage.observations_path().read_text())
+    assert stored["collectors"]["codex"]["usage_events"] == 2
+
+
+def test_delayed_older_report_cannot_clear_newer_warning(world):
+    from datetime import datetime, timedelta, timezone
+    from agent_usage_tracker import coverage
+
+    now = datetime.now(timezone.utc)
+    newer = {"version": 1, "generated_at": now.isoformat(), "issues": [
+        {"code": "parser_loss", "source_id": "collector:codex", "severity": "warning"}]}
+    coverage.save_report(newer)
+    before = coverage.report_path().read_bytes()
+    older = {"version": 1, "generated_at": (now - timedelta(minutes=1)).isoformat(),
+             "issues": []}
+    assert coverage.save_report(older) is False
+    assert coverage.report_path().read_bytes() == before
+
+
+
+def test_doctor_exposes_bundle_candidates_without_claiming_active_work(world, monkeypatch):
+    from agent_usage_tracker import coverage, harness_inventory
+    from agent_usage_tracker.config import load_config
+
+    applications = world / "Applications"
+    (applications / "Rex Beta.app").mkdir(parents=True)
+    (applications / "Unrelated private name.app").mkdir()
+    monkeypatch.setattr(harness_inventory, "application_dirs", lambda _home: [
+        applications])
+    report = coverage.build_report(load_config())
+    observed = report["harness_inventory"]["observations"]
+    assert observed[0]["harness_id"] == "rex"
+    assert observed[0]["installation"] == "candidate"
+    assert observed[0]["activity"] == "unknown"
+    assert observed[0]["reader_qualified"] is False
+    assert "Unrelated private name" not in json.dumps(report)
+
+
+
+def test_doctor_never_creates_sidecars_for_closed_wal_database(world):
+    import sqlite3
+    from agent_usage_tracker import coverage, push
+
+    path = push.outbox_path()
+    path.parent.mkdir(parents=True)
+    connection = sqlite3.connect(path)
+    connection.execute("PRAGMA journal_mode=WAL")
+    connection.execute("CREATE TABLE pending(kind TEXT)")
+    connection.execute("INSERT INTO pending VALUES ('activity')")
+    connection.commit()
+    connection.close()
+    before = {p.name: p.read_bytes() for p in path.parent.iterdir()}
+    assert set(before) == {"pending.sqlite3"}
+    assert coverage._delivery()["status"] == "unknown"
+    assert before == {p.name: p.read_bytes() for p in path.parent.iterdir()}
+
+
+
+def test_doctor_does_not_consume_a_nonregular_delivery_source(world):
+    import os
+    from agent_usage_tracker import coverage, push
+
+    if not hasattr(os, "mkfifo"):
+        pytest.skip("FIFO unavailable")
+    path = push.outbox_path()
+    path.parent.mkdir(parents=True)
+    os.mkfifo(path)
+    descriptor = os.open(path, os.O_RDWR | os.O_NONBLOCK)
+    try:
+        os.write(descriptor, b"retained-stream")
+        assert coverage._delivery()["status"] == "unknown"
+        try:
+            remaining = os.read(descriptor, 100)
+        except BlockingIOError:
+            remaining = b""
+        assert remaining == b"retained-stream"
+    finally:
+        os.close(descriptor)
+
+
+
+def test_all_rejected_records_cannot_appear_as_a_quiet_source(world):
+    from datetime import datetime, timezone
+    from agent_usage_tracker import coverage
+    from agent_usage_tracker.config import load_config
+
+    stamp = datetime.now(timezone.utc).isoformat()
+    coverage.save_scan_observations([{
+        "collector": "claude_code", "status": "ok", "error": None,
+        "started_at": stamp, "finished_at": stamp, "usage_events": 0,
+        "human_classifications": 0, "activity": {},
+        "diagnostics": {"skipped": {"malformed_records": 2}},
+    }])
+    report = coverage.build_report(load_config())
+    collector = next(row for row in report["collectors"] if row["collector"] == "claude_code")
+    assert collector["observation"]["activity_state"] == "unknown"
+    assert collector["capabilities"]["usage"]["observed"] is None
+    assert any(issue["code"] == "parser_loss" for issue in report["issues"])

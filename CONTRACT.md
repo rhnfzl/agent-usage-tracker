@@ -888,3 +888,30 @@ Historical metrics stay unchanged until an operator approves a prospective cutov
 
 Public session views must group by canonical `session_id`, rather than `(agent, session_id)`, and count distinct session IDs across providers.
 The database views live in the infrastructure repository, outside this collector repository.
+
+
+## Shared source coverage
+
+People can change coding tools without assuming that a successful collector captured every source.
+`aut doctor --json` separates source availability, parser support, local observations and unknown completeness.
+
+- Doctor is a bounded, read-only local assessment. It does not run collectors, commands, models or network requests.
+- The version1 `sources.json` registry declares engine homes, source location/transport, session associations and optional publication receipts.
+- Native Claude/Codex/Pi discovery is shared by collection, label context and private improvement inspection.
+  Defaults remain included; live Claude/Codex home overrides and explicit T3 Claude homes are additional roots.
+- Native IDs, token values, event ownership and positive automated/subagent origins remain unchanged.
+  Associations do not prove duplicate equivalence, human input or model consumption.
+- Normal non-dry scans save per-collector `scan-observations.json` and the private `coverage.json` assessment beside the watermark.
+  Changed nonempty issue sets emit a local stderr notice. Older writers cannot replace newer collector/report generations.
+- Receipts contain normalized counts and bounded diagnostics, never prompt/tool content or credentials.
+  Human classifications are not independent human-origin proof; commit/PR links are not verified outcomes.
+- A source with parser losses, missing evidence or unread metadata cannot become a quiet successful source.
+  The existing sink heartbeat status keeps its original semantics; coverage adds a separate assessment.
+- Metadata budgets, depth limits, skipped symlinks, unsupported routes and uninspected roots remain explicit.
+- The delivery probe rejects active or persisted WAL modes. A stable rollback-mode main-file snapshot is read without writes; concurrent changes return unknown.
+- macOS app-name matches are installation candidates with unknown activity. Unmatched names are omitted.
+- The 25-entry catalog contains documented routes only. Catalog presence never enables or qualifies a reader.
+- Publication freshness requires a current local verification receipt and matching live/published revisions.
+  Doctor does not fetch a website or manufacture a publisher receipt.
+
+The [coverage guide](docs/harness-coverage.md) defines the registry, limits and supported fields.

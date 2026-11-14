@@ -24,9 +24,11 @@ from pathlib import Path
 from typing import Any, Iterator, TypedDict
 
 from ..config import Config
-from ..event import Row, ActivityKind, Batch, ActivityEvent, EventSession, UsageEvent, make_event_id
+from ..event import (Row, ActivityKind, Batch, ActivityEvent, CollectorUnavailable, EventSession,
+                     UsageEvent, make_event_id)
 from ..repo_keys import RepoKeys
 from ..state import parse_record
+from ..sources import SourceError, engine_homes
 from .activity_common import (IDLE_S, Link, TurnAgg, add_call, best_effort, blank_tool_tally, drop_raw_shas,
                               first_record, human_event, ms_between, pad_pending, pop_pending,
                               record_commits, text_of, tool_key, turn_attrs)
@@ -59,7 +61,15 @@ def sessions_dir(home: Path) -> Path:
 
 
 def session_files(home: Path) -> list[str]:
-    return glob.glob(str(sessions_dir(home) / "**" / "*.jsonl"), recursive=True)
+    return [path for root in sessions_dirs(home)
+            for path in glob.glob(str(root / "**" / "*.jsonl"), recursive=True)]
+
+
+def sessions_dirs(home: Path) -> list[Path]:
+    try:
+        return [root / "sessions" for root in engine_homes(home, NAME)]
+    except SourceError as exc:
+        raise CollectorUnavailable(str(exc)) from exc
 
 
 def _cost_total(cost: object) -> float | None:
@@ -371,7 +381,7 @@ def _idle_snapshot(path: str, cur: FileState, keys: RepoKeys) -> list[ActivityEv
 
 
 def collect(cfg: Config, wm: dict[str, Any]) -> Iterator[Batch]:
-    if not sessions_dir(cfg.home).exists():
+    if not any(root.exists() for root in sessions_dirs(cfg.home)):
         return
     _upgrade_state(wm)
     keys = RepoKeys(cfg.repo_key_salt)

@@ -145,7 +145,8 @@ def test_delivery_failure_is_swallowed() -> None:
     rep_ok, sent_ok, state_ok, _ = results[0]
     for rep_bad, sent_bad, state_bad, err_bad in results[1:]:
         assert rep_bad == rep_ok and sent_bad == sent_ok and state_bad == state_ok
-        assert err_bad.count("\n") == 1 and "heartbeat" in err_bad, err_bad
+        heartbeat_warnings = [line for line in err_bad.splitlines() if "heartbeat" in line]
+        assert len(heartbeat_warnings) == 1, err_bad
     assert sent_ok == [["a1", "a2", "h1", "a3"]], sent_ok
 
 

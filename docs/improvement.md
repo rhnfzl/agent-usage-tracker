@@ -37,8 +37,10 @@ Database record identifiers replace JSONL line references for those events.
 The T3 reader does not prove that project instructions reached a past agent turn.
 Repository instructions apply to their project; an AUT-specific test rule is not copied to
 other projects with different test commands.
-Native Claude discovery also includes `claudeAgent` profile homes explicitly configured in T3.
-This recovers native usage without interpreting every forwarded T3 message as a human request.
+Native discovery uses the shared source resolver for collection, local labels and private inspection.
+It includes registered Claude/Codex/Pi homes, live Claude/Codex home overrides and explicit T3 Claude profiles.
+See [shared harness coverage](harness-coverage.md) for the registry and read-only doctor command.
+These source associations do not establish human input or complete task evidence.
 They omit positively identified automated sessions and sources active within the last two minutes.
 Codex sources identified as automated by their first session header skip body processing.
 Unknown sources retain the full evidence checks.

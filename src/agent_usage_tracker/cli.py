@@ -8,6 +8,7 @@
   aut backfill --activity-only [--dry-run]
                         the same for activity rows (steers, commits, turns, ...); never usage
   aut status            show config + watermark state
+  aut doctor --json     inspect source coverage without writing or connecting
   aut export [--out F]  write all usage as CSV (bulk load, offline bridge); never the watermark
   aut sync-prices [--out F]
                         refresh the API-equivalent model price map
@@ -133,9 +134,25 @@ def cmd_status(cfg: Config, agents: Sequence[str], args: argparse.Namespace) -> 
     pending = outbox_status()
     print(f"delivery queue: {sum(pending.values())} pending rows"
           + (f" ({', '.join(f'{kind}: {n}' for kind, n in sorted(pending.items()))})" if pending else ""))
+    print("coverage      : inspect known and registered sources with aut doctor --json")
     print("watermarks    :")
     for name in agents:
         print(f"    {name:<12} {REGISTRY[name].describe(cfg, collector_wm(state, name))}")
+
+
+def cmd_doctor(cfg: Config, args: argparse.Namespace) -> None:
+    from .coverage import build_report
+
+    report = build_report(cfg)
+    if args.json:
+        print(json.dumps(report, indent=2, sort_keys=True))
+        return
+    print(f"coverage: {len(report['sources'])} inspected source(s), "
+          f"{len(report['issues'])} reported issue(s)")
+    print("scope: known and registered sources; completeness remains evidence-specific")
+    for issue in report["issues"]:
+        print(f"  {issue['source_id']}: {issue['code']}")
+    print("Use aut doctor --json for capabilities, evidence and limits.")
 
 
 def cmd_time_add(cfg: Config, args: argparse.Namespace) -> None:
@@ -281,7 +298,7 @@ _AGENT_COMMANDS = {"scan": cmd_scan, "backfill": cmd_backfill, "export": cmd_exp
 _COMMANDS = {"time": cmd_time_add, "outcomes": cmd_outcomes, "outcome": cmd_outcome,
              "inspect": cmd_inspect, "episodes": cmd_episodes, "label": cmd_label,
              "history-steers": cmd_history_steers, "backup": cmd_backup, "git-days": cmd_git_days,
-             "retry-delivery": cmd_delivery_retry}
+             "retry-delivery": cmd_delivery_retry, "doctor": cmd_doctor}
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -308,6 +325,8 @@ def _build_parser() -> argparse.ArgumentParser:
     p_back.add_argument("--dry-run", action="store_true",
                         help="with --sessions-only/--activity-only: counts only")
     p_status = sub.add_parser("status", help="show config + watermark state")
+    p_doctor = sub.add_parser("doctor", help="inspect source coverage without writing or connecting")
+    p_doctor.add_argument("--json", action="store_true", help="print the private coverage report")
     p_export = sub.add_parser("export", help="write all usage as CSV (bulk load / offline bridge)")
     p_export.add_argument("--out", help="output CSV file (default: stdout)")
     for sp in (p_scan, p_back, p_status, p_export):     # accepted after the subcommand too

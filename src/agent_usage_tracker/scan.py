@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from dataclasses import replace
 from typing import Any, Callable, Iterator, Sequence, TextIO, TypedDict
 
+from . import diagnostics
 from .collectors import REGISTRY, Collect, drain
 from .config import Config
 from .event import (ActivityEvent, Batch, CollectorUnavailable, Row, TimeInterval, UsageEvent,
@@ -108,6 +109,7 @@ class _CollectorPass:
         self.buf: list[Row] = []
         self.advances: list[Callable[[], None]] = []
         self.newest_ts: datetime | None = None
+        self.diagnostics = diagnostics.Diagnostics()
         self.status: ScanStatus = "ok"
         self.error: str | None = None
 
@@ -165,6 +167,7 @@ def run_scan(cfg: Config, agents: Sequence[str], *, dry_run: bool) -> dict[str, 
             replay_outbox(cfg)
     report: dict[str, AgentTally] = {}
     scan_rows: list[dict[str, Any]] = []      # one heartbeat row per collector that ran (agents.collector_scan)
+    observations: list[dict[str, Any]] = []
 
     for name in agents:
         collector = REGISTRY[name]
@@ -175,9 +178,10 @@ def run_scan(cfg: Config, agents: Sequence[str], *, dry_run: bool) -> dict[str, 
         failure: BaseException | None = None
 
         try:
-            run.drain_all(collector.collect, cfg, wm, name)
-            if collector.after_scan and not dry_run:    # a dry run changes nothing
-                collector.after_scan(cfg)
+            with diagnostics.capture(run.diagnostics):
+                run.drain_all(collector.collect, cfg, wm, name)
+                if collector.after_scan and not dry_run:    # a dry run changes nothing
+                    collector.after_scan(cfg)
         except BaseException as exc:
             run.status, run.error = "error", error_type_name(exc)
             failure = exc
@@ -193,15 +197,43 @@ def run_scan(cfg: Config, agents: Sequence[str], *, dry_run: bool) -> dict[str, 
             scan_rows.append(scan_row(cfg, name, started_at, status=run.status, error=run.error,
                                       events=agg["events"] + agg["intervals"],
                                       human=agg["human"], newest_ts=run.newest_ts))
-            # the loop ends here: one delivery. Ctrl-C leaves at once and sends nothing.
+            observations.append({
+                "collector": name, "status": run.status, "error": run.error,
+                "started_at": started_at.isoformat(),
+                "finished_at": datetime.now(timezone.utc).isoformat(),
+                "usage_events": agg["events"], "human_classifications": agg["human"],
+                "activity": dict(agg["activity"]), "diagnostics": run.diagnostics.snapshot(),
+            })
+            # Ctrl-C leaves at once. Diagnostic persistence cannot replace the original failure.
             if failure and not isinstance(failure, KeyboardInterrupt):
+                try:
+                    _record_coverage(cfg, observations)
+                except Exception as exc:
+                    print(f"aut: coverage observation failed ({type(exc).__name__})", file=sys.stderr)
                 deliver_scan_rows(cfg, scan_rows)
         if failure:
             raise failure                   # the scan still fails
 
     if not dry_run:
         deliver_scan_rows(cfg, scan_rows)
+        _record_coverage(cfg, observations)
     return report
+
+
+def _record_coverage(cfg: Config, observations: list[dict[str, Any]]) -> None:
+    from .coverage import build_report, save_report, save_scan_observations
+
+    try:
+        save_scan_observations(observations)
+        assessment = build_report(cfg)
+        changed = save_report(assessment)
+    except (OSError, ValueError) as exc:
+        print(f"aut: coverage receipt unavailable ({type(exc).__name__}); "
+              "inspect with aut doctor --json", file=sys.stderr)
+        return
+    if changed and assessment["issues"]:
+        print(f"aut: coverage changed: {len(assessment['issues'])} reported issue(s) "
+              "within inspected sources; inspect with aut doctor --json", file=sys.stderr)
 
 
 def _print_tokens(name: str, agg: AgentTally) -> None:

@@ -15,7 +15,6 @@ persisted so resuming from a byte offset keeps the right attribution across scan
 from __future__ import annotations
 
 import glob
-import json
 import os
 from collections import Counter
 from datetime import datetime, timezone
@@ -23,10 +22,12 @@ from pathlib import Path
 from typing import Any, Iterator, NamedTuple, TypedDict
 
 from ..config import Config
+from ..diagnostics import observe_client
 from ..event import (Row, ActivityKind, Batch, ActivityEvent, CollectorUnavailable, EventSession,
                      RunOrigin, UsageEvent, make_event_id, parse_ts)
 from ..repo_keys import RepoKeys, repo_identity
 from ..state import parse_record
+from ..sources import SourceError, _read_json, engine_homes
 from .activity_common import (Link, TurnAgg, add_call, best_effort, blank_tool_tally, drop_raw_shas,
                               first_record, human_event, ms_between, record_commits, text_of,
                               result_status, turn_attrs)
@@ -64,14 +65,29 @@ def sessions_dir(home: Path) -> Path:
 
 
 def session_files(home: Path) -> list[str]:
-    return glob.glob(str(sessions_dir(home) / "**" / "rollout-*.jsonl"), recursive=True)
+    return [path for root in sessions_dirs(home)
+            for path in glob.glob(str(root / "**" / "rollout-*.jsonl"), recursive=True)]
+
+
+def sessions_dirs(home: Path) -> list[Path]:
+    try:
+        return [root / "sessions" for root in engine_homes(home, NAME)]
+    except SourceError as exc:
+        raise CollectorUnavailable(str(exc)) from exc
 
 
 def imported_until(home: Path) -> dict[str, datetime]:
     """Imported history has import-time timestamps, not new native work timestamps."""
+    out: dict[str, datetime] = {}
+    for root in sessions_dirs(home):
+        for sid, bound in _imported_until(root.parent).items():
+            out[sid] = max(out.get(sid, bound), bound)
+    return out
+
+
+def _imported_until(root: Path) -> dict[str, datetime]:
     try:
-        value = json.loads((home / ".codex/external_agent_session_imports.json").read_text(
-            encoding="utf-8"))
+        value = _read_json(root / "external_agent_session_imports.json")
         if not isinstance(value, dict) or not isinstance(value.get("records"), list):
             raise ValueError("Invalid import index")
         out: dict[str, datetime] = {}
@@ -88,7 +104,7 @@ def imported_until(home: Path) -> dict[str, datetime]:
         return out
     except FileNotFoundError:
         return {}
-    except (OSError, ValueError, OverflowError) as exc:
+    except (OSError, ValueError, OverflowError, RecursionError) as exc:
         raise CollectorUnavailable("codex: import index is unreadable or invalid") from exc
 
 
@@ -102,14 +118,15 @@ def imported_record(record: dict[str, Any], bound: datetime | None) -> bool:
 def thread_names(home: Path) -> dict[str, str]:
     """session id -> the name Codex gave the thread (session_index.jsonl). Best effort."""
     names: dict[str, str] = {}
-    try:
-        with open(home / ".codex" / "session_index.jsonl", encoding="utf-8") as fh:
-            for line in fh:
-                o = parse_record(line)
-                if o and isinstance(o.get("id"), str) and isinstance(o.get("thread_name"), str):
-                    names[o["id"]] = o["thread_name"]
-    except (OSError, ValueError):       # no index, or a bad byte: threads show what it had so far
-        return names
+    for root in sessions_dirs(home):
+        try:
+            with open(root.parent / "session_index.jsonl", encoding="utf-8") as fh:
+                for line in fh:
+                    o = parse_record(line)
+                    if o and isinstance(o.get("id"), str) and isinstance(o.get("thread_name"), str):
+                        names[o["id"]] = o["thread_name"]
+        except (OSError, ValueError):   # no index, or a bad byte: keep the names read so far
+            continue
     return names
 
 
@@ -158,6 +175,7 @@ def _set_meta(cur: FileState, p: dict[str, Any], keys: RepoKeys) -> None:
     """Identity, origin and cwd from the FIRST session_meta only: a forked file repeats its
     parent's meta on a later line. Its git block gives the link fields every turn carries: the
     repo from the cwd, else the remote URL (hashed, never kept), and the branch, as keys."""
+    observe_client(p.get("originator"))
     cur["meta"] = {"id": str_or_none(p.get("id")), "parent": str_or_none(p.get("parent_thread_id")),
                    "origin": run_origin(p)}
     cur["cwd"] = p.get("cwd") or cur.get("cwd")
@@ -569,7 +587,7 @@ def _trim_state(cur: FileState) -> None:
 
 
 def collect(cfg: Config, wm: dict[str, Any]) -> Iterator[Batch]:
-    if not sessions_dir(cfg.home).exists():
+    if not any(root.exists() for root in sessions_dirs(cfg.home)):
         return
     keys = RepoKeys(cfg.repo_key_salt)
     imports = imported_until(cfg.home)

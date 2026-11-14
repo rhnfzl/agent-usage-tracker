@@ -1,0 +1,439 @@
+{
+  "version": 1,
+  "scope": "Documented integration routes, not installed or qualified parser coverage.",
+  "harnesses": [
+    {
+      "id": "super-engineering",
+      "name": "super.engineering",
+      "research_date": "2026-11-14",
+      "engine": "Includes Claude Code, Codex, Cursor, OpenCode, Pi, Grok and other providers; surfaces/capabilities vary.",
+      "evidence_route": "Terminal is native CLI. Chat UI uses provider adapters; Claude noninteractive Chat UI follows a CLI path. Exact other Chat UI SDK/ACP/app-server wires remain unverified.",
+      "route_status": "documented",
+      "primary_urls": [
+        "https://super.engineering/docs/providers-and-models/",
+        "https://super.engineering/docs/remote-workspaces/",
+        "https://super.engineering/docs/settings-privacy-local-data",
+        "https://super.engineering/docs/session-history-and-restore"
+      ],
+      "runtime_verified": false,
+      "parser_coverage": "not_qualified_by_catalog"
+    },
+    {
+      "id": "zeron",
+      "name": "Zeron",
+      "research_date": "2026-11-14",
+      "engine": "Claude Code, Codex, Cursor, OpenCode, Pi and ACP-native providers including Devin, Grok, Hermes and Antigravity.",
+      "evidence_route": "Claude stream-json subprocess; Codex app-server JSON-RPC stdio; Cursor pinned SDK shim; OpenCode HTTP/SSE; Pi JSONL RPC; ACP only ACP-native drivers.",
+      "route_status": "documented",
+      "primary_urls": [
+        "https://raw.githubusercontent.com/zeronsh/zeron/main/crates/harness/src/lib.rs",
+        "https://raw.githubusercontent.com/zeronsh/zeron/main/crates/harness/src/claude/mod.rs",
+        "https://raw.githubusercontent.com/zeronsh/zeron/main/crates/harness/src/codex/mod.rs",
+        "https://github.com/zeronsh/zeron",
+        "https://raw.githubusercontent.com/zeronsh/zeron/main/ARCHITECTURE.md"
+      ],
+      "runtime_verified": false,
+      "parser_coverage": "not_qualified_by_catalog"
+    },
+    {
+      "id": "paseo",
+      "name": "Paseo",
+      "research_date": "2026-11-14",
+      "engine": "Native adapters for Claude Code, Codex, OpenCode, Pi and others, plus a version-pinned ACP catalog.",
+      "evidence_route": "Claude Agent SDK uses installed claude CLI; Codex uses codex app-server; generic ACP providers use stdio initialize/capability negotiation.",
+      "route_status": "documented",
+      "primary_urls": [
+        "https://paseo.sh/docs/providers",
+        "https://paseo.sh/docs/supported-providers",
+        "https://paseo.sh/docs/claude-code",
+        "https://paseo.sh/docs/codex",
+        "https://paseo.sh/docs/custom-providers",
+        "https://github.com/getpaseo/paseo",
+        "https://paseo.sh/docs/configuration",
+        "https://paseo.sh/docs/sdk/events",
+        "https://paseo.sh/docs/sdk/reference",
+        "https://paseo.sh/docs/plugins/hooks"
+      ],
+      "runtime_verified": false,
+      "parser_coverage": "not_qualified_by_catalog"
+    },
+    {
+      "id": "diri",
+      "name": "Diri",
+      "research_date": "2026-11-14",
+      "engine": "Existing Claude Code, Codex, Cursor, Gemini, OpenCode and other agent CLIs; generic agents retain terminal surfaces.",
+      "evidence_route": "PTY/holder-based native CLI launches. Claude manifest declares hooks authority and minted --session-id; Codex manifest declares screen authority plus notify/MCP injection.",
+      "route_status": "documented",
+      "primary_urls": [
+        "https://github.com/cristicretu/diri",
+        "https://raw.githubusercontent.com/cristicretu/diri/main/diri/crates/diri-engine/manifests/claude-code.json",
+        "https://raw.githubusercontent.com/cristicretu/diri/main/diri/crates/diri-engine/manifests/codex.json",
+        "https://raw.githubusercontent.com/cristicretu/diri/main/docs/AGENT-MANIFESTS.md",
+        "https://raw.githubusercontent.com/cristicretu/diri/main/AGENTS.md",
+        "https://raw.githubusercontent.com/cristicretu/diri/main/PRIVACY.md"
+      ],
+      "runtime_verified": false,
+      "parser_coverage": "not_qualified_by_catalog"
+    },
+    {
+      "id": "t3-code",
+      "name": "T3 Code",
+      "aliases": [
+        "T3 Code Beta",
+        "T3CodeBeta"
+      ],
+      "research_date": "2026-11-14",
+      "engine": "Claude Code, Codex, Cursor, OpenCode, Pi, Muse and ACP Registry/flavored providers.",
+      "evidence_route": "Claude Agent SDK; Codex App Server; native adapters for other non-ACP protocols, including Pi RPC; shared ACP Registry/flavored adapters for ACP providers.",
+      "route_status": "documented",
+      "primary_urls": [
+        "https://raw.githubusercontent.com/pingdotgg/t3code/main/docs/internals/adding-a-provider.md",
+        "https://github.com/pingdotgg/t3code/blob/main/docs/user/faq.md",
+        "https://raw.githubusercontent.com/pingdotgg/t3code/main/docs/internals/providers.md",
+        "https://raw.githubusercontent.com/pingdotgg/t3code/main/docs/user/background-service.md",
+        "https://raw.githubusercontent.com/pingdotgg/t3code/main/docs/user/providers-claude.md",
+        "https://raw.githubusercontent.com/pingdotgg/t3code/main/docs/user/providers-codex.md",
+        "https://raw.githubusercontent.com/pingdotgg/t3code/main/docs/internals/overview.md"
+      ],
+      "runtime_verified": false,
+      "parser_coverage": "not_qualified_by_catalog"
+    },
+    {
+      "id": "emdash",
+      "name": "Emdash",
+      "research_date": "2026-11-14",
+      "engine": "Installed coding-agent CLIs, including Claude Code, Codex, OpenCode and Amp; provider registry defines prompt, hooks, ACP and other capabilities.",
+      "evidence_route": "Two paths: legacy/TUI through PTY and TUI-agent runtimes; structured chat through ACP provider plugins and a Host ACP runtime. Explicit hooks/plugins drive TUI status.",
+      "route_status": "documented",
+      "primary_urls": [
+        "https://github.com/generalaction/emdash",
+        "https://emdash.sh/docs",
+        "https://emdash.sh/docs/providers",
+        "https://github.com/generalaction/emdash/blob/main/AGENTS.md",
+        "https://github.com/generalaction/emdash/blob/main/CONTEXT.md",
+        "https://github.com/generalaction/emdash/blob/main/agents/integrations/providers.md",
+        "https://ademark.dev/"
+      ],
+      "runtime_verified": false,
+      "parser_coverage": "not_qualified_by_catalog"
+    },
+    {
+      "id": "monocode",
+      "name": "MonoCode",
+      "research_date": "2026-11-14",
+      "engine": "Locally installed/authenticated agent providers including Claude Code, Codex, Cursor, OpenCode, Pi and others. CLI discovery happens at startup.",
+      "evidence_route": "Desktop sessions plus an experimental remote host service. /operator enables a local app CLI in an active agent turn; sessions.list and sessions.start expose app-session references.",
+      "route_status": "documented",
+      "primary_urls": [
+        "https://github.com/hardbeat920/monocode",
+        "https://usemono.dev",
+        "https://github.com/hardbeat920/monocode/blob/main/docs/providers.md",
+        "https://github.com/hardbeat920/monocode/blob/main/docs/agent-access.md",
+        "https://github.com/hardbeat920/monocode/blob/main/docs/remote-access.md",
+        "https://ademark.dev/"
+      ],
+      "runtime_verified": false,
+      "parser_coverage": "not_qualified_by_catalog"
+    },
+    {
+      "id": "synara",
+      "name": "Synara",
+      "research_date": "2026-11-14",
+      "engine": "Provider-native runtimes include Codex CLI/app-server, Claude Code, Cursor, OpenCode, Pi and others. Provider owns models, account, tools, permissions and limits.",
+      "evidence_route": "Durable projects/threads around provider sessions; internal thread-scoped Agent Gateway plus a separate user-paired External MCP stdio bridge to a loopback endpoint.",
+      "route_status": "documented",
+      "primary_urls": [
+        "https://github.com/Emanuele-web04/synara",
+        "https://www.trysynara.com",
+        "https://www.trysynara.com/docs",
+        "https://github.com/Emanuele-web04/synara/blob/main/docs/external-mcp.md",
+        "https://github.com/Emanuele-web04/synara/blob/main/docs/remote-connections-v2.md",
+        "https://ademark.dev/"
+      ],
+      "runtime_verified": false,
+      "parser_coverage": "not_qualified_by_catalog"
+    },
+    {
+      "id": "bb",
+      "name": "bb",
+      "research_date": "2026-11-14",
+      "engine": "Provider processes on host daemons; configured providers include Claude Code, Codex, Pi and ACP agents. Custom ACP provider commands run on the thread's host.",
+      "evidence_route": "Central SQLite source of truth; HTTP and WebSocket server contract; separate host-daemon RPC/events contract; first-class CLI and SDK methods.",
+      "route_status": "documented",
+      "primary_urls": [
+        "https://github.com/get-bb/bb",
+        "https://getbb.app",
+        "https://github.com/get-bb/bb/blob/main/docs/system-overview.md",
+        "https://github.com/get-bb/bb/blob/main/docs/configuration.md",
+        "https://ademark.dev/"
+      ],
+      "runtime_verified": false,
+      "parser_coverage": "not_qualified_by_catalog"
+    },
+    {
+      "id": "orca",
+      "name": "Orca",
+      "research_date": "2026-11-14",
+      "engine": "CLI-agent host for Claude Code, Codex, OpenCode, Pi and other installed agent CLIs. The any-CLI statement describes execution compatibility, not telemetry completeness.",
+      "evidence_route": "Worktree/terminal coordination plus an Orca CLI for a running editor, JSON status, SSH execution, notifications and orchestration. Usage tracking is provider-specific.",
+      "route_status": "documented",
+      "primary_urls": [
+        "https://github.com/stablyai/orca",
+        "https://www.onorca.dev",
+        "https://www.onorca.dev/docs/cli/overview",
+        "https://www.onorca.dev/docs/ssh",
+        "https://www.onorca.dev/docs/agents/usage-tracking",
+        "https://ademark.dev/"
+      ],
+      "runtime_verified": false,
+      "parser_coverage": "not_qualified_by_catalog"
+    },
+    {
+      "id": "traycer",
+      "name": "Traycer",
+      "research_date": "2026-11-14",
+      "engine": "Managed Claude Code/Codex/OpenCode CLIs and additional provider-specific integrations; Cursor chat uses an API key and needs no CLI; Traycer Inference is separate.",
+      "evidence_route": "traycer agent list --json; traycer agent transcript --agent-id; traycer agent inbox --after; traycer monitor CLI --json produces NDJSON progress/result envelopes; host status/log/doctor and data status discover the effective data folder. Default ~/.traycer/cli/config.json, ~/.traycer/host/, ~/.traycer/host/host.log, ~/.traycer/worktrees/; data folder may be relocated.",
+      "route_status": "documented",
+      "primary_urls": [
+        "https://docs.traycer.ai/agents-and-models/coding-agents.md",
+        "https://docs.traycer.ai/settings/providers.md",
+        "https://docs.traycer.ai/cli/commands.md",
+        "https://docs.traycer.ai/concepts/terminal-agents-vs-terminals.md"
+      ],
+      "runtime_verified": false,
+      "parser_coverage": "not_qualified_by_catalog"
+    },
+    {
+      "id": "claude-desktop",
+      "name": "Claude desktop",
+      "aliases": [
+        "Claude"
+      ],
+      "research_date": "2026-11-14",
+      "engine": "One app has distinct Chat, Cowork and Code surfaces. The Code tab uses the Claude Code engine, while Chat export and Cowork policy/telemetry are distinct.",
+      "evidence_route": "Code-tab OTEL service.name=claude-code-desktop; terminal service.name=claude-code; session.id and prompt.id correlation. Code settings, hooks and skills share documented Claude configuration; CLAUDE_CONFIG_DIR may relocate it. Account Chat history export from Settings > Privacy on web/Desktop, delivered by email. CLI JSONL default ~/.claude/projects/<project>/<session-id>.jsonl is documented for CLI; schema is internal and may change.",
+      "route_status": "documented",
+      "primary_urls": [
+        "https://code.claude.com/docs/en/desktop",
+        "https://code.claude.com/docs/en/monitoring-usage",
+        "https://support.claude.com/en/articles/9450526-how-can-i-export-my-claude-data",
+        "https://code.claude.com/docs/en/sessions"
+      ],
+      "runtime_verified": false,
+      "parser_coverage": "not_qualified_by_catalog"
+    },
+    {
+      "id": "capy",
+      "name": "Capy",
+      "research_date": "2026-11-14",
+      "engine": "Capy's own agent plus a separate Claude Code mode on the Claude Agent SDK; Captain and subagents coordinate work. Public control/evidence API uses REST and SSE.",
+      "evidence_route": "GET /api/v1/threads and /threads/{threadId}/messages; subagent message endpoints; paged after/before cursors. Thread/subagent SSE replays after Last-Event-ID; transcript event cursors never expire and pagination is stable across compaction. GET /api/v1/usage returns token totals plus member/model breakdowns; capy dock --verbose prints dock logs.",
+      "route_status": "documented",
+      "primary_urls": [
+        "https://docs.capy.ai/models-and-pricing.md",
+        "https://docs.capy.ai/desktop.md",
+        "https://docs.capy.ai/admin/security.md",
+        "https://docs.capy.ai/api-reference/streaming.md",
+        "https://docs.capy.ai/api-reference/messages/list-thread-messages.md",
+        "https://docs.capy.ai/api-reference/authentication.md",
+        "https://docs.capy.ai/api-reference/usage/get-usage-report.md"
+      ],
+      "runtime_verified": false,
+      "parser_coverage": "not_qualified_by_catalog"
+    },
+    {
+      "id": "cloudroom",
+      "name": "Cloudroom",
+      "research_date": "2026-11-14",
+      "engine": "Native harness processes: Codex app-server over stdio; Claude Code stream JSON without SDK bridge; Pi RPC; OpenCode ACP. Other adapters have their own native boundaries.",
+      "evidence_route": "GET /v1/sessions, per-session requests, events?after=N, and SSE stream with Last-Event-ID. CLOUDROOM_STATE_DIR local journal; setup example /var/lib/cloudroom/history. Self-host CLOUDROOM_LOCAL_HISTORY=1; managed history also goes to API-backed gzip object storage. CLOUDROOM_CODEX_HOME and account homes are explicit; native history remains adapter-owned. Private diagnostics.jsonl under state directory is bounded operational telemetry, distinct from full conversation history.",
+      "route_status": "documented",
+      "primary_urls": [
+        "https://raw.githubusercontent.com/davidondrej/cloudroom/main/core/docs/harnesses.md",
+        "https://raw.githubusercontent.com/davidondrej/cloudroom/main/core/src/runtime/codex.rs",
+        "https://raw.githubusercontent.com/davidondrej/cloudroom/main/core/docs/api.md",
+        "https://raw.githubusercontent.com/davidondrej/cloudroom/main/core/docs/setup.md",
+        "https://raw.githubusercontent.com/davidondrej/cloudroom/main/core/docs/observability.md"
+      ],
+      "runtime_verified": false,
+      "parser_coverage": "not_qualified_by_catalog"
+    },
+    {
+      "id": "superset",
+      "name": "Superset",
+      "aliases": [
+        "Paradev"
+      ],
+      "research_date": "2026-11-14",
+      "engine": "Terminal CLI agent orchestration; the app does not proxy model calls. Chat uses the installed CLI over ACP and can resume the same session in terminal.",
+      "evidence_route": "superset agents read returns saved Claude Code/Codex transcripts; other agent transcript reads fail rather than silently fall back to terminal output. Lifecycle hooks/command wrappers under ~/.paradev/bin and superset-hooks are active only inside marked Paradev terminals. SUPERSET_HOME_DIR (default ~/.paradev) relocates config.json and the host tree; documented host state includes manifest.json and host.db. Usage reads local native session logs and official account usage endpoints; it does not aggregate remote hosts. Profiles use CLAUDE_CONFIG_DIR/CODEX_HOME.",
+      "route_status": "documented",
+      "primary_urls": [
+        "https://github.com/paradevai/paradev",
+        "https://docs.paradev.com/llms.mdx/chat",
+        "https://docs.paradev.com/llms.mdx/agent-status",
+        "https://docs.paradev.com/llms.mdx/agent-sessions",
+        "https://docs.paradev.com/llms.mdx/cli/host-server",
+        "https://docs.paradev.com/llms.mdx/usage"
+      ],
+      "runtime_verified": false,
+      "parser_coverage": "not_qualified_by_catalog"
+    },
+    {
+      "id": "codex-app",
+      "name": "Codex app",
+      "aliases": [
+        "Codex"
+      ],
+      "research_date": "2026-11-14",
+      "engine": "Codex app-server structured thread, turn and item API; native CODEX_HOME state.",
+      "evidence_route": "app_server SQLite state can use sqlite_home/CODEX_SQLITE_HOME separately from CODEX_HOME.",
+      "route_status": "documented",
+      "primary_urls": [
+        "https://developers.openai.com/codex/app-server"
+      ],
+      "runtime_verified": false,
+      "parser_coverage": "not_qualified_by_catalog"
+    },
+    {
+      "id": "conductor",
+      "name": "Conductor",
+      "research_date": "2026-11-14",
+      "engine": "Managed Claude Code, Codex and OpenCode executables; Cursor API is a separate route.",
+      "evidence_route": "Managed executables and Cursor API.",
+      "route_status": "documented",
+      "primary_urls": [
+        "https://www.conductor.build/docs/reference/harnesses"
+      ],
+      "runtime_verified": false,
+      "parser_coverage": "not_qualified_by_catalog"
+    },
+    {
+      "id": "opencode",
+      "name": "OpenCode",
+      "research_date": "2026-11-14",
+      "engine": "OpenCode server owns configured provider/model execution; TUI and desktop are clients. SDK is a typed HTTP/OpenAPI client, not a separate model engine.",
+      "evidence_route": "Server HTTP/OpenAPI API, SDK session list/status/children methods, and event.subscribe SSE. Native SQLite metadata is another versioned evidence surface.",
+      "route_status": "documented",
+      "primary_urls": [
+        "https://opencode.ai/docs/sdk/",
+        "https://opencode.ai/docs/server/",
+        "https://opencode.ai/docs/cli/",
+        "https://opencode.ai/docs/troubleshooting/"
+      ],
+      "runtime_verified": false,
+      "parser_coverage": "not_qualified_by_catalog"
+    },
+    {
+      "id": "gemini-cli",
+      "name": "Gemini CLI",
+      "research_date": "2026-11-14",
+      "engine": "Native CLI with configured model/auth and tool runtime; documented telemetry describes Gemini API activity and execution events.",
+      "evidence_route": "Opt-in OpenTelemetry logs/metrics/traces, local OTLP target or telemetry outfile; separate ACP mode provides structured client interactions.",
+      "route_status": "documented",
+      "primary_urls": [
+        "https://geminicli.com/docs/cli/telemetry",
+        "https://geminicli.com/docs/cli/acp-mode",
+        "https://github.com/google-gemini/gemini-cli"
+      ],
+      "runtime_verified": false,
+      "parser_coverage": "not_qualified_by_catalog"
+    },
+    {
+      "id": "pi",
+      "name": "Pi",
+      "research_date": "2026-11-14",
+      "engine": "Pi is a configurable agent harness/model runtime, available as CLI or an in-process Node/Bun SDK. Provider/model selection belongs to that runtime.",
+      "evidence_route": "File-backed JSONL session tree; SDK session.subscribe; JSON event stream; language-independent RPC subprocess over JSONL stdin/stdout.",
+      "route_status": "documented",
+      "primary_urls": [
+        "https://github.com/badlogic/pi-mono",
+        "https://github.com/earendil-works/pi/blob/main/packages/coding-agent/README.md",
+        "https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/sdk.md",
+        "https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/rpc.md",
+        "https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/session-format.md"
+      ],
+      "runtime_verified": false,
+      "parser_coverage": "not_qualified_by_catalog"
+    },
+    {
+      "id": "cline",
+      "name": "Cline",
+      "research_date": "2026-11-14",
+      "engine": "@cline/core supplies Node sessions/storage/hub/automation/telemetry over @cline/agents and @cline/llms. The browser-compatible agent loop is a lower layer.",
+      "evidence_route": "SDK subscribe/event interfaces and optional OTLP logs/metrics. Event reference includes task lifecycle, model/provider, token, tool and hook events.",
+      "route_status": "documented",
+      "primary_urls": [
+        "https://docs.cline.bot/sdk/overview",
+        "https://docs.cline.bot/sdk/architecture/overview",
+        "https://docs.cline.bot/enterprise-solutions/monitoring/telemetry",
+        "https://docs.cline.bot/enterprise-solutions/monitoring/opentelemetry",
+        "https://docs.cline.bot/enterprise-solutions/monitoring/opentelemetry-events",
+        "https://github.com/cline/cline"
+      ],
+      "runtime_verified": false,
+      "parser_coverage": "not_qualified_by_catalog"
+    },
+    {
+      "id": "rex",
+      "name": "Rex",
+      "aliases": [
+        "Rex Beta",
+        "RexBeta"
+      ],
+      "research_date": "2026-11-14",
+      "engine": "External Claude Code, Codex, Pi/OpenCode and other terminal programs",
+      "evidence_route": "Native engine records plus explicit REX_SESSION/REX_BLOCK context and OSC7501 status; status is not a transcript",
+      "route_status": "documented",
+      "primary_urls": [
+        "https://www.superlogical.com/rex/docs/automate/agent-skill",
+        "https://www.superlogical.com/rex/docs/build/program-status"
+      ],
+      "runtime_verified": false,
+      "parser_coverage": "not_qualified_by_catalog"
+    },
+    {
+      "id": "zed",
+      "name": "Zed",
+      "research_date": "2026-11-14",
+      "engine": "Zed Agent, external ACP agents and Terminal Threads are distinct modes.",
+      "evidence_route": "External agents use ACP and session history import; Terminal Threads run CLI agents. Built-in Zed Agent requires separate evidence mapping.",
+      "route_status": "documented",
+      "primary_urls": [
+        "https://zed.dev/docs/ai/external-agents",
+        "https://zed.dev/docs/ai/agents"
+      ],
+      "runtime_verified": false,
+      "parser_coverage": "not_qualified_by_catalog"
+    },
+    {
+      "id": "vs-code-copilot",
+      "name": "VS Code Copilot",
+      "research_date": "2026-11-14",
+      "engine": "VSCode/Copilot agent harnesses and agent-host sessions",
+      "evidence_route": "Native OTel and explicit Agent DebugLog OTLP JSON session export; session.id is window-scoped",
+      "route_status": "documented",
+      "primary_urls": [
+        "https://code.visualstudio.com/docs/agents/guides/monitoring-agents",
+        "https://code.visualstudio.com/docs/agents/agent-troubleshooting/chat-debug-view"
+      ],
+      "runtime_verified": false,
+      "parser_coverage": "not_qualified_by_catalog"
+    },
+    {
+      "id": "warp",
+      "name": "Warp",
+      "research_date": "2026-11-14",
+      "engine": "Warp local agents and managed cloud runs",
+      "evidence_route": "Documented local conversation history and cloud-run session UI. A stable external transcript export/API contract is unverified.",
+      "route_status": "documented_with_unverified_export",
+      "primary_urls": [
+        "https://docs.warp.dev/agents/local-agents/interacting-with-agents",
+        "https://docs.warp.dev/platform/managing-cloud-agents"
+      ],
+      "runtime_verified": false,
+      "parser_coverage": "not_qualified_by_catalog"
+    }
+  ]
+}

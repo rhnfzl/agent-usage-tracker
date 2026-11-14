@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Iterable, Iterator, Sequence
 
 from ..event import Batch, CollectorUnavailable, Row
+from ..diagnostics import note_skips
 
 # Cap lines read per file per scan so a huge first-scan/backfill file can't spike memory.
 # The offset is committed at the cap, so the next scan simply continues from there.
@@ -69,6 +70,7 @@ def warn_skipped(name: str, skipped: Counter[str], unaffected: str = "usage") ->
     scan at its offset. But a malformed usage record's tokens are gone, so neither stays silent.
     Activity failures are keyed "activity:<exception type>": the type names a systematic parser
     break and, unlike a message, cannot carry record content."""
+    note_skips(skipped)
     failed = {k.partition(":")[2]: n for k, n in sorted(skipped.items())
               if k.startswith("activity:") and n}
     if failed:
