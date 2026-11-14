@@ -58,6 +58,18 @@ CAUSES = {"instruction", "environment", "tool_contract", "model", "task_ambiguit
 MAX_CONTROL_CANDIDATES = 20
 
 
+def _attempt_coverage(attempt: list[dict[str, Any]], coverage: dict[str, Any]) -> dict[str, Any]:
+    local = dict(coverage)
+    runs = coverage.get("run_coverage")
+    if isinstance(runs, dict):
+        local["source_incomplete"] = any(
+            runs.get(event.get("run_id"), {}).get("source_incomplete", True) for event in attempt)
+        local["missing_timestamps"] = sum(
+            runs.get(run, {}).get("missing_timestamps", 1)
+            for run in {event.get("run_id") for event in attempt})
+    return local
+
+
 def _complete_attempt(attempt: list[dict[str, Any]], coverage: dict[str, Any], *,
                       legacy_complete: bool = False) -> bool:
     calls = {event.get("call_id") for event in attempt if event["kind"] == "call"}
@@ -65,7 +77,8 @@ def _complete_attempt(attempt: list[dict[str, Any]], coverage: dict[str, Any], *
     closed = bool(attempt and attempt[-1]["kind"] == "boundary"
                   and attempt[-1]["text"] == "turn_complete")
     return bool((closed or legacy_complete) and not any(coverage.get(name) for name in (
-        "malformed_records", "conflicting_records", "missing_timestamps", "divergent_copy"))
+        "malformed_records", "conflicting_records", "missing_timestamps", "divergent_copy",
+        "source_incomplete"))
         and not any(event.get("truncated") or event["kind"] == "compaction" for event in attempt)
         and calls == results and not (calls & {"", None})
         and (attempt[0]["kind"] == "prompt" or legacy_complete))
@@ -102,7 +115,8 @@ def cases(store: Store, audit_id: str, *, limit: int = 30) -> list[dict[str, Any
                 control = index
             attempt = events[start:index + 1]
             if len(attempt) <= 40 and sum(len(e.get("text", "")) for e in attempt) <= 24000 \
-                    and _complete_attempt(attempt, coverage, legacy_complete=legacy_complete):
+                    and _complete_attempt(attempt, _attempt_coverage(attempt, coverage),
+                                          legacy_complete=legacy_complete):
                 control = index
                 break
         if control is not None:
@@ -126,9 +140,10 @@ def cases(store: Store, audit_id: str, *, limit: int = 30) -> list[dict[str, Any
             if replies:
                 selected.add(replies[-1])
             window = [events[i] for i in sorted(selected)]
-            local_coverage = dict(coverage, session_complete=coverage.get("complete", False))
+            local_coverage = dict(_attempt_coverage(attempt, coverage),
+                                  session_complete=coverage.get("complete", False))
             local_coverage["complete"] = _complete_attempt(
-                attempt, coverage, legacy_complete=legacy_complete)
+                attempt, local_coverage, legacy_complete=legacy_complete)
             case = {"version": VERSION, "session_snapshot": sid,
                     "agent": session["agent"], "origin": session["origin"],
                     "trigger": trigger,

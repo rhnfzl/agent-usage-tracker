@@ -20,7 +20,25 @@ Set `AUT_IMPROVE_ROOT`, or pass `aut improve --root /private/path ...`.
 Use a new empty directory. Existing stores require their `.aut-improve` version marker.
 Files are private, and the store's `.gitignore` excludes all contents. Never force-add them to Git.
 
-The initial adapters read Claude Code and Codex logs.
+The adapters read Claude Code and Codex logs and T3 Code's local
+`~/.t3/userdata/statev2.sqlite` projections. T3 is read in a read-only SQLite transaction,
+including committed WAL records. Requests explicitly created by a user in the web or mobile
+client qualify as human work. Provider-imported history, agent messages and unknown origins
+do not become human requests merely because they appear in T3.
+T3 app threads retain provider and run identifiers across Claude/Codex switches.
+Included T3 app threads group their linked native sources as frozen supplements. Native-only
+history remains inspectable without becoming a second independent judge observation.
+A session link alone does not prove equivalent coverage or identical execution records.
+Projection gaps, missing outputs, attachments, handoffs and clipped records remain explicit;
+they cannot establish complete evidence for an affected attempt. Unsupported databases are
+reported as unreadable sources rather than as an absence of work.
+T3 source hashes cover selected logical records, not the changing SQLite database file.
+Database record identifiers replace JSONL line references for those events.
+The T3 reader does not prove that project instructions reached a past agent turn.
+Repository instructions apply to their project; an AUT-specific test rule is not copied to
+other projects with different test commands.
+Native Claude discovery also includes `claudeAgent` profile homes explicitly configured in T3.
+This recovers native usage without interpreting every forwarded T3 message as a human request.
 They omit positively identified automated sessions and sources active within the last two minutes.
 Codex sources identified as automated by their first session header skip body processing.
 Unknown sources retain the full evidence checks.

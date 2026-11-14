@@ -12,12 +12,13 @@ from __future__ import annotations
 import json
 import sys
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any, Callable, Iterator
 
 from ..config import Config
-from ..event import Batch
+from ..event import Batch, parse_ts
 from . import activitywatch, claude_code, codex, cursor, cursor_api, cursor_cli, cursor_sdk, pi
-from . import generic_sdk
+from . import generic_sdk, t3
 from ._util import describe_files, describe_full_scan
 
 # Each collect() pass reads at most _MAX_LINES (50k) new lines per file (see collectors/_util.py),
@@ -40,6 +41,7 @@ class Collector:
 
 
 REGISTRY: dict[str, Collector] = {
+    t3.NAME: Collector(t3.collect, t3.describe, rows=frozenset({"usage", "session", "activity"})),
     generic_sdk.NAME: Collector(generic_sdk.collect, generic_sdk.describe, rows=_USAGE_ONLY),
     claude_code.NAME: Collector(claude_code.collect),
     codex.NAME: Collector(codex.collect),
@@ -54,7 +56,20 @@ REGISTRY: dict[str, Collector] = {
 
 
 def _stamped(collect: Collect, cfg: Config, wm: dict[str, Any]) -> Iterator[Batch]:
+    linked = collect is not t3.collect and "t3" in cfg.agents and bool(cfg.t3_activity_since)
+    read_at = datetime.now(timezone.utc)
+    bindings = t3.native_bindings(cfg) if linked else {}
+    clients = t3.native_clients(cfg) if linked and collect is codex.collect else set()
     for events, advance_watermark in collect(cfg, wm):
+        # A long native scan can reach app runs that started after its first snapshot.
+        if linked and any(stamp and stamp.tzinfo and stamp >= read_at
+                          for event in events if (stamp := parse_ts(event.ts))):
+            read_at = datetime.now(timezone.utc)
+            bindings = t3.native_bindings(cfg)
+            if collect is codex.collect:
+                clients = t3.native_clients(cfg)
+        if bindings or clients:
+            events = t3.canonicalize(list(events), bindings, clients, parse_ts(cfg.t3_activity_since))
         for e in events:
             e.machine = cfg.machine
         yield events, advance_watermark

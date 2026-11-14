@@ -14,6 +14,7 @@ intended cross-check for that.
 from __future__ import annotations
 
 import glob
+import json
 import os
 import re
 import time
@@ -23,7 +24,8 @@ from pathlib import Path
 from typing import Any, Iterable, Iterator, NamedTuple, TypedDict
 
 from ..config import Config
-from ..event import Row, ActivityEvent, Batch, EventSession, RunOrigin, UsageEvent, make_event_id
+from ..event import (Row, ActivityEvent, Batch, CollectorUnavailable, EventSession, RunOrigin,
+                     UsageEvent, make_event_id)
 from ..repo_keys import RepoKeys
 from ..state import parse_record
 from .activity_common import IDLE_S, best_effort, drop_raw_shas, human_event, pad_pending, text_of
@@ -49,15 +51,44 @@ def projects_dir(home: Path) -> Path:
     return home / ".claude" / "projects"
 
 
+def projects_dirs(home: Path) -> list[Path]:
+    """Include Claude homes explicitly configured in T3, without searching unrelated profiles."""
+    roots = [projects_dir(home)]
+    settings = home / ".t3/userdata/settings.json"
+    try:
+        if settings.stat().st_size > 1024 * 1024:
+            raise ValueError("oversized T3 settings")
+        data = json.loads(settings.read_text(encoding="utf-8"))
+        instances = data.get("providerInstances", {})
+        for instance in instances.values():
+            if instance.get("driver") != "claudeAgent":
+                continue
+            value = instance.get("config", {}).get("homePath")
+            if isinstance(value, str) and value:
+                path = Path(value)
+                if not path.is_absolute():
+                    raise ValueError("relative Claude profile")
+                roots.append(path / "projects")
+    except FileNotFoundError:
+        pass
+    except (OSError, ValueError, TypeError, AttributeError, RuntimeError) as exc:
+        raise CollectorUnavailable("claude_code: T3 profile configuration is unreadable") from exc
+    unique: dict[Path, Path] = {}
+    for root in roots:
+        unique.setdefault(root.resolve(), root)
+    return list(unique.values())
+
+
 def main_session_files(home: Path) -> list[str]:
     """Main sessions only (<project>/<id>.jsonl); subagents sit deeper and number tens of thousands."""
-    return glob.glob(str(projects_dir(home) / "*" / "*.jsonl"))
+    return [path for root in projects_dirs(home)
+            for path in glob.glob(str(root / "*" / "*.jsonl"))]
 
 
 def project_session_files(home: Path, project: str) -> list[str]:
     """The main sessions of one working directory; Claude Code names the directory after its path."""
-    project_dir = projects_dir(home) / re.sub(r"[^A-Za-z0-9]", "-", project)
-    return [str(f) for f in project_dir.glob("*.jsonl")]
+    name = re.sub(r"[^A-Za-z0-9]", "-", project)
+    return [str(f) for root in projects_dirs(home) for f in (root / name).glob("*.jsonl")]
 
 
 def is_interactive(path: str | Path) -> bool:
@@ -150,7 +181,8 @@ def human_text(o: dict[str, Any]) -> str | None:
     if o.get("type") != "user" or o.get("isMeta") or o.get("isCompactSummary") \
             or o.get("isSidechain"):
         return None
-    if o.get("entrypoint") in _PROGRAM_ENTRYPOINTS or _origin_not_human(o):
+    if o.get("entrypoint") in _PROGRAM_ENTRYPOINTS or o.get("entrypoint") == "t3-code" \
+            or _origin_not_human(o):
         return None
     m = o.get("message")
     if not isinstance(m, dict) or not _is_human_text(m.get("content")):
@@ -449,8 +481,8 @@ def _has_open_link_turn(entry: FileState) -> bool:
 
 
 def collect(cfg: Config, wm: dict[str, Any]) -> Iterator[Batch]:
-    base = projects_dir(cfg.home)
-    if not base.exists():
+    roots = projects_dirs(cfg.home)
+    if not any(base.exists() for base in roots):
         return
     _upgrade_state(wm)
     keys = RepoKeys(cfg.repo_key_salt)   # cwd -> repo_key cached once per collect() pass
@@ -461,5 +493,6 @@ def collect(cfg: Config, wm: dict[str, Any]) -> Iterator[Batch]:
             cur["old_loop_seen"] = _old_loop_before(path, off)
         return _chunk_rows(path, base, lines, not off, cur, keys, skipped)
 
-    yield from file_batches(NAME, glob.glob(str(base / "**" / "*.jsonl"), recursive=True),
-                            wm["files"], _fresh_state, chunk_rows, _has_open_link_turn)
+    for base in roots:
+        yield from file_batches(NAME, glob.glob(str(base / "**" / "*.jsonl"), recursive=True),
+                                wm["files"], _fresh_state, chunk_rows, _has_open_link_turn)

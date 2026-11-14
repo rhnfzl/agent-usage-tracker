@@ -10,7 +10,7 @@ from itertools import islice
 from pathlib import Path
 from typing import Any, Iterable
 
-from ..collectors import claude_code, codex, cursor_cli, pi
+from ..collectors import claude_code, codex, cursor_cli, pi, t3
 from ..collectors.activity_common import first_record, text_of
 from ..collectors.cursor import connect_ro
 from ..cursor_run import automated_sessions
@@ -18,11 +18,19 @@ from ..event import CollectorUnavailable, make_event_id
 from ..repo_keys import RepoKeys
 from ..state import parse_record
 
-AGENTS = frozenset({"claude_code", "codex", "cursor_cli", "pi"})
+AGENTS = frozenset({"claude_code", "codex", "cursor_cli", "pi", "t3"})
 
 
 def session_paths(home: Path, agent: str) -> dict[str, list[tuple[int, str]]]:
     """Canonical session identities and paths in discovery order, without retaining text."""
+    if agent == "t3":
+        try:
+            with t3.connection(home) as con:
+                return {"t3:" + tid: [(order, str(t3.database_path(home)))]
+                        for order, (tid,) in enumerate(t3._read(con,
+                            f"SELECT thread_id FROM {t3._PREFIX}threads"))}
+        except (OSError, sqlite3.Error, ValueError, TypeError) as exc:
+            raise CollectorUnavailable("t3: local context index unavailable") from exc
     discover = {"claude_code": claude_code.main_session_files, "codex": codex.session_files,
                 "cursor_cli": cursor_cli.chat_stores, "pi": pi.session_files}[agent]
     index: dict[str, list[tuple[int, str]]] = {}
@@ -329,3 +337,46 @@ def cursor_context(home: Path, sessions: set[str], want: set[str],
         finally:
             con.close()
     return {eid: value for eid, value in out.items() if eid not in ambiguous}
+
+
+def t3_context(home: Path, sessions: set[str], want: set[str],
+               until: datetime | None) -> dict[str, Context]:
+    """Resolve app message IDs locally; text never enters collector rows or watermarks."""
+    out: dict[str, Context] = {}
+    threads = tuple(sorted(sid[3:] for sid in sessions if sid.startswith("t3:")))
+    if not threads:
+        return out
+    try:
+        with t3.connection(home) as con:
+            placeholders = ','.join('?' for _ in threads)
+            condition = f'thread_id IN ({placeholders})'
+            params: tuple[Any, ...] = threads
+            if until is not None:
+                condition += ' AND julianday(created_at)<julianday(?)'
+                params += (until.isoformat(),)
+            rows = t3._read(con, f"SELECT message_id,thread_id,run_id,role,created_at,payload_json "
+                                f"FROM {t3._PREFIX}messages WHERE {condition} "
+                                "ORDER BY created_at,message_id", params)
+            by_thread: dict[str, list[tuple[str | None, str, int | None]]] = {}
+            counts: Counter[str] = Counter()
+            for mid, tid, runid, role, ts, raw in rows:
+                if "t3:" + tid not in sessions or not _in_time({"timestamp": ts}, until):
+                    continue
+                payload = t3._payload(raw)
+                text_value = payload.get("text")
+                text = text_value if isinstance(text_value, str) else ""
+                if role == "user":
+                    if not t3.confirmed_human(payload):
+                        # An automated message ends any prior human reply interval.
+                        by_thread.setdefault(tid, []).append(("", "", None))
+                        continue
+                    counts[tid] += 1
+                    by_thread.setdefault(tid, []).append(
+                        (make_event_id("t3", "steer", mid), text, counts[tid]))
+                elif role == "assistant":
+                    by_thread.setdefault(tid, []).append((None, text, None))
+            for events in by_thread.values():
+                out.update(_join(events, want))
+    except (OSError, sqlite3.Error, ValueError, TypeError) as exc:
+        raise CollectorUnavailable("t3: local context unavailable") from exc
+    return out

@@ -20,7 +20,7 @@ from .state import warn_if_group_readable
 # Must name what collectors.REGISTRY names (a test asserts it): collectors import this module, so
 # it cannot derive the list from the registry.
 ALL_AGENTS = ("claude_code", "codex", "cursor", "cursor_sdk", "cursor_api", "cursor_cli", "pi",
-              "activitywatch", "generic_sdk")
+              "activitywatch", "generic_sdk", "t3")
 # activitywatch reads window titles, so it is opt-in: a config without `agents` never enables it.
 DEFAULT_AGENTS = tuple(a for a in ALL_AGENTS if a not in ("activitywatch", "generic_sdk"))
 # Must name what label.tasks.TASKS names (tests/label/test_label_tasks.py asserts it): label.tasks imports
@@ -136,6 +136,8 @@ class Config:
     git_days_shared_authors: tuple[tuple[str, str], ...] = ()    # (email_regex, repo_regex)
     git_days_roots: tuple[str, ...] = DEFAULT_REPO_ROOTS
     git_days_remotes: tuple[tuple[str, tuple[str, ...]], ...] = ()   # (ssh host, roots there)
+
+    t3_activity_since: str | None = None  # explicit prospective cutover, never inferred per scan
 
     @property
     def cf_access_headers(self) -> dict[str, str]:
@@ -334,6 +336,14 @@ def _config_from(data: dict[str, Any], path: Path) -> Config:
     aw_days = _aw_title_days(data)
     label_tasks = _label_tasks(data)
     label_precision, label_recall, label_coverage = _label_bars(data)
+    t3_since = _text(data, "t3_activity_since")
+    if t3_since is not None:
+        try:
+            parsed_t3_since = datetime.fromisoformat(t3_since.replace("Z", "+00:00"))
+        except ValueError:
+            raise AutError("config: t3_activity_since must be a timezone-aware ISO timestamp") from None
+        if parsed_t3_since.tzinfo is None:
+            raise AutError("config: t3_activity_since must include a timezone")
     backup = _backup(data)
     git_days = _git_days(data)
     _warn_if_secrets_written(path, transport, data)
@@ -345,6 +355,7 @@ def _config_from(data: dict[str, Any], path: Path) -> Config:
         webhook_secret=_resolve(transport, "webhook_secret"),
         pg_dsn=_resolve(transport, "pg_dsn"),
         home=Path(data.get("home") or Path.home()).expanduser(),
+        t3_activity_since=t3_since,
         cursor_db_path=_resolve(data, "cursor_db_path"),
         cursor_human_only=_as_bool(data.get("cursor_human_only", False)),
         cursor_sdk_manifests=_resolve(data, "cursor_sdk_manifests"),
