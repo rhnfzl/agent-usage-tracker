@@ -19,7 +19,7 @@ from ..state import parse_record
 
 TEXT_LIMIT = 6000
 BYTE_LIMIT = 16 * 1024 * 1024
-VERSION = 6
+VERSION = 7
 
 
 def _text(value: object) -> str:
@@ -30,6 +30,31 @@ def _text(value: object) -> str:
             return json.dumps(value, ensure_ascii=False)
         return "\n".join(str(b.get("text", "")) for b in value if isinstance(b, dict))
     return json.dumps(value, ensure_ascii=False, sort_keys=True)
+
+
+def _codex_message_text(item: dict[str, Any]) -> str:
+    text = _text(item.get("content", item.get("text", "")))
+    citation = item.get("memory_citation")
+    if not isinstance(citation, dict) or set(citation) != {"entries", "rolloutIds"}:
+        return text
+    entries, rollouts = citation["entries"], citation["rolloutIds"]
+    if not isinstance(entries, list) or not isinstance(rollouts, list) \
+            or not all(isinstance(value, str) for value in rollouts) \
+            or not (entries or rollouts):
+        return text
+    lines = []
+    for entry in entries:
+        if not isinstance(entry, dict) or set(entry) != {"path", "lineStart", "lineEnd", "note"} \
+                or not all(isinstance(entry[key], str) for key in ("path", "note")) \
+                or type(entry["lineStart"]) is not int or type(entry["lineEnd"]) is not int \
+                or not 1 <= entry["lineStart"] <= entry["lineEnd"]:
+            return text
+        lines.append(f"{entry['path']}:{entry['lineStart']}-{entry['lineEnd']}"
+                     f"|note=[{entry['note']}]")
+    # Native AgentMessage stores citations separately; response_item renders them in the text.
+    return (text + "<oai-mem-citation>\n<citation_entries>\n" + "\n".join(lines)
+            + "\n</citation_entries>\n<rollout_ids>\n" + "\n".join(rollouts)
+            + "\n</rollout_ids>\n</oai-mem-citation>")
 
 
 def _recent_records(path: Path, budget: int,
@@ -227,7 +252,8 @@ def read_session(path: Path, agent: str, max_bytes: int = BYTE_LIMIT,
                          == "completed" else "unknown")
                 elif sub == "item_completed" and item.get("type") in {"UserMessage", "AgentMessage"}:
                     emit("prompt" if item["type"] == "UserMessage" else "reply",
-                         item.get("content", item.get("text", "")), line, record,
+                         _codex_message_text(item) if item["type"] == "AgentMessage"
+                         else item.get("content", item.get("text", "")), line, record,
                          key=item.get("id"))
                 elif sub == "item_completed" and item.get("type") == "ContextCompaction":
                     emit("compaction", "context was compacted", line, record, key=item.get("id"))
