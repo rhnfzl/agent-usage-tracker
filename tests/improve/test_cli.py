@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 from agent_usage_tracker import cli
 
 
@@ -53,6 +55,62 @@ def test_improve_rejects_invalid_bounds_without_scanning(tmp_path, capsys):
     assert cli.main(["improve", "--root", str(tmp_path / "private"), "audit",
                      "--limit", "0"]) == 1
     assert "limit" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("action", ["run", "diagnose"])
+@pytest.mark.parametrize("timed_out", [True, False])
+def test_cycle_cli_reports_worker_failure(tmp_path, monkeypatch, capsys, action, timed_out):
+    from agent_usage_tracker.improve import schedule
+    from agent_usage_tracker.improve.store import Store
+
+    root = tmp_path / "private"
+    store = Store(root)
+    evidence = store.put("sessions", {"existing": True})
+    pending = {"policy_id": "scheduled", "audit": {"audit_id": "unfinished"}}
+    (root / "pending_cycle.json").write_text(json.dumps(pending))
+    failure = {"accepted": False, "timeout": timed_out, "exit_code": -9 if timed_out else 2,
+               "output": "private worker diagnostic", "output_truncated": False}
+    monkeypatch.setattr(schedule, "command", lambda *args: failure)
+    argv = ["improve", "--root", str(root), action, "--budget-s", "1"]
+    if action == "diagnose":
+        argv += ["--audit", store.put("audits", {"session_ids": []})]
+
+    code = cli.main(argv)
+    captured = capsys.readouterr()
+    result = json.loads(captured.out)
+    assert result["status"] == ("timeout" if timed_out else "error")
+    assert result["exit_code"] == failure["exit_code"]
+    assert json.loads((root / "last_cycle.json").read_text()) == result
+    assert store.get("cycle_errors", result["error_id"])["output"] == failure["output"]
+    assert store.get("sessions", evidence) == {"existing": True}
+    assert json.loads((root / "pending_cycle.json").read_text()) == pending
+    assert "output" not in result
+    assert failure["output"] not in captured.out + captured.err
+    assert code == 1
+
+
+@pytest.mark.parametrize("action", ["run", "diagnose"])
+@pytest.mark.parametrize("status", ["ok", "deferred", "busy"])
+def test_cycle_cli_accepts_completion_deferral_and_contention(
+        tmp_path, monkeypatch, capsys, action, status):
+    from agent_usage_tracker.improve import cli as improve_cli
+    from agent_usage_tracker.improve.store import Store
+
+    root = tmp_path / "private"
+    report = {"status": status}
+    if status != "busy":
+        report["diagnosis"] = {"complete": status == "ok", "reason":
+                               "complete" if status == "ok" else "budget"}
+    monkeypatch.setattr(improve_cli, "run_once", lambda *args, **kwargs: report)
+    argv = ["improve", "--root", str(root), action, "--budget-s", "1"]
+    if action == "diagnose":
+        argv += ["--audit", Store(root).put("audits", {"session_ids": []})]
+
+    assert cli.main(argv) == 0
+    captured = capsys.readouterr()
+    expected = report["diagnosis"] if action == "diagnose" and status != "busy" else report
+    assert json.loads(captured.out) == expected
+    assert captured.err == ""
 
 
 def test_study_shortlist_is_available_through_real_cli(tmp_path, capsys):

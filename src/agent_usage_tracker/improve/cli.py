@@ -122,3 +122,5 @@ def run(args: argparse.Namespace) -> None:
         result = {"records": {kind: len(store.keys(kind)) for kind in kinds},
                   "private": True, "human_verified": False}
     print(json.dumps(result, sort_keys=True))
+    if args.improve_cmd in {"run", "diagnose"} and result.get("status") in {"timeout", "error"}:
+        raise AutError(f"improve: cycle {result['status']}")
