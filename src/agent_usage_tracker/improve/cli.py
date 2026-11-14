@@ -39,6 +39,8 @@ def register(sub: Any) -> None:
         action.add_argument("--budget-s", type=int, default=300)
         action.add_argument("--max-calls", type=int, default=40)
         action.add_argument("--explain-model", help="cached local instruct model for evidence review")
+    inspection = actions.add_parser("inspect", help="write a private view of captured case evidence")
+    inspection.add_argument("--case", required=True)
     proposal = actions.add_parser("propose", help="draft one explicit scoped text replacement")
     proposal.add_argument("--case", required=True)
     proposal.add_argument("--scope", type=Path, required=True)
@@ -85,6 +87,9 @@ def run(args: argparse.Namespace) -> None:
                           case_limit=args.limit, budget_s=args.budget_s, max_calls=args.max_calls,
                           explain_model=args.explain_model)
         result = report.get("diagnosis", report)
+    elif args.improve_cmd == "inspect":
+        from .case_view import write_case_view
+        result = write_case_view(store, args.case)
     elif args.improve_cmd == "propose":
         key = prepare(store, args.case, args.scope, args.target,
                       args.before_file.read_bytes().decode("utf-8"),

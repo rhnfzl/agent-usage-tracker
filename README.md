@@ -198,6 +198,8 @@ aut improve status
 ```
 
 Local judging uses cached models through the existing label extra.
+`aut improve inspect --case CASE_ID` writes a private view of a captured attempt and its source references.
+Missing or clipped evidence stays explicit; inspection does not upgrade a judgment.
 Read the [private improvement guide](docs/improvement.md) before judging, staging changes, or executing trials.
 The guide covers executable judge references, independent agent-task acceptance, and stable wheel installations.
 

@@ -33,12 +33,28 @@ Unknown fork ordinals cannot establish whether tail records are copied history, 
 remain excluded. A complete observed attempt can be reviewed even when its whole session is incomplete.
 Captured events are redacted and limited to 6,000 characters.
 Coverage exposes incomplete lines, clipped events, missing results, and copied history.
+Codex stores some replies both as native messages with structured memory citations and as
+rendered messages with citation text. Equivalent representations share one reply; changed
+reply bodies or citation data remain conflicts.
 Completeness describes captured records, not proof of the model's full context.
 Pattern-based redaction can leave private code, paths, names, and credentials.
 Audit output contains counts and identifiers, without prompt or tool text.
 
 Content-addressed records are immutable. A changed record fails its hash check rather than being reset.
 `events.jsonl` preserves progress and decisions.
+
+## Inspect captured case evidence
+
+```bash
+aut improve inspect --case CASE_ID
+```
+
+This writes a private HTML view under the local store and prints its path and counts.
+The view shows the matching captured attempt, including context omitted from the model input.
+It links the original local trace and frozen snapshot, with line or byte references for each event.
+Trace text stays in the private view, outside command output and the configured sink.
+Missing and clipped evidence stays visible. Inspection does not make a judgment eligible or verified.
+The original link opens the current file; the displayed evidence remains the immutable saved snapshot.
 
 ## Review with local models
 
@@ -60,7 +76,9 @@ The Python `diagnose` function checks elapsed time between calls; callers must p
 
 Separate criteria cover avoidable recovery and completion supported by evidence.
 Cases mix failed and clean user attempts. Each attempt ends at a recorded turn boundary or the next prompt.
-Sampling prefers complete captured attempts within each group. Audits retain all coverage gaps.
+Sampling prefers complete captured attempts within each group. Each source checks at most
+20 recent completed turns to select a clean control that fits the existing event and text budgets.
+If none fits, the latest available clean control retains its explicit gaps. Audits retain all coverage gaps.
 Complete attempts retain up to 40 events and 24,000 text characters.
 Clipped, unmatched, ambiguous, or omitted attempt evidence stays unknown before inference.
 Clipping in an unrelated earlier attempt does not invalidate a complete later attempt.
@@ -77,6 +95,8 @@ aut improve diagnose --audit AUDIT_ID \
 Its output must use the expected schema and cite existing event IDs.
 It cannot supply executable commands or change files.
 Incomplete completion evidence remains unknown.
+Choice descriptions state what each label means for its criterion. Their exact text is
+part of evaluator identity, so a changed description cannot reuse earlier votes.
 All model results are provisional estimates, including agreement between models.
 An explanatory model can veto a decision, but cannot upgrade model disagreement into pass or fail.
 Disagreements stay unknown without spending an explanatory-model call.

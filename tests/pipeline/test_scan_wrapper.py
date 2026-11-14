@@ -52,6 +52,8 @@ sys.exit(1 if (home / ("fail-" + command)).exists() else 0)
     aut.chmod(0o700)
     (conf / "scan.env").write_text(f'AUT_BIN="{aut}"\nAUT_LABEL=1\n')
     env = {"HOME": str(tmp_path), "PATH": "/usr/bin:/bin:/usr/sbin:/sbin"}
+    if "TZ" in os.environ:
+        env["TZ"] = os.environ["TZ"]
     return tmp_path, conf, env
 
 
