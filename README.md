@@ -139,7 +139,13 @@ Combining them can double-count usage. `cursor_cli` has no tokens and can run be
 To collect IDE prompts beside API usage, add `cursor` with `cursor_human_only = true`.
 
 The [collector reference](docs/reference.md#collectors) covers source paths, defaults, and ActivityWatch filtering.
-Collectors use the running user's home; they do not scan other users' accounts.
+Collectors use the running user's home and explicitly registered engine homes.
+They do not search other users' accounts.
+
+Run `aut doctor --json` to inspect readable sources, parser losses, pending delivery and evidence limits.
+Normal scans save a private coverage report and report changed gaps.
+A sourced catalog covers 25 coding tools without claiming that each has a qualified reader.
+See [shared harness coverage](docs/harness-coverage.md) for profiles, session associations and publication receipts.
 
 ## Local labels (`aut label`)
 

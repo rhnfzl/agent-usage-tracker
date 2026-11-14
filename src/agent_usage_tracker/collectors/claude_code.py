@@ -14,7 +14,6 @@ intended cross-check for that.
 from __future__ import annotations
 
 import glob
-import json
 import os
 import re
 import time
@@ -24,10 +23,12 @@ from pathlib import Path
 from typing import Any, Iterable, Iterator, NamedTuple, TypedDict
 
 from ..config import Config
+from ..diagnostics import observe_client
 from ..event import (Row, ActivityEvent, Batch, CollectorUnavailable, EventSession, RunOrigin,
                      UsageEvent, make_event_id)
 from ..repo_keys import RepoKeys
 from ..state import parse_record
+from ..sources import SourceError, engine_homes
 from .activity_common import IDLE_S, best_effort, drop_raw_shas, human_event, pad_pending, text_of
 from ._util import MALFORMED_RECORD, count_field, file_batches, project_name, str_or_none
 from .claude_code_activity import Activity, ActivityState
@@ -52,31 +53,15 @@ def projects_dir(home: Path) -> Path:
 
 
 def projects_dirs(home: Path) -> list[Path]:
-    """Include Claude homes explicitly configured in T3, without searching unrelated profiles."""
-    roots = [projects_dir(home)]
-    settings = home / ".t3/userdata/settings.json"
+    """Native Claude homes explicitly configured by the user or T3."""
     try:
-        if settings.stat().st_size > 1024 * 1024:
-            raise ValueError("oversized T3 settings")
-        data = json.loads(settings.read_text(encoding="utf-8"))
-        instances = data.get("providerInstances", {})
-        for instance in instances.values():
-            if instance.get("driver") != "claudeAgent":
-                continue
-            value = instance.get("config", {}).get("homePath")
-            if isinstance(value, str) and value:
-                path = Path(value)
-                if not path.is_absolute():
-                    raise ValueError("relative Claude profile")
-                roots.append(path / "projects")
-    except FileNotFoundError:
-        pass
-    except (OSError, ValueError, TypeError, AttributeError, RuntimeError) as exc:
-        raise CollectorUnavailable("claude_code: T3 profile configuration is unreadable") from exc
-    unique: dict[Path, Path] = {}
-    for root in roots:
-        unique.setdefault(root.resolve(), root)
-    return list(unique.values())
+        roots: dict[Path, Path] = {}
+        for home_root in engine_homes(home, NAME):
+            root = home_root / "projects"
+            roots.setdefault(root.resolve(), root)
+        return list(roots.values())
+    except SourceError as exc:
+        raise CollectorUnavailable(str(exc)) from exc
 
 
 def main_session_files(home: Path) -> list[str]:
@@ -209,6 +194,7 @@ def _file_identity(base: Path, path: str) -> FileIdentity:
 
 
 def _session_of(o: dict[str, Any], ident: FileIdentity, turn: str | None) -> EventSession:
+    observe_client(o.get("entrypoint"))
     sub, sid, parent = ident
     if sub:     # records carry sessionId = the PARENT session and agentId = their own
         return EventSession(str_or_none(o.get("agentId")) or sid,
