@@ -28,6 +28,8 @@ Parser losses remain visible even when useful usage rows were delivered.
 Pending delivery is reported separately. An existing SQLite WAL makes the queue probe unknown,
 because opening it could create sidecar files.
 
+Watermark reads stop at 64 MiB. Other report JSON reads stop at 8 MiB or a smaller purpose-specific limit.
+A read limit is distinct from invalid state.
 Metadata traversal stops after 4,096 entries or eight directory levels.
 Uninspected roots stay unknown. Skipped symlinks and traversal limits remain explicit.
 Receipt freshness uses a 12-hour threshold, exposed in the report.

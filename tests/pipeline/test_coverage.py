@@ -160,9 +160,13 @@ def test_outbox_report_is_readonly_and_separate(cfg):
     from agent_usage_tracker.push import outbox_path
     path = outbox_path()
     path.parent.mkdir(parents=True)
-    with sqlite3.connect(path) as con:
-        con.execute("CREATE TABLE pending(kind TEXT)")
-        con.execute("INSERT INTO pending VALUES ('activity')")
+    con = sqlite3.connect(path)
+    try:
+        with con:
+            con.execute("CREATE TABLE pending(kind TEXT)")
+            con.execute("INSERT INTO pending VALUES ('activity')")
+    finally:
+        con.close()
     path.chmod(0o640)
     before = (path.read_bytes(), path.stat().st_mode)
     report = coverage.build_report(cfg, now=NOW)
@@ -285,7 +289,7 @@ def test_reading_fifo_is_rejected_without_waiting(cfg, tmp_path):
 def test_json_reads_are_bounded(cfg, tmp_path):
     path = tmp_path / "large"
     path.write_bytes(b"x" * 100)
-    assert coverage._read_json(path, 16) == ("invalid", {})
+    assert coverage._read_json(path, 16) == ("limited", {})
 
 
 def test_publication_uses_registered_timezone_at_day_boundary(cfg):

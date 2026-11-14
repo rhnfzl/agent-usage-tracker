@@ -18,6 +18,7 @@ from .config import Config
 from .state import _locked, atomic_write_text, state_path
 
 MAX_JSON_BYTES = 8 * 1024 * 1024
+MAX_STATE_JSON_BYTES = 64 * 1024 * 1024
 MAX_ENTRIES = 4096
 MAX_DEPTH = 8
 MAX_COLLECTORS = 128
@@ -50,11 +51,13 @@ def _read_json(path: Path, limit: int = MAX_JSON_BYTES) -> tuple[str, dict[str, 
         fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0))
         with os.fdopen(fd, "rb") as handle:
             meta = os.fstat(handle.fileno())
-            if not stat.S_ISREG(meta.st_mode) or meta.st_size > limit:
+            if not stat.S_ISREG(meta.st_mode):
                 return "invalid", {}
+            if meta.st_size > limit:
+                return "limited", {}
             raw = handle.read(limit + 1)
         if len(raw) > limit:
-            return "invalid", {}
+            return "limited", {}
         value = json.loads(raw)
         return ("available", value) if isinstance(value, dict) else ("invalid", {})
     except FileNotFoundError:
@@ -285,10 +288,10 @@ def _delivery() -> dict[str, Any]:
     try:
         if not path.exists():
             return {"status": "available", "pending": {}}
+        before = path.stat()
         descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0))
         with os.fdopen(descriptor, "rb") as handle:
-            before = os.fstat(handle.fileno())
-            if not stat.S_ISREG(before.st_mode):
+            if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
                 return {"status": "unknown", "pending": {}}
             header = handle.read(100)
         sidecars = [path.with_name(path.name + suffix) for suffix in ("-wal", "-shm", "-journal")]
@@ -371,9 +374,12 @@ def build_report(cfg: Config, *, now: datetime | None = None) -> dict[str, Any]:
         registry = Registry((), (), ())
         registry_status = "unreadable"
         _issue(issues, "registry_unreadable", "registry")
-    state_status, state = _read_json(state_path())
+    state_status, state = _read_json(state_path(), MAX_STATE_JSON_BYTES)
     watermark = state.get("collectors", {})
-    if (state_status not in {"available", "missing"} or not isinstance(watermark, dict)
+    if state_status == "limited":
+        _issue(issues, "state_limited", "state")
+        watermark = {}
+    elif (state_status not in {"available", "missing"} or not isinstance(watermark, dict)
             or state_status == "available" and "collectors" not in state):
         _issue(issues, "state_unreadable", "state")
         watermark = {}
@@ -496,7 +502,9 @@ def build_report(cfg: Config, *, now: datetime | None = None) -> dict[str, Any]:
     return {"version": 1, "generated_at": now.isoformat(), "completeness": "unknown",
             "thresholds": {"collector_evidence_hours": FRESH_HOURS,
                            "publication_verification_hours": FRESH_HOURS},
-            "read_limits": {"json_bytes": MAX_JSON_BYTES, "metadata_entries": MAX_ENTRIES,
+            "state_status": state_status,
+            "read_limits": {"json_bytes": MAX_JSON_BYTES, "state_json_bytes": MAX_STATE_JSON_BYTES,
+                            "metadata_entries": MAX_ENTRIES,
                             "metadata_depth": MAX_DEPTH, "metadata_entries_visited": budget[0]},
             "registry_status": registry_status, "sources": sources, "collectors": collectors,
             "session_links": session_links, "session_links_omitted": len(registry.links) - len(session_links),

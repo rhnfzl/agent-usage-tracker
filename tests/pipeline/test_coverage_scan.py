@@ -186,6 +186,7 @@ def test_doctor_exposes_bundle_candidates_without_claiming_active_work(world, mo
     from agent_usage_tracker import coverage, harness_inventory
     from agent_usage_tracker.config import load_config
 
+    monkeypatch.setattr(harness_inventory.sys, "platform", "darwin")
     applications = world / "Applications"
     (applications / "Rex Beta.app").mkdir(parents=True)
     (applications / "Unrelated private name.app").mkdir()
@@ -260,3 +261,53 @@ def test_all_rejected_records_cannot_appear_as_a_quiet_source(world):
     assert collector["observation"]["activity_state"] == "unknown"
     assert collector["capabilities"]["usage"]["observed"] is None
     assert any(issue["code"] == "parser_loss" for issue in report["issues"])
+
+
+
+def test_large_valid_watermark_has_a_separate_read_budget(world):
+    from agent_usage_tracker import coverage
+    from agent_usage_tracker.config import load_config
+
+    state = {"collectors": {}, "retained_metadata": "x" * (8 * 1024 * 1024)}
+    (world / "state.json").write_text(json.dumps(state))
+    report = coverage.build_report(load_config())
+    assert not any(issue["code"] == "state_unreadable" for issue in report["issues"])
+    assert report["state_status"] == "available"
+    assert report["read_limits"]["state_json_bytes"] == 64 * 1024 * 1024
+
+
+def test_watermark_read_budget_is_reported_as_limited_not_corrupt(world, monkeypatch):
+    from agent_usage_tracker import coverage
+    from agent_usage_tracker.config import load_config
+
+    monkeypatch.setattr(coverage, "MAX_STATE_JSON_BYTES", 32, raising=False)
+    report = coverage.build_report(load_config())
+    codes = {issue["code"] for issue in report["issues"]}
+    assert "state_limited" in codes
+    assert "state_unreadable" not in codes
+    assert report["state_status"] == "limited"
+
+
+
+def test_delivery_identity_uses_consistent_metadata_calls(world, monkeypatch):
+    import sqlite3
+    from types import SimpleNamespace
+    from agent_usage_tracker import coverage, push
+
+    path = push.outbox_path()
+    path.parent.mkdir(parents=True)
+    connection = sqlite3.connect(path)
+    connection.execute("CREATE TABLE pending(kind TEXT)")
+    connection.execute("INSERT INTO pending VALUES ('activity')")
+    connection.commit()
+    connection.close()
+    original = coverage.os.fstat
+
+    def descriptor_metadata(descriptor):
+        metadata = original(descriptor)
+        return SimpleNamespace(st_mode=metadata.st_mode, st_size=metadata.st_size,
+            st_ino=0, st_dev=metadata.st_dev, st_mtime_ns=metadata.st_mtime_ns,
+            st_ctime_ns=metadata.st_ctime_ns)
+
+    monkeypatch.setattr(coverage.os, "fstat", descriptor_metadata)
+    assert coverage._delivery() == {"status": "available", "pending": {"activity": 1}}
