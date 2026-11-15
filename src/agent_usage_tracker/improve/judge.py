@@ -252,15 +252,25 @@ def _llm_review(case: dict[str, Any], rubric: str, model: MlxLetter,
 def diagnose(store: Store, audit_id: str, *, models: tuple[str, ...] = (
              "pplx-decider-flash", "clef-flash"), limit: int = 12, budget_s: int = 300,
              max_calls: int = 50, explain_model: str | None = None,
-             backend_for: Callable[[str], Backend] = _backend) -> dict[str, Any]:
+             backend_for: Callable[[str], Backend] = _backend,
+             deadline: float | None = None,
+             progress: Callable[[dict[str, Any]], None] | None = None) -> dict[str, Any]:
     if not models or len(set(models)) != len(models) or not 1 <= max_calls <= 500 \
             or not 1 <= budget_s <= 3600:
         raise AutError("improve: invalid diagnosis models or budget")
+    if deadline is not None and not math.isfinite(deadline):
+        raise AutError("improve: invalid diagnosis deadline")
+    deadline = min(deadline if deadline is not None else time.monotonic() + budget_s,
+                   time.monotonic() + budget_s)
     rows = cases(store, audit_id, limit=limit)
     explainer = MlxLetter(explain_model) if explain_model else None
     if explainer:
         explainer.prepare()
     backends = {name: backend_for(name) for name in models}
+    for backend in backends.values():
+        prepare = getattr(backend, "prepare", None)
+        if prepare:
+            prepare()
     policy: dict[str, Any] = {"version": VERSION, "audit_id": audit_id, "models": list(models),
               "model_identity": {name: {"id": backend.model_id, "revision": backend.model_rev,
                                         "protocol": getattr(backend, "protocol", "")}
@@ -273,7 +283,6 @@ def diagnose(store: Store, audit_id: str, *, models: tuple[str, ...] = (
               "minimum_raw_score": .7}
     job_id = store.put("diagnoses", policy)
     evaluator_id = digest({k: v for k, v in policy.items() if k not in {"audit_id", "cases"}})
-    deadline = time.monotonic() + budget_s
     calls = 0
     finished = 0
     tally: dict[str, int] = {label: 0 for label in LABELS}
@@ -281,7 +290,24 @@ def diagnose(store: Store, audit_id: str, *, models: tuple[str, ...] = (
              if (row := store.get("votes", key))}
     decisions = {row["evaluation_key"]: key for key in store.keys("judgments")
                  if (row := store.get("judgments", key))}
+    review_cache: dict[str, list[dict[str, Any]]] = {}
+    for attempt_id in store.keys("review_attempts"):
+        saved = store.get("review_attempts", attempt_id)
+        review_cache.setdefault(saved["evaluation_key"], []).append(saved)
+    active = {digest({"evaluator": evaluator_id, "case": row["case_id"], "rubric": rubric})
+              for row in rows for rubric in RUBRICS}
     reason = "complete"
+
+    def checkpoint() -> dict[str, Any]:
+        report = {"job_id": job_id, "complete": finished == len(active),
+                  "finished": finished, "total": len(active), "calls": calls,
+                  "reason": reason, "verdicts": dict(tally), "human_verified": False,
+                  "judgment_ids": [decisions[key] for key in sorted(active) if key in decisions]}
+        if progress:
+            progress(report)
+        return report
+
+    checkpoint()
     model_locked = False
     try:
         with _locked(store.root / "diagnose", blocking=False), ExitStack() as resources:
@@ -294,6 +320,9 @@ def diagnose(store: Store, audit_id: str, *, models: tuple[str, ...] = (
                         tally[value["verdict"]] += 1
                         finished += 1
                         continue
+                    if time.monotonic() >= deadline:
+                        reason = "budget"
+                        break
                     eligible = (case["coverage"].get("complete")
                                 and not case["omitted_task_events"]
                                 and not any(e.get("truncated") for e in case["events"]))
@@ -305,6 +334,7 @@ def diagnose(store: Store, audit_id: str, *, models: tuple[str, ...] = (
                         decisions[key] = store.put("judgments", result)
                         tally["unknown"] += 1
                         finished += 1
+                        checkpoint()
                         continue
                     votes = []
                     refs = []
@@ -320,14 +350,16 @@ def diagnose(store: Store, audit_id: str, *, models: tuple[str, ...] = (
                                 memory_guard()
                                 model_locked = True
                             backend = backends[name]
+                            calls += 1
+                            checkpoint()
                             distribution = backend.distribution(_request(case, rubric))
                             aggregate([distribution])
-                            calls += 1
                             cache[vote_key] = store.put("votes", {
                                 "evaluation_key": vote_key, "job_id": job_id, "case_id": case["case_id"],
                                 "rubric": rubric, "model": backend.model_id,
                                 "model_rev": backend.model_rev, "distribution": distribution,
                                 "protocol": getattr(backend, "protocol", "")})
+                            checkpoint()
                         vote = store.get("votes", cache[vote_key])
                         votes.append(vote["distribution"])
                         refs.append(cache[vote_key])
@@ -345,36 +377,47 @@ def diagnose(store: Store, audit_id: str, *, models: tuple[str, ...] = (
                         can_review = False
                         review_skipped = "review_input_limit"
                     if can_review and explain_model:
-                        if calls >= max_calls or time.monotonic() >= deadline:
-                            reason = "budget"
-                            break
                         assert explainer is not None
-                        if not model_locked:
-                            resources.enter_context(_locked(config_path().parent / "replay-model",
-                                                            blocking=False))
-                            memory_guard()
-                            model_locked = True
-                        feedback = ""
-                        for attempt in range(2):
+                        saved_attempts = sorted(review_cache.get(key, []),
+                                                key=lambda row: row["attempt"])
+                        for saved_attempt in saved_attempts:
+                            if saved_attempt["error"]:
+                                review_errors.append(saved_attempt["error"])
+                            if saved_attempt["review"] is not None:
+                                review = validate_review(case, saved_attempt["review"], rubric)
+                                break
+                        if review is None and len(saved_attempts) < 2:
                             if calls >= max_calls or time.monotonic() >= deadline:
+                                reason = "budget"
                                 break
-                            calls += 1
-                            try:
-                                review = _llm_review(case, rubric, explainer, feedback)
-                            except AutError as exc:
-                                review_errors.append(str(exc))
-                                feedback = str(exc).split("\n", 1)[0]
-                            store.put("review_attempts", {"evaluation_key": key,
-                                "model": explain_model, "model_rev": explainer.model_rev,
-                                "attempt": attempt, "review": review,
-                                "error": review_errors[-1] if review is None else None})
-                            if review is not None:
-                                break
-                        if review is None:
+                            if not model_locked:
+                                resources.enter_context(_locked(config_path().parent / "replay-model",
+                                                                blocking=False))
+                                memory_guard()
+                                model_locked = True
+                            feedback = review_errors[-1].split("\n", 1)[0] if review_errors else ""
+                            for attempt in range(len(saved_attempts), 2):
+                                if calls >= max_calls or time.monotonic() >= deadline:
+                                    reason = "budget"
+                                    break
+                                calls += 1
+                                checkpoint()
+                                try:
+                                    review = _llm_review(case, rubric, explainer, feedback)
+                                except AutError as exc:
+                                    review_errors.append(str(exc))
+                                    feedback = str(exc).split("\n", 1)[0]
+                                store.put("review_attempts", {"evaluation_key": key,
+                                    "model": explain_model, "model_rev": explainer.model_rev,
+                                    "attempt": attempt, "review": review,
+                                    "error": review_errors[-1] if review is None else None})
+                                checkpoint()
+                                if review is not None:
+                                    break
+                        if reason == "budget":
+                            break
+                        if review is None or review["verdict"] != result["verdict"]:
                             result["verdict"] = "unknown"
-                        if review:
-                            if review["verdict"] != result["verdict"]:
-                                result["verdict"] = "unknown"
                     if rubric == "completion_supported" and (not coverage.get("complete")
                                                               or case["omitted_task_events"]):
                         result["verdict"] = "unknown"
@@ -388,6 +431,7 @@ def diagnose(store: Store, audit_id: str, *, models: tuple[str, ...] = (
                     decisions[key] = store.put("judgments", result)
                     tally[result["verdict"]] += 1
                     finished += 1
+                    checkpoint()
                 if reason == "budget":
                     break
     except LockBusy:
@@ -397,11 +441,6 @@ def diagnose(store: Store, audit_id: str, *, models: tuple[str, ...] = (
             close = getattr(backend, "close", None)
             if close:
                 close()
-    report = {"job_id": job_id, "complete": finished == len(rows) * len(RUBRICS),
-              "finished": finished, "total": len(rows) * len(RUBRICS), "calls": calls,
-              "reason": reason, "verdicts": tally, "human_verified": False}
-    active = {digest({"evaluator": evaluator_id, "case": row["case_id"], "rubric": rubric})
-              for row in rows for rubric in RUBRICS}
-    report["judgment_ids"] = [decisions[key] for key in sorted(active) if key in decisions]
+    report = checkpoint()
     store.append("diagnosis", **report)
     return report
