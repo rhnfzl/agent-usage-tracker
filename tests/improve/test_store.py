@@ -159,7 +159,9 @@ def test_audit_recent_window_keeps_complete_observed_attempt_eligible(tmp_path):
     ]
     for record in records:
         record["timestamp"] = "2026-11-12T10:00:00Z"
-    (folder / "rollout-long.jsonl").write_text("".join(json.dumps(row) + "\n" for row in records))
+    path = folder / "rollout-long.jsonl"
+    path.write_text("".join(json.dumps(row) + "\n" for row in records))
+    os.utime(path, (1_000_000_000, 1_000_000_000))
     store = Store(tmp_path / "private")
     report = audit(store, home, idle_s=0, since_epoch=0, max_bytes=4096)
     observed = cases(store, report["audit_id"])
