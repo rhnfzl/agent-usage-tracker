@@ -105,6 +105,16 @@ Rejected explanatory reviews still contribute their measured duration before a r
 This estimate does not guarantee preemption of an unusually slow native call.
 A long audit can leave too little time for a first call; its frozen evidence resumes later.
 
+Matching checkpoints record `unfinished_call` before an admitted model operation.
+It names the model revision, case, criterion and operation without a durable result.
+It does not prove native execution started. Saving a vote or review attempt clears it.
+A killed worker retains the descriptor so its failed operation can be inspected.
+
+After stopping a command, process reaping and output-reader cleanup share one second.
+Incomplete cleanup returns a failure with `cleanup_timeout` and the owned `pid`.
+An unknown exit status is never accepted. An OS-stuck child can still retain model locks.
+Completed process startup counts against the command deadline; an unreturning spawn remains OS-dependent.
+
 Separate criteria cover avoidable recovery and completion supported by evidence.
 Cases mix failed and clean user attempts. Each attempt ends at a recorded turn boundary or the next prompt.
 Sampling prefers complete captured attempts within each group. Each source checks at most

@@ -198,12 +198,14 @@ def _roots(cfg: Config, engine: str) -> list[Path]:
     return []
 
 
-def _metadata(root: Path, files: dict[str, Any], budget: list[int], engine: str) -> dict[str, Any]:
+def _metadata(root: Path, files: dict[str, Any], budget: list[int], engine: str,
+              limit: int | None = None) -> dict[str, Any]:
+    stop_at = min(MAX_ENTRIES, budget[0] + limit) if limit is not None else MAX_ENTRIES
     info: dict[str, Any] = {"path": str(root), "status": "available", "files": 0,
                             "bytes": 0, "unread_bytes": 0, "limited": False}
 
     def visit(path: Path, depth: int) -> None:
-        if budget[0] >= MAX_ENTRIES:
+        if budget[0] >= stop_at:
             info["limited"] = True
             if path == root:
                 info["status"] = "unknown"
@@ -245,7 +247,7 @@ def _metadata(root: Path, files: dict[str, Any], budget: list[int], engine: str)
                     return
                 with os.scandir(path) as entries:
                     for entry in entries:
-                        if budget[0] >= MAX_ENTRIES:
+                        if budget[0] >= stop_at:
                             info["limited"] = True
                             break
                         visit(Path(entry.path), depth + 1)
@@ -394,6 +396,15 @@ def build_report(cfg: Config, *, now: datetime | None = None) -> dict[str, Any]:
     collectors: list[dict[str, Any]] = []
     all_engines = list(dict.fromkeys((*cfg.agents, "claude_code", "codex", "pi",
                                     *(s.engine for s in registry.sources))))[:MAX_COLLECTORS]
+    planned_roots: dict[str, list[Path]] = {}
+    for engine in all_engines:
+        try:
+            planned_roots[engine] = _roots(cfg, engine)
+        except (OSError, ValueError, RuntimeError):
+            planned_roots[engine] = []
+            _issue(issues, "source_discovery_failed", "collector:" + engine)
+    root_count = sum(len(roots) for roots in planned_roots.values())
+    root_budget = max(1, MAX_ENTRIES // max(1, root_count))
     for engine in all_engines:
         observation = _receipt(receipts.get(engine), now)
         configured = engine in cfg.agents
@@ -416,11 +427,8 @@ def build_report(cfg: Config, *, now: datetime | None = None) -> dict[str, Any]:
         if not isinstance(wm, dict) or not isinstance(files, dict):
             _issue(issues, "state_unreadable", "collector:" + engine)
         files = files if isinstance(files, dict) else {}
-        try:
-            roots = [_metadata(root, files, budget, engine) for root in _roots(cfg, engine)]
-        except (OSError, ValueError, RuntimeError):
-            roots = []
-            _issue(issues, "source_discovery_failed", "collector:" + engine)
+        roots = [_metadata(root, files, budget, engine, root_budget)
+                 for root in planned_roots[engine]]
         for root in roots:
             if root["limited"]:
                 _issue(issues, "discovery_limited", "collector:" + engine)
@@ -507,6 +515,7 @@ def build_report(cfg: Config, *, now: datetime | None = None) -> dict[str, Any]:
             "state_status": state_status,
             "read_limits": {"json_bytes": MAX_JSON_BYTES, "state_json_bytes": MAX_STATE_JSON_BYTES,
                             "metadata_entries": MAX_ENTRIES,
+                            "metadata_entries_per_root": root_budget,
                             "metadata_depth": MAX_DEPTH, "metadata_entries_visited": budget[0]},
             "registry_status": registry_status, "sources": sources, "collectors": collectors,
             "session_links": session_links, "session_links_omitted": len(registry.links) - len(session_links),

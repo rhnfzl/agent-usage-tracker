@@ -46,6 +46,21 @@ def test_unknown_client_labels_are_hashed_and_bounded():
     assert any(label.startswith("unknown:") for label in observed.clients)
 
 
+def test_codex_tui_is_named_metadata_without_promoting_origin():
+    from agent_usage_tracker import diagnostics
+    from agent_usage_tracker.collectors.codex import run_origin
+
+    with diagnostics.capture() as observed:
+        diagnostics.observe_client("codex-tui")
+    assert observed.clients == {"codex-tui"}
+    assert observed.skipped == {}
+    for source, expected in [
+        ("cli", "interactive"), ({"subagent": {}}, "subagent"), ("future-source", "unknown"),
+    ]:
+        assert run_origin({"originator": "codex-tui", "source": source}) == expected
+        assert run_origin({"originator": "future-client", "source": source}) == expected
+
+
 def test_diagnostics_outside_a_scan_do_not_leak_into_the_next_scan():
     from agent_usage_tracker import diagnostics
 

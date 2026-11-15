@@ -156,3 +156,20 @@ def test_changed_cycle_policy_preserves_previous_evidence(tmp_path, monkeypatch)
     assert report["audit"]["audit_id"] == new_audit
     assert store.get("audits", old_audit)["synthetic"] == "old"
     assert store.get("judgments", judgment) == {"synthetic": "prior"}
+
+
+def test_unreaped_worker_stays_a_timeout_with_private_cleanup_diagnostics(
+        tmp_path, monkeypatch, capsys):
+    from agent_usage_tracker.improve import schedule
+
+    store = Store(tmp_path / "private")
+    failure = {"accepted": False, "timeout": True, "exit_code": None,
+               "cleanup_timeout": True, "pid": 424242}
+    monkeypatch.setattr(schedule, "command", lambda *a, **kw: failure)
+    from agent_usage_tracker import cli
+    code = cli.main(["improve", "--root", str(store.root), "run", "--budget-s", "2"])
+    report = json.loads(capsys.readouterr().out)
+    assert code == 1
+    assert report["status"] == "timeout" and report["exit_code"] is None
+    error = store.get("cycle_errors", report["error_id"])
+    assert error["cleanup_timeout"] and error["pid"] == 424242

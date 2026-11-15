@@ -269,3 +269,50 @@ def test_zero_elapsed_review_does_not_admit_repair_at_the_deadline(native_budget
                             backend_for=backend_for(clock, calls, {"local": 0}, "fail"))
     assert not result["complete"] and result["reason"] == "budget"
     assert result["calls"] == 2 and len(reviews) == 1
+
+
+def test_failed_decision_keeps_the_unfinished_call_in_its_last_checkpoint(native_budget):
+    store, audit, clock = native_budget
+    checkpoints = []
+
+    class Backend:
+        model_id = "local"
+        model_rev = "synthetic"
+
+        def distribution(self, request):
+            raise RuntimeError("fixture native failure")
+
+    with pytest.raises(RuntimeError, match="fixture native failure"):
+        judge.diagnose(store, audit, models=("local",), backend_for=lambda _: Backend(),
+                       progress=checkpoints.append)
+    unfinished = checkpoints[-1]["unfinished_call"]
+    assert unfinished["kind"] == "decision" and unfinished["model"] == "local"
+    assert unfinished["rubric"] == "avoidable_recovery"
+    assert store.get("cases", unfinished["case_id"])
+    assert not store.keys("votes")
+
+
+def test_review_checkpoint_clears_only_after_its_attempt_is_durable(native_budget, monkeypatch):
+    store, audit, clock = native_budget
+    review_setup(monkeypatch)
+    votes, reviews, checkpoints = [], [], []
+
+    def review(*args):
+        reviews.append(True)
+        if len(reviews) == 1:
+            raise AutError("fixture invalid citations")
+        return accepted_review()
+
+    def checkpoint(report):
+        checkpoints.append((len(store.keys("review_attempts")), report))
+
+    monkeypatch.setattr(judge, "_llm_review", review)
+    report = judge.diagnose(store, audit, models=("local",), explain_model="review",
+                            backend_for=backend_for(clock, votes, {"local": 0}, "fail"),
+                            progress=checkpoint)
+    admitted = [row["unfinished_call"] for _, row in checkpoints
+                if row.get("unfinished_call", {}).get("kind") == "review"]
+    assert [row["attempt"] for row in admitted] == [0, 1]
+    assert all(row["model"] == "review" and row["model_rev"] == "synthetic" for row in admitted)
+    assert any(count == 1 and "unfinished_call" not in row for count, row in checkpoints)
+    assert report["complete"] and "unfinished_call" not in report

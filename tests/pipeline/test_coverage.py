@@ -156,6 +156,73 @@ def test_metadata_discovery_budget_is_explicit(cfg, monkeypatch):
     assert report["read_limits"]["metadata_entries"] == 2
 
 
+def test_large_first_root_cannot_hide_other_native_homes(cfg, monkeypatch):
+    cfg.agents = ("claude_code", "codex", "pi")
+    large = cfg.home / ".claude/projects/project"
+    large.mkdir(parents=True)
+    for index in range(30):
+        (large / f"{index}.jsonl").write_text("not read\n")
+    native_file(cfg)
+    profile = cfg.home / "other-codex"
+    (profile / "sessions").mkdir(parents=True)
+    (profile / "sessions/rollout-profile.jsonl").write_text("not read\n")
+    (cfg.home / ".pi/agent/sessions").mkdir(parents=True)
+    registry(cfg, sources=[{"id": "profile", "harness": "wrapper", "engine": "codex",
+                           "location": "local", "home": str(profile)}])
+    monkeypatch.setattr(coverage, "MAX_ENTRIES", 16)
+    report = coverage.build_report(cfg, now=NOW)
+    by_engine = {c["collector"]: c for c in report["collectors"]}
+    assert by_engine["claude_code"]["roots"][0]["limited"]
+    assert all(r["status"] == "available" for r in by_engine["codex"]["roots"])
+    assert source(report, "native:codex")["availability"] == "available"
+    assert source(report, "profile")["availability"] == "available"
+    assert source(report, "native:pi")["availability"] == "available"
+    assert report["read_limits"]["metadata_entries_visited"] <= 16
+    assert report["completeness"] == "unknown"
+
+
+@pytest.mark.parametrize("future", [False, True])
+def test_empty_native_home_is_available_without_inventing_complete_work(cfg, future):
+    (cfg.home / ".codex/sessions").mkdir(parents=True)
+    stamp = NOW + timedelta(hours=1) if future else NOW
+    coverage.save_scan_observations([row(started_at=stamp.isoformat(),
+                                        finished_at=stamp.isoformat())])
+    report = coverage.build_report(cfg, now=NOW)
+    assert source(report, "native:codex")["availability"] == "available"
+    observation = report["collectors"][0]["observation"]
+    assert observation["activity_state"] == ("unknown" if future else "idle")
+    assert report["collectors"][0]["capabilities"]["requests"]["observed"] is (
+        None if future else False)
+    assert report["completeness"] == "unknown"
+
+
+def test_each_root_stops_enumerating_after_its_share(cfg, monkeypatch):
+    from contextlib import contextmanager
+
+    root = cfg.home / ".codex/sessions"
+    root.mkdir(parents=True)
+    for index in range(30):
+        (root / f"rollout-{index}.jsonl").write_text("not read\n")
+    original = coverage.os.scandir
+    seen = []
+
+    @contextmanager
+    def counted(path):
+        with original(path) as entries:
+            def bounded():
+                for entry in entries:
+                    seen.append(entry.name)
+                    assert len(seen) <= 3, "root quota must also stop directory enumeration"
+                    yield entry
+            yield bounded()
+
+    monkeypatch.setattr(coverage.os, "scandir", counted)
+    budget = [0]
+    info = coverage._metadata(root, {}, budget, "codex", 3)
+    assert info["limited"] and info["files"] == 2
+    assert budget[0] == 3
+
+
 def test_outbox_report_is_readonly_and_separate(cfg):
     from agent_usage_tracker.push import outbox_path
     path = outbox_path()

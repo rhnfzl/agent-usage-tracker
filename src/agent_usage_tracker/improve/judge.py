@@ -284,6 +284,7 @@ def diagnose(store: Store, audit_id: str, *, models: tuple[str, ...] = (
     job_id = store.put("diagnoses", policy)
     evaluator_id = digest({k: v for k, v in policy.items() if k not in {"audit_id", "cases"}})
     calls = 0
+    unfinished_call: dict[str, Any] | None = None
     durations: dict[tuple[str, str], float] = {}
 
     def can_call(kind: str, name: str) -> bool:
@@ -312,6 +313,8 @@ def diagnose(store: Store, audit_id: str, *, models: tuple[str, ...] = (
                   "finished": finished, "total": len(active), "calls": calls,
                   "reason": reason, "verdicts": dict(tally), "human_verified": False,
                   "judgment_ids": [decisions[key] for key in sorted(active) if key in decisions]}
+        if unfinished_call is not None:
+            report["unfinished_call"] = unfinished_call
         if progress:
             progress(report)
         return report
@@ -362,6 +365,9 @@ def diagnose(store: Store, audit_id: str, *, models: tuple[str, ...] = (
                                 reason = "budget"
                                 break
                             backend = backends[name]
+                            unfinished_call = {"kind": "decision", "model": backend.model_id,
+                                "model_rev": backend.model_rev, "case_id": case["case_id"],
+                                "rubric": rubric, "evaluation_key": vote_key}
                             calls += 1
                             checkpoint()
                             started = time.monotonic()
@@ -376,6 +382,7 @@ def diagnose(store: Store, audit_id: str, *, models: tuple[str, ...] = (
                                 "rubric": rubric, "model": backend.model_id,
                                 "model_rev": backend.model_rev, "distribution": distribution,
                                 "protocol": getattr(backend, "protocol", "")})
+                            unfinished_call = None
                             checkpoint()
                         vote = store.get("votes", cache[vote_key])
                         votes.append(vote["distribution"])
@@ -417,6 +424,9 @@ def diagnose(store: Store, audit_id: str, *, models: tuple[str, ...] = (
                                 if not can_call("review", explain_model):
                                     reason = "budget"
                                     break
+                                unfinished_call = {"kind": "review", "model": explain_model,
+                                    "model_rev": explainer.model_rev, "case_id": case["case_id"],
+                                    "rubric": rubric, "evaluation_key": key, "attempt": attempt}
                                 calls += 1
                                 checkpoint()
                                 started = time.monotonic()
@@ -433,6 +443,7 @@ def diagnose(store: Store, audit_id: str, *, models: tuple[str, ...] = (
                                     "model": explain_model, "model_rev": explainer.model_rev,
                                     "attempt": attempt, "review": review,
                                     "error": review_errors[-1] if review is None else None})
+                                unfinished_call = None
                                 checkpoint()
                                 if review is not None:
                                     break

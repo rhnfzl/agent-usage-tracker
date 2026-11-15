@@ -238,3 +238,170 @@ def test_protected_command_changed_after_prospective_study_is_rejected(tmp_path)
     with pytest.raises(AutError, match='changed'):
         run_trial(store, policy['trial_spec_id'], execute=True)
     assert store.keys('trial_results') == []
+
+
+def test_command_bounds_reaping_after_native_child_does_not_exit(tmp_path, monkeypatch):
+    from io import BytesIO
+    import signal
+    from agent_usage_tracker.improve import trial
+
+    clock = [0.0]
+    waits = []
+    stopped = []
+
+    class Process:
+        pid = 424242
+        returncode = None
+        stdout = BytesIO(b"fixture native worker output")
+
+        def wait(self, timeout=None):
+            assert timeout is not None, "native child cleanup must not wait without a deadline"
+            waits.append(timeout)
+            clock[0] += timeout
+            raise trial.subprocess.TimeoutExpired("fixture", timeout)
+
+        def poll(self):
+            return None
+
+        def kill(self):
+            stopped.append(self.pid)
+
+    monkeypatch.setattr(trial.subprocess, "Popen", lambda *a, **kw: Process())
+    monkeypatch.setattr(trial.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(trial.os, "killpg", lambda pid, sig: stopped.append(pid), raising=False)
+    previous = signal.getsignal(signal.SIGTERM)
+    try:
+        result = command(["fixture-native-worker"], tmp_path, 2)
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+    assert result["timeout"] and not result["accepted"]
+    assert result["cleanup_timeout"] and result["exit_code"] is None
+    assert result["pid"] == 424242 and stopped
+    assert result["elapsed_s"] <= 3
+    assert waits[1] <= 1 and waits[-1] == 0
+
+
+def test_spawn_failure_restores_signal_handler_without_cleanup(tmp_path, monkeypatch):
+    import signal
+    from agent_usage_tracker.improve import trial
+
+    previous = signal.getsignal(signal.SIGTERM)
+
+    def unavailable(*args, **kwargs):
+        raise OSError("fixture spawn failure")
+
+    monkeypatch.setattr(trial.subprocess, "Popen", unavailable)
+    with pytest.raises(OSError, match="fixture spawn failure"):
+        command(["fixture-native-worker"], tmp_path, 2)
+    assert signal.getsignal(signal.SIGTERM) == previous
+
+
+def test_process_startup_is_charged_to_the_command_deadline(tmp_path, monkeypatch):
+    from io import BytesIO
+    from agent_usage_tracker.improve import trial
+
+    clock = [0.0]
+    waits = []
+
+    class Process:
+        pid = 424242
+        returncode = 0
+        stdout = BytesIO(b"fixture")
+
+        def wait(self, timeout=None):
+            waits.append(timeout)
+            return 0
+
+        def poll(self):
+            return 0
+
+    def start(*args, **kwargs):
+        clock[0] = 1.5
+        return Process()
+
+    monkeypatch.setattr(trial.subprocess, "Popen", start)
+    monkeypatch.setattr(trial.time, "monotonic", lambda: clock[0])
+    assert command(["fixture"], tmp_path, 2)["accepted"]
+    assert waits == [.5]
+
+
+def test_trial_does_not_accept_an_unreaped_child_with_unknown_exit_code(tmp_path, monkeypatch):
+    from agent_usage_tracker.improve import trial
+
+    baseline, candidate = tmp_path / "baseline", tmp_path / "candidate"
+    baseline.mkdir()
+    candidate.mkdir()
+    store = Store(tmp_path / "private")
+    spec = store.put("trial_specs", {"version": 1, "kind": "command_check",
+        "directories": {"baseline": str(baseline), "candidate": str(candidate)},
+        "cases": [{"id": "fixture", "argv": ["fixture"], "timeout_s": 2}],
+        "repeats": 1, "seed": 7})
+    failure = {"accepted": False, "timeout": True, "exit_code": None,
+               "cleanup_timeout": True, "pid": 424242, "elapsed_s": 3,
+               "output": "", "output_truncated": False}
+    monkeypatch.setattr(trial, "command", lambda *a, **kw: failure)
+    report = run_trial(store, spec, execute=True)
+    assert report["accepted"] == {"baseline": 0, "candidate": 0}
+    assert report["timeouts"] == 2 and report["agent_behaviour_verified"] is False
+
+
+def test_agent_trial_rejects_unknown_execution_and_acceptance_exit_codes(tmp_path, monkeypatch):
+    from agent_usage_tracker.improve import trial
+
+    spec, _, _ = agent_spec(tmp_path)
+    store = Store(tmp_path / "private")
+    failure = {"accepted": False, "timeout": True, "exit_code": None,
+               "cleanup_timeout": True, "pid": 424242, "elapsed_s": 3,
+               "output": "", "output_truncated": False}
+    monkeypatch.setattr(trial, "command", lambda *a, **kw: failure)
+    report = run_trial(store, store.put("trial_specs", spec), execute=True)
+    assert report["accepted"] == {"baseline": 0, "candidate": 0}
+    rows = [store.get("trial_results", key) for key in store.keys("trial_results")]
+    assert rows and all(row["exit_code"] is None and not row["accepted"] for row in rows)
+
+
+def test_reference_oracle_rejects_an_unknown_exit_code(tmp_path, monkeypatch):
+    from agent_usage_tracker.improve import validation
+    from .test_validation import setup_reference
+
+    store, spec, job, _ = setup_reference(tmp_path)
+    failure = {"accepted": False, "timeout": True, "exit_code": None,
+               "cleanup_timeout": True, "pid": 424242, "elapsed_s": 3,
+               "output": "", "output_truncated": False}
+    monkeypatch.setattr(validation, "command", lambda *a, **kw: failure)
+    with pytest.raises(AutError, match="reference oracle failed"):
+        validation.validate(store, spec, job, execute=True)
+    row = store.get("reference_oracles", store.keys("reference_oracles")[0])
+    assert row["exit_code"] is None and row["cleanup_timeout"] and not row["accepted"]
+
+
+@pytest.mark.parametrize("startup_s", [2., 3.])
+def test_completed_spawn_at_or_after_deadline_is_not_accepted(tmp_path, monkeypatch, startup_s):
+    from io import BytesIO
+    from agent_usage_tracker.improve import trial
+
+    clock = [0.0]
+    waits = []
+
+    class Process:
+        pid = 424242
+        returncode = 0
+        stdout = BytesIO(b"fixture")
+
+        def wait(self, timeout=None):
+            waits.append(timeout)
+            return 0
+
+        def poll(self):
+            return 0
+
+    def start(*args, **kwargs):
+        clock[0] = startup_s
+        return Process()
+
+    monkeypatch.setattr(trial.subprocess, "Popen", start)
+    monkeypatch.setattr(trial.time, "monotonic", lambda: clock[0])
+    result = command(["fixture"], tmp_path, 2)
+    assert result["timeout"] and not result["accepted"]
+    assert result["exit_code"] == 0 and result["elapsed_s"] == startup_s
+    assert waits == [0.]
