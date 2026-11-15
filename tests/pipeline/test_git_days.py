@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 from datetime import date, datetime, timedelta, timezone
@@ -255,6 +256,94 @@ def test_the_remote_script_reads_the_same_as_the_local_scan(world, monkeypatch):
     assert git_days.day_counts(found.commits, date(2026, 11, 1), date(2026, 11, 5)) == EXPECTED
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="the remote script is POSIX sh")
+@pytest.mark.parametrize("scratch_failure", ["creation", "stderr_write"])
+def test_remote_scan_needs_no_writable_scratch_and_keeps_real_failures(
+        world, monkeypatch, scratch_failure):
+    expected = git_days.scan_all(_cfg(world), TZ)
+    real_git = shutil.which("git")
+    assert real_git is not None
+    errors = {
+        "stale": "fatal: not a git repository (or any of the parent directories): .git",
+        "invalid": "fatal: invalid gitfile format: invented/.git",
+        "permission": "fatal: Permission denied",
+        "unknown": "fatal: unexpected object store failure",
+    }
+    failures = {}
+    for name, error in errors.items():
+        repo = world / "projects" / name
+        (repo / ".git").mkdir(parents=True)
+        failures[str(repo)] = error
+    shim = world / "no-scratch"
+    shim.mkdir()
+    (shim / "mktemp").write_text("#!/bin/sh\nexit 1\n")
+    (shim / "mktemp").chmod(0o755)
+    (shim / "git").write_text(
+        f"#!{sys.executable}\n"
+        "import errno, os, stat, sys\n"
+        f"errors = {failures!r}\n"
+        "args = sys.argv[1:]\n"
+        "path = args[args.index('-C') + 1] if '-C' in args else None\n"
+        "if 'rev-parse' in args and path in errors:\n"
+        "    try:\n"
+        f"        if {scratch_failure == 'stderr_write'!r} and "
+        "stat.S_ISREG(os.fstat(2).st_mode):\n"
+        "            raise OSError(errno.ENOSPC, 'No space left on device')\n"
+        "        os.write(2, (errors[path] + '\\n').encode())\n"
+        "    except OSError:\n"
+        "        pass\n"
+        "    sys.exit(128)\n"
+        f"os.execv({real_git!r}, [{real_git!r}, *args])\n")
+    (shim / "git").chmod(0o755)
+    # Creation fails in one arm. The other reproduces an inode with no writable data blocks.
+    if scratch_failure == "stderr_write":
+        (shim / "mktemp").unlink()
+    monkeypatch.setenv("PATH", f"{shim}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.setattr(git_days, "_ssh_argv", lambda host: ["sh", "-s"])
+    cfg = _cfg(world, git_days_roots=(),
+               git_days_remotes=(("local", (str(world / "projects"),)),))
+    found = git_days.scan_all(cfg, TZ)
+    assert (found.stores, found.failed) == (2, 2)
+    assert found.commits == expected.commits
+    assert git_days.day_counts(found.commits, date(2026, 11, 1), date(2026, 11, 5)) == EXPECTED
+    assert "could not be read" in (git_days.refusal(found, None) or "")
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the remote script is POSIX sh")
+@pytest.mark.parametrize("output", ["valid", "warning", "missing", "relative"])
+def test_remote_success_requires_an_absolute_common_directory(world, monkeypatch, output):
+    real_git = shutil.which("git")
+    assert real_git is not None
+    shim = world / "git-output"
+    shim.mkdir()
+    (shim / "git").write_text(
+        f"#!{sys.executable}\n"
+        "import os, subprocess, sys\n"
+        "args = sys.argv[1:]\n"
+        f"mode = {output!r}\n"
+        "if 'rev-parse' in args and mode != 'valid':\n"
+        "    if mode == 'warning':\n"
+        f"        result = subprocess.run([{real_git!r}, *args], capture_output=True)\n"
+        "        os.write(1, result.stdout)\n"
+        "        os.write(2, b'warning: invented diagnostic\\n')\n"
+        "    else:\n"
+        f"        print({str(world / 'missing-common-dir')!r} if mode == 'missing' else '.')\n"
+        "    sys.exit(0)\n"
+        f"os.execv({real_git!r}, [{real_git!r}, *args])\n")
+    (shim / "git").chmod(0o755)
+    monkeypatch.setenv("PATH", f"{shim}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.setattr(git_days, "_ssh_argv", lambda host: ["sh", "-s"])
+    cfg = _cfg(world, git_days_roots=(),
+               git_days_remotes=(("local", (str(world / "projects" / "app"),)),))
+    found = git_days.scan_all(cfg, TZ)
+    assert (found.stores, found.failed) == ((1, 0) if output == "valid" else (0, 1))
+    if output == "valid":
+        local = git_days.scan_all(_cfg(world, git_days_roots=cfg.git_days_remotes[0][1]), TZ)
+        assert found.commits == local.commits
+    else:
+        assert found.commits == {}
+
+
 @pytest.mark.skipif(sys.platform == "win32", reason="shared-repo scan uses POSIX sh and symlinks")
 @pytest.mark.parametrize("remote", [False, True])
 def test_shared_reads_are_exact_scoped_hardened_and_offline(world, monkeypatch, remote):
@@ -423,6 +512,89 @@ def test_partial_attempt_uses_six_hour_retry_despite_recent_complete_run(world, 
                         {'stores': 1, 'failed': 1, 'written': 0})
     git_days.run_if_due(_cfg(world), now=NOW + timedelta(hours=7))
     assert calls == [1]
+
+
+@pytest.mark.parametrize("remotes,current_version,limit,immediate", [
+    (True, False, None, True), (True, True, None, False),
+    (False, False, None, False), (True, False, date(2026, 11, 7), False),
+    (True, False, date(2026, 11, 5), True), (True, False, date(2026, 11, 6), True),
+])
+def test_new_remote_reader_retries_pending_work_once(
+        world, monkeypatch, remotes, current_version, limit, immediate):
+    wm = {"last_ok": NOW.isoformat(),
+          "last_attempt": (NOW - timedelta(hours=1)).isoformat(), "partial_pending": True}
+    if current_version:
+        wm["remote_scan_version"] = 1
+    (world / "state.json").write_text(json.dumps({"collectors": {"git_days": wm}}))
+    cfg = _cfg(world, git_days_remotes=(("local", ("~/projects",)),) if remotes else ())
+    calls = []
+
+    def failed_run(cfg, dry_run, **kw):
+        calls.append(1)
+        raise AutError("still unavailable")
+
+    monkeypatch.setattr(git_days, "run", failed_run)
+    kwargs = {"defer_remotes_until": limit} if limit else {}
+    git_days.run_if_due(cfg, now=NOW, **kwargs)
+    assert len(calls) == int(immediate)
+    git_days.run_if_due(cfg, now=NOW + timedelta(hours=1), **kwargs)
+    assert len(calls) == int(immediate)
+    if immediate:
+        assert load_state()["collectors"]["git_days"]["remote_scan_version"] == 1
+        git_days.run_if_due(cfg, now=NOW + timedelta(hours=6), **kwargs)
+        assert len(calls) == 2
+
+
+@pytest.mark.parametrize("dry_run,local_only,deferred,records_version", [
+    (False, False, False, True), (False, True, False, False),
+    (False, False, True, False), (True, False, False, False),
+])
+def test_remote_reader_version_records_only_actual_attempts(
+        world, monkeypatch, dry_run, local_only, deferred, records_version):
+    cfg = _cfg(world, git_days_remotes=(("local", ("~/projects",)),))
+    (world / "state.json").write_text(json.dumps({"collectors": {"git_days": {
+        "partial_pending": True, "last_attempt": (NOW - timedelta(hours=1)).isoformat()}}}))
+    before = (world / "state.json").read_bytes()
+    monkeypatch.setattr(git_days, "_scan_remote",
+                        lambda i, h, r, c, t, f: setattr(f, "stores", 1))
+    log = _stored_rows(monkeypatch, {})
+    with _fake_psycopg(log):
+        git_days.run(cfg, dry_run=dry_run, now=NOW, tz=TZ, local_only=local_only,
+                     defer_remotes_until=date(2099, 1, 1) if deferred else None)
+    wm = load_state()["collectors"]["git_days"]
+    assert (wm.get("remote_scan_version") == 1) is records_version
+    if dry_run:
+        assert (world / "state.json").read_bytes() == before
+
+
+def test_unexpected_manual_remote_failure_records_attempt_and_preserves_backoff(world, monkeypatch):
+    cfg = _cfg(world, git_days_roots=(), git_days_remotes=(("local", ("~/projects",)),))
+    (world / "state.json").write_text(json.dumps({"collectors": {"git_days": {
+        "partial_pending": True, "last_attempt": (NOW - timedelta(hours=1)).isoformat()}}}))
+
+    def fail_remote(*args):
+        raise RuntimeError("unexpected reader failure")
+
+    monkeypatch.setattr(git_days, "_scan_remote", fail_remote)
+    with _fake_psycopg(_stored_rows(monkeypatch, {})):
+        with pytest.raises(RuntimeError, match="unexpected reader"):
+            git_days.run(cfg, dry_run=False, now=NOW, tz=TZ)
+    wm = load_state()["collectors"]["git_days"]
+    assert wm["remote_scan_version"] == 1 and wm["last_attempt"] == NOW.isoformat()
+    calls = []
+    monkeypatch.setattr(git_days, "run", lambda *a, **kw: calls.append(1))
+    git_days.run_if_due(cfg, now=NOW + timedelta(hours=1))
+    assert calls == []
+
+
+def test_current_reader_does_not_rescan_recent_healthy_work(world, monkeypatch):
+    cfg = _cfg(world, git_days_remotes=(("local", ("~/projects",)),))
+    (world / "state.json").write_text(json.dumps({"collectors": {"git_days": {
+        "partial_pending": False, "last_ok": NOW.isoformat(), "last_attempt": NOW.isoformat(),
+        "remote_scan_version": 1}}}))
+    monkeypatch.setattr(git_days, "run", lambda *a, **kw: pytest.fail("healthy work rescanned"))
+    git_days.run_if_due(cfg, now=NOW)
+    git_days.run_if_due(cfg, now=NOW + timedelta(hours=19))
 
 
 def test_same_count_completeness_upgrade_and_no_partial_downgrade():

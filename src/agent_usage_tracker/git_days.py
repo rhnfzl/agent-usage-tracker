@@ -49,6 +49,7 @@ MIN_STORE_SHARE = 0.5
 KEEP_STORES = 5                     # good runs whose best store count the share rule uses
 DUE_AFTER = timedelta(hours=20)
 RETRY_AFTER = timedelta(hours=6)    # after an attempt that failed or was refused
+_REMOTE_SCAN_VERSION = 1           # retry older partial remote reads once after this repair
 SSH_CONNECT_S = 10
 REMOTE_TIMEOUT_S = 900
 INSERT_SQL = "INSERT INTO agents.git_commit_day (day, commits, scanned_at, complete) VALUES (%s, %s, %s, %s)"
@@ -159,8 +160,9 @@ def _sh_root(root: str) -> str:
 def remote_script(roots: Iterable[str], exclude_dirs: Iterable[str] = ()) -> str:
     """POSIX sh doing what _scan_local does: \\1<common dir> starts a store's log lines, \\2 marks a
     missing root, a folder find could not read or a store git could not read, \\3 a git older than
-    2.31 (no --path-format). A stale .git that holds no repository is skipped, as locally. stderr
-    stays its own stream: ssh hands it back, and it is never printed (it names paths)."""
+    2.31 (no --path-format). A stale .git that holds no repository is skipped, as locally. Capture
+    rev-parse errors in memory so read-only scans need no writable remote scratch space.
+    Other stderr stays separate and is never printed (it names paths)."""
     env = " ".join(f"{k}={shlex.quote(v)}" for k, v in READ_ENV.items())
     prune = " -o ".join(f"-name {n}" for n in _PRUNE)
     for path in exclude_dirs:
@@ -173,8 +175,6 @@ v=${{3:-0.0}}
 case $v in [0-9]*.[0-9]*) ;; *) v=0.0 ;; esac
 maj=${{v%%.*}}; min=${{v#*.}}; min=${{min%%.*}}
 if [ "$maj" -lt 2 ] || {{ [ "$maj" -eq 2 ] && [ "$min" -lt 31 ]; }}; then printf '\\003\\n'; exit 0; fi
-err=$(mktemp) || exit 3
-trap 'rm -f "$err"' EXIT
 fail=$(printf '\\002')
 seen='
 '
@@ -189,11 +189,13 @@ for root in {" ".join(map(_sh_root, roots))}; do
 done | while IFS= read -r g; do
   if [ "$g" = "$fail" ]; then printf '\\002\\n'; continue; fi
   d=${{g%/.git}}
-  if ! c=$({rev} 2>"$err"); then
-    case $(cat "$err") in *"not a git repository"*|*"invalid gitfile format"*) ;; \
+  if ! c=$({rev} 2>&1); then
+    case $c in *"not a git repository"*|*"invalid gitfile format"*) ;; \
 *) printf '\\002\\n' ;; esac
     continue
   fi
+  case $c in /*) ;; *) printf '\\002\\n'; continue ;; esac
+  [ -d "$c" ] || {{ printf '\\002\\n'; continue; }}
   case $seen in *"
 $c
 "*) continue ;; esac
@@ -378,6 +380,9 @@ def _collect(cfg: Config, now: datetime, tz: tzinfo, dsn: str | None, beat: JobB
     wm = collector_wm(state, NAME)
     kept = wm.get("stores")
     prev = [n for n in kept if isinstance(n, int)] if isinstance(kept, list) else []
+    if dsn is not None and cfg.git_days_remotes and not deferred:
+        wm.update(last_attempt=now.isoformat(), remote_scan_version=_REMOTE_SCAN_VERSION)
+        save_state(state, [NAME])
     found = scan_all(cfg, tz, defer_remotes=deferred)
     snapshots: list[Snapshot] = []
     for identity, source, skipped in found.sources:
@@ -463,17 +468,25 @@ def _older(stamp: object, now: datetime, gap: timedelta) -> bool:
 def run_if_due(cfg: Config, now: datetime | None = None, *,
                defer_remotes_until: date | None = None) -> None:
     """From `aut scan`: once the last good run is DUE_AFTER old and the last attempt RETRY_AFTER
-    old. Never fails the scan. A manual `aut git-days` calls run() and always runs."""
+    old. A fixed remote reader retries older partial attempts once. Never fails the scan.
+    A manual `aut git-days` calls run() and always runs."""
     if not cfg.git_days_enabled:
         return
     try:
         now = now or datetime.now(timezone.utc)
         state = load_state()
         wm = collector_wm(state, NAME)
+        deferred = (defer_remotes_until is not None
+                    and now.astimezone(_ledger_zone()).date() < defer_remotes_until)
+        new_remote_reader = (wm.get("partial_pending") is True and bool(cfg.git_days_remotes)
+                             and not deferred
+                             and wm.get("remote_scan_version") != _REMOTE_SCAN_VERSION)
         if not ((wm.get('partial_pending') is True or _older(wm.get("last_ok"), now, DUE_AFTER))
-                and _older(wm.get("last_attempt"), now, RETRY_AFTER)):
+                and (new_remote_reader or _older(wm.get("last_attempt"), now, RETRY_AFTER))):
             return
         wm["last_attempt"] = now.isoformat()
+        if cfg.git_days_remotes and not deferred:
+            wm["remote_scan_version"] = _REMOTE_SCAN_VERSION
         save_state(state, [NAME])
         report = run(cfg, dry_run=False, defer_remotes_until=defer_remotes_until) \
             if defer_remotes_until else run(cfg, dry_run=False)

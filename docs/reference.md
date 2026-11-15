@@ -57,6 +57,10 @@ Native JSONL commands drain a finite snapshot of each file admitted during the f
 All complete initial lines are included, even when several capped reads are needed.
 Later writes, new files and observed replacements or truncations wait for another run.
 
+`aut git-days` captures remote Git diagnostics in memory without writable temporary files.
+Unknown Git errors still mark coverage incomplete. After a remote-reader repair, an older pending
+remote read gets one immediate retry. Further failures keep the six-hour backoff.
+
 ## Configuration
 
 The config file is `~/.config/agent-usage-tracker/config.toml` (`$XDG_CONFIG_HOME` is honoured,
