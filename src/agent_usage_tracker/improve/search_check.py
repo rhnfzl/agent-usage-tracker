@@ -8,7 +8,7 @@ import shlex
 import stat
 from collections.abc import Mapping
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
 from typing import Any, Literal
 
 
@@ -68,20 +68,24 @@ def _path(value: str, cwd: Path, root: Path) -> Path:
     return path
 
 
+def _relative_name(path: PurePath, root: PurePath) -> str:
+    return path.relative_to(root).as_posix()
+
+
 def _fixture(task: SearchTask, root: Path) -> set[str]:
     if not root.is_dir() or root.is_symlink() or not re.fullmatch(r"[A-Za-z_]\w*", task.symbol):
         raise ValueError("invalid fixture")
+    for name in (task.scope, *task.files):
+        logical = PurePosixPath(name)
+        if not name or "\\" in name or PureWindowsPath(name).drive or logical.is_absolute() \
+                or logical.as_posix() != name or ".." in logical.parts:
+            raise ValueError("invalid fixture paths")
     scope = _path(task.scope, root, root)
-    if task.scope.startswith("/") or any(
-        name.startswith("/") or str(Path(name)) != name or ".." in Path(name).parts
-        for name in task.files
-    ):
-        raise ValueError("invalid fixture paths")
     paths = list(root.rglob("*"))
     modes = [path.lstat().st_mode for path in paths]
     if any(not (stat.S_ISREG(mode) or stat.S_ISDIR(mode)) for mode in modes):
         raise ValueError("nonregular fixture entry")
-    actual = {str(path.relative_to(root)): path.read_bytes().decode("utf-8")
+    actual = {_relative_name(path, root): path.read_bytes().decode("utf-8")
               for path, mode in zip(paths, modes) if stat.S_ISREG(mode)}
     if actual != dict(task.files):
         raise ValueError("fixture changed")
@@ -248,20 +252,20 @@ def _search(args: list[str], name: str, cwd: Path, root: Path,
     if pattern != task.symbol or not number:
         raise ValueError("unsupported search")
     targets = [_path(value, cwd, root) for value in positional or ["."]]
-    if not no_ignore and any(Path(file).name in {".gitignore", ".ignore", ".rgignore"}
+    if not no_ignore and any(PurePosixPath(file).name in {".gitignore", ".ignore", ".rgignore"}
                              for file in task.files):
         raise ValueError("unsupported ignore rules")
     if any(not path.exists() for path in targets):
         if len(targets) != 1 or targets[0] != _path(task.scope, root, root):
             raise ValueError("unrelated missing scope")
-        displays = {positional[0], str(targets[0])}
+        displays = {positional[0], str(targets[0]), targets[0].as_posix()}
         errors = {f"{name}: {path}: No such file or directory{suffix}" for path in displays
                   for suffix in ("", " (os error 2)")}
         return _Proof([errors], set(), True, 2)
     selected = {file for file in task.files if any(
         root / file == path or recursive and path.is_dir() and (root / file).is_relative_to(path)
         for path in targets) and (not python_only or file.endswith(".py")) and
-        (hidden or not any(part.startswith(".") for part in Path(file).parts))}
+        (hidden or not any(part.startswith(".") for part in PurePosixPath(file).parts))}
     output: list[set[str]] = []
     show_path = filename or len(targets) > 1 or any(path.is_dir() for path in targets)
     for file in sorted(selected):
@@ -270,9 +274,10 @@ def _search(args: list[str], name: str, cwd: Path, root: Path,
             if task.symbol not in text:
                 continue
             if show_path:
-                names = {str(path), file}
+                names = {str(path), path.as_posix(), file}
                 if path.is_relative_to(cwd):
-                    names |= {str(path.relative_to(cwd)), "./" + str(path.relative_to(cwd))}
+                    relative = _relative_name(path, cwd)
+                    names |= {relative, "./" + relative}
                 output.append({f"{display}:{line}:{text}" for display in names})
             else:
                 output.append({f"{line}:{text}"})
@@ -353,7 +358,7 @@ def _bash(command: str, root: Path, task: SearchTask, cwd: Path) -> _Proof:
                 else path.exists()
             code = 0 if exists else 1
         elif name == "pwd" and not args:
-            proof.output.append({str(cwd)})
+            proof.output.append({str(cwd), cwd.as_posix()})
             code = 0
         elif name == "ls" and (not args or args[0] == "-1" or
                                len(args) == 1 and not args[0].startswith("-")):
@@ -369,7 +374,7 @@ def _bash(command: str, root: Path, task: SearchTask, cwd: Path) -> _Proof:
                 code = 0
             elif not path.exists() and path == _path(task.scope, root, root):
                 proof.output.append({f"ls: {value}: No such file or directory"
-                                     for value in {display, str(path)}})
+                                     for value in {display, str(path), path.as_posix()}})
                 proof.missing, code = True, 1
             else:
                 raise ValueError("unsupported directory listing")
@@ -378,7 +383,7 @@ def _bash(command: str, root: Path, task: SearchTask, cwd: Path) -> _Proof:
             path = _path(args[-1], cwd, root)
             if path != _path(task.scope, root, root) or path.exists():
                 raise ValueError("unsupported scope probe")
-            displays = {args[-1], str(path)}
+            displays = {args[-1], str(path), path.as_posix()}
             proof.output.append({f"{name}: {display}: {prefix}No such file or directory"
                                  for display in displays for prefix in ("", "stat: ")})
             proof.missing, code = True, 1
@@ -426,7 +431,7 @@ def _native(name: str, data: dict[str, Any], result: dict[str, Any], root: Path,
         if set(data) != {"file_path"} or not isinstance(data["file_path"], str) or result["error"]:
             raise ValueError("partial or failed read")
         path = _path(data["file_path"], root, root)
-        relative = str(path.relative_to(root))
+        relative = _relative_name(path, root)
         if relative not in task.files:
             raise ValueError("unfrozen read")
         lines = result["text"].splitlines()

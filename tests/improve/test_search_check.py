@@ -22,7 +22,7 @@ def fixture(tmp_path, status="found"):
     for name, text in FILES.items():
         target = tmp_path / name
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(text)
+        target.write_bytes(text.encode("utf-8"))
     scope = {"found": "grove", "not_found": "harbor", "unavailable": "quarry"}[status]
     hits = tuple(SearchHit(**hit) for hit in HITS) if status == "found" else ()
     return SearchTask(scope, "copper_gate", FILES, status, hits)
@@ -202,9 +202,9 @@ def test_fixture_integrity_failure_blocks_otherwise_correct_results(tmp_path, mu
     task = fixture(tmp_path)
     target = tmp_path / "grove/main.py"
     if mutation == "changed":
-        target.write_text("changed\n")
+        target.write_bytes(b"changed\n")
     elif mutation == "added":
-        (tmp_path / "extra.py").write_text("copper_gate\n")
+        (tmp_path / "extra.py").write_bytes(b"copper_gate\n")
     elif mutation == "deleted":
         target.unlink()
     else:
@@ -253,13 +253,13 @@ def test_default_search_does_not_claim_hidden_or_ignored_file_coverage(tmp_path)
     from dataclasses import replace
 
     task = fixture(tmp_path, "not_found")
-    (tmp_path / "harbor/.hidden.py").write_text("VALUE = 4\n")
+    (tmp_path / "harbor/.hidden.py").write_bytes(b"VALUE = 4\n")
     task = replace(task, files={**FILES, "harbor/.hidden.py": "VALUE = 4\n"})
     evidence = search("rg -n -g '*.py' copper_gate harbor", "Exit code 1", True)
     assert not check(tmp_path, task, stream(task, evidence)).accepted
     evidence = search("rg -n --hidden -g '*.py' copper_gate harbor", "Exit code 1", True)
     assert check(tmp_path, task, stream(task, evidence)).accepted
-    (tmp_path / ".ignore").write_text("main.py\n")
+    (tmp_path / ".ignore").write_bytes(b"main.py\n")
     task = replace(task, files={**task.files, ".ignore": "main.py\n"})
     assert not check(tmp_path, task, stream(task, evidence)).accepted
 
@@ -499,3 +499,46 @@ def test_independent_read_only_tools_do_not_taint_an_overlapping_search(tmp_path
     readonly = pair("readonly", tool, {}, "")
     evidence = [found[0], readonly[0], readonly[1], found[1]]
     assert check(tmp_path, task, stream(task, evidence)).accepted
+
+
+def test_windows_relative_paths_use_portable_logical_keys():
+    from pathlib import PureWindowsPath
+
+    from agent_usage_tracker.improve.search_check import _relative_name
+
+    root = PureWindowsPath("C:/fixture")
+    assert _relative_name(root / "grove/nested/worker.py", root) == "grove/nested/worker.py"
+
+
+@pytest.mark.parametrize("name", ["C:foo", "C:/foo", "//server/share/file.py",
+                                 r"\\server\share\file.py", r"grove\main.py",
+                                 "../file.py", "./file.py", "/file.py"])
+@pytest.mark.parametrize("field", ["file", "scope"])
+def test_ambiguous_logical_paths_reject_before_reading_fixture_contents(tmp_path, monkeypatch, name, field):
+    from dataclasses import replace
+    from pathlib import Path
+
+    task = fixture(tmp_path)
+    task = replace(task, files={**FILES, name: "untrusted path\n"}) if field == "file" else replace(
+        task, scope=name)
+
+    def unexpected_read(path):
+        raise AssertionError("Invalid logical paths must reject before reading files")
+
+    monkeypatch.setattr(Path, "read_bytes", unexpected_read)
+    result = check(tmp_path, task, stream(task, search()))
+    assert result.correct is None and not result.accepted
+
+
+def test_trusted_crlf_utf8_content_is_exact_and_lf_mutation_rejects(tmp_path):
+    from dataclasses import replace
+
+    task = fixture(tmp_path, "not_found")
+    content = "LABEL = 'other_gate café'\r\n"
+    (tmp_path / "harbor/main.py").write_bytes(content.encode("utf-8"))
+    task = replace(task, files={**FILES, "harbor/main.py": content})
+    native = pair("read", "Read", {"file_path": str(tmp_path / "harbor/main.py")},
+                  "1→LABEL = 'other_gate café'")
+    assert check(tmp_path, task, stream(task, native)).accepted
+    (tmp_path / "harbor/main.py").write_bytes(content.replace("\r\n", "\n").encode("utf-8"))
+    assert not check(tmp_path, task, stream(task, native)).accepted

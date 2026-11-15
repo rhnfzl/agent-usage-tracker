@@ -198,6 +198,8 @@ Trusted Python acceptance commands can use `improve.search_check.check_search_st
 Pass the captured native JSONL stream, a `SearchTask`, and the unchanged fixture directory.
 The task supplies the full file inventory, contents, search scope, symbol, status, and expected hits.
 AUT validates that ground truth against the files before checking the answer.
+Logical file names and scope use relative forward-slash paths on every platform.
+Frozen contents preserve exact UTF-8 bytes, including line endings.
 
 The checker reports answer correctness separately from evidence completeness.
 It accepts supported read-only searches, compound scope checks, and full native file reads.
