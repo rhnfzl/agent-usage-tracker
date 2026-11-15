@@ -23,6 +23,8 @@ import json
 import os
 import re
 import sqlite3
+import stat
+import sys
 import time
 from collections import Counter
 from dataclasses import asdict, dataclass, field
@@ -111,6 +113,8 @@ def _field1_ids(b: bytes) -> tuple[str, ...]:
     out, i = [], 0
     while i < len(b):
         tag, i = _varint(b, i)
+        if tag >> 3 == 0:
+            raise ValueError("invalid protobuf field")
         wt = tag & 7
         if wt == 0:
             _, i = _varint(b, i)
@@ -125,6 +129,8 @@ def _field1_ids(b: bytes) -> tuple[str, ...]:
             i += n
         else:
             raise ValueError(wt)
+        if i > len(b):
+            raise ValueError("truncated protobuf field")
     return tuple(out)
 
 
@@ -144,18 +150,34 @@ def root_lists(con: sqlite3.Connection) -> list[tuple[str, ...]]:
     return [a for a, b in zip(srt, srt[1:] + [()]) if b[:len(a)] != a]
 
 
-def messages(con: sqlite3.Connection, ids: set[str]) -> dict[str, dict[str, Any]]:
+def messages(con: sqlite3.Connection, ids: set[str],
+             skipped: Counter[str] | None = None) -> dict[str, dict[str, Any]]:
     """The listed messages, plus every prompt (a prompt can be in no surviving root)."""
     out: dict[str, dict[str, Any]] = {}
+    found: set[str] = set()
 
     def take(rows: Iterable[tuple[str, Any]]) -> None:
         for k, v in rows:
+            required = k in ids and k not in found
+            found.add(k)
             try:
                 m = json.loads(v)
             except (ValueError, TypeError):     # a listed id can be a protobuf root, not a message
+                if skipped is not None and required:
+                    if v is None:
+                        skipped["missing_payloads"] += 1
+                    else:
+                        try:
+                            if not isinstance(v, bytes):
+                                raise ValueError("message is neither JSON nor protobuf")
+                            _field1_ids(v)
+                        except (ValueError, IndexError):
+                            skipped["malformed"] += 1
                 continue
             if isinstance(m, dict):
                 out[k] = m
+            elif skipped is not None and required:
+                skipped["malformed"] += 1
     q = sorted(ids)
     for j in range(0, len(q), _SQL_IN_CHUNK):
         part = q[j:j + _SQL_IN_CHUNK]
@@ -164,6 +186,8 @@ def messages(con: sqlite3.Connection, ids: set[str]) -> dict[str, dict[str, Any]
         take(con.execute(sql, part))
     take(con.execute("SELECT id, data FROM blobs WHERE substr(data, 1, 1) = X'7B' "
                      "AND instr(data, '\"requestId\"') > 0"))
+    if skipped is not None and (missing := len(ids - found)):
+        skipped["missing_payloads"] += missing
     return out
 
 
@@ -195,7 +219,7 @@ class _Activity:
     def __init__(self, keys: RepoKeys) -> None:
         self.keys = keys
         self.calls: dict[object, Any] = {}     # toolCallId -> args, across the chat's lists
-        self.errors: Counter[str] = Counter()      # messages whose extraction raised (skipped)
+        self.errors: Counter[str] = Counter()      # message read and extraction gaps
 
     def record(self, message: dict[str, Any], turn: _Turn) -> None:
         """One assistant or tool message: tool aggregates, commits, rejections, link."""
@@ -344,8 +368,21 @@ def _closed_turn_rows(path: str, con: sqlite3.Connection, meta: dict[str, Any], 
     info = meta.get("subagentInfo")
     parent = info.get("parentAgentId") if isinstance(info, dict) else None
     created = epoch_ms_to_iso(meta.get("createdAt"))
+    act = _Activity(keys)
+    if isinstance(meta.get("latestRootBlobId"), str):
+        root = con.execute("SELECT data FROM blobs WHERE id = ?",
+                           (meta["latestRootBlobId"],)).fetchone()
+        if root is None or root[0] is None:
+            act.errors["missing_payloads"] += 1
+        elif not isinstance(root[0], bytes):
+            act.errors["malformed"] += 1
+        else:
+            try:
+                _field1_ids(root[0])
+            except (ValueError, IndexError):
+                act.errors["malformed"] += 1
     lists = root_lists(con)
-    msgs = messages(con, {i for seq in lists for i in seq})
+    msgs = messages(con, {i for seq in lists for i in seq}, act.errors)
     # Read after the message snapshot: a concurrent wrapper registers before its first prompt.
     scripted = sid in automated_sessions()
     human = not info and not scripted
@@ -354,14 +391,13 @@ def _closed_turn_rows(path: str, con: sqlite3.Connection, meta: dict[str, Any], 
             "run_origin": "subagent",
             "parent_session_id": parent if isinstance(parent, str) and _UUID.fullmatch(parent) else None})
     done = set(cur.get("done", ()))
-    act = _Activity(keys)
     snapshots = cur.setdefault("snapshots", {})
     prompts = {rid: snapshot["prompt"] for rid, snapshot in snapshots.items()}
     previous = con.execute("SELECT data FROM blobs WHERE id = ?", (cur.get("root"),)).fetchone()
-    if previous:
+    if previous and isinstance(previous[0], bytes):
         try:
-            ids = _field1_ids(bytes(previous[0]))
-        except (ValueError, IndexError, TypeError):
+            ids = _field1_ids(previous[0])
+        except (ValueError, IndexError):
             ids = ()
         for mid in ids:
             if r := request_id(msgs.get(mid, {})):
@@ -445,21 +481,60 @@ def describe(cfg: Config, wm: dict[str, Any]) -> str:
     return describe_files(cfg, wm)
 
 
+def _closed_source(path: str) -> list[list[int] | None] | None:
+    """Main/WAL identity for a closed chat; journals and unreadable metadata cannot be cached."""
+    # Windows ctime is creation time, so restored mtime can hide a write.
+    if sys.platform == "win32":
+        return None
+    files: list[list[int] | None] = []
+    try:
+        if os.path.lexists(path + "-journal"):
+            return None
+        for source in (path, path + "-wal"):
+            try:
+                info = os.stat(source)
+            except FileNotFoundError:
+                if source == path:
+                    return None
+                files.append(None)
+                continue
+            if not stat.S_ISREG(info.st_mode):
+                return None
+            files.append([info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns,
+                          info.st_ctime_ns, info.st_mode])
+        return None if os.path.lexists(path + "-journal") else files
+    except OSError:
+        return None
+
+
+def _closed_checkpoint(cur: dict[str, Any]) -> bool:
+    root = cur.get("root")
+    return (isinstance(root, str) and re.fullmatch(r"[0-9a-f]{64}", root) is not None
+            and type(cur.get("open")) is int and cur["open"] == 0
+            and isinstance(cur.get("snapshots"), dict))
+
+
 def _read_chat(path: str, prev: dict[str, Any], keys: RepoKeys) -> tuple[list[Any], dict[str, Any], Counter[str]] | None:
     """(rows, the chat's new watermark entry, messages skipped); None when it has nothing new.
-    Raises sqlite3.DatabaseError when the store is locked or corrupt."""
+    Raises sqlite3.DatabaseError when a required read finds the store locked or corrupt."""
+    source = _closed_source(path)
+    # shortcut: cached closed data skips lock checks, require SQLite opens for fresh lock health.
+    if source is not None and _closed_checkpoint(prev) and prev.get("closed_source") == source:
+        return None
     con = connect_ro(path)
     if con is None:
         raise sqlite3.OperationalError("store could not be opened")
     try:
-        meta = chat_meta(con)
-        if meta is None or (meta.get("latestRootBlobId") == prev.get("root")
-                            and not prev.get("open") and "snapshots" in prev):
-            return None
         # A deep copy: only advance_watermark() may publish this chat's state into the watermark.
         cur = copy.deepcopy(prev)
+        cur.pop("closed_source", None)
+        meta = chat_meta(con)
+        if meta is None:
+            return ([], cur, Counter()) if cur != prev else None
         events, errs = _closed_turn_rows(path, con, meta, cur, time.time() - _mtime(path) >= IDLE_S, keys)
         cur["root"] = meta.get("latestRootBlobId")
+        if not errs and _closed_checkpoint(cur) and source is not None and source == _closed_source(path):
+            cur["closed_source"] = source
         return events, cur, errs
     finally:
         con.close()

@@ -13,13 +13,13 @@ import json
 import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Callable, Iterator
+from typing import Any, Callable, Generator, Iterator
 
 from ..config import Config
 from ..event import Batch, parse_ts
 from . import activitywatch, claude_code, codex, cursor, cursor_api, cursor_cli, cursor_sdk, pi
 from . import generic_sdk, t3
-from ._util import describe_files, describe_full_scan
+from ._util import FileSnapshot, describe_files, describe_full_scan, file_snapshot
 
 # Each collect() pass reads at most _MAX_LINES (50k) new lines per file (see collectors/_util.py),
 # so a consumer drains by re-running collect() until the watermark stops advancing. Bound the loop
@@ -55,34 +55,56 @@ REGISTRY: dict[str, Collector] = {
 }
 
 
-def _stamped(collect: Collect, cfg: Config, wm: dict[str, Any]) -> Iterator[Batch]:
+def _stamped(collect: Collect, cfg: Config, wm: dict[str, Any],
+             snapshot: FileSnapshot) -> Generator[Batch, None, None]:
     linked = collect is not t3.collect and "t3" in cfg.agents and bool(cfg.t3_activity_since)
     read_at = datetime.now(timezone.utc)
     bindings = t3.native_bindings(cfg) if linked else {}
     clients = t3.native_clients(cfg) if linked and collect is codex.collect else set()
-    for events, advance_watermark in collect(cfg, wm):
-        # A long native scan can reach app runs that started after its first snapshot.
-        if linked and any(stamp and stamp.tzinfo and stamp >= read_at
-                          for event in events if (stamp := parse_ts(event.ts))):
-            read_at = datetime.now(timezone.utc)
-            bindings = t3.native_bindings(cfg)
-            if collect is codex.collect:
-                clients = t3.native_clients(cfg)
-        if bindings or clients:
-            events = t3.canonicalize(list(events), bindings, clients, parse_ts(cfg.t3_activity_since))
-        for e in events:
-            e.machine = cfg.machine
-        yield events, advance_watermark
+    with file_snapshot(snapshot):
+        source = collect(cfg, wm)
+    try:
+        while True:
+            try:
+                with file_snapshot(snapshot):
+                    events, advance_watermark = next(source)
+            except StopIteration:
+                return
+            # A long native scan can reach app runs that started after its first snapshot.
+            if linked and any(stamp and stamp.tzinfo and stamp >= read_at
+                              for event in events if (stamp := parse_ts(event.ts))):
+                read_at = datetime.now(timezone.utc)
+                bindings = t3.native_bindings(cfg)
+                if collect is codex.collect:
+                    clients = t3.native_clients(cfg)
+            if bindings or clients:
+                events = t3.canonicalize(list(events), bindings, clients,
+                                         parse_ts(cfg.t3_activity_since))
+            for e in events:
+                e.machine = cfg.machine
+            yield events, advance_watermark
+    finally:
+        with file_snapshot(snapshot):
+            if close := getattr(source, "close", None):
+                close()
 
 
 def drain(collect: Collect, cfg: Config, wm: dict[str, Any], name: str) -> Iterator[Iterator[Batch]]:
     """One iterator of batches per pass of collect() over wm, each row stamped with this machine,
-    until a pass leaves wm unchanged. Full-scan collectors (cursor, cursor_sdk) never mutate wm, so
+    until a pass leaves wm unchanged. Native JSONL files stop at their first observed lengths;
+    later files and writes wait until the next run. Full-scan collectors never mutate wm, so
     they settle after one pass. The consumer applies a pass's advances before asking for the next;
     what it does with a row (validate, dedup, send) is its own."""
+    snapshot = FileSnapshot()
     for _ in range(MAX_DRAIN_PASSES):
         before = json.dumps(wm, sort_keys=True, default=str)
-        yield _stamped(collect, cfg, wm)
+        batches = _stamped(collect, cfg, wm, snapshot)
+        try:
+            yield batches
+        finally:
+            batches.close()
+            snapshot.restart_deferred()
+        snapshot.frozen = True
         if json.dumps(wm, sort_keys=True, default=str) == before:
             return
     print(f"aut: warning: {name} hit the drain-pass cap ({MAX_DRAIN_PASSES}), so more rows remain "

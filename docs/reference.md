@@ -53,6 +53,10 @@ response reaches the client. Discarded input is limited to 1 MiB and one second.
 `packaging/claude/commands/outcome.md` is a Claude Code `/outcome` command that runs
 `aut outcome <verdict> --session <this session>`. Copy it to `~/.claude/commands/`.
 
+Native JSONL commands drain a finite snapshot of each file admitted during the first collector pass.
+All complete initial lines are included, even when several capped reads are needed.
+Later writes, new files and observed replacements or truncations wait for another run.
+
 ## Configuration
 
 The config file is `~/.config/agent-usage-tracker/config.toml` (`$XDG_CONFIG_HOME` is honoured,
