@@ -36,10 +36,28 @@ def command(argv: list[str], cwd: Path, timeout_s: float, *,
     timed_out = False
     output = bytearray()
     output_limit = threading.Event()
+    cleanup_deadline: float | None = None
+    cleanup_timeout = False
+
+    def cleanup_remaining() -> float:
+        assert cleanup_deadline is not None
+        return max(0., cleanup_deadline - time.monotonic())
+
+    def reap() -> None:
+        nonlocal cleanup_timeout
+        assert process is not None
+        try:
+            process.wait(timeout=cleanup_remaining())
+        except subprocess.TimeoutExpired:
+            cleanup_timeout = True
 
     def stop() -> None:
+        nonlocal cleanup_deadline
         if process is None:
             return
+        # A child can remain unreaped after SIGKILL; do not block its supervisor indefinitely.
+        if cleanup_deadline is None:
+            cleanup_deadline = time.monotonic() + 1
         try:
             if os.name == "posix":
                 os.killpg(process.pid, signal.SIGKILL)
@@ -72,26 +90,31 @@ def command(argv: list[str], cwd: Path, timeout_s: float, *,
                                    stderr=subprocess.STDOUT, start_new_session=os.name == "posix")
         reader.start()
         try:
-            process.wait(timeout=timeout_s)
+            process.wait(timeout=max(0., started + timeout_s - time.monotonic()))
+            timed_out = time.monotonic() >= started + timeout_s
         except subprocess.TimeoutExpired:
             timed_out = True
             stop()
-            process.wait()
+            reap()
     finally:
         if process is not None and process.poll() is None:
             stop()
-            process.wait()
+            reap()
         if reader.ident is not None:
-            reader.join(timeout=1)
+            reader.join(timeout=1 if cleanup_deadline is None else cleanup_remaining())
             if reader.is_alive():
                 stop()
-                reader.join(timeout=2)
+                reader.join(timeout=cleanup_remaining())
+                cleanup_timeout |= reader.is_alive()
         if previous is not None:
             signal.signal(signal.SIGTERM, previous)
     assert process is not None
     return {"exit_code": process.returncode, "timeout": timed_out,
             "output_limit": output_limit.is_set(),
-            "accepted": process.returncode == 0 and not timed_out and not output_limit.is_set(),
+            "accepted": process.returncode == 0 and not timed_out and not output_limit.is_set()
+                        and not cleanup_timeout,
+            "cleanup_timeout": cleanup_timeout,
+            **({"pid": process.pid} if cleanup_timeout else {}),
             "elapsed_s": round(time.monotonic() - started, 4),
             "output": redact(output.decode("utf-8", errors="replace"))[:12000],
             "output_truncated": output_limit.is_set() or len(output) > 12000}

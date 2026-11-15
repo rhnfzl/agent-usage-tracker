@@ -21,6 +21,7 @@ These notices use the existing scheduled-job logs; they do not send desktop, ema
 Source availability, parser support, observed records and completeness are separate fields.
 Normalized row counts describe local collection, not end-to-end delivery acknowledgements.
 Human counts describe existing collector classifications, not independent human-origin certification.
+Known client labels, including `codex-tui`, describe native metadata. They do not certify human input or qualify a harness.
 Commit and pull-request links do not establish an accepted task outcome.
 
 Missing, stale, malformed, future-dated and failed receipts remain distinct from a quiet successful pass.
@@ -34,8 +35,11 @@ because opening it could create sidecar files.
 
 Watermark reads stop at 64 MiB. Other report JSON reads stop at 8 MiB or a smaller purpose-specific limit.
 A read limit is distinct from invalid state.
-Metadata traversal stops after 4,096 entries or eight directory levels.
-Uninspected roots stay unknown. Skipped symlinks and traversal limits remain explicit.
+Metadata traversal stops after 4,096 entries in total or eight directory levels.
+Roots share that entry budget equally, so one large tree cannot consume another root's quota.
+The report exposes the total limit and each root's quota. Small roots can leave budget unused.
+A root inspected within its quota can be available while its contents remain incomplete.
+Roots that the total budget cannot reach stay unknown. Skipped symlinks and traversal limits remain explicit.
 Receipt freshness uses a 12-hour threshold, exposed in the report.
 
 The catalog describes documented routes for 25 tools. It does not enable collectors.

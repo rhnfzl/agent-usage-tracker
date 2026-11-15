@@ -11,7 +11,7 @@ from typing import Iterator
 
 _KNOWN_CLIENTS = frozenset({
     "cli", "sdk-py", "sdk-cli", "t3-code", "t3 code", "claude code", "codex",
-    "codex_cli_rs", "codex_vscode", "codex_exec", "vscode", "exec", "mcp",
+    "codex_cli_rs", "codex_vscode", "codex_exec", "codex-tui", "vscode", "exec", "mcp",
     "automation", "rex", "super.engineering", "zeron", "paseo", "diri", "emdash",
     "monocode", "synara", "bb", "orca", "traycer", "claude desktop", "capy",
     "cloudroom", "superset", "paradev", "conductor",
