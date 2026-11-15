@@ -284,6 +284,15 @@ def diagnose(store: Store, audit_id: str, *, models: tuple[str, ...] = (
     job_id = store.put("diagnoses", policy)
     evaluator_id = digest({k: v for k, v in policy.items() if k not in {"audit_id", "cases"}})
     calls = 0
+    durations: dict[tuple[str, str], float] = {}
+
+    def can_call(kind: str, name: str) -> bool:
+        # Native inference can outlast Python's alarm, so reserve time before starting it.
+        observed = durations.get((kind, name))
+        required = 2 * observed if observed is not None else budget_s / 2
+        remaining = deadline - time.monotonic()
+        return calls < max_calls and remaining > 0 and remaining >= required
+
     finished = 0
     tally: dict[str, int] = {label: 0 for label in LABELS}
     cache = {row["evaluation_key"]: key for key in store.keys("votes")
@@ -341,7 +350,7 @@ def diagnose(store: Store, audit_id: str, *, models: tuple[str, ...] = (
                     for name in models:
                         vote_key = digest({"decision": key, "model": policy["model_identity"][name]})
                         if vote_key not in cache:
-                            if calls >= max_calls or time.monotonic() >= deadline:
+                            if not can_call("vote", name):
                                 reason = "budget"
                                 break
                             if not model_locked:
@@ -349,10 +358,18 @@ def diagnose(store: Store, audit_id: str, *, models: tuple[str, ...] = (
                                                                 blocking=False))
                                 memory_guard()
                                 model_locked = True
+                            if not can_call("vote", name):
+                                reason = "budget"
+                                break
                             backend = backends[name]
                             calls += 1
                             checkpoint()
-                            distribution = backend.distribution(_request(case, rubric))
+                            started = time.monotonic()
+                            try:
+                                distribution = backend.distribution(_request(case, rubric))
+                            finally:
+                                durations["vote", name] = max(durations.get(("vote", name), 0),
+                                                             time.monotonic() - started)
                             aggregate([distribution])
                             cache[vote_key] = store.put("votes", {
                                 "evaluation_key": vote_key, "job_id": job_id, "case_id": case["case_id"],
@@ -387,7 +404,7 @@ def diagnose(store: Store, audit_id: str, *, models: tuple[str, ...] = (
                                 review = validate_review(case, saved_attempt["review"], rubric)
                                 break
                         if review is None and len(saved_attempts) < 2:
-                            if calls >= max_calls or time.monotonic() >= deadline:
+                            if not can_call("review", explain_model):
                                 reason = "budget"
                                 break
                             if not model_locked:
@@ -397,16 +414,21 @@ def diagnose(store: Store, audit_id: str, *, models: tuple[str, ...] = (
                                 model_locked = True
                             feedback = review_errors[-1].split("\n", 1)[0] if review_errors else ""
                             for attempt in range(len(saved_attempts), 2):
-                                if calls >= max_calls or time.monotonic() >= deadline:
+                                if not can_call("review", explain_model):
                                     reason = "budget"
                                     break
                                 calls += 1
                                 checkpoint()
+                                started = time.monotonic()
                                 try:
                                     review = _llm_review(case, rubric, explainer, feedback)
                                 except AutError as exc:
                                     review_errors.append(str(exc))
                                     feedback = str(exc).split("\n", 1)[0]
+                                finally:
+                                    durations["review", explain_model] = max(
+                                        durations.get(("review", explain_model), 0),
+                                        time.monotonic() - started)
                                 store.put("review_attempts", {"evaluation_key": key,
                                     "model": explain_model, "model_rev": explainer.model_rev,
                                     "attempt": attempt, "review": review,

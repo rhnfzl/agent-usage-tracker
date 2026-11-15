@@ -57,6 +57,10 @@ Native JSONL commands drain a finite snapshot of each file admitted during the f
 All complete initial lines are included, even when several capped reads are needed.
 Later writes, new files and observed replacements or truncations wait for another run.
 
+`aut git-days` captures remote Git diagnostics in memory without writable temporary files.
+Unknown Git errors still mark coverage incomplete. After a remote-reader repair, an older pending
+remote read gets one immediate retry. Further failures keep the six-hour backoff.
+
 ## Configuration
 
 The config file is `~/.config/agent-usage-tracker/config.toml` (`$XDG_CONFIG_HOME` is honoured,
@@ -129,6 +133,10 @@ Files aut keeps on this machine:
 than one counts the same usage twice. `cursor_api` is the accurate one. To keep Cursor prompts
 from the local DB beside it, set `cursor_human_only = true`. `cursor_cli` has no tokens and
 overlaps none of them.
+
+Cursor usage collection accepts an authenticated default-empty response (`{}`).
+Malformed responses and nonempty error objects still fail without acknowledging that window.
+An empty open window keeps its existing watermark. Closed windows advance only after delivery acknowledgement.
 
 **ActivityWatch** needs `pg_dsn`. Before anything is sent it drops login window and screen
 saver rows, password managers, private browsing and anything in `activitywatch_deny_apps` or

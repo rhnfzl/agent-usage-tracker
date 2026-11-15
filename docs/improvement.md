@@ -96,6 +96,15 @@ The deadline includes startup, evidence collection, model preparation, inference
 The Python `diagnose` function accepts an inherited monotonic deadline and checkpoints completed work.
 Callers that use it directly must provide a deadline wrapper when needed.
 
+New model calls need enough remaining time for their expected duration.
+Each model and operation starts with an allowance of half the original diagnosis budget.
+Later calls reserve twice the longest observed duration for that model and operation during this run.
+AUT checks admission again after acquiring shared resources. A deferred call does not spend a call count.
+Cached votes, judgments, and reviews remain usable without a new inference allowance.
+Rejected explanatory reviews still contribute their measured duration before a repair attempt.
+This estimate does not guarantee preemption of an unusually slow native call.
+A long audit can leave too little time for a first call; its frozen evidence resumes later.
+
 Separate criteria cover avoidable recovery and completion supported by evidence.
 Cases mix failed and clean user attempts. Each attempt ends at a recorded turn boundary or the next prompt.
 Sampling prefers complete captured attempts within each group. Each source checks at most
