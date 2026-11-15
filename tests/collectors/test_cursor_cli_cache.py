@@ -261,16 +261,36 @@ def test_permission_loss_and_recovery_require_fresh_reads(tmp_path, monkeypatch)
     assert len(opened) == 3
 
 
-def test_nonregular_wal_is_reported_on_each_read(tmp_path, monkeypatch):
+@pytest.mark.parametrize("platform", ["native", "win32"])
+@pytest.mark.parametrize("readable", [False, True])
+def test_nonregular_wal_forces_fresh_reads_without_caching(
+        tmp_path, monkeypatch, platform, readable):
+    connect = cursor_cli.connect_ro
+    if platform == "win32":
+        monkeypatch.setattr(cursor_cli, "sys", SimpleNamespace(platform="win32"))
     path, opened = chat(tmp_path, monkeypatch)
     watermark = {}
     _collect(tmp_path, watermark)
     before = copy.deepcopy(watermark)
+    readable_copy = tmp_path / "readable.db"
+    readable_copy.write_bytes(path.read_bytes())
     Path(str(path) + "-wal").mkdir()
+
+    def sqlite_boundary(source):
+        opened.append(source)
+        return connect(readable_copy) if readable else None
+
+    monkeypatch.setattr(cursor_cli, "connect_ro", sqlite_boundary)
     for _ in range(2):
-        with pytest.raises(CollectorUnavailable):
-            _collect(tmp_path, watermark)
-    assert watermark == before
+        assert cursor_cli._closed_source(str(path)) is None
+        if readable:
+            assert _collect(tmp_path, watermark) == []
+            assert projected(watermark) == projected(before)
+            assert "closed_source" not in watermark["chats"][str(path)]
+        else:
+            with pytest.raises(CollectorUnavailable):
+                _collect(tmp_path, watermark)
+            assert watermark == before
     assert len(opened) == 3
 
 
