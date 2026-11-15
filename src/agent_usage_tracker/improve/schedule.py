@@ -5,17 +5,56 @@ from __future__ import annotations
 import html
 import argparse
 import json
+import math
+import signal
+import threading
+from contextlib import contextmanager
+from collections.abc import Iterator
 import sys
 import time
 import uuid
 from pathlib import Path
 from typing import Any
+from types import FrameType
 
 from ..config import AutError
 from ..state import LockBusy, _locked, atomic_write_text
 from .judge import diagnose
 from .store import Store, audit
 from .trial import command
+
+
+class _BudgetExpired(BaseException):
+    # Model loading wraps ordinary exceptions as failures; cancellation must pass through.
+    pass
+
+
+@contextmanager
+def _cooperative_deadline(deadline: float) -> Iterator[None]:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise _BudgetExpired
+    if not hasattr(signal, "setitimer") or threading.current_thread() is not threading.main_thread():
+        yield
+        return
+
+    def expired(signum: int, frame: FrameType | None) -> None:
+        raise _BudgetExpired
+
+    previous_handler = signal.getsignal(signal.SIGALRM)
+    previous_timer = signal.getitimer(signal.ITIMER_REAL)
+    started = time.monotonic()
+    signal.signal(signal.SIGALRM, expired)
+    signal.setitimer(signal.ITIMER_REAL, remaining)
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous_handler)
+        if previous_timer[0]:
+            signal.setitimer(signal.ITIMER_REAL,
+                            max(.001, previous_timer[0] - (time.monotonic() - started)),
+                            previous_timer[1])
 
 
 def inbox(store: Store, judgment_ids: list[str]) -> None:
@@ -48,6 +87,8 @@ def run_once(store: Store, *, days: int = 7, limit: int = 30, case_limit: int = 
              explain_model: str | None = None, audit_id: str | None = None) -> dict[str, Any]:
     if not 1 <= budget_s <= 3600:
         raise AutError("improve: cycle budget must be 1..3600 seconds")
+    deadline = time.monotonic() + budget_s
+    reserve = min(5., budget_s / 10)
     policy = {"version": 1, "days": days, "limit": limit, "case_limit": case_limit,
               "budget_s": budget_s, "max_calls": max_calls, "models": list(models),
               "explain_model": explain_model}
@@ -59,32 +100,44 @@ def run_once(store: Store, *, days: int = 7, limit: int = 30, case_limit: int = 
     try:
         with _locked(store.root / "cycle", blocking=False):
             argv = [sys.executable, "-I", "-m", "agent_usage_tracker.improve.schedule", "--root",
-                    str(store.root), "--policy", key, "--run-id", run_id]
-            result = command(argv, store.root, budget_s)
+                    str(store.root), "--policy", key, "--run-id", run_id,
+                    "--deadline", str(deadline)]
+            result = command(argv, store.root, max(.001, deadline - time.monotonic() - reserve / 2))
             report: dict[str, Any] = {"status": "timeout" if result["timeout"] else "error",
                                       "policy_id": key, "exit_code": result["exit_code"]}
             if not result["accepted"]:
                 report["error_id"] = store.put("cycle_errors", {
                     "run_id": run_id, "policy_id": key, **result})
-            if result["accepted"]:
-                try:
-                    saved = json.loads((store.root / "worker_result.json").read_text())
-                    if saved["run_id"] != run_id:
-                        raise ValueError("stale worker result")
+            try:
+                saved = json.loads((store.root / "worker_result.json").read_text())
+                if saved["run_id"] != run_id or saved["report"]["policy_id"] != key:
+                    raise ValueError("stale worker result")
+                if result["accepted"]:
+                    if saved["report"]["status"] not in {"ok", "deferred"}:
+                        raise ValueError("unfinished worker result")
                     report = saved["report"]
-                except (OSError, ValueError, KeyError) as exc:
+                else:
+                    report["progress"] = saved["report"]
+            except (OSError, ValueError, KeyError, TypeError) as exc:
+                if result["accepted"]:
                     raise AutError("improve: worker did not preserve its matching result") from exc
             store.append("cycle_finished", **report)
             atomic_write_text(store.root / "last_cycle.json", json.dumps(report, indent=2) + "\n")
-            inbox(store, report.get("diagnosis", {}).get("judgment_ids", []))
+            inbox(store, report.get("diagnosis", report.get("progress", {}).get("diagnosis", {}))
+                  .get("judgment_ids", []))
             return report
     except LockBusy:
         return {"status": "busy"}
 
 
-def _worker(store: Store, policy_id: str, run_id: str) -> dict[str, Any]:
-    policy = store.get("cycle_policies", policy_id)
+def _worker(store: Store, policy_id: str, run_id: str, *,
+            deadline: float | None = None) -> dict[str, Any]:
     started = time.monotonic()
+    policy = store.get("cycle_policies", policy_id)
+    if deadline is not None and not math.isfinite(deadline):
+        raise AutError("improve: invalid worker deadline")
+    deadline = min(deadline if deadline is not None else started + policy["budget_s"],
+                   started + policy["budget_s"]) - min(5., policy["budget_s"] / 10)
     pending_path = store.root / "pending_cycle.json"
     pending = json.loads(pending_path.read_text()) if pending_path.exists() else {}
     provided = policy.get("audit_id")
@@ -97,12 +150,28 @@ def _worker(store: Store, policy_id: str, run_id: str) -> dict[str, Any]:
     else:
         frozen = audit(store, Path.home(), days=policy["days"], limit=policy["limit"])
         atomic_write_text(pending_path, json.dumps({"policy_id": policy_id, "audit": frozen}) + "\n")
-    remaining = int(policy["budget_s"] - (time.monotonic() - started))
-    judged = diagnose(store, frozen["audit_id"], models=tuple(policy["models"]),
-                      limit=policy["case_limit"], budget_s=max(1, remaining),
-                      max_calls=policy["max_calls"], explain_model=policy["explain_model"])
-    report = {"status": "ok" if judged["complete"] else "deferred",
-              "policy_id": policy_id, "audit": frozen, "diagnosis": judged}
+    judged: dict[str, Any] = {"complete": False, "reason": "budget", "calls": 0,
+                              "finished": 0, "judgment_ids": []}
+    report = {"status": "running", "policy_id": policy_id, "audit": frozen,
+              "diagnosis": judged}
+
+    def checkpoint(progress: dict[str, Any]) -> None:
+        nonlocal judged
+        judged = progress
+        report["diagnosis"] = judged
+        atomic_write_text(store.root / "worker_result.json",
+                          json.dumps({"run_id": run_id, "report": report}) + "\n")
+
+    checkpoint(judged)
+    try:
+        with _cooperative_deadline(deadline):
+            judged = diagnose(store, frozen["audit_id"], models=tuple(policy["models"]),
+                              limit=policy["case_limit"], budget_s=policy["budget_s"],
+                              max_calls=policy["max_calls"], explain_model=policy["explain_model"],
+                              deadline=deadline, progress=checkpoint)
+    except _BudgetExpired:
+        judged = {**judged, "complete": False, "reason": "budget"}
+    report.update(status="ok" if judged["complete"] else "deferred", diagnosis=judged)
     if judged["complete"] and not provided:
         atomic_write_text(pending_path, json.dumps({"policy_id": policy_id, "audit": None}) + "\n")
     atomic_write_text(store.root / "worker_result.json",
@@ -115,5 +184,6 @@ if __name__ == "__main__":
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--policy", required=True)
     parser.add_argument("--run-id", required=True)
+    parser.add_argument("--deadline", type=float)
     args = parser.parse_args()
-    _worker(Store(args.root), args.policy, args.run_id)
+    _worker(Store(args.root), args.policy, args.run_id, deadline=args.deadline)

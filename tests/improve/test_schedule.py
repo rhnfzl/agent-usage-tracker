@@ -107,3 +107,52 @@ def test_direct_diagnosis_preserves_the_scheduled_pending_audit(tmp_path, monkey
     monkeypatch.setattr(schedule, "diagnose", lambda *a, **kw: {"complete": True})
     assert schedule._worker(store, policy, "direct")["audit"] == {"audit_id": audit_id}
     assert json.loads((store.root / "pending_cycle.json").read_text()) == pending
+
+
+@pytest.mark.parametrize("timed_out", [True, False])
+@pytest.mark.parametrize("matching", [True, False])
+def test_failed_cycle_keeps_its_status_and_only_its_matching_checkpoint(
+        tmp_path, monkeypatch, timed_out, matching):
+    from agent_usage_tracker.improve import schedule
+
+    store = Store(tmp_path / "private")
+    judgment = store.put("judgments", {"rubric": "current", "verdict": "unknown",
+                                       "case_id": "synthetic"})
+
+    def launch(argv, cwd, timeout):
+        deadline = float(argv[argv.index("--deadline") + 1])
+        assert deadline > schedule.time.monotonic()
+        assert 0 < timeout < 10
+        run_id = argv[argv.index("--run-id") + 1]
+        policy_id = argv[argv.index("--policy") + 1]
+        saved = {"run_id": run_id if matching else "stale", "report": {
+            "status": "running", "policy_id": policy_id,
+            "diagnosis": {"complete": False, "finished": 1, "judgment_ids": [judgment]}}}
+        (store.root / "worker_result.json").write_text(json.dumps(saved))
+        return {"accepted": False, "timeout": timed_out, "exit_code": -9 if timed_out else 2}
+
+    monkeypatch.setattr(schedule, "command", launch)
+    report = run_once(store, budget_s=10)
+    assert report["status"] == ("timeout" if timed_out else "error")
+    assert ("progress" in report) == matching
+    assert store.keys("cycle_errors")
+    assert ("current" in (store.root / "inbox.html").read_text()) == matching
+
+
+def test_changed_cycle_policy_preserves_previous_evidence(tmp_path, monkeypatch):
+    from agent_usage_tracker.improve import schedule
+
+    store = Store(tmp_path / "private")
+    old_audit = store.put("audits", {"session_ids": [], "synthetic": "old"})
+    new_audit = store.put("audits", {"session_ids": [], "synthetic": "new"})
+    (store.root / "pending_cycle.json").write_text(json.dumps({
+        "policy_id": "old", "audit": {"audit_id": old_audit}}))
+    judgment = store.put("judgments", {"synthetic": "prior"})
+    policy = store.put("cycle_policies", {"days": 7, "limit": 30, "budget_s": 10,
+        "case_limit": 1, "max_calls": 24, "models": ["local"], "explain_model": None})
+    monkeypatch.setattr(schedule, "audit", lambda *a, **kw: {"audit_id": new_audit})
+    monkeypatch.setattr(schedule, "diagnose", lambda *a, **kw: {"complete": False})
+    report = schedule._worker(store, policy, "synthetic")
+    assert report["audit"]["audit_id"] == new_audit
+    assert store.get("audits", old_audit)["synthetic"] == "old"
+    assert store.get("judgments", judgment) == {"synthetic": "prior"}

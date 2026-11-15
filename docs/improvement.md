@@ -92,7 +92,9 @@ Apple silicon and a working MLX runtime are required.
 The process acquires AUT's shared `replay-model.lock` without waiting and checks memory headroom.
 Busy inference leaves work deferred.
 Both CLI commands, `diagnose` and `run`, enforce a hard subprocess deadline.
-The Python `diagnose` function checks elapsed time between calls; callers must provide a deadline wrapper when needed.
+The deadline includes startup, evidence collection, model preparation, inference, and saving progress.
+The Python `diagnose` function accepts an inherited monotonic deadline and checkpoints completed work.
+Callers that use it directly must provide a deadline wrapper when needed.
 
 Separate criteria cover avoidable recovery and completion supported by evidence.
 Cases mix failed and clean user attempts. Each attempt ends at a recorded turn boundary or the next prompt.
@@ -103,7 +105,9 @@ Complete attempts retain up to 40 events and 24,000 text characters.
 Clipped, unmatched, ambiguous, or omitted attempt evidence stays unknown before inference.
 Clipping in an unrelated earlier attempt does not invalidate a complete later attempt.
 This sample does not estimate population prevalence.
-Votes resume after interruption. Unchanged cases reuse judgments across later audits.
+Votes, completed judgments, and completed explanatory reviews resume after interruption.
+Unchanged cases reuse judgments across later audits. Model preparation resolves the actual
+model revision before AUT constructs a cache identity.
 
 Add a cached instruct model to verify unanimous failure votes:
 
@@ -188,6 +192,25 @@ Trial environments exclude inherited secrets and use the condition's `src` direc
 Command checks do not establish an agent behaviour or productivity improvement.
 Those claims need controlled agent tasks, untouched evaluation cases, repeated trials, and fresh follow-up work.
 
+### Check a frozen search task
+
+Trusted Python acceptance commands can use `improve.search_check.check_search_stream`.
+Pass the captured native JSONL stream, a `SearchTask`, and the unchanged fixture directory.
+The task supplies the full file inventory, contents, search scope, symbol, status, and expected hits.
+AUT validates that ground truth against the files before checking the answer.
+
+The checker reports answer correctness separately from evidence completeness.
+It accepts supported read-only searches, compound scope checks, and full native file reads.
+It never executes commands from a model's trace. Unsupported shell syntax, uncertain shell
+state, missing results, and incomplete scope evidence remain unknown.
+An independently supported answer can remain correct when its procedure cannot be certified.
+Fixtures with changed contents, symbolic links, or special files cannot receive acceptance.
+
+This is a finite checker for frozen Python-symbol search fixtures, not a general task judge.
+Do not use its acceptance as proof that a remote action occurred.
+Freeze acceptance code and independent controls before an experiment.
+Later checker improvements produce a new diagnostic evaluation, not a rewrite of earlier outcomes.
+
 ### Agent tasks
 
 Set `kind` to `agent_task` for a trial with independent acceptance checks.
@@ -244,10 +267,15 @@ aut improve run --days 7 --limit 30 --case-limit 12 --budget-s 300 --max-calls 4
 ```
 
 This freezes evidence and resumes diagnosis in a subprocess with a hard deadline.
+One inherited deadline covers the whole cycle. AUT reserves time to save its result.
+On supported POSIX workers, a cooperative alarm interrupts unfinished model work before
+the outer deadline. A native call that delays Python signal handling can still time out.
 Overlapping cycles return `busy`. Contention, exhausted budgets, and failures remain visible.
 Both `run` and `diagnose` exit 1 on a hard timeout or worker error, after printing their JSON result.
 Completed cycles, cooperative budget deferrals, and overlapping cycles exit 0.
 Failed workers retain bounded, redacted diagnostics in private `cycle_errors` records.
+Matching worker checkpoints remain available when the outer deadline kills the worker.
+Results from an earlier worker or another policy cannot count as the current result.
 The command returns their identifiers without printing captured trace text.
 An interrupted or budget-limited cycle resumes its frozen audit before collecting another batch.
 The process writes `last_cycle.json` and refreshes `inbox.html`.
