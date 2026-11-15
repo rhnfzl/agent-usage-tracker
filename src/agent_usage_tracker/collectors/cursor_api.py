@@ -178,6 +178,9 @@ def _fetch_events(cookie: str, team_id: int, uid: object, since: int, start: int
                 "startDate": start - 1, "endDate": end + 1}
         data = _post(cookie, "get-filtered-usage-events", body)
         batch = data.get("usageEventsDisplay") if isinstance(data, dict) else None
+        # Cursor omits every default field from its empty ProtoJSON response.
+        if isinstance(data, dict) and not data:
+            batch = []
         if not isinstance(batch, list):
             raise CollectorUnavailable("cursor_api: invalid usage page; watermark unchanged")
         bounded = [raw for raw in batch if isinstance(raw, dict)

@@ -130,6 +130,10 @@ than one counts the same usage twice. `cursor_api` is the accurate one. To keep 
 from the local DB beside it, set `cursor_human_only = true`. `cursor_cli` has no tokens and
 overlaps none of them.
 
+Cursor usage collection accepts an authenticated default-empty response (`{}`).
+Malformed responses and nonempty error objects still fail without acknowledging that window.
+An empty open window keeps its existing watermark. Closed windows advance only after delivery acknowledgement.
+
 **ActivityWatch** needs `pg_dsn`. Before anything is sent it drops login window and screen
 saver rows, password managers, private browsing and anything in `activitywatch_deny_apps` or
 `activitywatch_deny_titles`. Private browsing is found only by its title ("Private Browsing",

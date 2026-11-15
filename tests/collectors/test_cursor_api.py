@@ -164,6 +164,73 @@ def test_cursor_api_token_gone_is_unavailable_not_silent() -> None:
             assert "token" in str(exc)
 
 
+@pytest.mark.parametrize("response", [{}, {"usageEventsDisplay": []}])
+def test_empty_protojson_page_preserves_window_ack_policy(monkeypatch, response) -> None:
+    from agent_usage_tracker.collectors import cursor_api
+    now = 1_790_000_000_000
+    since = now - cursor_api._WINDOW_MS - 100
+    cfg = _cfg(Path("/tmp"))
+    cfg.cursor_api = True
+    monkeypatch.setattr(cursor_api, "_auth", lambda cfg: ("cookie", 1))
+    monkeypatch.setattr(cursor_api, "_now_ms", lambda: now)
+    monkeypatch.setattr(cursor_api, "_post",
+                        lambda cookie, name, body: {"userId": "u1"}
+                        if name == "get-me" else response)
+    wm = {"since_ms": since}
+    pages = cursor_api.collect(cfg, wm)
+    batch, commit = next(pages)
+    assert batch == [] and wm == {"since_ms": since}
+    commit()
+    closed_mark = since + cursor_api._WINDOW_MS
+    assert wm == {"since_ms": closed_mark}
+    batch, commit = next(pages)
+    assert batch == [] and wm == {"since_ms": closed_mark}
+    commit()
+    assert wm == {"since_ms": closed_mark}
+    assert list(pages) == []
+
+
+def test_full_page_then_default_empty_protojson_page_terminates(monkeypatch) -> None:
+    from agent_usage_tracker.collectors import cursor_api
+    row = {"owningUser": "u1", "timestamp": "110", "model": "m",
+           "conversationId": "c1", "tokenUsage": {"inputTokens": 3}}
+    calls = []
+
+    def post(cookie, name, body):
+        calls.append(body)
+        return {"usageEventsDisplay": [row]} if body["page"] == 1 else {}
+
+    monkeypatch.setattr(cursor_api, "_post", post)
+    monkeypatch.setattr(cursor_api, "_PAGE", 1)
+    found, newest = cursor_api._fetch_events("cookie", 1, "u1", 100, 100, 120)
+    assert len(found) == 1 and found[0].total_tokens == 3
+    assert newest == 110
+    assert [body["page"] for body in calls] == [1, 2]
+    assert all(body["userId"] == "u1" for body in calls)
+
+
+@pytest.mark.parametrize("response", [
+    None, [], "", 0, False, {"error": "unauthorized"}, {"message": "unavailable"},
+    {"totalUsageEventsCount": 0}, {"usageEvents": []},
+    {"usageEventsDisplay": None}, {"usageEventsDisplay": {}},
+    {"usageEventsDisplay": "invalid"},
+])
+def test_malformed_or_error_page_refuses_watermark_ack(monkeypatch, response) -> None:
+    from agent_usage_tracker.collectors import cursor_api
+    cfg = _cfg(Path("/tmp"))
+    cfg.cursor_api = True
+    monkeypatch.setattr(cursor_api, "_auth", lambda cfg: ("cookie", 1))
+    monkeypatch.setattr(cursor_api, "_now_ms", lambda: 120)
+    monkeypatch.setattr(cursor_api, "_post",
+                        lambda cookie, name, body: {"userId": "u1"}
+                        if name == "get-me" else response)
+    wm = {"since_ms": 100}
+    with pytest.raises(CollectorUnavailable, match="invalid usage page"):
+        for _batch, commit in cursor_api.collect(cfg, wm):
+            commit()
+    assert wm == {"since_ms": 100}
+
+
 def _fake_api(events: list[dict], calls: list[dict]):
     """A stand-in for the dashboard API: events in [startDate, endDate], newest first, paged."""
     def post(cookie, name, body):
