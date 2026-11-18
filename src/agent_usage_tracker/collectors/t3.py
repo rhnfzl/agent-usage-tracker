@@ -121,6 +121,7 @@ class Snapshot:
     message_runs: dict[str, list[tuple[Any, ...]]]
     tool_attrs: dict[str, dict[str, Any]]
     covered_runs: set[str]
+    run_threads: dict[str, str]
 
 
 def snapshot(con: sqlite3.Connection, since: datetime, *, include_text: bool = True) -> Snapshot:
@@ -207,6 +208,7 @@ def snapshot(con: sqlite3.Connection, since: datetime, *, include_text: bool = T
     message_runs: dict[str, list[tuple[Any, ...]]] = {}
     bindings: dict[tuple[str, str], list[Binding]] = {}
     run_bindings: dict[str, tuple[str, str]] = {}
+    run_threads: dict[str, str] = {}
     for row in raw_runs:
         payload = _payload(row[7])
         proof = proofs.get(str(payload.get("userMessageId")))
@@ -218,6 +220,7 @@ def snapshot(con: sqlite3.Connection, since: datetime, *, include_text: bool = T
         end = _stamp(row[6]) if row[6] else datetime.now(timezone.utc)
         if end < start:
             raise ValueError("run ends before its human prompt")
+        run_threads[row[0]] = row[1]
         if proof[2] == "interactive":
             runs.append(row)
             message_runs.setdefault(str(payload.get("userMessageId")), []).append(row)
@@ -258,6 +261,7 @@ def snapshot(con: sqlite3.Connection, since: datetime, *, include_text: bool = T
         message_runs,
         tool_attrs,
         covered_runs,
+        run_threads,
     )
 
 
@@ -395,12 +399,11 @@ def collect(cfg: Config, wm: dict[str, Any]) -> Iterator[Batch]:
                     eligible.add(mid)
                 else:
                     ambiguous.add(mid)
-            by_run = {run[0]: run for run in data.runs}
             pending: list[tuple[str, str, list[Row]]] = []
             for rid, mid, tid, runid, role, ts, payload in data.messages:
                 if mid not in data.message_runs:
-                    owner = by_run.get(runid)
-                    if owner and owner[1] == tid and runid in data.covered_runs:
+                    # A human steer into an agent-started run is proved by that run's binding too.
+                    if data.run_threads.get(runid) == tid and runid in data.covered_runs:
                         eligible.add(mid)
                 if mid not in eligible:
                     ambiguous.add(mid)
