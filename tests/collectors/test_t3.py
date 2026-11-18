@@ -769,3 +769,31 @@ def test_historical_oversized_records_do_not_block_current_task(tmp_path):
     assert len([row for row in rows if isinstance(row, UsageEvent)]) == 1
     assert len([row for row in rows if isinstance(row, ActivityEvent) and row.kind == "turn"]) == 1
     c.close()
+
+
+def test_human_steer_into_agent_started_run_is_counted(tmp_path):
+    c = database(tmp_path)
+    message(c, source="provider", author="agent")
+    message(c, mid="steer", ts="05Z")
+    run(c, provider="claudeAgent")
+    binding(c, driver="claudeAgent")
+    c.commit()
+    wm = {}
+    rows = collect(config(tmp_path), wm)
+    humans = [r for r in rows if isinstance(r, UsageEvent) and r.kind == "human"]
+    assert [h.session.session_id for h in humans] == ["t3:app"]
+    assert sum(isinstance(r, ActivityEvent) and r.kind == "steer" for r in rows) == 1
+    assert not any(isinstance(r, ActivityEvent) and r.kind == "turn" for r in rows)
+    assert collect(config(tmp_path), wm) == []
+    c.close()
+
+
+def test_human_steer_into_unbound_agent_run_stays_unproved(tmp_path):
+    c = database(tmp_path)
+    message(c, source="provider", author="agent")
+    message(c, mid="steer", ts="05Z")
+    run(c, provider="claudeAgent")
+    c.commit()
+    with pytest.raises(CollectorUnavailable, match="overlap is unproved"):
+        collect(config(tmp_path))
+    c.close()
