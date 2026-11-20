@@ -118,9 +118,10 @@ def load_policy(path: Path | None = None) -> tuple[dict[str, Any], str]:
         ) from exc
 
 
-def memory_guard() -> None:
+def memory_guard() -> int | None:
+    """Refuse a local model run below 15% free memory; return the free percentage (None off macOS)."""
     if sys.platform != "darwin":
-        return
+        return None
     try:
         result = subprocess.run(
             ["/usr/bin/memory_pressure", "-Q"], capture_output=True, text=True, timeout=10
@@ -128,6 +129,7 @@ def memory_guard() -> None:
         match = re.search(r"memory free percentage:\s*(\d+)%", result.stdout)
         if result.returncode or not match or int(match[1]) < 15:
             raise BackendUnavailable("label: local model run waits for at least 15% free memory")
+        return int(match[1])
     except (OSError, subprocess.SubprocessError) as exc:
         raise BackendUnavailable("label: could not check local model memory headroom") from exc
 
