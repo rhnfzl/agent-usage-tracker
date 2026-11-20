@@ -19,6 +19,8 @@
 #   AUT_BIN=/path/to/aut                     # default: ~/.local/bin/aut
 #   AUT_TUNNEL_HOST=user@host                # unset (the default) means no tunnel, scan direct
 #   AUT_TUNNEL_SPEC=15432:10.0.0.5:5432      # ssh -L argument; required with AUT_TUNNEL_HOST
+#   AUT_TUNNEL_FALLBACK_HOSTS=root@192.168.1.150   # tried in order when AUT_TUNNEL_HOST does not
+#                                            # connect (e.g. a LAN route when Tailscale is down)
 #   AUT_LABEL=1                              # run the nightly `aut label run` here (needs aut[label])
 #   AUT_LABEL_MODE=local                     # saved local estimates, separate from calibrated labels
 #

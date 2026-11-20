@@ -117,8 +117,13 @@ def test_crashed_owner_does_not_leave_scheduler_locked(scheduled):
     assert (conf / "label-day").exists()
 
 
-@pytest.mark.parametrize("spec", ["", "15432::5432", "15432:db:noport", "15432:db:65536"])
-def test_invalid_tunnel_config_does_not_create_retry_or_success_markers(scheduled, spec):
+@pytest.mark.parametrize("spec,fallbacks", [
+    ("", ""), ("15432::5432", ""), ("15432:db:noport", ""), ("15432:db:65536", ""),
+    # A host that starts with "-" would be read by ssh as an option.
+    ("15432:db:5432", "-oProxyCommand=x"), ("15432:db:5432", "lan,-oProxyCommand=x"),
+])
+def test_invalid_tunnel_config_does_not_create_retry_or_success_markers(scheduled, spec,
+                                                                        fallbacks):
     home, conf, env = scheduled
     tools = home / "bin"
     tools.mkdir()
@@ -127,7 +132,8 @@ def test_invalid_tunnel_config_does_not_create_retry_or_success_markers(schedule
     ssh.chmod(0o700)
     env["PATH"] = str(tools) + os.pathsep + env["PATH"]
     with (conf / "scan.env").open("a") as settings:
-        settings.write(f"AUT_TUNNEL_HOST=example\nAUT_TUNNEL_SPEC={spec}\n")
+        settings.write(f"AUT_TUNNEL_HOST=example\nAUT_TUNNEL_SPEC={spec}\n"
+                       f"AUT_TUNNEL_FALLBACK_HOSTS='{fallbacks}'\n")
     assert run_wrapper(env).returncode == 2
     assert not (conf / "retry-pending").exists()
     assert not (conf / "outcomes-day").exists()
@@ -244,3 +250,48 @@ def test_scan_wrapper_adds_homebrew_to_scheduler_path(scheduled, mode):
     assert "/opt/homebrew/bin" in (tmp_path / "child-path").read_text().split(os.pathsep)
     expected = "label run --local-estimates" if mode == "local" else "label run"
     assert expected in (tmp_path / "calls").read_text().splitlines()
+
+
+def route_by_host(home, failing):
+    """Make the fake ssh exit 1 for the named hosts and serve the tunnel for any other."""
+    ssh = home / "bin" / "ssh"
+    ssh.rename(home / "bin" / "ssh-serve")
+    cases = "|".join(failing) or "__none__"
+    ssh.write_text(f'#!/bin/bash\necho "${{@: -1}}" >> "$HOME/ssh-hosts"\n'
+                   f'case "${{@: -1}}" in {cases}) exit 1;; esac\n'
+                   f'exec "$HOME/bin/ssh-serve" "$@"\n')
+    ssh.chmod(0o700)
+
+
+def test_fallback_route_delivers_when_the_primary_fails(tunnel):
+    home, conf, env, port = tunnel
+    route_by_host(home, ["primary"])
+    with (conf / "scan.env").open("a") as settings:
+        settings.write("AUT_TUNNEL_HOST=primary\nAUT_TUNNEL_FALLBACK_HOSTS=lan\n")
+    assert run_wrapper(env).returncode == 0
+    assert (home / "ssh-hosts").read_text().split() == ["primary", "lan"]
+    assert (home / "calls").read_text().splitlines()[0] == "scan"
+    assert not (conf / "retry-pending").exists()
+    assert "tunnel up via fallback 1" in (conf / "scan.log").read_text()
+    wait_for(lambda: not port_open(port))
+
+
+def test_every_route_failing_arms_retry(tunnel):
+    home, conf, env, port = tunnel
+    route_by_host(home, ["primary", "lan"])
+    with (conf / "scan.env").open("a") as settings:
+        settings.write("AUT_TUNNEL_HOST=primary\nAUT_TUNNEL_FALLBACK_HOSTS=lan\n")
+    assert run_wrapper(env).returncode == 1
+    assert (conf / "retry-pending").exists()
+    assert not (home / "calls").exists()
+    assert "tunnel FAILED on all 2 route(s)" in (conf / "scan.log").read_text()
+
+
+def test_fallback_hosts_without_a_primary_open_no_tunnel(tunnel):
+    home, conf, env, port = tunnel
+    route_by_host(home, [])
+    with (conf / "scan.env").open("a") as settings:
+        settings.write("AUT_TUNNEL_HOST=\nAUT_TUNNEL_FALLBACK_HOSTS=lan\n")
+    assert run_wrapper(env).returncode == 0
+    assert not (home / "ssh-hosts").exists()
+    assert (home / "calls").read_text().splitlines()[0] == "scan"

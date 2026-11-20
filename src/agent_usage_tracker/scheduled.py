@@ -46,6 +46,9 @@ def _listening(port: int) -> bool:
 def _run(conf: Path, log: TextIO) -> int:
     aut = os.environ.get("AUT_BIN", str(Path.home() / ".local/bin/aut"))
     host, spec = os.environ.get("AUT_TUNNEL_HOST", ""), os.environ.get("AUT_TUNNEL_SPEC", "")
+    # Fallback routes share the spec, so each must reach the same sink (e.g. a LAN address).
+    fallbacks = os.environ.get("AUT_TUNNEL_FALLBACK_HOSTS", "").replace(",", " ").split()
+    hosts = [host, *fallbacks]
     retry = conf / "retry-pending"
     tunnel: subprocess.Popen[bytes] | None = None
     child: subprocess.Popen[bytes] | None = None
@@ -75,6 +78,9 @@ def _run(conf: Path, log: TextIO) -> int:
         except ValueError:
             write("AUT_TUNNEL_HOST requires AUT_TUNNEL_SPEC=port:host:port; refusing to scan")
             return 2
+        if any(target.startswith("-") for target in hosts):
+            write("tunnel host must be user@host; refusing to scan")  # else ssh reads an option
+            return 2
         if not shutil.which("ssh"):
             write("ssh is not installed; refusing to scan")
             return 2
@@ -83,20 +89,31 @@ def _run(conf: Path, log: TextIO) -> int:
     scanning = False
     try:
         if host and not _listening(port):
-            tunnel = subprocess.Popen(
-                ["ssh", "-N", "-o", "ControlMaster=no", "-o", "ControlPath=none",
-                 "-o", "ForkAfterAuthentication=no", "-o", "ExitOnForwardFailure=yes",
-                 "-o", "ConnectTimeout=15",
-                 "-L", spec, host], stdout=log, stderr=log)
-            deadline = time.monotonic() + 17
-            while tunnel.poll() is None and time.monotonic() < deadline:
+            for index, target in enumerate(hosts):
+                wait = 15 if index == 0 else 5  # LAN fallbacks answer fast or not at all
+                tunnel = subprocess.Popen(
+                    ["ssh", "-N", "-o", "ControlMaster=no", "-o", "ControlPath=none",
+                     "-o", "ForkAfterAuthentication=no", "-o", "ExitOnForwardFailure=yes",
+                     "-o", "BatchMode=yes", "-o", f"ConnectTimeout={wait}",
+                     "-L", spec, target], stdout=log, stderr=log)
+                deadline = time.monotonic() + wait + 2
+                while tunnel.poll() is None and time.monotonic() < deadline:
+                    if _listening(port):
+                        break
+                    time.sleep(0.1)
                 if _listening(port):
+                    write("tunnel up via " + ("primary" if index == 0 else f"fallback {index}"))
                     break
-                time.sleep(0.1)
+                # A half-dead ssh must not hold the port; `finally` only reaps the last one.
+                _terminate(tunnel)
+                tunnel = None
             else:
-                write("tunnel FAILED; armed retry-pending (retries until the host is reachable)")
+                write(f"tunnel FAILED on all {len(hosts)} route(s); armed retry-pending "
+                      "(retries until a host is reachable)")
                 retry.touch()
                 return 1
+        elif host:
+            write("tunnel reused existing listener")
 
         scanning = True
         rc = command("scan")
