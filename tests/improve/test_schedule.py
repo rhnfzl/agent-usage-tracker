@@ -173,3 +173,164 @@ def test_unreaped_worker_stays_a_timeout_with_private_cleanup_diagnostics(
     assert report["status"] == "timeout" and report["exit_code"] is None
     error = store.get("cycle_errors", report["error_id"])
     assert error["cleanup_timeout"] and error["pid"] == 424242
+
+
+def frozen_audit(store, days=7, limit=30, tag="a"):
+    key = store.put("audits", {"session_ids": [], "tag": tag,
+                               "source_policy": {"days": days, "limit": limit}})
+    return {"audit_id": key, "sessions": 0}
+
+
+def cycle_policy(store, **changes):
+    return store.put("cycle_policies", {"days": 7, "limit": 30, "budget_s": 300, "case_limit": 4,
+        "max_calls": 40, "models": ["local"], "explain_model": None, **changes})
+
+
+def write_pending(store, value):
+    (store.root / "pending_cycle.json").write_text(json.dumps(value))
+
+
+def test_budget_change_keeps_the_frozen_audit(tmp_path, monkeypatch):
+    from agent_usage_tracker.improve import schedule
+
+    store = Store(tmp_path / "private")
+    frozen = frozen_audit(store)
+    write_pending(store, {"policy_id": cycle_policy(store), "audit": frozen})
+    policy = cycle_policy(store, budget_s=1200, max_calls=48)
+    monkeypatch.setattr(schedule, "audit", lambda *a, **kw: pytest.fail("Budget change rescanned"))
+    monkeypatch.setattr(schedule, "diagnose", lambda *a, **kw: {"complete": False})
+    report = schedule._worker(store, policy, "run")
+    assert report["audit"] == frozen and report["audit_s"] == 0
+    assert report["worker_started_at"]
+
+
+def test_days_change_rebuilds_the_audit(tmp_path, monkeypatch):
+    from agent_usage_tracker.improve import schedule
+
+    store = Store(tmp_path / "private")
+    old = frozen_audit(store)
+    write_pending(store, {"audit": old})
+    fresh = frozen_audit(store, days=14, tag="new")
+    monkeypatch.setattr(schedule, "audit", lambda *a, **kw: fresh)
+    monkeypatch.setattr(schedule, "diagnose", lambda *a, **kw: {"complete": False})
+    report = schedule._worker(store, cycle_policy(store, days=14), "run")
+    assert report["audit"] == fresh
+    assert store.get("audits", old["audit_id"])["tag"] == "a"
+    assert json.loads((store.root / "pending_cycle.json").read_text())["audit"] == fresh
+
+
+@pytest.mark.parametrize("pending", [None, {"audit": None}])
+def test_freeze_cycle_audit_writes_pending(tmp_path, monkeypatch, pending):
+    from agent_usage_tracker.improve import schedule
+
+    store = Store(tmp_path / "private")
+    if pending is not None:
+        write_pending(store, pending)
+    fresh = frozen_audit(store)
+    monkeypatch.setattr(schedule, "audit", lambda *a, **kw: fresh)
+    assert schedule.freeze_cycle_audit(store) == {"status": "frozen", **fresh}
+    assert json.loads((store.root / "pending_cycle.json").read_text()) == {"audit": fresh}
+
+
+def test_freeze_cycle_audit_keeps_a_matching_pending_audit(tmp_path, monkeypatch):
+    from agent_usage_tracker.improve import schedule
+
+    store = Store(tmp_path / "private")
+    frozen = frozen_audit(store)
+    write_pending(store, {"policy_id": "x", "audit": frozen})
+    monkeypatch.setattr(schedule, "audit", lambda *a, **kw: pytest.fail("Kept audit rescanned"))
+    assert schedule.freeze_cycle_audit(store) == {"status": "kept", **frozen}
+
+
+def test_freeze_cycle_audit_leaves_pending_to_a_running_cycle(tmp_path, monkeypatch):
+    from agent_usage_tracker.improve import schedule
+
+    store = Store(tmp_path / "private")
+    write_pending(store, {"audit": None})
+    fresh = frozen_audit(store)
+    monkeypatch.setattr(schedule, "audit", lambda *a, **kw: fresh)
+    with _locked(store.root / "cycle"):
+        result = schedule.freeze_cycle_audit(store)
+    assert result == {"status": "busy", "audit_id": fresh["audit_id"]}
+    assert json.loads((store.root / "pending_cycle.json").read_text()) == {"audit": None}
+
+
+def test_freeze_cycle_audit_returns_budget_without_writing_pending(tmp_path, monkeypatch, capsys):
+    from agent_usage_tracker import cli
+    from agent_usage_tracker.improve import schedule
+
+    store = Store(tmp_path / "private")
+    write_pending(store, {"audit": None})
+
+    def expired(*args, **kwargs):
+        raise schedule._BudgetExpired
+
+    monkeypatch.setattr(schedule, "audit", expired)
+    code = cli.main(["improve", "--root", str(store.root), "audit", "--cycle", "--budget-s", "5"])
+    assert code == 1
+    assert json.loads(capsys.readouterr().out) == {"status": "budget"}
+    assert json.loads((store.root / "pending_cycle.json").read_text()) == {"audit": None}
+
+
+def test_freeze_cycle_audit_skips_while_another_freeze_runs(tmp_path, monkeypatch):
+    from agent_usage_tracker.improve import schedule
+
+    store = Store(tmp_path / "private")
+    monkeypatch.setattr(schedule, "audit", lambda *a, **kw: pytest.fail("Busy freeze scanned"))
+    with _locked(store.root / "cycle_audit"):
+        assert schedule.freeze_cycle_audit(store) == {"status": "busy"}
+    assert not (store.root / "pending_cycle.json").exists()
+
+
+def worker_timeout(store, monkeypatch, **kwargs):
+    from agent_usage_tracker.improve import schedule
+
+    seen = {}
+
+    def launch(argv, cwd, timeout):
+        seen["timeout"] = timeout
+        return {"accepted": False, "timeout": True, "exit_code": -9}
+
+    monkeypatch.setattr(schedule, "command", launch)
+    run_once(store, budget_s=300, **kwargs)
+    return seen["timeout"]
+
+
+def test_outer_timeout_adds_the_audit_allowance_only_when_an_audit_must_be_built(
+        tmp_path, monkeypatch):
+    store = Store(tmp_path / "private")
+    assert worker_timeout(store, monkeypatch) < 300
+    assert 300 < worker_timeout(store, monkeypatch, audit_budget_s=600) <= 900
+    write_pending(store, {"audit": frozen_audit(store)})
+    assert worker_timeout(store, monkeypatch, audit_budget_s=600) < 300
+
+
+@pytest.mark.parametrize("allowance", [0, 600])
+def test_judge_deadline_starts_after_the_worker_audit(tmp_path, monkeypatch, allowance):
+    from agent_usage_tracker.improve import schedule
+
+    store = Store(tmp_path / "private")
+    clock = [1000.0]
+    monkeypatch.setattr(schedule.time, "monotonic", lambda: clock[0])
+    fresh = frozen_audit(store)
+
+    def slow_audit(*args, **kwargs):
+        clock[0] += 100
+        return fresh
+
+    seen = {}
+    monkeypatch.setattr(schedule, "audit", slow_audit)
+    monkeypatch.setattr(schedule, "diagnose",
+                        lambda *a, **kw: seen.update(kw) or {"complete": False})
+    report = schedule._worker(store, cycle_policy(store, audit_budget_s=allowance), "run")
+    # Without an allowance the audit shares the budget as before; with one the judge keeps all of it.
+    assert seen["deadline"] == (1295 if allowance == 0 else 1395)
+    assert report["audit_s"] == 100
+
+
+def test_cycle_audit_rejects_a_project(tmp_path, capsys):
+    from agent_usage_tracker import cli
+
+    assert cli.main(["improve", "--root", str(tmp_path / "private"), "audit", "--cycle",
+                     "--project", str(tmp_path)]) == 1
+    assert "--cycle" in capsys.readouterr().err

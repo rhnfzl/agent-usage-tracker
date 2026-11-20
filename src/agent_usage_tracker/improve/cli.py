@@ -11,7 +11,7 @@ from typing import Any
 from ..config import AutError
 from ..label.core import data_dir
 from .proposals import prepare, stage
-from .schedule import run_once
+from .schedule import freeze_cycle_audit, run_once
 from .store import Store, audit
 from .trial import run_trial
 from .validation import validate
@@ -29,8 +29,14 @@ def register(sub: Any) -> None:
         action.add_argument("--limit", type=int, default=30)
         if name == "audit":
             action.add_argument("--project", type=Path)
+            action.add_argument("--cycle", action="store_true",
+                                help="freeze the next scheduled cycle's audit unless one is pending")
+            action.add_argument("--budget-s", type=int, default=1500,
+                                help="deadline for the --cycle audit step")
         else:
             action.add_argument("--case-limit", type=int, default=12)
+            action.add_argument("--audit-budget-s", type=int, default=0,
+                                help="extra seconds to build an audit when none is frozen")
     decision = actions.add_parser("diagnose", help="review frozen evidence with cached local models")
     decision.add_argument("--audit", required=True)
     decision.add_argument("--limit", type=int, default=12)
@@ -80,6 +86,10 @@ def run(args: argparse.Namespace) -> None:
         if not isinstance(mapping, dict):
             raise AutError("improve: desktop mapping must be a JSON object")
         result = import_desktop(store, args.trace, args.responses, mapping)
+    elif args.improve_cmd == "audit" and args.cycle:
+        if args.project:
+            raise AutError("improve: --cycle freezes the scheduled audit and takes no --project")
+        result = freeze_cycle_audit(store, days=args.days, limit=args.limit, budget_s=args.budget_s)
     elif args.improve_cmd == "audit":
         result = audit(store, Path.home(), days=args.days, limit=args.limit, project=args.project)
     elif args.improve_cmd == "diagnose":
@@ -109,7 +119,8 @@ def run(args: argparse.Namespace) -> None:
     elif args.improve_cmd == "run":
         result = run_once(store, days=args.days, limit=args.limit, case_limit=args.case_limit,
                           budget_s=args.budget_s, max_calls=args.max_calls,
-                          models=tuple(args.models.split(",")), explain_model=args.explain_model)
+                          models=tuple(args.models.split(",")), explain_model=args.explain_model,
+                          audit_budget_s=args.audit_budget_s)
     elif args.improve_cmd == "validate":
         try:
             value = json.loads(args.spec_file.read_text())
@@ -122,5 +133,6 @@ def run(args: argparse.Namespace) -> None:
         result = {"records": {kind: len(store.keys(kind)) for kind in kinds},
                   "private": True, "human_verified": False}
     print(json.dumps(result, sort_keys=True))
-    if args.improve_cmd in {"run", "diagnose"} and result.get("status") in {"timeout", "error"}:
-        raise AutError(f"improve: cycle {result['status']}")
+    if args.improve_cmd in {"run", "diagnose", "audit"} \
+            and result.get("status") in {"timeout", "error", "budget"}:
+        raise AutError(f"improve: {args.improve_cmd} {result['status']}")

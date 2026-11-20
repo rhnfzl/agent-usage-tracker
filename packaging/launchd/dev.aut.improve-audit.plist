@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  macOS daily job that freezes the private improvement audit before the reviewer runs, so the
+  reviewer (`aut improve run`, 04:20) spends its whole budget on judging. A template: nothing installs it.
+  Use the same stable runtime release as the reviewer job (docs/improvement.md "Install a stable runtime"):
+    cp packaging/launchd/dev.aut.improve-audit.plist ~/Library/LaunchAgents/
+    sed -i '' -e "s#/Users/CHANGEME#$HOME#g" -e "s#RELEASE#<release dir>#" ~/Library/LaunchAgents/dev.aut.improve-audit.plist
+    launchctl load ~/Library/LaunchAgents/dev.aut.improve-audit.plist
+  The days and limit must match the reviewer's run. While an unfinished job holds a frozen audit it
+  keeps it and exits 0. A slot missed while asleep runs on wake; the reviewer then audits itself if needed.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>dev.aut.improve-audit</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/CHANGEME/.local/share/aut/improve-runtime/releases/RELEASE/venv/bin/python</string>
+    <string>-I</string><string>-m</string><string>agent_usage_tracker.cli</string>
+    <string>improve</string><string>--root</string><string>/Users/CHANGEME/.local/share/aut/improve</string>
+    <string>audit</string><string>--cycle</string>
+    <string>--days</string><string>7</string><string>--limit</string><string>30</string>
+    <string>--budget-s</string><string>1500</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PYTHONUNBUFFERED</key><string>1</string>
+    <key>HF_HUB_OFFLINE</key><string>1</string>
+  </dict>
+  <key>StartCalendarInterval</key>
+  <dict><key>Hour</key><integer>3</integer><key>Minute</key><integer>50</integer></dict>
+  <key>RunAtLoad</key><false/>
+  <key>ProcessType</key><string>Background</string>
+  <key>LowPriorityIO</key><true/>
+  <key>WorkingDirectory</key><string>/Users/CHANGEME/.local/share/aut/improve</string>
+  <key>StandardOutPath</key><string>/Users/CHANGEME/.local/share/aut/improve/audit.stdout.log</string>
+  <key>StandardErrorPath</key><string>/Users/CHANGEME/.local/share/aut/improve/audit.stderr.log</string>
+</dict>
+</plist>
