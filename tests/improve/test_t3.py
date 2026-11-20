@@ -156,12 +156,31 @@ def test_t3_missing_output_and_projection_loss_remain_incomplete(tmp_path):
     db, _ = fixture_db(home)
     add_run(db)
     db.execute("DELETE FROM orchestration_v2_projection_turn_items WHERE type='command_execution'")
-    item(db, 'r1', 'incomplete', 'command_execution', 1, input='pytest')
+    item(db, 'r1', 'incomplete', 'command_execution', 1, input='pytest', status='running')
     db.commit()
     store, result, sessions = capture(tmp_path, home)
     assert sessions[0]['coverage']['unmatched_calls'] == 1
     assert not sessions[0]['coverage']['complete']
     assert not any(row['coverage']['complete'] for row in cases(store, result['audit_id']))
+    db.close()
+
+
+@pytest.mark.parametrize('kind,fields,expected', [
+    ('command_execution', {'status': 'completed', 'exitCode': 0}, 'success'),
+    ('command_execution', {'status': 'failed', 'exitCode': 2}, 'error'),
+    ('dynamic_tool', {'status': 'completed'}, 'success'),
+    ('command_execution', {'status': 'interrupted'}, 'unknown'),
+])
+def test_t3_finished_item_without_output_still_has_a_result(tmp_path, kind, fields, expected):
+    home = tmp_path / 'home'
+    db, _ = fixture_db(home)
+    add_run(db)
+    db.execute("DELETE FROM orchestration_v2_projection_turn_items WHERE type='command_execution'")
+    item(db, 'r1', 'quiet', kind, 1, input='true', **fields)
+    db.commit()
+    _, _, sessions = capture(tmp_path, home)
+    assert sessions[0]['coverage']['unmatched_calls'] == 0
+    assert [e['status'] for e in sessions[0]['events'] if e['kind'] == 'result'] == [expected]
     db.close()
 
 

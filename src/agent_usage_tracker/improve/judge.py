@@ -249,6 +249,12 @@ def _llm_review(case: dict[str, Any], rubric: str, model: MlxLetter,
         raise AutError(f"improve: local review rejected ({exc})\n{redact(text)[:2000]}") from exc
 
 
+def _eligible(case: dict[str, Any]) -> bool:
+    """Whether the judge may vote on a case; the rest are recorded as incomplete evidence."""
+    return bool(case["coverage"].get("complete") and not case["omitted_task_events"]
+                and not any(e.get("truncated") for e in case["events"]))
+
+
 def diagnose(store: Store, audit_id: str, *, models: tuple[str, ...] = (
              "pplx-decider-flash", "clef-flash"), limit: int = 12, budget_s: int = 300,
              max_calls: int = 50, explain_model: str | None = None,
@@ -307,12 +313,14 @@ def diagnose(store: Store, audit_id: str, *, models: tuple[str, ...] = (
     active = {digest({"evaluator": evaluator_id, "case": row["case_id"], "rubric": rubric})
               for row in rows for rubric in RUBRICS}
     reason = "complete"
+    evidence = {"cases": len(rows), "eligible": sum(_eligible(row) for row in rows)}
 
     def checkpoint() -> dict[str, Any]:
         report = {"job_id": job_id, "complete": finished == len(active),
                   "finished": finished, "total": len(active), "calls": calls,
                   "reason": reason, "verdicts": dict(tally), "human_verified": False,
-                  "judgment_ids": [decisions[key] for key in sorted(active) if key in decisions]}
+                  "judgment_ids": [decisions[key] for key in sorted(active) if key in decisions],
+                  "evidence": evidence}
         if unfinished_call is not None:
             report["unfinished_call"] = unfinished_call
         if progress:
@@ -335,10 +343,7 @@ def diagnose(store: Store, audit_id: str, *, models: tuple[str, ...] = (
                     if time.monotonic() >= deadline:
                         reason = "budget"
                         break
-                    eligible = (case["coverage"].get("complete")
-                                and not case["omitted_task_events"]
-                                and not any(e.get("truncated") for e in case["events"]))
-                    if not eligible:
+                    if not _eligible(case):
                         result = {**aggregate([]), "evaluation_key": key, "job_id": job_id,
                                   "case_id": case["case_id"], "rubric": rubric, "vote_ids": [],
                                   "review": None, "reason": "incomplete_evidence",
