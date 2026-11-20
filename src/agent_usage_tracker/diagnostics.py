@@ -14,7 +14,7 @@ _KNOWN_CLIENTS = frozenset({
     "codex_cli_rs", "codex_vscode", "codex_exec", "codex-tui", "vscode", "exec", "mcp",
     "automation", "rex", "super.engineering", "zeron", "paseo", "diri", "emdash",
     "monocode", "synara", "bb", "orca", "traycer", "claude desktop", "capy",
-    "cloudroom", "superset", "paradev", "conductor",
+    "cloudroom", "superset", "paradev", "conductor", "codex desktop", "sdk-ts",
 })
 _MAX_CLIENTS = 32
 _MAX_COUNT = 2**63 - 1

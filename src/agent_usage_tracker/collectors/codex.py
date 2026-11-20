@@ -65,8 +65,12 @@ def sessions_dir(home: Path) -> Path:
 
 
 def session_files(home: Path) -> list[str]:
+    # Codex moves finished rollouts to archived_sessions; event ids are content-based, so a moved
+    # file re-read under its new path re-emits the same ids and the sink dedups them.
     return [path for root in sessions_dirs(home)
-            for path in glob.glob(str(root / "**" / "rollout-*.jsonl"), recursive=True)]
+            for pattern in (root / "**" / "rollout-*.jsonl",
+                            root.parent / "archived_sessions" / "rollout-*.jsonl")
+            for path in glob.glob(str(pattern), recursive=True)]
 
 
 def sessions_dirs(home: Path) -> list[Path]:
