@@ -111,9 +111,10 @@ def validate_record(record: Any) -> dict[str, Any]:
         required = {"remaining", "limit", "unit", "period", "reset", "fresh_until", "scope"}
         if not required <= set(r):
             raise ValueError("quota needs explicit values, including null unknowns")
-        if r["unit"] not in ("tokens", "requests", "percent", "credits", "unknown"):
+        if r["unit"] not in ("tokens", "requests", "percent", "basis_points", "credits", "unknown"):
             raise ValueError("invalid quota unit")
-        if r["period"] not in ("minute", "hour", "day", "week", "month", "session", "unknown"):
+        if r["period"] not in ("minute", "hour", "day", "week", "month", "session", "unknown",
+                               "five_hour", "seven_day"):
             raise ValueError("invalid quota period")
         identifier(r["scope"])
     if kind == "tool" and r.get("status") not in ("ok", "error", "unknown"):
@@ -121,6 +122,10 @@ def validate_record(record: Any) -> dict[str, Any]:
     if len(json.dumps(r).encode()) > MAX_RECORD_BYTES:
         raise ValueError("record too large")
     return r
+
+
+def default_store_path() -> Path:
+    return Path.home() / ".config/aut/observations.sqlite3"
 
 
 def _connect(store: str | Path) -> sqlite3.Connection:

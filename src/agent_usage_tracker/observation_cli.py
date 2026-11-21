@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import AutError
-from .observations import import_file
+from .observations import default_store_path, import_file
 from .observation_report import build_report, public_draft, render_html
 from .state import atomic_write_text
 
@@ -16,7 +16,7 @@ from .state import atomic_write_text
 def register(subparsers: Any) -> None:
     parser = subparsers.add_parser('observe', help='private external observations')
     parser.set_defaults(observation_command=True)
-    parser.add_argument('--db', type=Path, default=Path.home() / '.config/aut/observations.sqlite3')
+    parser.add_argument('--db', type=Path, default=default_store_path())
     actions = parser.add_subparsers(dest='observe_cmd', required=True)
     action = actions.add_parser('import')
     action.add_argument('file', type=Path)
