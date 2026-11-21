@@ -32,3 +32,13 @@ aut quota mute --scope your-generated-uuid --window five_hour
 The first command only reads the cache. The second writes notices to a private local inbox when a fresh reading reaches 90% or the observed pace points to reaching the limit before reset. Quiet hours use the configured ledger timezone. Mute lasts until the recorded reset. A recovery requires a fresh reading that shows the warning condition ended.
 
 The statusline shows the latest saved scan and coverage evidence. The existing scan route continues to handle coverage and no-scan paging.
+
+## Pending delivery notices
+
+```sh
+aut delivery-notices check
+aut delivery-notices check --notify --quiet-hours 22:00-07:00
+aut delivery-notices inbox
+```
+
+A scan saves an outbox count with its local coverage assessment. The check reports a backlog once. It reports recovery when a newer assessment reads an empty outbox. A missing outbox, an unreadable queue or an assessment older than 12 hours leaves the episode open. Quiet hours follow the ledger timezone. Notices stay in a private inbox on this machine.

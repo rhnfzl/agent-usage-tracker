@@ -12,7 +12,8 @@ import sys
 
 from .config import AutError, ledger_zone, load_config
 from .observations import default_store_path, timestamp
-from .operational_status import (check_quota_notices, mute_quota, read_quota_notices,
+from .operational_status import (check_delivery_notices, check_quota_notices, delivery_evidence,
+                                 mute_quota, read_delivery_notices, read_quota_notices,
                                  statusline_snapshot)
 from .quota import MAX_INPUT_CHARS, WINDOWS, capture_claude_quota, quota_scope, quota_snapshot
 
@@ -35,6 +36,13 @@ def register(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     mute.add_argument("--scope", required=True)
     mute.add_argument("--window", choices=WINDOWS, required=True)
     actions.add_parser("inbox", help="read previously emitted local quota notices")
+
+    delivery = sub.add_parser("delivery-notices", help="read the local delivery queue notice inbox")
+    actions = delivery.add_subparsers(dest="delivery_cmd", required=True)
+    check = actions.add_parser("check", help="read cached queue evidence or opt in to notices")
+    check.add_argument("--notify", action="store_true", help="enable local inbox notices for this run")
+    check.add_argument("--quiet-hours", type=_parse_quiet, metavar="HH:MM-HH:MM")
+    actions.add_parser("inbox", help="read previously emitted pending-delivery notices")
 
 
 def _parse_quiet(text: str) -> tuple[time, time]:
@@ -118,3 +126,20 @@ def run(args: argparse.Namespace) -> None:
             _show(snapshot)
     except (ValueError, OSError, sqlite3.Error, RecursionError) as exc:
         raise AutError(f"quota: {exc}") from exc
+
+
+def run_delivery_notices(args: argparse.Namespace) -> None:
+    try:
+        if args.delivery_cmd == "inbox":
+            _show(read_delivery_notices())
+        elif args.notify:
+            now = datetime.now(timezone.utc)
+            if args.quiet_hours:
+                now = now.astimezone(ledger_zone(load_config()))
+            _show(check_delivery_notices(now=now, quiet_hours=args.quiet_hours))
+        elif args.quiet_hours:
+            raise ValueError("quiet hours apply only to delivery-notices check --notify")
+        else:
+            _show(delivery_evidence())
+    except (ValueError, OSError) as exc:
+        raise AutError(f"delivery-notices: {exc}") from exc

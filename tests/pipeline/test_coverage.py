@@ -237,7 +237,8 @@ def test_outbox_report_is_readonly_and_separate(cfg):
     path.chmod(0o640)
     before = (path.read_bytes(), path.stat().st_mode)
     report = coverage.build_report(cfg, now=NOW)
-    assert report["delivery"] == {"status": "available", "pending": {"activity": 1}}
+    assert report["delivery"] == {"status": "available", "pending": {"activity": 1},
+                                 "evidence": "outbox_snapshot"}
     assert "delivery_backlog" in codes(report)
     assert before == (path.read_bytes(), path.stat().st_mode)
 

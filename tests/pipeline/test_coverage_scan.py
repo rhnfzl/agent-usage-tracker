@@ -381,7 +381,8 @@ def test_delivery_identity_uses_consistent_metadata_calls(world, monkeypatch):
             st_ctime_ns=metadata.st_ctime_ns)
 
     monkeypatch.setattr(coverage.os, "fstat", descriptor_metadata)
-    assert coverage._delivery() == {"status": "available", "pending": {"activity": 1}}
+    assert coverage._delivery() == {"status": "available", "pending": {"activity": 1},
+                                 "evidence": "outbox_snapshot"}
 
 
 @pytest.fixture

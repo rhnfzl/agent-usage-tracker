@@ -321,7 +321,8 @@ def _delivery() -> dict[str, Any]:
         allowed = {"usage", "session", "activity", "time"}
         if any(kind not in allowed or type(count) is not int or count < 0 for kind, count in rows):
             return {"status": "unknown", "pending": {}}
-        return {"status": "available", "pending": dict(rows)}
+        return {"status": "available", "pending": dict(rows),
+                "evidence": "outbox_snapshot"}
     except (OSError, sqlite3.Error, ValueError):
         return {"status": "unknown", "pending": {}}
 
