@@ -228,6 +228,8 @@ Bounded reviews preserve completed judgments and resume unfinished work within t
 `aut improve inspect --case CASE_ID` writes a private view of a captured attempt and its source references.
 
 `aut improve label --rubric completion_supported` opens a private human review page to check an advisory judge against captured cases.
+
+Captured commit results can attach redacted local diffs for `code_quality` judging and human labels. Local commit-state changes queue another advisory review.
 Missing or clipped evidence stays explicit; inspection does not upgrade a judgment.
 Read the [private improvement guide](docs/improvement.md) before judging, staging changes, or executing trials.
 The guide covers executable judge references, independent agent-task acceptance, and stable wheel installations.

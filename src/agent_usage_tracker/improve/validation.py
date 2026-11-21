@@ -18,9 +18,11 @@ from .store import Store, digest
 from .trial import command
 
 
-def evidence_key(case: dict[str, Any]) -> str:
-    return digest({name: case[name] for name in (
-        "events", "coverage", "omitted_task_events")})
+def evidence_key(case: dict[str, Any], outputs_id: str | None = None) -> str:
+    value = {name: case[name] for name in ("events", "coverage", "omitted_task_events")}
+    if outputs_id:
+        value["outputs_id"] = outputs_id
+    return digest(value)
 
 
 def score(pairs: Iterable[tuple[str, str | None]]) -> dict[str, Any]:
@@ -137,6 +139,8 @@ def validate(store: Store, spec_id: str, diagnosis_id: str, *,
     for ref in references:
         key = evaluation_key(evaluator(policy, ref["rubric"]), cases[ref["evidence_sha256"]],
                              ref["rubric"])
+        key = policy.get("evaluation_keys", {}).get(cases[ref["evidence_sha256"]], {}).get(
+            ref["rubric"], key)
         if key not in judgments:
             rows.append({**ref, "observed": None, "judgment_id": None})
             continue

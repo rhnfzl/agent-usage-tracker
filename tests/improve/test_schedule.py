@@ -30,6 +30,29 @@ def test_cycle_records_timeout_and_leaves_existing_evidence(tmp_path, monkeypatc
     assert (store.root / "last_cycle.json").exists()
 
 
+def test_outputs_refresh_runs_after_worker_and_failure_keeps_inbox(tmp_path, monkeypatch):
+    from agent_usage_tracker.improve import schedule
+
+    store = Store(tmp_path / "private")
+    seen = []
+    def launch(*args):
+        seen.append("worker")
+        return {"accepted": False, "timeout": True, "exit_code": -9}
+    def refresh(value):
+        assert value is store and seen == ["worker"]
+        seen.append("refresh")
+        raise AutError("fixture")
+    from agent_usage_tracker.config import AutError
+
+    monkeypatch.setattr(schedule, "command", launch)
+    monkeypatch.setattr(schedule.outputs, "refresh", refresh)
+    result = run_once(store, budget_s=1)
+    assert result["status"] == "timeout" and seen == ["worker", "refresh"]
+    assert (store.root / "inbox.html").exists()
+    rows = [json.loads(line) for line in (store.root / "events.jsonl").read_text().splitlines()]
+    assert any(row["kind"] == "outputs_error" for row in rows)
+
+
 def test_failed_worker_preserves_its_diagnostic_output_privately(tmp_path, monkeypatch):
     from agent_usage_tracker.improve import schedule
 

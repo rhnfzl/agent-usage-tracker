@@ -54,14 +54,15 @@ class Clone:
     readable: bool = True     # False: git failed reading its refs, so `default` says nothing
 
 
-def _default_ref(path: str) -> tuple[str | None, bool]:
+def default_ref(path: str, *, timeout: float = 10) -> tuple[str | None, bool]:
     """(origin's default branch, whether git answered); never a local branch, so unpushed work is
     never merged. for-each-ref exits 0 for an absent ref, so a None from it is a real failure.
     A clone's origin/HEAD can name anything: `ref: --ext-diff` would reach git log as a flag and run
     a repo-defined diff driver, so a target outside origin's refs is ignored."""
     head, *fallbacks = ("refs/remotes/origin/HEAD", "refs/remotes/origin/main",
                         "refs/remotes/origin/master", "refs/remotes/origin/develop")
-    out = run_git(path, "for-each-ref", "--format=%(refname) %(symref)", head, *fallbacks)
+    out = run_git(path, "for-each-ref", "--format=%(refname) %(symref)", head, *fallbacks,
+                  timeout=timeout)
     if out is None:
         return None, False
     refs = dict(line.partition(" ")[::2] for line in out.splitlines())
@@ -69,6 +70,9 @@ def _default_ref(path: str) -> tuple[str | None, bool]:
     if target.startswith("refs/remotes/origin/"):
         return target, True
     return next((r for r in fallbacks if r in refs), None), True
+
+
+_default_ref = default_ref
 
 
 def _common_dir(path: str) -> str | None:
