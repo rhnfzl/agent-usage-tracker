@@ -370,21 +370,31 @@ def diagnose(store: Store, audit_id: str, *, models: tuple[str, ...] = (
         admission.update(required_s=round(need, 3), remaining_s=round(remaining, 3))
         if calls < max_calls and remaining > 0 and remaining >= need:
             return True
-        stopped_by = {"kind": kind, "model": name, "required_s": round(need, 3),
+        stopped_by = {"kind": kind, "model": name,
+                      "limit": "max_calls" if calls >= max_calls else "time",
+                      "required_s": round(need, 3),
                       "remaining_s": round(remaining, 3), "next_chars": size}
         return False
 
-    def ensure_loaded(kind: str, name: str) -> bool:
-        """Load a model before its first timed call; True when this call loaded it."""
-        nonlocal first_call_at
+    def ensure_loaded(kind: str, name: str, size: int) -> bool:
+        """Load a model before its first timed call; True when this call loaded it.
+        A deadline can only interrupt once native work returns, so the start is saved first
+        and the finished load is journaled before any inference."""
+        nonlocal first_call_at, unfinished_call
         key = (kind, name)
         if key in loaded or key not in loaders:
             return False
         first_call_at = first_call_at or _now()
+        model, revision = identity[key]
+        unfinished_call = {"kind": kind, "phase": "load", "model": model, "model_rev": revision}
+        checkpoint()
         started = time.monotonic()
         loaders[key]()
         load_s[key] = unrecorded_load[key] = round(time.monotonic() - started, 3)
         loaded.add(key)
+        record(kind, name, size, None, None)
+        unfinished_call = None
+        checkpoint()
         return True
 
     def record(kind: str, name: str, size: int, at: str | None, infer_s: float | None) -> None:
@@ -471,12 +481,12 @@ def diagnose(store: Store, audit_id: str, *, models: tuple[str, ...] = (
                             if not can_call("vote", name, size):
                                 reason = "budget"
                                 break
-                            if ensure_loaded("vote", name) and not can_call("vote", name, size):
-                                record("vote", name, size, None, None)
+                            if ensure_loaded("vote", name, size) and not can_call("vote", name, size):
                                 reason = "budget"
                                 break
                             backend = backends[name]
-                            unfinished_call = {"kind": "decision", "model": backend.model_id,
+                            unfinished_call = {"kind": "decision", "phase": "inference",
+                                "model": backend.model_id,
                                 "model_rev": backend.model_rev, "case_id": case["case_id"],
                                 "rubric": rubric, "evaluation_key": vote_key}
                             calls += 1
@@ -484,8 +494,13 @@ def diagnose(store: Store, audit_id: str, *, models: tuple[str, ...] = (
                             at = _now()
                             first_call_at = first_call_at or at
                             started = time.monotonic()
-                            distribution = backend.distribution(_request(case, rubric))
-                            record("vote", name, size, at, time.monotonic() - started)
+                            done = False
+                            try:
+                                distribution = backend.distribution(_request(case, rubric))
+                                done = True
+                            finally:    # a cut-off call still leaves its row, without a rate
+                                record("vote", name, size, at,
+                                       time.monotonic() - started if done else None)
                             aggregate([distribution])
                             cache[vote_key] = store.put("votes", {
                                 "evaluation_key": vote_key, "job_id": job_id, "case_id": case["case_id"],
@@ -535,12 +550,12 @@ def diagnose(store: Store, audit_id: str, *, models: tuple[str, ...] = (
                                 if not can_call("review", explain_model, size):
                                     reason = "budget"
                                     break
-                                if ensure_loaded("review", explain_model) and not can_call(
+                                if ensure_loaded("review", explain_model, size) and not can_call(
                                         "review", explain_model, size):
-                                    record("review", explain_model, size, None, None)
                                     reason = "budget"
                                     break
-                                unfinished_call = {"kind": "review", "model": explain_model,
+                                unfinished_call = {"kind": "review", "phase": "inference",
+                                    "model": explain_model,
                                     "model_rev": explainer.model_rev, "case_id": case["case_id"],
                                     "rubric": rubric, "evaluation_key": key, "attempt": attempt}
                                 calls += 1
@@ -548,12 +563,17 @@ def diagnose(store: Store, audit_id: str, *, models: tuple[str, ...] = (
                                 at = _now()
                                 first_call_at = first_call_at or at
                                 started = time.monotonic()
+                                done = False
                                 try:
                                     review = _llm_review(case, rubric, explainer, feedback)
+                                    done = True
                                 except AutError as exc:
                                     review_errors.append(str(exc))
                                     feedback = str(exc).split("\n", 1)[0]
-                                record("review", explain_model, size, at, time.monotonic() - started)
+                                    done = True
+                                finally:
+                                    record("review", explain_model, size, at,
+                                           time.monotonic() - started if done else None)
                                 store.put("review_attempts", {"evaluation_key": key,
                                     "model": explain_model, "model_rev": explainer.model_rev,
                                     "attempt": attempt, "review": review,

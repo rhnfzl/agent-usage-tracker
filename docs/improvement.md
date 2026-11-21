@@ -109,6 +109,8 @@ Matching checkpoints record `unfinished_call` before an admitted model operation
 It names the model revision, case, criterion and operation without a durable result.
 It does not prove native execution started. Saving a vote or review attempt clears it.
 A killed worker retains the descriptor so its failed operation can be inspected.
+A model load is checkpointed the same way, with `phase: load` and `first_call_at`, and its
+`model_call` row is written before any inference, so a deadline during either keeps both.
 
 After stopping a command, process reaping and output-reader cleanup share one second.
 Incomplete cleanup returns a failure with `cleanup_timeout` and the owned `pid`.

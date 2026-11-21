@@ -350,7 +350,7 @@ def test_cold_model_with_a_load_step_is_refused_before_loading(native_budget):
                             backend_for=loading_backend(clock, calls, 30, 5, loads))
     assert result["reason"] == "budget" and result["calls"] == 0
     assert not calls and not loads
-    assert result["stopped_by"]["model"] == "cold"
+    assert result["stopped_by"]["model"] == "cold" and result["stopped_by"]["limit"] == "time"
     assert result["stopped_by"]["required_s"] == 90
     assert result["stopped_by"]["remaining_s"] == 60
 
@@ -381,9 +381,56 @@ def test_recorded_inference_time_excludes_the_load(native_budget):
     assert result["complete"] and result["calls"] == 2
     assert loads == ["local"]
     rows = model_calls(store)
-    assert [row["load_s"] for row in rows] == [30, None]
-    assert [row["infer_s"] for row in rows] == [5, 5]
+    assert [row["load_s"] for row in rows] == [30, None, None]
+    assert [row["infer_s"] for row in rows] == [None, 5, 5]
     assert all(row["call"] == "vote" and row["model"] == "local" for row in rows)
+
+
+def interrupted_worker(store, audit, clock, monkeypatch, *, cut):
+    """Run the scheduled worker with a backend whose load or inference hits the deadline."""
+    from functools import partial
+
+    from agent_usage_tracker.improve import schedule
+
+    class Backend:
+        model_rev = "synthetic"
+
+        def __init__(self, name):
+            self.model_id = name
+
+        def load(self):
+            clock[0] += 30
+            if cut == "load":
+                raise schedule._BudgetExpired
+
+        def distribution(self, request):
+            raise schedule._BudgetExpired
+
+    monkeypatch.setattr(schedule, "diagnose", partial(judge.diagnose, backend_for=Backend))
+    policy = store.put("cycle_policies", {"audit_id": audit, "budget_s": 180, "case_limit": 4,
+        "max_calls": 4, "models": ["local"], "explain_model": None})
+    report = schedule._worker(store, policy, "run")
+    saved = json.loads((store.root / "worker_result.json").read_text())["report"]
+    assert report["status"] == "deferred" and saved["status"] == "deferred"
+    return saved["diagnosis"]
+
+
+def test_a_load_cut_by_the_deadline_keeps_its_start_and_phase(native_budget, monkeypatch):
+    store, audit, clock = native_budget
+    diagnosis = interrupted_worker(store, audit, clock, monkeypatch, cut="load")
+    assert diagnosis["calls"] == 0 and diagnosis["first_call_at"]
+    assert diagnosis["unfinished_call"] == {"kind": "vote", "phase": "load", "model": "local",
+                                            "model_rev": "synthetic"}
+    assert not (store.root / "events.jsonl").exists() or not model_calls(store)
+
+
+def test_an_inference_cut_by_the_deadline_keeps_the_journaled_load(native_budget, monkeypatch):
+    store, audit, clock = native_budget
+    diagnosis = interrupted_worker(store, audit, clock, monkeypatch, cut="inference")
+    assert diagnosis["calls"] == 1 and diagnosis["first_call_at"]
+    assert diagnosis["unfinished_call"]["phase"] == "inference"
+    assert [(row["load_s"], row["infer_s"]) for row in model_calls(store)] == [
+        (30, None), (None, None)]
 
 
 def test_admission_rechecks_after_the_load_consumes_time(native_budget):
