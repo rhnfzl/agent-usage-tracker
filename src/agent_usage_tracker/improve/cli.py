@@ -68,6 +68,10 @@ def register(sub: Any) -> None:
     desktop.add_argument("--trace", type=Path, required=True, help="raw trace file or segment directory")
     desktop.add_argument("--responses", type=Path, help="local response companion JSONL")
     desktop.add_argument("--mapping", type=Path, required=True, help="explicit task/session/parent JSON")
+    grouping = actions.add_parser("groups", help="group failed judgments by deterministic signals")
+    grouping.add_argument("--days", type=int, default=14)
+    grouping.add_argument("--threshold", type=int, default=3,
+                          help="distinct tasks that make a group recurring")
     study_cli.register(actions)
     actions.add_parser("status", help="show local progress counts without trace text")
 
@@ -97,6 +101,9 @@ def run(args: argparse.Namespace) -> None:
                           case_limit=args.limit, budget_s=args.budget_s, max_calls=args.max_calls,
                           explain_model=args.explain_model)
         result = report.get("diagnosis", report)
+    elif args.improve_cmd == "groups":
+        from .groups import refresh
+        result = refresh(store, window_days=args.days, threshold=args.threshold)
     elif args.improve_cmd == "inspect":
         from .case_view import write_case_view
         result = write_case_view(store, args.case)
