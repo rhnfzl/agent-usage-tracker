@@ -87,8 +87,8 @@ def _pending(store: Store) -> dict[str, Any]:
     return json.loads(path.read_text()) if path.exists() else {}
 
 
-def _reusable_audit(store: Store, pending: dict[str, Any], days: int, limit: int,
-                    policy_id: str | None = None) -> dict[str, Any] | None:
+def _reusable_audit(store: Store, pending: dict[str, Any], days: int,
+                    limit: int) -> dict[str, Any] | None:
     """The pending frozen audit when it was built for these days and limit.
     Budget and call limits do not change the evidence, so they no longer discard it."""
     frozen = pending.get("audit")
@@ -98,8 +98,11 @@ def _reusable_audit(store: Store, pending: dict[str, Any], days: int, limit: int
         source = store.get("audits", frozen["audit_id"]).get("source_policy")
     except (AutError, KeyError, TypeError):    # missing or changed record: rebuild, never fail nightly
         return None
-    if source is None:      # pre-v4 manifests and old fixtures: the old policy-id rule
-        return frozen if policy_id is not None and pending.get("policy_id") == policy_id else None
+    if source is None:      # pre-v4 manifests: the days and limit of the policy that froze it
+        try:
+            source = store.get("cycle_policies", pending["policy_id"])
+        except (AutError, KeyError, TypeError):
+            return None
     return frozen if (source.get("days"), source.get("limit")) == (days, limit) else None
 
 
@@ -118,7 +121,8 @@ def freeze_cycle_audit(store: Store, *, days: int = 7, limit: int = 30,
 
 
 def _freeze(store: Store, days: int, limit: int, budget_s: int) -> dict[str, Any]:
-    if (kept := _reusable_audit(store, _pending(store), days, limit)):
+    before = _pending(store)
+    if (kept := _reusable_audit(store, before, days, limit)):
         return {"status": "kept", **kept}
     # Build without the cycle lock: after sleep launchd fires this and the reviewer together,
     # and the reviewer must not lose its night to a busy lock. The worst case is a duplicate build.
@@ -129,8 +133,11 @@ def _freeze(store: Store, days: int, limit: int, budget_s: int) -> dict[str, Any
         return {"status": "budget"}
     try:
         with _locked(store.root / "cycle", blocking=False):
-            if (kept := _reusable_audit(store, _pending(store), days, limit)):
+            current = _pending(store)
+            if (kept := _reusable_audit(store, current, days, limit)):
                 return {"status": "kept", **kept}
+            if current != before:   # a cycle finished during the build and judged this evidence
+                return {"status": "superseded", "audit_id": fresh["audit_id"]}
             atomic_write_text(store.root / "pending_cycle.json", json.dumps({"audit": fresh}) + "\n")
             return {"status": "frozen", **fresh}
     except LockBusy:        # a running cycle owns pending; the built audit record is harmless
@@ -159,7 +166,7 @@ def run_once(store: Store, *, days: int = 7, limit: int = 30, case_limit: int = 
         with _locked(store.root / "cycle", blocking=False):
             # A run that must build its own audit gets that time on top of the judge's budget.
             needs_audit = audit_id is None and audit_budget_s and not _reusable_audit(
-                store, _pending(store), days, limit, key)
+                store, _pending(store), days, limit)
             deadline = time.monotonic() + budget_s + (audit_budget_s if needs_audit else 0)
             argv = [sys.executable, "-I", "-m", "agent_usage_tracker.improve.schedule", "--root",
                     str(store.root), "--policy", key, "--run-id", run_id,
@@ -203,7 +210,7 @@ def _worker(store: Store, policy_id: str, run_id: str, *,
     pending_path = store.root / "pending_cycle.json"
     provided = policy.get("audit_id")
     reuse = None if provided else _reusable_audit(store, _pending(store), policy["days"],
-                                                  policy["limit"], policy_id)
+                                                  policy["limit"])
     allowance = 0 if provided or reuse else policy.get("audit_budget_s", 0)
     outer = min(deadline if deadline is not None else started + budget_s + allowance,
                 started + budget_s + allowance)

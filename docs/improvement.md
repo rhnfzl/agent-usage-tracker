@@ -313,7 +313,8 @@ To keep the audit out of the judge's budget, freeze it in a separate step first:
 aut improve audit --cycle --days 7 --limit 30 --budget-s 1500
 ```
 
-It returns `frozen`, `kept` (a matching audit is already pending), `busy`, or `budget`.
+It returns `frozen`, `kept` (a matching audit is already pending), `busy`, `budget`, or
+`superseded` (a cycle finished while it built, so it queues nothing).
 Only `budget` exits 1, and it leaves the pending audit unchanged.
 `--cycle` takes no `--project`. Plain `aut improve audit` is unchanged and writes no pending audit.
 `packaging/launchd/dev.aut.improve-audit.plist` is a template that runs this step at 03:50.

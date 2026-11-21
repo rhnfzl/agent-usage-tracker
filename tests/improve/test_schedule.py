@@ -232,6 +232,41 @@ def test_freeze_cycle_audit_writes_pending(tmp_path, monkeypatch, pending):
     assert json.loads((store.root / "pending_cycle.json").read_text()) == {"audit": fresh}
 
 
+def test_freeze_cycle_audit_queues_nothing_when_a_cycle_finishes_during_the_build(
+        tmp_path, monkeypatch):
+    from agent_usage_tracker.improve import schedule
+
+    store = Store(tmp_path / "private")
+    write_pending(store, {"audit": None})
+    fresh = frozen_audit(store)
+    finished = {"policy_id": "reviewer", "audit": None}
+
+    def build(*args, **kwargs):
+        write_pending(store, finished)      # the reviewer completes its cycle meanwhile
+        return fresh
+
+    monkeypatch.setattr(schedule, "audit", build)
+    assert schedule.freeze_cycle_audit(store) == {"status": "superseded",
+                                                  "audit_id": fresh["audit_id"]}
+    assert json.loads((store.root / "pending_cycle.json").read_text()) == finished
+
+
+@pytest.mark.parametrize("days, kept", [(7, True), (14, False)])
+def test_a_pre_v4_pending_audit_is_kept_by_its_policy_days_and_limit(
+        tmp_path, monkeypatch, days, kept):
+    from agent_usage_tracker.improve import schedule
+
+    store = Store(tmp_path / "private")
+    old = {"audit_id": store.put("audits", {"session_ids": [], "tag": "pre-v4"}), "sessions": 0}
+    write_pending(store, {"policy_id": cycle_policy(store), "audit": old})
+    fresh = frozen_audit(store, days=days, tag="new")
+    monkeypatch.setattr(schedule, "audit", lambda *a, **kw: fresh)
+    monkeypatch.setattr(schedule, "diagnose", lambda *a, **kw: {"complete": False})
+    # The audit budget changes the policy id even at zero; days and limit still match.
+    report = schedule._worker(store, cycle_policy(store, days=days, audit_budget_s=0), "run")
+    assert report["audit"] == (old if kept else fresh)
+
+
 def test_freeze_cycle_audit_keeps_a_matching_pending_audit(tmp_path, monkeypatch):
     from agent_usage_tracker.improve import schedule
 
