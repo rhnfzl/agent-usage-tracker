@@ -1,378 +1,65 @@
-# agent-usage-tracker (`aut`)
+# Agent Usage Tracker (`aut`)
 
 [![CI](https://github.com/rhnfzl/agent-usage-tracker/actions/workflows/ci.yml/badge.svg)](https://github.com/rhnfzl/agent-usage-tracker/actions/workflows/ci.yml)
-[![Python](https://img.shields.io/badge/python-3.11--3.15-blue)](https://www.python.org/downloads/)
-[![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-![Platforms](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey)
+[![PyPI](https://img.shields.io/pypi/v/agent-usage-tracker)](https://pypi.org/project/agent-usage-tracker/)
+[![MIT license](https://img.shields.io/badge/license-MIT-green)](https://github.com/rhnfzl/agent-usage-tracker/blob/main/LICENSE)
 
-**Stop guessing how many tokens your coding agents use and what they actually do.**
+**See where your coding agents spend tokens, how the work ends, and what keeps going wrong.**
 
-`aut` reads existing Claude Code, Codex, Cursor, and Pi logs. Export usage to a local CSV, or keep usage and sessions across machines in a database you control.
-Optional local models classify the work as building, debugging, planning, or reviewing.
-
-Use it to answer:
-
-- Which agents and models do I use, and how many tokens do they consume?
-- How much work involves building, debugging, planning, or reviewing?
-- Which sessions belong to the same piece of work, and what became of it?
-- Do I have a copy of my session logs if this laptop fails?
-
-With [uv](https://docs.astral.sh/uv/getting-started/installation/) installed, try a local export:
-
-```bash
-uvx agent-usage-tracker --agents claude_code,codex,cursor_cli,pi export --out usage.csv
-```
-
-AUT is a collector and CLI. For history and dashboards, it ships a Docker Compose sink (TimescaleDB and Grafana) that runs on your laptop or a homelab. There is no hosted service.
-
-[Quick start](#quick-start) · [Collectors](#collectors) · [Local labels](#local-labels-aut-label) · [Privacy](#privacy-model) · [Documentation](#documentation)
-
-## What you can track
-
-| Area | What AUT records | What you need |
-|---|---|---|
-| Usage | Input, output, cache-read, and cache-write tokens; model; project basename | Agent logs, or the optional Cursor API |
-| Sessions and activity | Human prompts, turns, interrupts, tool counts, commits, PR links, and related sessions | PostgreSQL |
-| Active time | ActivityWatch intervals and manual time entries | PostgreSQL; ActivityWatch is opt-in |
-| Outcomes | Commit merge/revert/rework states and your own session verdicts | PostgreSQL and local Git clones |
-| Local labels | Work categories, instruction types, and inferred outcomes | Saved model setup and local weights |
-| Daily commits | Your commits across local and remote clones, deduplicated across copies | PostgreSQL and configured Git roots |
-| Backups | Encrypted, deduplicated copies of logs, AUT configuration, and label files | A configured restic repository |
-
-**Token counts are usage, not your subscription bill.** Dollar figures derived from them are estimated API-equivalent costs.
-Local collection works with subscription logs without adding a proxy or requiring an API key.
+AUT reads the logs Claude Code, Codex, Cursor, and Pi already save. Start with a local usage report or CSV. Add your own database for session history across machines. The optional improvement workflow links recurring problems to the evidence and drafts changes you can review.
 
 ## Quick start
 
-Python 3.11 to 3.15; macOS, Linux, and Windows.
-The base install uses the standard library, plus `tzdata` on Windows.
+With [uv](https://docs.astral.sh/uv/getting-started/installation/) installed, try the demo with synthetic logs:
 
-### Try a local export
-
-Install with [uv](https://docs.astral.sh/uv/getting-started/installation/):
-
-```bash
-uv tool install agent-usage-tracker
-aut --agents claude_code,codex,cursor_cli,pi export --out usage.csv
+```sh
+uvx agent-usage-tracker demo
 ```
 
-For the newest `main` instead of the latest release, install from `git+https://github.com/rhnfzl/agent-usage-tracker`.
+The demo finds two agent records totaling **1,140 tokens**. It shows input, output and cache separately, and reports missing model prices as unknown. Try the same report with your own logs, or export them as a CSV:
 
-No database or configuration file is required for this export.
-It reads your current user's logs and writes usage rows to a local CSV.
-Cursor CLI contributes prompt rows, not token counts; choose a Cursor token source below for those.
-An unreadable source makes export exit nonzero, so a partial file cannot silently count as a complete export.
-
-### Read a local usage summary
-
-Use the summary to see recorded usage by agent, model, or project.
-It reads local logs without a database, a provider account, or a network connection.
-Try a synthetic example first, or preview local setup.
-
-```bash
-aut demo
-aut setup
-aut summary
-aut summary --period week --group-by model
-aut summary --since 2026-06-01 --until 2026-07-01 --group-by project --json
-aut overview
+```sh
+uvx agent-usage-tracker summary --period week --group-by agent
+uvx agent-usage-tracker --agents claude_code,codex,cursor_cli,pi export --out usage.csv
 ```
 
-The report uses the configured ledger time zone. The end date is exclusive.
-Source coverage describes what AUT can read. JSON uses `null` when no values are known for a count.
-The `unknown_events` field shows how many records lack each value.
-Keep the output private if it includes project names.
+Local reporting runs without a database, a provider account, or a model. The CLI runs on macOS, Linux, and Windows with Python 3.11 to 3.15. See [first run](https://github.com/rhnfzl/agent-usage-tracker/blob/main/docs/first-run.md) for installation, source checks, and the private browser overview.
 
-Use `aut setup --apply` to create a starter configuration if you need one.
-The [first-run guide](docs/first-run.md) covers optional scheduled delivery.
+## What you can track
 
-`aut sync-prices` explicitly refreshes local API list rates. The summary separates the known
-estimated subtotal from the full estimate and from costs recorded in source logs.
-Use `aut summary --compare-prices MODEL_A MODEL_B` to apply two rates to the same observed token mix.
+| Question | Where to start |
+|---|---|
+| Which agents and models am I using? How much is cached? | Local summary and CSV export. |
+| Which sessions belong to the same work? What happened to their commits? | Your own TimescaleDB and Grafana stack, with Git outcome tracking. |
+| How much of my work is building, debugging, planning, or review? | Optional local models estimate work categories and leave uncertain cases unknown. |
+| What if I lose this laptop? | Optional encrypted backups of agent logs and AUT settings with restic. |
 
-Use `aut statusline` to check cached quota, reset times, and scan freshness.
-The [quota guide](docs/quota.md) shows how to feed Claude Code statusline input into AUT
-and enable local notices for quota or pending delivery.
+## From a repeated problem to a fix you can review
 
-### Keep history in your own database
+![AUT reads agent logs for a local report or self-hosted history. A separate optional workflow checks local evidence, groups recurring problems, and drafts a fix for approval.](https://raw.githubusercontent.com/rhnfzl/agent-usage-tracker/main/docs/assets/aut-workflow.png)
 
-Install the PostgreSQL extra:
+For example, an agent says the tests passed. AUT can surface the tool result behind that claim. If the result is missing, the judgment can stay unknown. When judgments identify the same problem across distinct tasks, AUT can group those cases and draft a small instruction or config change in an isolated copy. Run a check you trust against the original and the candidate, then decide whether to adopt it.
 
-```bash
-uv tool install "agent-usage-tracker[postgres]"
+Start by freezing a small sample of recent sessions. This step runs locally without a model:
+
+```sh
+uvx agent-usage-tracker improve audit --days 7 --limit 30
 ```
 
-Create `~/.config/agent-usage-tracker/config.toml` with your machine label and database connection:
-
-```toml
-machine = "laptop"
-agents = ["claude_code", "codex", "cursor_cli", "pi"]
-
-[transport]
-pg_dsn = "env:AUT_PG_DSN"
-```
-
-Set `AUT_PG_DSN` to your provisioned database connection.
-The database needs AUT's tables and views. The [sink stack](src/agent_usage_tracker/sink_stack/README.md) provides them with one `docker compose up`;
-the [deploy runbook](DEPLOY.md) describes the sink contract.
-Set `ledger_timezone` to the sink's `AUT_TZ`.
-On macOS and Linux, protect the configuration with `chmod 600`.
-On Windows, restrict its directory permissions to your account.
-
-```bash
-aut status
-aut scan --dry-run
-aut scan
-```
-
-The dry run parses logs and reports totals without sending rows.
-Real scans advance their watermark only after delivery succeeds.
-Repeated delivery is safe because the sink deduplicates event IDs.
-Native JSONL collection drains a finite file snapshot, including all capped chunks present when each file is admitted.
-Later appends, new files and replaced files wait for the next run.
-On POSIX, acknowledged closed Cursor CLI stores skip SQLite reads while database and WAL metadata stay unchanged.
-
-Webhook-only scans keep session, activity, and time rows in a private local delivery queue.
-`aut status` shows pending rows. After configuring PostgreSQL, scans replay them automatically;
-`aut retry-delivery` also retries the queue directly. Keep the state directory in your backups.
-
-For a full configuration, start from [`config.example.toml`](config.example.toml).
-Put secrets in your local configuration or environment, never in this repository.
-Scheduled jobs do not inherit your shell environment; configure their secrets separately.
-
-### Configuration
-
-The [configuration reference](docs/reference.md#configuration) lists defaults, environment overrides, and local state files.
-Use the same secret `repo_key_salt` across machines if their repository identities must match.
-Preserve that salt in backups; replacing it breaks those cross-machine matches.
+The [improvement guide](https://github.com/rhnfzl/agent-usage-tracker/blob/main/docs/improvement.md) covers private evidence, advisory judgments, drafts, and the review inbox. The [study guide](https://github.com/rhnfzl/agent-usage-tracker/blob/main/docs/improvement-studies.md) explains how to test a candidate. Source edits require an explicit decision. A passing check supports the tested change; measuring an improvement in real work requires comparable follow-up.
 
 ## Collectors
 
-| Agent | Source | Coverage and limits |
-|---|---|---|
-| Claude Code | `~/.claude/projects/` and Claude homes configured in T3 | Usage, prompts, sessions, activity, and links |
-| T3 Code | `~/.t3/userdata/statev2.sqlite` | Confirmed app prompts and completed app runs after an explicit cutover; native logs retain token usage |
-| Codex | `~/.codex/sessions/` | Usage, reasoning tokens, prompts, sessions, activity, and links |
-| Pi | `~/.pi/agent/sessions/` | Usage, reasoning tokens, prompts, sessions, activity, and links |
-| Cursor CLI | `~/.cursor/chats/` and SDK run stores | Prompts, sessions, activity, and links; no token counts |
-| Cursor IDE | Local `state.vscdb` | Prompt records and a lower bound on usage |
-| Cursor API | Your dashboard account, explicitly enabled | Token usage for the IDE and CLI; no prompt records |
-| Cursor SDK | Configured run manifests | Per-run usage from your SDK applications |
-| ActivityWatch | Your local server, explicitly enabled | Active-window intervals; review title privacy settings first |
-
-T3 activity collection requires an approved `t3_activity_since` timestamp in your local configuration:
-
-```toml
-t3_activity_since = "2026-11-15T00:00:00Z" # replace with your approved prospective cutover
-```
-
-Include `"t3"` beside your native collectors when `agents` is explicit.
-T3 uses confirmed web/mobile messages and strong native bindings to avoid mirrored prompts.
-Provider changes share one `t3:<app-thread-id>` session. Native logs remain the source of tokens and costs.
-T3 turns count completed app runs, which can contain several internal agent turns.
-Missing or ambiguous evidence reports degraded coverage. Existing history is not reconciled automatically.
-
-**Choose one Cursor token source:** `cursor`, `cursor_api`, or `cursor_sdk`.
-Combining them can double-count usage. `cursor_cli` has no tokens and can run beside any of them.
-To collect IDE prompts beside API usage, add `cursor` with `cursor_human_only = true`.
-
-The [collector reference](docs/reference.md#collectors) covers source paths, defaults, and ActivityWatch filtering.
-Collectors use the running user's home and explicitly registered engine homes.
-They do not search other users' accounts.
-
-Run `aut doctor --json` to inspect readable sources, parser losses, pending delivery and evidence limits.
-Normal scans save a private coverage report and report changed gaps.
-A sourced catalog covers 25 coding tools without claiming that each has a qualified reader.
-See [shared harness coverage](docs/harness-coverage.md) for profiles, session associations and publication receipts.
-
-## Local labels (`aut label`)
-
-Optional decision models turn session evidence into categories such as building, debugging, planning, and review.
-They can also classify your instructions and infer whether a piece of work is resolved, blocked, or still open.
-
-Local estimates read Claude Code, Codex, Cursor CLI, and Pi inputs.
-Prompts and final replies stay inside the episode's time bounds.
-Daily work also stops at midnight in `ledger_timezone`, so shared sessions cannot mix separate work days.
-Cursor replies are omitted because their stores lack reliable per-reply timestamps.
-Cases without sufficient evidence stay unclassified; uncertain model decisions stay unknown.
-
-| Workflow | Use it for | Setup |
-|---|---|---|
-| Calibrated labels | Evaluating models against reviewed examples | Review examples, evaluate, and save a model choice |
-| Provisional local estimates | Ongoing classification with an existing local recipe | Save `label-local.json`, install the required runtime, and cache its exact weights |
-
-Collection does not require models, annotation, or cloud spending.
-Saved local recipes can combine models; they are not automatically fitted or selected for you.
-The MLX backends require Apple silicon. GGUF backends use a separately installed `llama-server`.
-AUT never downloads weights during classification.
-An optional [writing attribute](docs/local-labels.md#optional-writing-attribute) records explicit
-requests for prose deliverables alongside the main work category, using a separate local recipe.
-
-With a saved local recipe:
-
-```bash
-aut label run --local-estimates --task work_category
-```
-
-For historical work, prepare a job and resume its saved ID:
-
-```bash
-aut label replay --task work_category --since 2026-01-01 --until 2026-02-01
-aut label replay --job JOB_ID --apply --budget-s 600
-```
-
-Preparation previews coverage and freezes private inputs without running models or sending labels.
-The end date is exclusive. Resume the same job until `complete` is true; progress follows successful batch delivery.
-Frozen jobs keep their original inputs when new readers are installed.
-Mature-outcome catch-up is separately opt-in through `label_mature_outcomes`; it is disabled by default.
-
-See the [local-label guide](docs/local-labels.md) for model setup, ensembles, cutoffs, calibration, and replay privacy.
-Provisional charts describe estimates, not verified classification accuracy.
-
-### The models
-
-The [model reference](docs/local-labels.md#the-models) lists supported backends, pinned downloads, runtime needs, and synthetic timing measurements.
-Choose and evaluate models for your own tasks; the timing table does not establish classification accuracy.
-
-## Private improvement (`aut improve`)
-
-Optional local diagnosis finds evidence of avoidable recovery and unsupported completion claims.
-It saves private evidence, provisional model judgments, scoped patch proposals, and controlled command checks.
-These records stay separate from the normal sink. Installed instructions do not change automatically.
-
-Private studies connect incident evidence, prospective trial policies and fresh follow-up.
-They preserve rejected runs and distinguish bounded code correctness from general productivity.
-See the [study guide](docs/improvement-studies.md) for commands and evidence requirements.
-
-Additional producers can supply private usage, quota and tool observations through the
-[observation guide](docs/observations.md). `aut observe` imports explicit files, renders private quota reports,
-and offers an opt-in authenticated receiver. Public exports are local drafts.
-Native desktop receipts use `aut improve desktop`; command success does not establish task acceptance.
-
-```bash
-aut improve audit --days 7 --limit 30
-aut improve status
-aut improve report-card --days 28 --format md
-```
-
-Local judging uses cached models through the existing label extra.
-Bounded reviews preserve completed judgments and resume unfinished work within the configured budget.
-`aut improve inspect --case CASE_ID` writes a private view of a captured attempt and its source references.
-
-`aut improve label --rubric completion_supported` opens a private human review page to check an advisory judge against captured cases.
-`aut improve draft` prepares small changes for human review in private candidates. Remote drafters receive selected redacted file text; conversation excerpts stay off by default.
-
-Captured commit results can attach redacted local diffs for `code_quality` judging and human labels. Local commit-state changes queue another advisory review.
-Missing or clipped evidence stays explicit; inspection does not upgrade a judgment.
-Read the [private improvement guide](docs/improvement.md) before judging, staging changes, or executing trials.
-The guide covers executable judge references, independent agent-task acceptance, and stable wheel installations.
-
-## Scheduling
-
-Run AUT on each machine whose logs you want to collect.
-The supplied timers scan every 15 minutes on macOS and Windows, or every 10 minutes on Linux.
-The macOS scan also catches up at login and after sleep.
-
-The optional wrapper adds SSH tunnelling, retries, daily commit outcomes, and local labels.
-Update the installed package before copying a new wrapper; the wrapper calls `aut scan-job`.
-The scheduler prevents overlapping runs and records daily success only after each step completes.
-Failed or unfinished daily steps retry after the next successful scan.
-Local scheduled labels require `AUT_LABEL=1` and `AUT_LABEL_MODE=local` in `scan.env`, plus saved recipes.
-`AUT_IMPROVE_PUBLISH=1` adds daily advisory score and adoption-marker delivery after outcomes.
-Deploy the updated sink schema first. Preview with `aut publish-improve --dry-run`.
-An interrupted historical replay resumes when you invoke its saved job again; preparing a job does not install a scheduler.
-
-Follow the [timer setup](packaging/README.md) and [wrapper reference](docs/reference.md#scheduling).
-
-### Keep scripted Cursor work out of your human counts
-
-Use `aut cursor-run --model MODEL --workspace /path/to/workspace < prompt.txt` for scripted requests.
-It registers the chat as automated before sending the prompt through your installed `cursor-agent` account.
-Registered prompts do not increase human steer counts; automated turns and child links remain available.
-This command can spend your account's credits. Normal collection never invokes it.
-Direct Cursor calls bypass this registration; existing database records require a separate audited repair.
-
-### Back up your logs
-
-`aut backup` uses restic to copy agent logs, AUT configuration, label files, and the repository-key salt.
-The shipped macOS backup job runs daily at 02:30 and at login.
-Backup destinations, passwords, retention, and any offsite copy require your own setup.
-The database needs its own backup.
-
-Follow [backup and laptop recovery](docs/new-laptop.md) before relying on recovery.
-`aut status` reports the age of the last good backup; `aut backup --check` checks the repository.
+Claude Code, Codex, and Pi supply native token records. Cursor CLI supplies prompts and activity. For Cursor token totals, choose one of the IDE, API, or SDK sources to avoid double-counting. T3 Code activity and ActivityWatch are optional. See the [collector matrix](https://github.com/rhnfzl/agent-usage-tracker/blob/main/docs/reference.md#collectors) and [coverage guide](https://github.com/rhnfzl/agent-usage-tracker/blob/main/docs/harness-coverage.md).
 
 ## Privacy model
 
-AUT sends rows only to the sink you configure. It publishes nothing itself.
-Normal collection sends counts and identifiers, not prompt text, tool output, commit messages, or full local paths.
-Repository identities and references use salted HMAC keys.
+Normal collection works from existing logs. If you configure a sink, it receives usage and activity metadata such as counts, project basenames, and commit IDs. Prompt text and tool output stay off that path. Optional remote drafting sends selected file text and review summaries after redaction. Conversation excerpts require separate opt-in. See the [privacy and network-call reference](https://github.com/rhnfzl/agent-usage-tracker/blob/main/docs/reference.md#privacy-model) and [drafting guide](https://github.com/rhnfzl/agent-usage-tracker/blob/main/docs/improvement.md#drafted-proposals).
 
-Some metadata remains readable: project basenames, session IDs, commit SHAs, skill names, and tool counts.
-ActivityWatch can send redacted window titles unless you turn titles off; app names are still sent.
-The optional `daily_note` task sends a generated note.
-
-Local replay jobs retain redacted input text on disk. Keep them and your evaluations outside the public source repository.
-The optional teacher command sends sampled Claude Code text through `claude -p`; local classification does not need it.
-Cursor API collection and `cursor-run` also make account-authenticated network calls when explicitly used.
-
-Read the [full privacy and network-call reference](docs/reference.md#privacy-model) before enabling optional collectors or model workflows.
-
-## Commands
-
-| Start with | Purpose |
-|---|---|
-| `aut status` | Check configuration, progress, and backup age |
-| `aut setup` | Preview configuration, source checks, and delivery status |
-| `aut demo` | Try the local summary on synthetic agent logs |
-| `aut summary --period week` | See local usage, source coverage, and unknown counts |
-| `aut overview` | Open a private page with usage, source health, and available evidence |
-| `aut statusline` | Check cached quota, reset times, and scan freshness |
-| `aut scan --dry-run` | Inspect parsed totals without sending rows |
-| `aut scan` | Deliver new usage and activity |
-| `aut export --out usage.csv` | Export local usage without a sink |
-| `aut git-days --dry-run` | Preview daily commit counts across configured clones |
-| `aut git-days --local-only` | Collect available local commits while remote machines are offline; mark incomplete coverage |
-| `aut inspect --day YYYY-MM-DD` | Inspect the local evidence behind a day's episodes |
-| `aut backup --check` | Verify your configured restic repository |
-
-Use `aut --help` or `aut <command> --help` for options.
-The [full command reference](docs/reference.md#commands) includes backfills, outcomes, review pages, and model evaluation.
+Usage is measured in tokens. Dollar estimates apply API list rates and are separate from subscription billing. AUT is a CLI with an optional self-hosted dashboard.
 
 ## Documentation
 
-| Guide | Read it when you want to... |
-|---|---|
-| [Configuration example](config.example.toml) | Choose sources, transports, and optional features |
-| [Command and configuration reference](docs/reference.md) | Look up commands, defaults, local files, privacy rules, or errors |
-| [Local labels and models](docs/local-labels.md) | Configure decisions, evaluate models, or classify historical work |
-| [Scheduling](packaging/README.md) | Install macOS, Linux, or Windows timers |
-| [Backup and recovery](docs/new-laptop.md) | Preserve logs and recover on another machine |
-| [Deploy runbook](DEPLOY.md) | Provision a self-hosted sink and connect collectors |
-| [Data contract](CONTRACT.md) | Build database views, dashboards, or a website from AUT rows |
-
-## Development
-
-From a checkout:
-
-In restricted agent sessions, keep uv's cache inside the checkout before running these commands:
-
-```bash
-export UV_CACHE_DIR="$PWD/.agent-harness/uv-cache"
-```
-
-```bash
-uv venv
-uv pip install -e ".[test,postgres]" ruff==0.15.11 mypy==2.4.1
-uv run --no-sync pytest -q
-uv run --no-sync ruff check .
-uv run --no-sync mypy
-```
-
-The [CI workflow](.github/workflows/ci.yml) tests Linux, macOS, and Windows across supported Python versions.
-SQL integration tests require a scratch database on a TimescaleDB server and `psql`, through `AUT_TEST_PG_DSN` with a literal IP address and port; otherwise those tests skip.
-To release, raise `__version__` in `src/agent_usage_tracker/__init__.py`, merge, and push the tag `v<version>`.
-The [release workflow](.github/workflows/release.yml) builds it and publishes it to PyPI through trusted publishing.
-Use synthetic fixtures in public contributions. Keep session logs, personal labels, and private benchmarks out of commits.
-
-MIT licensed. See [LICENSE](LICENSE).
+- **Set up:** [First run](https://github.com/rhnfzl/agent-usage-tracker/blob/main/docs/first-run.md) · [Self-hosted stack](https://github.com/rhnfzl/agent-usage-tracker/blob/main/src/agent_usage_tracker/sink_stack/README.md) · [Deploy runbook](https://github.com/rhnfzl/agent-usage-tracker/blob/main/DEPLOY.md) · [Timers](https://github.com/rhnfzl/agent-usage-tracker/blob/main/packaging/README.md)
+- **Use it:** [Command and configuration reference](https://github.com/rhnfzl/agent-usage-tracker/blob/main/docs/reference.md) · [Local labels](https://github.com/rhnfzl/agent-usage-tracker/blob/main/docs/local-labels.md) · [Quota and statusline](https://github.com/rhnfzl/agent-usage-tracker/blob/main/docs/quota.md) · [Backup and recovery](https://github.com/rhnfzl/agent-usage-tracker/blob/main/docs/new-laptop.md)
+- **Improve it:** [Private improvement](https://github.com/rhnfzl/agent-usage-tracker/blob/main/docs/improvement.md) · [Controlled studies](https://github.com/rhnfzl/agent-usage-tracker/blob/main/docs/improvement-studies.md) · [Observation imports](https://github.com/rhnfzl/agent-usage-tracker/blob/main/docs/observations.md) · [Development](https://github.com/rhnfzl/agent-usage-tracker/blob/main/docs/development.md) · [Data contract](https://github.com/rhnfzl/agent-usage-tracker/blob/main/CONTRACT.md)

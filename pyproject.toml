@@ -1,7 +1,7 @@
 [project]
 name = "agent-usage-tracker"
 dynamic = ["version"]
-description = "Passive, subscription-safe tracker of coding-agent work (Claude Code, Codex, Cursor, Pi): usage, sessions, activity, active time, outcomes and local labels. Reads local logs, normalizes, pushes to a self-hosted sink."
+description = "Track coding-agent usage and outcomes from local logs, find recurring problems, and test proposed fixes before adopting them."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
