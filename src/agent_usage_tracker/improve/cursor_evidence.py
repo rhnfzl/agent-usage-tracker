@@ -15,14 +15,15 @@ from ..collectors._util import dict_or_empty, epoch_ms_to_iso
 from ..collectors.activity_common import result_status, text_of
 from ..cursor_run import automated_sessions
 from ..event import parse_ts
-from .evidence import VERSION, trace_event
+from .evidence import VERSION, has_attachment, trace_event
 
 
 def read(path: Path, since: float, max_bytes: int) -> dict[str, Any] | None:
     with closing(sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=1)) as db:
+        db.setlimit(sqlite3.SQLITE_LIMIT_LENGTH, max_bytes)
         db.execute("PRAGMA query_only=ON")
         db.execute("BEGIN")
-        row = db.execute("SELECT length(CAST(value AS BLOB)) FROM meta WHERE key='0'").fetchone()
+        row = db.execute("SELECT length(value) FROM meta WHERE key='0'").fetchone()
         if not row or row[0] is None or row[0] >= max_bytes:
             raise ValueError("Cursor metadata missing or over budget")
         meta = cursor_cli.chat_meta(db)
@@ -38,6 +39,7 @@ def read(path: Path, since: float, max_bytes: int) -> dict[str, Any] | None:
         events: list[dict[str, Any]] = []
         timestamp = None
         request = None
+        pending_summary = None
         active = False
         replied = False
         seen: set[tuple[str, str]] = set()
@@ -68,8 +70,14 @@ def read(path: Path, since: float, max_bytes: int) -> dict[str, Any] | None:
                            "table": "blobs", "record_id": record_id})
 
         sequence = blob(root)
-        if sequence is not None:
-            for ordinal, mid in enumerate(cursor_cli._field1_ids(sequence)):
+        if sequence is None:
+            raise ValueError("Cursor chat root payload unavailable")
+        try:
+            messages = cursor_cli._field1_ids(sequence, limit=20001)
+        except IndexError as exc:
+            raise ValueError("Cursor chat root is truncated") from exc
+        if messages:
+            for ordinal, mid in enumerate(messages):
                 if ordinal == 20000:
                     counts["source_incomplete"] = 1
                     break
@@ -84,7 +92,15 @@ def read(path: Path, since: float, max_bytes: int) -> dict[str, Any] | None:
                     continue
                 role = message.get("role")
                 body = message.get("content")
+                omitted = has_attachment(body)
                 options = cursor_cli._cursor_options(message)
+                if options.get("isSummary"):
+                    counts["source_incomplete"] = 1
+                    if active:
+                        emit("compaction", mid, "context was compacted", mid)
+                    else:
+                        pending_summary = mid
+                    continue
                 if rid := cursor_cli.request_id(message):
                     if rid == request:
                         # An in-turn user message can change the goal mid-attempt.
@@ -100,12 +116,13 @@ def read(path: Path, since: float, max_bytes: int) -> dict[str, Any] | None:
                     replied = False
                     if active:
                         query = cursor_cli.USER_QUERY.search(text)
-                        emit("prompt", mid, query[1] if query else text, mid)
+                        emit("prompt", mid, query[1] if query else text, mid, omitted_attachment=omitted)
+                        if pending_summary:
+                            emit("compaction", pending_summary, "context was compacted", pending_summary)
+                            pending_summary = None
                     continue
                 if not active:
                     continue
-                if options.get("isSummary"):
-                    emit("compaction", mid, "context was compacted", mid)
                 if role not in {"assistant", "tool"}:
                     continue
                 if isinstance(body, str) and role == "assistant" and body:
@@ -118,7 +135,7 @@ def read(path: Path, since: float, max_bytes: int) -> dict[str, Any] | None:
                     key = f"{mid}:{index}"
                     tool, call = block.get("toolName"), block.get("toolCallId")
                     if role == "assistant" and block.get("type") == "text" and block.get("text"):
-                        emit("reply", key, block["text"], mid)
+                        emit("reply", key, block["text"], mid, omitted_attachment=omitted)
                         replied = True
                     elif role == "assistant" and block.get("type") == "tool-call":
                         emit("call", key, block.get("args", {}), mid, call=call, tool=tool)
@@ -129,7 +146,8 @@ def read(path: Path, since: float, max_bytes: int) -> dict[str, Any] | None:
                         status = result_status(value, error)
                         if tool == "Shell" and isinstance(value, str) and (ex := cursor_cli.EXIT_LINE.match(value)):
                             status = "error" if error is True or int(ex[1]) else "success"
-                        emit("result", key, value, mid, call=call, tool=tool, status=status)
+                        emit("result", key, value, mid, call=call, tool=tool, status=status,
+                             omitted_attachment=omitted)
                         replied = False
 
     calls = {e["call_id"] for e in events if e["kind"] == "call"}

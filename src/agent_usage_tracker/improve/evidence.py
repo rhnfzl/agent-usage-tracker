@@ -20,6 +20,7 @@ from ..state import parse_record
 TEXT_LIMIT = 6000
 BYTE_LIMIT = 16 * 1024 * 1024
 VERSION = 7
+ATTACHMENT_TYPES = ("image", "file", "document", "audio", "video", "resource")
 
 
 def _text(value: object) -> str:
@@ -28,20 +29,29 @@ def _text(value: object) -> str:
     if isinstance(value, list):
         if all(isinstance(b, str) for b in value):
             return json.dumps(value, ensure_ascii=False)
-        return "\n".join(str(b.get("text", "")) for b in value if isinstance(b, dict))
+        return "\n".join(str(b.get("text", "")) for b in value
+                         if isinstance(b, dict) and b.get("type") not in ATTACHMENT_TYPES)
     return json.dumps(value, ensure_ascii=False, sort_keys=True)
+
+
+def has_attachment(content: object) -> bool:
+    return isinstance(content, list) and any(isinstance(block, dict) and block.get("type")
+                                            in ATTACHMENT_TYPES for block in content)
 
 
 def trace_event(agent: str, session: str, kind: str, identity: str, value: object,
                 timestamp: object, *, call: object = "", tool: object = "",
-                status: str = "unknown") -> dict[str, Any]:
+                status: str = "unknown", omitted_attachment: bool = False) -> dict[str, Any]:
     raw = _text(value)
+    omitted_attachment = omitted_attachment or has_attachment(value)
+    if omitted_attachment:
+        raw = "[Attachment omitted]\n" + raw
     signature = hashlib.sha256(json.dumps({"text": raw, "status": status,
         "tool": str(tool or "")}, sort_keys=True).encode()).hexdigest()
     cleaned = redact(raw)
     return {"id": hashlib.sha256(f"{agent}|{session}|{kind}|{identity}".encode()).hexdigest()[:32],
             "kind": kind, "timestamp": timestamp, "text": cleaned[:TEXT_LIMIT],
-            "truncated": len(cleaned) > TEXT_LIMIT, "source_sha256": signature,
+            "truncated": omitted_attachment or len(cleaned) > TEXT_LIMIT, "source_sha256": signature,
             "call_id": str(call or ""), "tool": str(tool or ""), "status": status}
 
 
@@ -237,7 +247,7 @@ def read_session(path: Path, agent: str, max_bytes: int = BYTE_LIMIT,
                              call=block.get("id"), tool=block.get("name"), key=f"{entry}:{index}")
                     elif block.get("type") == "text":
                         emit("reply", block.get("text", ""), line, record, key=f"{entry}:{index}")
-                if message.get("stopReason") in {"stop", "aborted", "error", "length"}:
+                if message.get("stopReason") in {"stop", "aborted", "length"}:
                     last_closed = message["stopReason"] == "stop"
                     emit("boundary", "turn_complete" if last_closed else "turn_aborted",
                          line, record, key=entry)
