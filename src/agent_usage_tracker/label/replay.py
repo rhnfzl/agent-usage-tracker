@@ -8,11 +8,11 @@ import re
 import time
 import uuid
 from dataclasses import asdict
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from ..config import AutError, Config
+from ..config import AutError, Config, ledger_zone, machine_zone_agrees
 from ..push import send_activity_rows
 from ..repo_keys import RepoKeys
 from ..state import LockBusy, _locked, atomic_write_text
@@ -72,14 +72,15 @@ def prepare(cfg: Config, task: str, since: date, until: date, *, src: Source | N
             now: datetime | None = None) -> dict[str, Any]:
     """Freeze redacted local inputs and preview counts, without scoring or sink writes."""
     now = now or datetime.now(timezone.utc)
-    if task not in TASK_NAMES or since >= until or until > now.astimezone().date():
+    tz = ledger_zone(cfg)
+    if task not in TASK_NAMES or since >= until or until > now.astimezone(tz).date():
         raise AutError("label replay: choose a local task and a nonempty range of completed dates")
     cfg.require_pg("label replay preview")
     identity = _identity(cfg)
     policy, policy_id = load_policy(writing_policy_path()) if task == "writing_activity" else load_policy()
     if task not in policy["tasks"]:
         raise AutError("label replay: this task has no saved local recipe")
-    start, end = local_midnight(since), local_midnight(until)
+    start, end = local_midnight(since, tz), local_midnight(until, tz)
     src = src or Source(cfg, local_context=True)
     missing = len(getattr(src, "missing_text_units", []))
     partial = len(getattr(src, "partial_text_units", []))
@@ -94,7 +95,8 @@ def prepare(cfg: Config, task: str, since: date, until: date, *, src: Source | N
     directory = _directory(job_id)
     labelled_at = reserve_label_time(directory.parent, now)
     manifest = {"version": 1, "job_id": job_id, "task": task, "since": since.isoformat(),
-                "until": until.isoformat(), "asof": now.astimezone(timezone.utc).isoformat(),
+                "until": until.isoformat(), "ledger_timezone": cfg.ledger_timezone,
+                "asof": now.astimezone(timezone.utc).isoformat(),
                 "labelled_at": labelled_at, "machine": cfg.machine, "identity": identity,
                 "policy_id": policy_id, "task_policy": policy["tasks"][task],
                 "missing_local_text": sum(start <= ts < end for ts in
@@ -128,6 +130,15 @@ def resume(cfg: Config, job_id: str, *, apply: bool = False, budget_s: int = 600
         raise AutError("label replay: this job is already running") from exc
 
 
+def _machine_days_match(manifest: dict[str, Any], cfg: Config) -> bool:
+    """A job saved before its zone was recorded counted days and hours in the machine's zone. It
+    may go on when that zone agrees with the ledger zone over the job's range, a day either side."""
+    since, until = (datetime.fromisoformat(manifest[k]).replace(tzinfo=timezone.utc)
+                    for k in ("since", "until"))
+    return machine_zone_agrees(ledger_zone(cfg), since - timedelta(days=1),
+                               until + timedelta(days=1))
+
+
 def _resume(cfg: Config, job_id: str, directory: Path, apply: bool, budget_s: int,
             backend_for: Callable[[str, dict[str, Any], str, Config], LocalBackend] | None,
             ) -> dict[str, Any]:
@@ -140,6 +151,11 @@ def _resume(cfg: Config, job_id: str, directory: Path, apply: bool, budget_s: in
         raise AutError("label replay: job snapshot or cursor changed; refusing to continue")
     if manifest["machine"] != cfg.machine or manifest["identity"] != _identity(cfg):
         raise AutError("label replay: machine identity or repository salt changed")
+    saved = manifest.get("ledger_timezone")
+    if saved != cfg.ledger_timezone and not (saved is None and _machine_days_match(manifest, cfg)):
+        raise AutError(f"label replay: the job's days are in ledger_timezone "
+                       f"{manifest.get('ledger_timezone') or 'unknown'}, not {cfg.ledger_timezone}; "
+                       "prepare a new job")
     task = manifest["task"]
     policy, _current_id = load_policy(writing_policy_path()) if task == "writing_activity" else load_policy()
     if _digest(policy["tasks"].get(task)) != _digest(manifest["task_policy"]):

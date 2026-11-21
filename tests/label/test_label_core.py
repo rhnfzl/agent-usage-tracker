@@ -15,14 +15,15 @@ import json
 import math
 import sys
 import types
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import pytest
 
 from agent_usage_tracker.label import backends
 from agent_usage_tracker.label import core
 from agent_usage_tracker.label import tasks
-from label_helpers import ById, NOW, SECRET
+from label_helpers import ZONE, ById, NOW, SECRET
 
 
 class FixedLetters(backends.LetterBackend):
@@ -145,6 +146,25 @@ def test_choice_file_and_backend_slots(tmp_path, monkeypatch):
         backends.Encoder("steer_intent").distribution(_req())
 
 
+def test_a_choice_or_encoder_from_another_ledger_zone_is_not_used(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("AUT_CONFIG", str(tmp_path / "config.toml"))
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    ver = f"steer_intent@2/p{core.PROMPT_VER}"
+    (tmp_path / "label.json").write_text(json.dumps({"tasks": {"steer_intent": {
+        "tau": {"stop": 0.7}, "prompt_ver": ver, "ledger_timezone": "Asia/Tokyo"}}}))
+    assert core.load_choice("steer_intent", 2, "Asia/Tokyo").tau == {"stop": 0.7}
+    assert core.load_choice("steer_intent", 2, ZONE) == core.Choice()
+    assert "another ledger_timezone" in capsys.readouterr().err
+    backends.encoder_path("steer_intent").parent.mkdir(parents=True)
+    backends.encoder_path("steer_intent").write_text(json.dumps({
+        "task": "steer_intent", "task_ver": 2, "ledger_timezone": "Asia/Tokyo",
+        "labels": ["stop"], "w": {}}))
+    assert backends.Encoder("steer_intent", zone="Asia/Tokyo").distribution(_req())
+    with pytest.raises(backends.BackendUnavailable, match="another ledger_timezone"):
+        backends.make_backend("steer_intent", core.Choice(backend="encoder"), "x",
+                              zone=ZONE).distribution(_req())
+
+
 def test_a_bad_platt_in_label_json_runs_uncalibrated(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("AUT_CONFIG", str(tmp_path / "config.toml"))
     for bad in ("yes", {"yes": "a"}, {"a": 1.0, "b": 0.0}, {"yes": "a", "a": "1", "b": 0.0}):
@@ -176,8 +196,9 @@ def _two_options(**kw) -> core.Request:
 
 
 def test_local_midnight_is_an_aware_start_of_that_day():
-    m = core.local_midnight(date(2026, 3, 29))
-    assert m.tzinfo is not None and (m.year, m.month, m.day, m.hour, m.minute) == (2026, 3, 29, 0, 0)
+    m = core.local_midnight(date(2026, 3, 29), ZoneInfo("Europe/Amsterdam"))
+    assert (m.year, m.month, m.day, m.hour, m.minute) == (2026, 3, 29, 0, 0)
+    assert m.utcoffset() == timedelta(hours=1)     # the ledger zone's, on its spring-forward day
 
 
 def test_label_paths_follow_the_environment(tmp_path, monkeypatch):

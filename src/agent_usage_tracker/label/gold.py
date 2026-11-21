@@ -18,7 +18,7 @@ from datetime import date, datetime, timezone
 from typing import Any, Callable
 
 from .. import local_page
-from ..config import LABEL_DAYS, Config
+from ..config import LABEL_DAYS, Config, ledger_zone
 from .core import Request, top_label
 from .evalset import (FLOORS, append_jsonl, eval_path, gold_latest, read_jsonl,
                       silver_by_unit, stratified, stratum, window_units, write_jsonl)
@@ -116,8 +116,9 @@ def _drop_last(task: str, unit_id: str) -> None:
 class _Sitting:
     """One sitting of the gold page: the queue, the position in it, and what can be undone."""
 
-    def __init__(self, task: str, reqs: dict[str, Request], today: date | None) -> None:
-        self.task, self.silver, self.gold = task, silver_by_unit(task), gold_latest(task)
+    def __init__(self, task: str, reqs: dict[str, Request], today: date | None, zone: str) -> None:
+        self.task, self.zone = task, zone
+        self.silver, self.gold = silver_by_unit(task, zone), gold_latest(task, zone)
         self.queue = stratified([r for u, r in reqs.items() if u not in self.gold],
                                 lambda r: stratum(self.silver.get(r.unit_id)), seed=task)
         self.pos = 0
@@ -148,7 +149,8 @@ class _Sitting:
     def _answer(self, u: str, a: str) -> None:
         append_jsonl(eval_path(self.task, "gold"), {"unit_id": u, "gold": a, "labeller": LABELLER,
                                                     "date": self.day,
-                                                    "task_ver": TASKS[self.task].ver})
+                                                    "task_ver": TASKS[self.task].ver,
+                                                    "ledger_timezone": self.zone})
         self.gold[u] = a
         self.hist.append(("gold", u))
         self.pos += 1
@@ -175,10 +177,12 @@ class _Sitting:
 
 
 def serve(task: str, reqs: dict[str, Request], *, open_browser: bool = True,
-          on_ready: Callable[[str], None] | None = None, today: date | None = None) -> Counter[str]:
-    """Serve the page until q (or Ctrl-C). Returns {answered, skipped} of this sitting."""
+          on_ready: Callable[[str], None] | None = None, today: date | None = None,
+          zone: str) -> Counter[str]:
+    """Serve the page until q (or Ctrl-C). Returns {answered, skipped} of this sitting; answers
+    are saved under ledger zone `zone`."""
     token = local_page.new_token()
-    sitting = _Sitting(task, reqs, today)
+    sitting = _Sitting(task, reqs, today, zone)
 
     def on_post(form: dict[str, Any]) -> bytes | None:
         if sitting.act(form):
@@ -196,10 +200,10 @@ def run_gold_review(cfg: Config, task: str | None, days: int = LABEL_DAYS, *, sr
                     on_ready: Callable[[str], None] | None = None,
                     now: datetime | None = None) -> dict[str, Any]:
     task = task or next((t for t in cfg.label_tasks if t in TASKS), "steer_intent")
-    today = (now or datetime.now(timezone.utc)).astimezone().date()
+    today = (now or datetime.now(timezone.utc)).astimezone(ledger_zone(cfg)).date()
     counts = serve(task, window_units(cfg, task, days, src, today), open_browser=open_browser,
-                   on_ready=on_ready, today=today)
-    n = Counter(gold_latest(task).values())
+                   on_ready=on_ready, today=today, zone=cfg.ledger_timezone)
+    n = Counter(gold_latest(task, cfg.ledger_timezone).values())
     return {**counts, "task": task, "gold": {c: n[c] for c, _d in TASKS[task].candidates}}
 
 

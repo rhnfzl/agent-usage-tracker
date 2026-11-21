@@ -464,12 +464,12 @@ Evidence remains until deliberately removed. Configure backups and retention sep
 
 ### Install a stable runtime
 
-Build a wheel, then install it outside the development checkout using cached dependencies:
+Build a wheel, then install the newest one outside the development checkout using cached dependencies:
 
 ```bash
 uv build --wheel
 python -m agent_usage_tracker.improve.runtime \
-  --wheel dist/agent_usage_tracker-0.1.0-py3-none-any.whl \
+  --wheel "$(ls -t dist/agent_usage_tracker-*-py3-none-any.whl | head -n 1)" \
   --store "$HOME/.local/share/aut/improve" \
   --runtime-root "$HOME/.local/share/aut/improve-runtime"
 ```

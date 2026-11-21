@@ -77,7 +77,7 @@ def test_teach_sonnet_only_for_claude_units_resumable_and_capped(tmp_path, monke
         assert c["sonnet_skipped"] == 1 and c["spent_usd_milli"] == 2000
         rows = evalset.read_jsonl(evalset.eval_path(TASK, "silver"))
         assert {r["teacher"] for r in rows} == {"fake/oracle", teach.SONNET}
-        assert all(set(r) == {"unit_id", "teacher", "dist", "date", "task_ver"} for r in rows)
+        assert all(set(r) == {"unit_id", "teacher", "dist", "date", "task_ver", "ledger_timezone"} for r in rows)
         assert WORD not in evalset.eval_path(TASK, "silver").read_text()
         assert WORD in asked[0]                         # Sonnet saw the (Claude Code) text
         # a rerun adds only what is missing: Sonnet for the skipped unit, then the fourth unit

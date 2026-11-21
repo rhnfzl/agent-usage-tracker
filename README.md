@@ -161,7 +161,7 @@ They can also classify your instructions and infer whether a piece of work is re
 
 Local estimates read Claude Code, Codex, Cursor CLI, and Pi inputs.
 Prompts and final replies stay inside the episode's time bounds.
-Daily work also stops at local midnight, so shared sessions cannot mix separate work days.
+Daily work also stops at midnight in `ledger_timezone`, so shared sessions cannot mix separate work days.
 Cursor replies are omitted because their stores lack reliable per-reply timestamps.
 Cases without sufficient evidence stay unclassified; uncertain model decisions stay unknown.
 

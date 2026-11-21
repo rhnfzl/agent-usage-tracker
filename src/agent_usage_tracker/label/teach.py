@@ -18,7 +18,7 @@ from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from ..config import LABEL_DAYS, AutError, Config
+from ..config import LABEL_DAYS, AutError, Config, ledger_zone, record_zone_ok
 from .backends import make_backend
 from .core import Choice, Request, render_prompt
 from .evalset import append_jsonl, eval_path, read_jsonl, stratified, unit_day, window_units
@@ -110,19 +110,20 @@ def run_teach(cfg: Config, task: str, n: int, *, budget_usd: float = 5.0, days: 
     local teacher is the config's label_model, uncalibrated; sonnet_only skips it, and with it every
     unit Sonnet may not read."""
     t = TASKS[task]
-    today = (now or datetime.now(timezone.utc)).astimezone().date()
+    tz = ledger_zone(cfg)
+    today = (now or datetime.now(timezone.utc)).astimezone(tz).date()
     reqs = window_units(cfg, task, days, src, today)
     local = None if sonnet_only else make_backend(task, Choice(), cfg.label_model,
                                                   cfg.label_llama_server)
     out = eval_path(task, "silver")
     have = {(r.get("unit_id"), r.get("teacher")) for r in read_jsonl(out)
-            if r.get("task_ver") == t.ver}
+            if r.get("task_ver") == t.ver and record_zone_ok(r, cfg.ledger_timezone)}
 
     def wants(r: Request) -> list[str]:
         teachers = ([local.model_id] if local else []) + ([SONNET] if r.unit in CLAUDE_UNITS else [])
         return [x for x in teachers if (r.unit_id, x) not in have]
 
-    order = stratified(list(reqs.values()), lambda r: (r.unit, unit_day(r)), seed=task)
+    order = stratified(list(reqs.values()), lambda r: (r.unit, unit_day(r, tz)), seed=task)
     todo = [r for r in order if wants(r)][:n]
     c: Counter[str] = Counter(units=len(todo))
     sonnet, today_s = _SonnetRun(budget_usd), today.isoformat()
@@ -132,6 +133,7 @@ def run_teach(cfg: Config, task: str, n: int, *, budget_usd: float = 5.0, days: 
             if dist is None:
                 continue
             append_jsonl(out, {"unit_id": r.unit_id, "teacher": teacher, "task_ver": t.ver,
+                               "ledger_timezone": cfg.ledger_timezone,
                                "date": today_s, "dist": {k: round(v, 4) for k, v in dist.items()}})
             c["sonnet" if teacher == SONNET else "local"] += 1
     c["spent_usd_milli"] = round(sonnet.spent * _MILLI_PER_USD)

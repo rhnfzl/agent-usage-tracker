@@ -17,7 +17,7 @@ import pytest
 
 from agent_usage_tracker.label import evalset
 from agent_usage_tracker.label import gold
-from label_helpers import LABELS, TASK, TODAY, WORD, _env, _src
+from label_helpers import LABELS, TASK, TODAY, WORD, ZONE, _env, _src
 from agent_usage_tracker.label import tasks
 from label_helpers import BASE, _cfg
 
@@ -29,7 +29,7 @@ def _serve(reqs, **kw):
         box["url"] = url
         ready.set()
     t = threading.Thread(target=lambda: box.update(res=gold.serve(
-        TASK, reqs, open_browser=False, on_ready=on_ready, **kw)))
+        TASK, reqs, open_browser=False, on_ready=on_ready, zone=ZONE, **kw)))
     t.start()
     assert ready.wait(10)
     return t, box
@@ -61,7 +61,7 @@ def test_gold_page_hides_silver_until_answered_and_writes_no_text(tmp_path):
         reqs = evalset.window_units(cfg, TASK, src=src, today=TODAY)
         for u in reqs:
             evalset.append_jsonl(evalset.eval_path(TASK, "silver"), {
-                "unit_id": u, "teacher": "fake/teacher", "task_ver": 2, "date": "d",
+                "unit_id": u, "teacher": "fake/teacher", "task_ver": 2, "ledger_timezone": ZONE, "date": "d",
                 "dist": {"acceptance": 0.8, "stop": 0.2}})
         t, box = _serve(reqs)
         url = box["url"]
@@ -91,7 +91,7 @@ def test_gold_page_hides_silver_until_answered_and_writes_no_text(tmp_path):
         assert not t.is_alive() and box["res"] == Counter(answered=1, skipped=0)
         rows = evalset.read_jsonl(evalset.eval_path(TASK, "gold"))
         assert rows == [{"unit_id": shown, "gold": "stop", "labeller": "human",
-                         "date": rows[0]["date"], "task_ver": 2}]
+                         "date": rows[0]["date"], "task_ver": 2, "ledger_timezone": ZONE}]
         assert WORD not in evalset.eval_path(TASK, "gold").read_text()
         # the next session starts with what is left
         t, box = _serve(reqs)
@@ -106,7 +106,7 @@ def _reqs(*ids) -> dict:
 
 
 def _sitting(*ids) -> gold._Sitting:
-    return gold._Sitting(TASK, _reqs(*ids), TODAY)
+    return gold._Sitting(TASK, _reqs(*ids), TODAY, ZONE)
 
 
 def _gold_rows() -> list[dict]:
@@ -166,7 +166,7 @@ def test_drop_last_removes_only_the_newest_row_of_the_unit(tmp_path):
 def test_session_skips_what_already_has_gold(tmp_path):
     with _env(tmp_path):
         evalset.append_jsonl(evalset.eval_path(TASK, "gold"),
-                             {"unit_id": "u1", "gold": "stop", "task_ver": tasks.TASKS[TASK].ver})
+                             {"unit_id": "u1", "gold": "stop", "task_ver": tasks.TASKS[TASK].ver, "ledger_timezone": ZONE})
         s = _sitting("u1", "u2")
         assert [r.unit_id for r in s.queue] == ["u2"]
 
@@ -189,7 +189,7 @@ def test_session_answer_writes_a_row_and_undo_takes_it_back(tmp_path):
         shown = s.queue[0].unit_id
         assert s.act({"a": ["stop"], "u": [shown]}) is False
         assert _gold_rows() == [{"unit_id": shown, "gold": "stop", "labeller": gold.LABELLER,
-                                 "date": TODAY.isoformat(), "task_ver": tasks.TASKS[TASK].ver}]
+                                 "date": TODAY.isoformat(), "task_ver": tasks.TASKS[TASK].ver, "ledger_timezone": ZONE}]
         assert (s.pos, s.gold, s.counts["answered"]) == (1, {shown: "stop"}, 1)
         assert s.last == {"gold": "stop", "teachers": []}
         s.act({"a": [":undo"]})
@@ -226,7 +226,7 @@ def test_run_gold_review_picks_the_first_labelled_task_and_reports_gold(tmp_path
     cfg = _cfg(tmp_path, label_tasks=("daily_note", TASK))
     with _env(tmp_path):
         evalset.append_jsonl(evalset.eval_path(TASK, "gold"),
-                             {"unit_id": "u", "gold": "stop", "task_ver": tasks.TASKS[TASK].ver})
+                             {"unit_id": "u", "gold": "stop", "task_ver": tasks.TASKS[TASK].ver, "ledger_timezone": ZONE})
         report = gold.run_gold_review(cfg, None, open_browser=False)
     assert seen["task"] == TASK and seen["open_browser"] is False and set(seen["reqs"]) == {"u"}
     assert (report["task"], report["answered"], report["skipped"]) == (TASK, 1, 2)

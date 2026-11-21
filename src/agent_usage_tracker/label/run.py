@@ -13,11 +13,11 @@ import sys
 import time
 from collections import Counter, defaultdict
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone, tzinfo
 from pathlib import Path
 from typing import Any, Callable
 
-from ..config import LABEL_NOTE, AutError, Config
+from ..config import LABEL_NOTE, AutError, Config, ledger_zone
 from ..episode_store import Episode
 from ..event import ActivityEvent
 from ..push import job_heartbeat, send_activity_rows
@@ -69,7 +69,7 @@ class _Run:
 
 
 def _window(name: str, wm: dict[str, Any], since: datetime | None, now: datetime,
-            ready: datetime | None = None, *, mature_outcomes: bool = False,
+            ready: datetime | None = None, *, tz: tzinfo, mature_outcomes: bool = False,
             ) -> tuple[datetime, datetime | None]:
     """(since, until) of one task. until None: up to now, and the watermark becomes the newest
     unit's ts. A day task covers whole past days (see _day_window)."""
@@ -82,30 +82,31 @@ def _window(name: str, wm: dict[str, Any], since: datetime | None, now: datetime
                   f"{scope}", file=sys.stderr)
         return now - timedelta(days=OUTCOME_DAYS), None
     if window == "day":
-        return _day_window(name, wm, since, now, ready)
-    return _start(name, wm, since, now), None
+        return _day_window(name, wm, since, now, ready, tz=tz)
+    return _start(name, wm, since, now, tz), None
 
 
-def _start(name: str, wm: dict[str, Any], since: datetime | None, now: datetime) -> datetime:
+def _start(name: str, wm: dict[str, Any], since: datetime | None, now: datetime,
+           tz: tzinfo) -> datetime:
     """Where a task picks up: `since`, else its watermark, else a day ago."""
     if since:
         return since
     if wm.get(name):
         return datetime.fromisoformat(wm[name])
-    return local_midnight(now.astimezone().date()) - timedelta(1)
+    return local_midnight(now.astimezone(tz).date(), tz) - timedelta(1)
 
 
 def _day_window(name: str, wm: dict[str, Any], since: datetime | None, now: datetime,
-                ready: datetime | None = None) -> tuple[datetime, datetime]:
-    """(since, until) over whole past days: until is today's local midnight, or for a task built
+                ready: datetime | None = None, *, tz: tzinfo) -> tuple[datetime, datetime]:
+    """(since, until) over whole past ledger days (tz): until is today's midnight, or for a task built
     from episodes the midnight that starts the day of `ready`, so a day whose episodes are not
     rebuilt yet (a month delivered after a gap) waits for the next rebuild instead of being passed
     for good. Never before since: then the window is empty."""
-    start = local_midnight(_start(name, wm, since, now).astimezone().date())
-    until = local_midnight(now.astimezone().date())
+    start = local_midnight(_start(name, wm, since, now, tz).astimezone(tz).date(), tz)
+    until = local_midnight(now.astimezone(tz).date(), tz)
     if name in _EPISODE_TASKS:
         until = start if ready is None else max(
-            start, min(until, local_midnight(ready.astimezone().date())))
+            start, min(until, local_midnight(ready.astimezone(tz).date(), tz)))
     return start, until
 
 
@@ -133,11 +134,12 @@ def _insert_note(dsn: str, day: date, text: str, model_id: str) -> None:
 
 def _run_notes(run: _Run, backend: NoteBackend, since: datetime, until: datetime) -> TaskReport:
     c: TaskReport = defaultdict(int)
-    for d in local_days(since, until):
+    tz = ledger_zone(run.cfg)
+    for d in local_days(since, until, tz):
         if time.monotonic() >= run.deadline:
             c["cut"] = 1
             break
-        start, end = local_midnight(d), local_midnight(d + timedelta(1))
+        start, end = local_midnight(d, tz), local_midnight(d + timedelta(1), tz)
         eps = [e for e in run.src.episodes(start) if e["first_ts"] < end]
         text = backend.generate(_note_prompt(d, run.src.labels(start, end), eps))
         c["notes"] += 1
@@ -217,22 +219,23 @@ def _label_one(run: _Run, name: str, since: datetime | None, now: datetime, choi
     """One task's report, and the error that stopped only it: its watermark stays, the others go
     on, and the heartbeat row records it."""
     try:
+        tz = ledger_zone(run.cfg)
         if name == "writing_activity" and not run.local_estimates:
             raise BackendUnavailable("label: writing_activity requires --local-estimates")
         if name != LABEL_NOTE:
-            start, until = _window(name, run.wm, since, now, run.ready,
+            start, until = _window(name, run.wm, since, now, run.ready, tz=tz,
                 mature_outcomes=run.local_estimates and run.cfg.label_mature_outcomes)
             if TASKS[name].window == "recent":
                 until = now  # All recent and mature requests in this run share one as-of time.
             report = _run_task(run, TASKS[name], choice, backend_for(name, choice), start, until)
         else:
-            start, until = _day_window(name, run.wm, since, now, run.ready)
+            start, until = _day_window(name, run.wm, since, now, run.ready, tz=tz)
             backend = backend_for(name, choice)
             if not isinstance(backend, NoteBackend):    # label.json can name the encoder for it
                 raise BackendUnavailable(f"label: {name} needs a backend that can write text")
             report = _run_notes(run, backend, start, until)
         if name in _EPISODE_TASKS and until is not None \
-                and until < local_midnight(now.astimezone().date()):
+                and until < local_midnight(now.astimezone(tz).date(), tz):
             report["unavailable"] = 1
             stopped = SourceUnavailable("waiting for the episode rebuild")
             print(f"aut: label {name}: {stopped}; saved progress will resume", file=sys.stderr)
@@ -285,7 +288,8 @@ def run_label(cfg: Config, tasks: list[str] | None = None, since: datetime | Non
         k = (task if choice.backend == "encoder" else None, choice.backend,
              choice.model_id or cfg.label_model, choice.model_rev)
         if k not in loaded:
-            loaded[k] = make_backend(task, choice, cfg.label_model, cfg.label_llama_server)
+            loaded[k] = make_backend(task, choice, cfg.label_model, cfg.label_llama_server,
+                                     cfg.ledger_timezone)
         return loaded[k]
 
     backend_for = backend_for or default_backend
@@ -302,7 +306,7 @@ def run_label(cfg: Config, tasks: list[str] | None = None, since: datetime | Non
         try:
             for name in names:
                 choice = Choice() if local_estimates else load_choice(
-                    name, TASKS[name].ver if name in TASKS else None)
+                    name, *((TASKS[name].ver, cfg.ledger_timezone) if name in TASKS else ()))
                 report[name], stopped = _label_one(run, name, since, now, choice,
                                                    backend_for)
                 beat.events += report[name]["rows"] + report[name]["notes"]

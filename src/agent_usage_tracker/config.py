@@ -6,14 +6,16 @@ written as "env:VAR" is resolved from the environment at run time.
 from __future__ import annotations
 
 from typing import Any
+import functools
 import os
 import re
 import socket
 import sys
 import tomllib
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, timedelta, timezone, tzinfo
 from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .state import warn_if_group_readable
 
@@ -42,6 +44,50 @@ AW_CATEGORIES = ("editor", "terminal", "agent", "dev", "browser", "comms", "docs
 
 class AutError(Exception):
     """An error for the operator: main prints the message and exits 1, with no traceback."""
+
+
+def ledger_zone(cfg: Config) -> ZoneInfo:
+    """The zone of a ledger day, as in the sink's views (ledger_timezone)."""
+    return _zone(cfg.ledger_timezone)
+
+
+def _zone(name: str) -> ZoneInfo:
+    try:
+        return ZoneInfo(name)
+    except (ZoneInfoNotFoundError, ValueError):
+        raise AutError(f"ledger_timezone {name!r} is unknown here: check "
+                       "the name, or install the time zone database (the system tzdata package, "
+                       "or pip install tzdata)") from None
+
+
+def _machine_offset(t: float) -> timedelta | None:
+    return datetime.fromtimestamp(t, timezone.utc).astimezone().utcoffset()
+
+
+def machine_zone_agrees(tz: tzinfo, start: datetime, end: datetime) -> bool:
+    """The machine's zone has tz's UTC offset at every hour from start to end, so a day or an hour
+    the machine counted there is the same in tz. Offsets, not midnights: a midnight can be missing
+    (a DST jump at 00:00) in both zones, or agree while the hours around it do not."""
+    t, stop = start.timestamp() // 3600 * 3600, end.timestamp()
+    while t <= stop:
+        if _machine_offset(t) != datetime.fromtimestamp(t, tz).utcoffset():
+            return False
+        t += 3600
+    return True
+
+
+@functools.cache
+def _machine_agrees_since_2024(zone: str) -> bool:
+    return machine_zone_agrees(_zone(zone), datetime(2024, 1, 1, tzinfo=timezone.utc),
+                               datetime.now(timezone.utc))
+
+
+def record_zone_ok(rec: dict[str, Any], zone: str) -> bool:
+    """A saved label record (gold, silver, eval, encoder, choice) holds under ledger zone `zone`:
+    it was made in it, or it has no zone (saved before the zone was) and the machine zone, which
+    its days were counted in, agrees with `zone` since 2024."""
+    saved = rec.get("ledger_timezone")
+    return saved == zone if saved is not None else _machine_agrees_since_2024(zone)
 
 
 def config_path() -> Path:

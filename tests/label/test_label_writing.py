@@ -9,7 +9,7 @@ import pytest
 
 from agent_usage_tracker.config import AutError, Config, LABEL_DECISION_TASKS
 from agent_usage_tracker.label import core, local, replay, run, tasks
-from label_helpers import DAY1, NOW, FakeSource, _cfg, _claude_log, _env, _steer
+from label_helpers import LEDGER, DAY1, NOW, FakeSource, _cfg, _claude_log, _env, _steer
 from test_label import sink  # noqa: F401
 from test_label_local import recipe
 
@@ -188,8 +188,8 @@ def test_replay_uses_writing_recipe_and_keeps_existing_progress_separate(tmp_pat
     sent = []
     monkeypatch.setattr(replay, 'send_activity_rows', lambda dsn, events: sent.extend(events))
     with _env(tmp_path):
-        preview = replay.prepare(cfg, 'writing_activity', (NOW - timedelta(days=3)).astimezone().date(),
-                                 NOW.astimezone().date(), src=src, now=NOW)
+        preview = replay.prepare(cfg, 'writing_activity', (NOW - timedelta(days=3)).astimezone(LEDGER).date(),
+                                 NOW.astimezone(LEDGER).date(), src=src, now=NOW)
         row = recipe()
         row['minimum_score'] = .7
         write_policy(base, {'steer_intent': row})

@@ -14,11 +14,11 @@ import math
 import os
 import sys
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone, tzinfo
 from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator, Protocol, runtime_checkable
 
-from ..config import config_path
+from ..config import config_path, record_zone_ok
 from ..event import ActivityEvent, make_event_id
 
 PROMPT_VER = 2               # bump when render_prompt() or the chat prompt changes; task_ver covers candidates/definitions
@@ -26,13 +26,14 @@ LETTERS = "ABCDEFGHIJ"
 TAU_FLOOR = 0.5
 
 
-def local_midnight(d: date) -> datetime:
-    return datetime(d.year, d.month, d.day).astimezone()
+def local_midnight(d: date, tz: tzinfo) -> datetime:
+    """The start of ledger day d (tz: config.ledger_zone)."""
+    return datetime(d.year, d.month, d.day, tzinfo=tz)
 
 
-def local_days(since: datetime, until: datetime) -> Iterator[date]:
-    """The local dates from `since`'s up to, not including, `until`'s."""
-    d, end = since.astimezone().date(), until.astimezone().date()
+def local_days(since: datetime, until: datetime, tz: tzinfo) -> Iterator[date]:
+    """The ledger dates (tz) from `since`'s up to, not including, `until`'s."""
+    d, end = since.astimezone(tz).date(), until.astimezone(tz).date()
     while d < end:
         yield d
         d += timedelta(days=1)
@@ -144,13 +145,18 @@ def _check_entry(task: str, c: object) -> None:
         raise ValueError(f"the platt of {task} is not a table of yes, a and b")
 
 
-def load_choice(task: str, task_ver: int | None = None) -> Choice:
+def load_choice(task: str, task_ver: int | None = None, zone: str | None = None) -> Choice:
+    """The chosen backend and calibration of a task; with task_ver and zone, only one fitted for
+    that prompt version and ledger zone (config.record_zone_ok)."""
     try:
         c = read_choices().get("tasks", {}).get(task)
         if c is not None:
             _check_entry(task, c)
             if task_ver is not None and c.get("prompt_ver") != f"{task}@{task_ver}/p{PROMPT_VER}":
                 raise ValueError(f"the calibration of {task} belongs to another prompt version")
+            if zone is not None and not record_zone_ok(c, zone):
+                raise ValueError(f"the calibration of {task} was fitted on days in another "
+                                 f"ledger_timezone than {zone}")
     except (OSError, ValueError) as exc:
         print(f"aut: warning: {choice_path()} is unusable ({exc}); {task} runs uncalibrated, so "
               "none of its labels pass tau. Fix it or move it aside and re-run `aut label choose`.", file=sys.stderr)

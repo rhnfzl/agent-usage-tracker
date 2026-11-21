@@ -9,7 +9,7 @@ from agent_usage_tracker.collectors import cursor_cli
 from agent_usage_tracker.collectors import codex
 from agent_usage_tracker.event import CollectorUnavailable, make_event_id
 from agent_usage_tracker.label import context, tasks
-from label_helpers import FakeSource, _cfg
+from label_helpers import LEDGER, FakeSource, _cfg
 from test_cursor_cli import A, B, _msg, _prompt, _store
 
 UNTIL = datetime(2026, 11, 1, 10, 5, tzinfo=timezone.utc)
@@ -156,9 +156,9 @@ def test_work_keeps_prompts_without_choosing_a_concurrent_reply(tmp_path, monkey
         "a": ("", "done"), "b": ("", "cannot continue")})
     monkeypatch.setattr(src, "activity", lambda *args: [])
     monkeypatch.setattr(src, "windows", lambda *args: [])
-    day = ts.astimezone().date()
-    requests = tasks.units("work_category", src, tasks.local_midnight(day),
-                           tasks.local_midnight(day + timedelta(days=1)))
+    day = ts.astimezone(LEDGER).date()
+    requests = tasks.units("work_category", src, tasks.local_midnight(day, LEDGER),
+                           tasks.local_midnight(day + timedelta(days=1), LEDGER))
     assert len(requests) == 1
     assert requests[0].facts["steers"] == 2
     assert requests[0].facts["last_agent_reply"] == ""
@@ -343,7 +343,7 @@ def test_nonclaude_inputs_route_through_all_local_tasks(tmp_path):
     src = FakeSource(_cfg(tmp_path), [row], [ep])
     src.context_agents = context.AGENTS
     assert tasks.units("steer_intent", src, at, UNTIL)[0].facts["text"] == "fix [redacted]"
-    day = at.astimezone().replace(hour=0, minute=0, second=0, microsecond=0)
+    day = at.astimezone(LEDGER).replace(hour=0, minute=0, second=0, microsecond=0)
     assert tasks.units("work_category", src, day, day + timedelta(days=1))[0].facts["first_steer"] \
         == "fix [redacted]"
     assert tasks.units("soft_outcome", src, at, UNTIL)[0].facts["last_steers"] == ["fix [redacted]"]

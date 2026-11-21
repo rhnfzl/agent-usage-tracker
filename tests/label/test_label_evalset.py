@@ -4,15 +4,16 @@ from __future__ import annotations
 
 import os
 from datetime import date, timedelta
+from zoneinfo import ZoneInfo
 
 import pytest
 
 from agent_usage_tracker.config import AutError
 from agent_usage_tracker.label import evalset
 from agent_usage_tracker.label import tasks
-from label_helpers import BASE, FIXED, TASK
+from label_helpers import BASE, FIXED, LEDGER, TASK, ZONE
 from agent_usage_tracker.label import core
-from label_helpers import FakeSource, _cfg, _env
+from label_helpers import FakeSource, _cfg, _env, machine_in
 
 
 FOLDS_OF_FIXED_DAYS = [3, 3, 0, 3, 2, 0, 3, 3]
@@ -26,19 +27,19 @@ def test_stratified_and_split():
     t = tasks.TASKS[TASK]
     r = t.request("steer", "u", FIXED, {})
     later = t.request("steer", "v", FIXED + timedelta(hours=1), {})
-    assert evalset.fold(r) == evalset.fold(later)                # same day, same fold
-    assert evalset.final_test(r) == evalset.final_test(later)
-    assert evalset.in_encoder_train_split(r) == evalset.in_encoder_train_split(later)
+    assert evalset.fold(r, LEDGER) == evalset.fold(later, LEDGER)                # same day, same fold
+    assert evalset.final_test(r, LEDGER) == evalset.final_test(later, LEDGER)
+    assert evalset.in_encoder_train_split(r, LEDGER) == evalset.in_encoder_train_split(later, LEDGER)
     many = [t.request("steer", "u", FIXED - timedelta(days=d), {}) for d in range(400)]
-    assert {evalset.fold(q) for q in many} == set(range(evalset.FOLDS))
-    assert 0.12 < sum(evalset.final_test(q) for q in many) / 400 < 0.28
-    assert {evalset.in_encoder_train_split(q) for q in many} == {True, False}
+    assert {evalset.fold(q, LEDGER) for q in many} == set(range(evalset.FOLDS))
+    assert 0.12 < sum(evalset.final_test(q, LEDGER) for q in many) / 400 < 0.28
+    assert {evalset.in_encoder_train_split(q, LEDGER) for q in many} == {True, False}
     # the hash is the contract: every model and every run gets these same folds
-    assert [evalset.fold(q) for q in many[:8]] == FOLDS_OF_FIXED_DAYS
+    assert [evalset.fold(q, LEDGER) for q in many[:8]] == FOLDS_OF_FIXED_DAYS
     # a title's ts moves with the window read: its groups follow the unit_id, not the day
     a = tasks.TASKS["aw_title_relevance"]
     for fn in (evalset.fold, evalset.final_test, evalset.in_encoder_train_split):
-        assert len({fn(a.request("aw_title", "k1", FIXED - timedelta(days=d), {}))
+        assert len({fn(a.request("aw_title", "k1", FIXED - timedelta(days=d), {}), LEDGER)
                     for d in range(20)}) == 1
     assert evalset.stratum(None) == "unlabelled"
     assert evalset.stratum({"x": {"a": 0.6, "b": 0.4}, "y": {"a": 0.9, "b": 0.1}}) == "a"
@@ -86,24 +87,24 @@ def test_gold_latest_takes_the_last_answer_of_this_version(tmp_path):
     ver = tasks.TASKS[TASK].ver
     with _env(tmp_path):
         p = evalset.eval_path(TASK, "gold")
-        for row in ({"unit_id": "u1", "gold": "stop", "task_ver": ver},
-                    {"unit_id": "u1", "gold": "framing", "task_ver": ver},
-                    {"unit_id": "u2", "gold": "stop", "task_ver": ver + 1},
-                    {"unit_id": "u3", "gold": "not-a-label", "task_ver": ver}):
+        for row in ({"unit_id": "u1", "gold": "stop", "task_ver": ver, "ledger_timezone": ZONE},
+                    {"unit_id": "u1", "gold": "framing", "task_ver": ver, "ledger_timezone": ZONE},
+                    {"unit_id": "u2", "gold": "stop", "task_ver": ver + 1, "ledger_timezone": ZONE},
+                    {"unit_id": "u3", "gold": "not-a-label", "task_ver": ver, "ledger_timezone": ZONE}):
             evalset.append_jsonl(p, row)
-        assert evalset.gold_latest(TASK) == {"u1": "framing"}
+        assert evalset.gold_latest(TASK, ZONE) == {"u1": "framing"}
 
 
 def test_silver_by_unit_groups_teachers_of_this_version(tmp_path):
     ver = tasks.TASKS[TASK].ver
     with _env(tmp_path):
         p = evalset.eval_path(TASK, "silver")
-        for row in ({"unit_id": "u", "teacher": "x", "task_ver": ver, "dist": {"stop": 1.0}},
-                    {"unit_id": "u", "teacher": "y", "task_ver": ver, "dist": {"framing": 1.0}},
-                    {"unit_id": "v", "teacher": "x", "task_ver": ver + 1, "dist": {"stop": 1.0}},
-                    {"unit_id": "w", "teacher": "x", "task_ver": ver, "dist": "junk"}):
+        for row in ({"unit_id": "u", "teacher": "x", "task_ver": ver, "ledger_timezone": ZONE, "dist": {"stop": 1.0}},
+                    {"unit_id": "u", "teacher": "y", "task_ver": ver, "ledger_timezone": ZONE, "dist": {"framing": 1.0}},
+                    {"unit_id": "v", "teacher": "x", "task_ver": ver + 1, "ledger_timezone": ZONE, "dist": {"stop": 1.0}},
+                    {"unit_id": "w", "teacher": "x", "task_ver": ver, "ledger_timezone": ZONE, "dist": "junk"}):
             evalset.append_jsonl(p, row)
-        assert evalset.silver_by_unit(TASK) == {"u": {"x": {"stop": 1.0}, "y": {"framing": 1.0}}}
+        assert evalset.silver_by_unit(TASK, ZONE) == {"u": {"x": {"stop": 1.0}, "y": {"framing": 1.0}}}
 
 
 def test_stratum_ignores_a_teacher_without_an_answer():
@@ -111,17 +112,38 @@ def test_stratum_ignores_a_teacher_without_an_answer():
     assert evalset.stratum({"x": {}, "y": {"a": 1.0}}) == "a"
 
 
-def test_unit_day_is_the_local_day_of_the_unit():
+def test_gold_and_silver_count_only_under_their_ledger_zone(tmp_path, monkeypatch):
+    ver = tasks.TASKS[TASK].ver
+    with _env(tmp_path):
+        for unit, zone in (("old", None), ("tokyo", "Asia/Tokyo"), ("here", ZONE)):
+            stamp = {"ledger_timezone": zone} if zone else {}
+            evalset.append_jsonl(evalset.eval_path(TASK, "gold"),
+                                 {"unit_id": unit, "gold": "stop", "task_ver": ver, **stamp})
+            evalset.append_jsonl(evalset.eval_path(TASK, "silver"), {
+                "unit_id": unit, "teacher": "t", "task_ver": ver, "dist": {"stop": 1.0}, **stamp})
+        # a record from before the zone was saved counted days in the machine zone
+        machine_in(monkeypatch, ZONE)
+        assert set(evalset.gold_latest(TASK, ZONE)) == set(evalset.silver_by_unit(TASK, ZONE)) \
+            == {"old", "here"}
+        machine_in(monkeypatch, "UTC")
+        assert set(evalset.gold_latest(TASK, ZONE)) == set(evalset.silver_by_unit(TASK, ZONE)) \
+            == {"here"}
+        assert set(evalset.gold_latest(TASK, "Asia/Tokyo")) == {"tokyo"}
+
+
+def test_unit_day_is_the_ledger_day_of_the_unit():
     r = tasks.TASKS[TASK].request("steer", "u", BASE, {})
-    assert evalset.unit_day(r) == BASE.date()
+    assert evalset.unit_day(r, LEDGER) == BASE.date()
+    late = tasks.TASKS[TASK].request("steer", "u", BASE.replace(hour=23), {})
+    assert evalset.unit_day(late, ZoneInfo("Asia/Tokyo")) == BASE.date() + timedelta(days=1)
 
 
 def test_encoder_split_follows_the_day():
     days = [BASE - timedelta(days=d) for d in range(40)]
-    sides = [evalset.in_encoder_train_split(tasks.TASKS[TASK].request("steer", "u", d, {}))
+    sides = [evalset.in_encoder_train_split(tasks.TASKS[TASK].request("steer", "u", d, {}), LEDGER)
              for d in days]
     assert set(sides) == {True, False}
-    other = [evalset.in_encoder_train_split(tasks.TASKS[TASK].request("steer", "v", d, {}))
+    other = [evalset.in_encoder_train_split(tasks.TASKS[TASK].request("steer", "v", d, {}), LEDGER)
              for d in days]
     assert other == sides       # the day alone decides: a day's units never straddle the split
 
@@ -131,7 +153,7 @@ def test_window_units_needs_the_sink_unless_given_a_source(tmp_path):
         evalset.window_units(_cfg(tmp_path, pg_dsn=None), TASK)
 
 
-def test_window_units_reads_whole_local_days_up_to_today(tmp_path, monkeypatch):
+def test_window_units_reads_whole_ledger_days_up_to_today(tmp_path, monkeypatch):
     seen = {}
     req = tasks.TASKS[TASK].request("steer", "u", BASE, {})
 
@@ -142,8 +164,8 @@ def test_window_units_reads_whole_local_days_up_to_today(tmp_path, monkeypatch):
     src = FakeSource(_cfg(tmp_path))
     assert evalset.window_units(_cfg(tmp_path), TASK, 7, src, date(2026, 6, 15)) == {"u": req}
     assert seen["task"] == TASK and seen["src"] is src
-    assert seen["since"] == core.local_midnight(date(2026, 6, 8))
-    assert seen["until"] == core.local_midnight(date(2026, 6, 15))
+    assert seen["since"] == core.local_midnight(date(2026, 6, 8), LEDGER)
+    assert seen["until"] == core.local_midnight(date(2026, 6, 15), LEDGER)
 
 
 @pytest.mark.skipif(os.name == "nt", reason="no POSIX modes")
