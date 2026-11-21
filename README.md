@@ -92,7 +92,7 @@ Use `aut summary --compare-prices MODEL_A MODEL_B` to apply two rates to the sam
 
 Use `aut statusline` to check cached quota, reset times, and scan freshness.
 The [quota guide](docs/quota.md) shows how to feed Claude Code statusline input into AUT
-and enable local quota notices.
+and enable local notices for quota or pending delivery.
 
 ### Keep history in your own database
 

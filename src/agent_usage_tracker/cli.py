@@ -16,6 +16,7 @@
   aut summary [--json]  show local usage, source coverage and unknown values by date
   aut quota             capture and inspect local quota observations
   aut statusline        read cached quota and scan status
+  aut delivery-notices  inspect pending local delivery and record opt-in notices
   aut sync-prices [--out F] [--sink]
                         refresh the API-equivalent model price map
   aut time add --start <local> --end <local> | --minutes N [--at <local end>] [--not-relevant]
@@ -299,7 +300,8 @@ def cmd_publish_improve(cfg: Config, args: argparse.Namespace) -> None:
 
 _NO_CONFIG_COMMANDS = {"sync-prices": pricing_cli.run, "cursor-run": cmd_cursor_run,
                        "scan-job": cmd_scan_job, "setup": setup_cli.run, "demo": demo_cli.run,
-                       "quota": quota_cli.run, "statusline": quota_cli.run_statusline}
+                       "quota": quota_cli.run, "statusline": quota_cli.run_statusline,
+                       "delivery-notices": quota_cli.run_delivery_notices}
 _AGENT_COMMANDS = {"scan": cmd_scan, "backfill": cmd_backfill, "export": cmd_export,
                    "status": cmd_status, "summary": summary_cli.run}
 _COMMANDS = {"time": cmd_time_add, "outcomes": cmd_outcomes, "outcome": cmd_outcome,
