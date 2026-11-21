@@ -26,11 +26,12 @@ def local_paths(tmp_path, monkeypatch):
     monkeypatch.setattr(card.coverage, "report_path", lambda: tmp_path / "coverage.json")
 
 
-def put_case(store, stamp, name, trigger="control", verdict="fail", version=1, **extra):
+def put_case(store, stamp, name, trigger="control", verdict="fail", version=1, *,
+             agent="codex", **extra):
     events = [{"id": name, "timestamp": stamp, "text": SECRET, "kind": "prompt"}]
-    session = store.put("sessions", {"agent": "codex", "session_id": name, "events": events})
-    key = store.put("cases", {"agent": "codex", "trigger": trigger, "events": events,
-                               "session_snapshot": session})
+    session = store.put("sessions", {"agent": agent, "session_id": name, "events": events})
+    key = store.put("cases", {"agent": agent, "trigger": trigger, "events": events,
+                             "session_snapshot": session})
     store.put("judgments", {"case_id": key, "rubric": "test_rubric", "rubric_version": version,
         "job_id": digest(name), "verdict": verdict, "review": {"rationale": SECRET}, **extra})
     return key
@@ -71,6 +72,22 @@ def test_two_windows_versions_triggers_harnesses_and_ledger_zone(tmp_path):
     assert next(r for r in rows if r["trigger"] == "merge")["rubric_version"] == 2
     text = card.to_markdown(card.build(store, days=2, today=TODAY))
     assert "-100.0 percentage points" in text
+
+
+def test_cursor_cli_keeps_its_identity_in_scores_and_coverage(tmp_path):
+    store = Store(tmp_path / "store")
+    (tmp_path / "coverage.json").write_text(json.dumps({"collectors": [
+        {"collector": "cursor_cli", "observation": {"usage_events": 1}}]}))
+    before = card.build(store, today=TODAY)
+    assert before["coverage"]["usage_without_evidence"] == ["cursor_cli"]
+    put_case(store, "2026-11-20T03:00:00Z", "cli", agent="cursor_cli")
+    put_case(store, "2026-11-20T03:00:00Z", "desktop", agent="cursor")
+    rendered = card.to_json(card.build(store, today=TODAY))
+    result = json.loads(rendered)
+    assert result["coverage"]["usage_without_evidence"] == []
+    assert {row["harness"] for row in result["rubrics"] if row["rubric_id"] == "test_rubric"} == {
+        "cursor", "cursor_cli"}
+    assert "PRIVATE_SENTINEL" not in rendered
 
 
 @pytest.mark.parametrize("before,after,enough", [(12, 12, True), (12, 5, False), (10, 10, True)])

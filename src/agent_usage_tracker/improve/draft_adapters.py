@@ -27,7 +27,8 @@ LOCAL = ("mlx", "gguf")
 NAMES = ("codex", "claude", "cursor", "pi", *LOCAL)
 PI_FLAGS = ("--no-tools", "--no-mcp", "--no-extensions", "--no-skills", "--no-context-files",
             "--no-session", "--no-prompt-templates", "--no-themes", "--offline", "--no-approve")
-_ALIASES = {"claude_code": "claude", "cursor_agent": "cursor", "cursor-agent": "cursor"}
+_ALIASES = {"claude_code": "claude", "cursor_agent": "cursor", "cursor-agent": "cursor",
+            "cursor_cli": "cursor"}
 
 
 def _env(home: Path, agent: Path) -> dict[str, str]:
