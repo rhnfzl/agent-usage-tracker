@@ -4,16 +4,26 @@ import argparse
 import csv
 import io
 import json
-from datetime import date, datetime, timezone
+import os
+from dataclasses import replace
+from datetime import date, datetime, timedelta, timezone
+from decimal import Decimal
 from urllib.request import OpenerDirector
 
 import pytest
 
-from agent_usage_tracker import scan, summary, summary_cli
+from agent_usage_tracker import pricing, scan, summary, summary_cli
+from price_fixture import (CATALOG, PRICE_DAY, PRICE_MODEL, PRICE_TIMESTAMP, price_config,
+                           price_rows)
 from agent_usage_tracker.config import AutError, Config
 
 SINCE = date(2026, 6, 15)
 UNTIL = date(2026, 6, 16)
+
+
+@pytest.fixture(autouse=True)
+def private_config(tmp_path, monkeypatch):
+    monkeypatch.setenv("AUT_CONFIG", str(tmp_path / "config.toml"))
 
 
 def write_summary_logs(home):
@@ -82,7 +92,6 @@ def test_registered_summary_is_offline_and_read_only(tmp_path, monkeypatch, caps
     parser = argparse.ArgumentParser()
     summary_cli.register(parser.add_subparsers())
     args = parser.parse_args(["summary", "--json", "--since", str(SINCE), "--until", str(UNTIL)])
-    from dataclasses import replace
     summary_cli.run(replace(cfg, pg_dsn="postgresql://example.invalid/db", cursor_api=True),
                     (*cfg.agents, "cursor_api", "activitywatch"), args)
     output = json.loads(capsys.readouterr().out)
@@ -103,3 +112,97 @@ def test_calendar_periods_and_explicit_bounds(tmp_path):
     assert summary.build_summary(cfg, period="week", now=now)["window"]["until"] == "2026-06-18"
     with pytest.raises(AutError, match="--since and --until"):
         summary.build_summary(cfg, since=SINCE)
+
+
+def test_missing_or_bad_price_file_keeps_offline_usage(tmp_path):
+    cfg = write_summary_logs(tmp_path)
+    path = tmp_path / "model_prices.json"
+    for status in ("missing", "invalid"):
+        if status == "invalid":
+            path.write_text("bad json")
+        report = summary.build_summary(cfg, since=SINCE, until=UNTIL, prices_path=path)
+        assert report["rate_status"] == status
+        assert report["rate_age_seconds"] is None
+        assert report["totals"]["tokens"]["total_tokens"] == 20
+        assert report["totals"]["pricing"] == {
+            "coverage_tokens": 20, "priced_tokens": 0, "unpriced_tokens": 20,
+            "unattributed_tokens": 0, "unpriced_events": 2,
+            "known_api_cost_usd": None, "estimated_api_cost_usd": None,
+        }
+
+
+def test_measured_price_coverage_and_logged_cost(tmp_path, monkeypatch):
+    path = tmp_path / "rates.json"
+    pricing.sync_prices(path, fetch=lambda url: CATALOG)
+    os.utime(path, (PRICE_TIMESTAMP.timestamp(), PRICE_TIMESTAMP.timestamp()))
+    cfg = price_config(tmp_path, monkeypatch, price_rows())
+    report = summary.build_summary(cfg, since=PRICE_DAY, until=PRICE_DAY + timedelta(days=1),
+                                   prices_path=path, now=PRICE_TIMESTAMP + timedelta(seconds=60))
+    assert report["rate_age_seconds"] == 60
+    assert report["rate_synced_at"] == PRICE_TIMESTAMP.isoformat()
+    totals = report["totals"]
+    rates = totals["pricing"]
+    assert totals["logged_cost_usd"] == 0.125
+    assert Decimal(rates["known_api_cost_usd"]) == Decimal("1.01")
+    assert rates["estimated_api_cost_usd"] is None
+    assert (rates["coverage_tokens"], rates["priced_tokens"], rates["unpriced_tokens"],
+            rates["unattributed_tokens"], rates["unpriced_events"]) == (97, 80, 17, 2, 2)
+    models = {model["model"]: model for model in report["prices_by_model"]}
+    a, b, missing = (models[key] for key in (PRICE_MODEL, "model-b", "codex-auto-review"))
+    assert Decimal(a["estimated_api_cost_usd"]) == Decimal("0.61")
+    assert b["unpriced_tokens"] == 7 and Decimal(b["known_api_cost_usd"]) == Decimal("0.4")
+    assert b["estimated_api_cost_usd"] is None
+    assert missing["model"] == "codex-auto-review" and missing["known_api_cost_usd"] is None
+    assert report["price_comparison"] is None
+    assert "at least two complete ledger days" in report["price_forecast"]["reason"].lower()
+
+
+def test_fixed_usage_comparison_requires_both_component_rates(tmp_path, monkeypatch):
+    path = tmp_path / "rates.json"
+    pricing.sync_prices(path, fetch=lambda url: CATALOG)
+    cfg = price_config(tmp_path, monkeypatch, price_rows()[:2])
+    settings = dict(since=PRICE_DAY, until=PRICE_DAY + timedelta(days=1), prices_path=path)
+    report = summary.build_summary(cfg, compare=("model-a", "model-c"), **settings)
+    comparison = report["price_comparison"]
+    assert comparison["reason"] is None and comparison["coverage_tokens"] == 87
+    assert {key: Decimal(value) for key, value in comparison["model_cost_usd"].items()} == {
+        "model-a": Decimal("0.881"), "model-c": Decimal("2.357"),
+    }
+    report = summary.build_summary(cfg, compare=("model-a", "model-b"), **settings)
+    assert report["price_comparison"]["model_cost_usd"] is None
+    assert "each token component" in report["price_comparison"]["reason"]
+
+
+def test_forecast_uses_completed_covered_days_and_explicit_assumptions(tmp_path, monkeypatch):
+    path = tmp_path / "rates.json"
+    pricing.sync_prices(path, fetch=lambda url: CATALOG)
+    row = price_rows()[0]
+    first = datetime.combine(PRICE_DAY, datetime.min.time(), timezone.utc)
+    until = PRICE_DAY + timedelta(days=5)
+    now = first + timedelta(days=4, hours=3)
+    rows = [replace(row, event_id=f"day-{day}", ts=(first + timedelta(days=day)).isoformat())
+            for day in (0, 2, 4)]
+    cfg = price_config(tmp_path, monkeypatch, rows)
+    settings = dict(since=PRICE_DAY, until=until, now=now, prices_path=path)
+    report = summary.build_summary(cfg, **settings)
+    forecast = report["price_forecast"]
+    assert forecast["reason"] is None
+    assert forecast["until"] == now.date().isoformat()
+    assert (forecast["active_days"], forecast["calendar_days"]) == (2, 4)
+    assert Decimal(forecast["api_cost_for_30_calendar_days_usd"]) == Decimal("9.15")
+    assert Decimal(forecast["api_cost_for_30_active_days_usd"]) == Decimal("18.30")
+    assert report["totals"]["events"] == 3
+    rows.pop()
+    forecast = summary.build_summary(cfg, **settings)["price_forecast"]
+    assert "does not cover" in forecast["reason"]
+    assert forecast["api_cost_for_30_calendar_days_usd"] is None
+
+
+def test_malformed_source_record_marks_source_partial(tmp_path):
+    cfg = write_summary_logs(tmp_path)
+    with (tmp_path / ".claude/projects/orchard/main.jsonl").open("a") as log:
+        log.write("bad json\n")
+    report = summary.build_summary(cfg, since=SINCE, until=UNTIL)
+    assert report["sources"][0]["status"] == "partial"
+    assert report["sources"][0]["skipped_records"] == {"malformed_records": 1}
+    assert report["totals"]["events"] == 2

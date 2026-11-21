@@ -342,7 +342,7 @@
         "showHeader": true,
         "cellHeight": "sm"
       },
-      "description": "Tokens and API-equivalent cost of counted episodes: median per shipped episode, and all episodes per shipped one. Notional: subscriptions are flat-rate."
+      "description": "Tokens and API-equivalent cost of counted episodes. Cost estimates require price coverage for the episodes included in each measure."
     },
     {
       "id": 10,
@@ -366,7 +366,7 @@
             "uid": "agents-timescaledb"
           },
           "format": "time_series",
-          "rawSql": "SELECT day::timestamp AS time, model AS metric, sum(est_cost_usd) AS cost\nFROM agents.tokens_cost_by_model_daily\nWHERE day >= $__timeFrom()::date AND day <= $__timeTo()::date\nGROUP BY 1, 2 ORDER BY 1, 2;",
+          "rawSql": "SELECT day::timestamp AS time, model AS metric, CASE WHEN sum(unpriced_turns) = 0 THEN sum(est_cost_usd) END AS cost\nFROM agents.tokens_cost_by_model_daily\nWHERE day >= $__timeFrom()::date AND day <= $__timeTo()::date\nGROUP BY 1, 2 ORDER BY 1, 2;",
           "editorMode": "code"
         }
       ],
@@ -383,7 +383,7 @@
         "overrides": []
       },
       "options": {},
-      "description": "API-equivalent USD per local day and model, reasoning tokens never added; an unpriced model shows no cost."
+      "description": "API-equivalent USD per local day and model. A day with unpriced usage shows no estimate."
     },
     {
       "id": 11,

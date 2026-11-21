@@ -175,3 +175,56 @@ def test_sync_survives_a_missing_genai_prices_list() -> None:
         n = pricing.sync_prices(Path(d) / "p.json",
                                 fetch=lambda url: sample if url == pricing.LITELLM_URL else None)
     assert n == 1
+
+
+def test_invalid_primary_refresh_keeps_previous_snapshot_and_skips_sink(tmp_path, monkeypatch):
+    path = tmp_path / "model_prices.json"
+    pricing.sync_prices(path, fetch=lambda url: {"old": {"output_cost_per_token": 0}})
+    before = path.read_bytes()
+    monkeypatch.setattr(pricing, "load_sink_prices", lambda *args: pytest.fail("sink write"))
+    for raw in (None, {"invalid": {"output_cost_per_token": "NaN"}},
+                {"invalid": {"output_cost_per_token": -1}}):
+        def fetch(url):
+            return raw if url == pricing.LITELLM_URL else {"fallback": {"models": {
+                "other": {"cost": {"output": 2}}
+            }}}
+
+        with pytest.raises(AutError, match="keeping the existing"):
+            pricing.sync_prices(path, pg_dsn="never used", fetch=fetch)
+        assert path.read_bytes() == before
+    assert pricing.load_prices(path) == {"old": {"output_cost": 0}}
+
+
+def test_registered_price_refresh_only_connects_on_request(tmp_path, monkeypatch, capsys):
+    import argparse
+    from agent_usage_tracker import pricing_cli
+
+    parser = argparse.ArgumentParser()
+    pricing_cli.register(parser.add_subparsers())
+    sample = {"example": {"output_cost_per_token": 0}}
+    monkeypatch.setattr(pricing, "_fetch_json", lambda url: sample)
+    updates = []
+    monkeypatch.setattr(pricing, "load_sink_prices", lambda *args: updates.append(args))
+    out = tmp_path / "model_prices.json"
+    args = ["sync-prices", "--out", str(out)]
+    monkeypatch.setenv("AUT_PRICE_PG_DSN", "scratch-dsn")
+    pricing_cli.run(parser.parse_args(args))
+    assert not updates and out.exists()
+    pricing_cli.run(parser.parse_args([*args, "--sink"]))
+    assert updates[0][:2] == ("scratch-dsn", {"example": {"output_cost": 0}})
+    assert "loaded 1 model prices" in capsys.readouterr().err
+    monkeypatch.delenv("AUT_PRICE_PG_DSN")
+    with pytest.raises(AutError, match="needs AUT_PRICE_PG_DSN"):
+        pricing_cli.run(parser.parse_args([*args, "--sink"]))
+
+
+def test_zero_component_price_is_a_measured_zero_and_reasoning_is_not_added():
+    from decimal import Decimal
+    from agent_usage_tracker.event import UsageEvent
+    from agent_usage_tracker.usage_price import price_usage
+
+    row = UsageEvent("zero-price", None, "codex", "free", None,
+                     output_tokens=3, reasoning_tokens=2, total_tokens=3)
+    quote = price_usage(row, {"free": {"output_cost": 0}})
+    assert quote.priced == quote.denominator == 3
+    assert quote.known_cost == Decimal(0)
