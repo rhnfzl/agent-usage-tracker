@@ -11,7 +11,8 @@ from pathlib import Path
 from typing import Any
 
 from ..config import AutError
-from .judge import LABELS, RUBRICS
+from . import rubric
+from .judge import LABELS, evaluation_key, evaluator
 from .proposals import file_digest
 from .store import Store, digest
 from .trial import command
@@ -52,8 +53,12 @@ def validate(store: Store, spec_id: str, diagnosis_id: str, *,
                 or "{reference_input}" not in argv:
             raise ValueError
         identities = set()
+        # A policy names its rubrics; one without any predates them and had only the two core ones.
+        known = policy.get("rubrics")
+        if not isinstance(known, dict):
+            known = set(rubric.LEGACY_V1)
         for ref in references:
-            if ref["rubric"] not in RUBRICS or ref["expected"] not in LABELS \
+            if ref["rubric"] not in known or ref["expected"] not in LABELS \
                     or not re.fullmatch(r"[a-f0-9]{64}", ref["evidence_sha256"]):
                 raise ValueError
             identity = ref["evidence_sha256"], ref["rubric"]
@@ -99,14 +104,13 @@ def validate(store: Store, spec_id: str, diagnosis_id: str, *,
             raise ValueError
     except (ValueError, TypeError, KeyError) as exc:
         raise AutError(f"improve: reference oracle failed or disagreed; record {oracle_id}") from exc
-    evaluator = digest({k: v for k, v in policy.items() if k not in {"audit_id", "cases"}})
     judgments = {value["evaluation_key"]: (key, value) for key in store.keys("judgments")
                  if (value := store.get("judgments", key))}
     counts: Counter[str] = Counter()
     rows = []
     for ref in references:
-        key = digest({"evaluator": evaluator, "case": cases[ref["evidence_sha256"]],
-                      "rubric": ref["rubric"]})
+        key = evaluation_key(evaluator(policy, ref["rubric"]), cases[ref["evidence_sha256"]],
+                             ref["rubric"])
         if key not in judgments:
             counts["missing"] += 1
             rows.append({**ref, "observed": None, "judgment_id": None})

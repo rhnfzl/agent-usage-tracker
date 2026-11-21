@@ -1,8 +1,13 @@
+from dataclasses import replace
+
 import pytest
 
 from agent_usage_tracker.config import AutError
+from agent_usage_tracker.improve import rubric
 from agent_usage_tracker.improve.judge import aggregate, cases, validate_review
 from agent_usage_tracker.improve.store import Store
+
+BUILTIN = {item.id: item for item in rubric.load()}
 
 
 def test_model_agreement_is_provisional_and_disagreement_abstains():
@@ -42,9 +47,9 @@ def test_completion_failure_must_cite_the_claim_and_contradicting_result():
     value = {"verdict": "fail", "evidence_ids": ["result"], "cause": "model",
              "rationale": "An implicit goal was not fulfilled."}
     with pytest.raises(AutError, match="claim"):
-        validate_review(case, value, rubric="completion_supported")
+        validate_review(case, value, rubric=BUILTIN["completion_supported"])
     accepted = validate_review(case, {**value, "evidence_ids": ["result", "claim"]},
-                               rubric="completion_supported")
+                               rubric=BUILTIN["completion_supported"])
     assert accepted["verdict"] == "fail"
 
 
@@ -223,7 +228,7 @@ def test_expected_exploration_cannot_justify_an_avoidable_recovery_failure():
     with pytest.raises(AutError, match="cause"):
         validate_review(case, {"verdict": "fail", "cause": "expected_exploration",
             "evidence_ids": ["result"], "rationale": "A bounded useful retry."},
-            rubric="avoidable_recovery")
+            rubric=BUILTIN["avoidable_recovery"])
 
 
 @pytest.mark.parametrize("review_verdict", ["pass", "fail"])
@@ -266,7 +271,7 @@ def test_review_schema_repair_respects_call_budget_and_preserves_errors(tmp_path
     from types import SimpleNamespace
     from agent_usage_tracker.improve import judge
 
-    monkeypatch.setattr(judge, "RUBRICS", {"avoidable_recovery": ("Question", "Definitions")})
+    monkeypatch.setattr(judge, "_rubrics", lambda first=judge._rubrics()[:1]: first)
     monkeypatch.setattr(judge, "config_path", lambda: tmp_path / "config/config.toml")
     monkeypatch.setattr(judge, "memory_guard", lambda: None)
     monkeypatch.setattr(judge, "MlxLetter", lambda name: SimpleNamespace(
@@ -304,7 +309,7 @@ def test_review_schema_repair_respects_call_budget_and_preserves_errors(tmp_path
     judgment = store.get("judgments", result["judgment_ids"][0])
     assert judgment["review_errors"] == ["invalid citations\nrejected local response"]
     assert attempts[1][-1] == "invalid citations"
-    monkeypatch.setattr(judge, "MAX_REVIEW_CHARS", 1)
+    monkeypatch.setattr(judge, "_rubrics", lambda tiny=[replace(judge._rubrics()[0], max_input_chars=1)]: tiny)
     limited = judge.diagnose(store, audit, models=("one", "two"), explain_model="local",
                              max_calls=4, backend_for=Backend)
     assert limited["verdicts"]["unknown"] == 1

@@ -119,7 +119,8 @@ Incomplete cleanup returns a failure with `cleanup_timeout` and the owned `pid`.
 An unknown exit status is never accepted. An OS-stuck child can still retain model locks.
 Completed process startup counts against the command deadline; an unreturning spawn remains OS-dependent.
 
-Separate criteria cover avoidable recovery and completion supported by evidence.
+Each criterion is a markdown rubric (see [Rubrics](#rubrics)). Two are blocking: avoidable
+recovery and completion supported by evidence.
 Cases mix failed and clean user attempts. Each attempt ends at a recorded turn boundary or the next prompt.
 Sampling prefers complete captured attempts within each group. Each source checks at most
 20 recent completed turns to select a clean control that fits the existing event and text budgets.
@@ -143,16 +144,94 @@ Its output must use the expected schema and cite existing event IDs.
 It cannot supply executable commands or change files.
 Incomplete completion evidence remains unknown.
 Choice descriptions state what each label means for its criterion. Their exact text is
-part of evaluator identity, so a changed description cannot reuse earlier votes.
+part of that rubric's evaluator identity, so a changed description cannot reuse its earlier votes.
 All model results are provisional estimates, including agreement between models.
 An explanatory model can veto a decision, but cannot upgrade model disagreement into pass or fail.
 Disagreements stay unknown without spending an explanatory-model call.
-Reviews over 6,000 serialized case characters stay unknown with `review_input_limit` recorded.
+Reviews over the rubric's `max_input_chars` (6,000 by default) serialized case characters stay
+unknown with `review_input_limit` recorded.
 Invalid reviews retain their bounded, redacted responses in private `review_attempts` records.
 One schema repair is allowed. Both attempts count against the model-call and time budgets.
 They are not human labels or calibrated accuracy measurements.
 Ask a human only when evidence cannot settle a required fact, authority, or preference.
 The private `inbox.html` shows escaped review text and case identifiers.
+
+## Rubrics
+
+Each criterion is a markdown file. Built-ins ship in
+`src/agent_usage_tracker/improve/rubrics/`: `avoidable_recovery` and `completion_supported`
+(blocking, moved from code with their exact text), and `verbosity`, `redundant_tests` and
+`code_quality` (non-blocking). `code_quality` needs commit outputs, which no case has yet, so it
+never runs.
+
+Your own files go in `rubrics/` next to the config file
+(`~/.config/agent-usage-tracker/rubrics/*.md`). A file with the same `id` replaces the built-in, and keeps the built-in's `blocking` unless the
+file sets it.
+A file with only `id: NAME` and `enabled: false` in its frontmatter switches that rubric off.
+A broken file stops the diagnosis with its file name; it is never skipped silently, so keep
+notes and other markdown out of that folder.
+
+```markdown
+---
+id: verbosity
+version: 1
+threshold: 0.7
+priority: 30
+blocking: false
+applies_to: {"triggers": ["error_result", "control"], "requires": ["final_reply"]}
+max_cases: 4
+checks: {"fail_must_cite": ["reply"]}
+---
+## Question
+Is the assistant's final reply no longer than the result needs?
+## Definition
+What each label means, as one paragraph.
+## Labels
+- pass: ...
+- fail: ...
+- unknown: ...
+```
+
+Frontmatter is `key: value` lines. A value that starts with `[`, `{`, a digit, `true` or `false`
+is JSON; anything else is a string. Wrapped lines under a heading or label join with one space.
+
+| Field | Default | Meaning |
+|---|---|---|
+| `id`, `version` | required | Identity. Bump `version` on any change of meaning. |
+| `threshold` | 0.7 | Minimum model probability for a pass or fail vote, above 0.5 and at most 1. |
+| `priority` | 100 | Lower runs first. |
+| `blocking` | false | `true`: the diagnosis is not complete until this rubric is judged on all its cases. `false`: best effort; it uses only time and calls left after the blocking rubrics. |
+| `applies_to.triggers` | both | `error_result`, `control`, `merge` (no case has `merge` yet). |
+| `applies_to.requires` | none | `final_reply` (a reply event), `test_command` (a call whose command family is a test runner such as `pytest`, `python -m pytest`, `npm test`), `outputs` (commit outputs; none yet). |
+| `max_cases` | 200 | Cases per diagnosis for this rubric. |
+| `max_input_chars` | 6000 | Review size cap, at most 24,000. |
+| `input` | `attempt` | `outputs_summary` is accepted only with `requires: ["outputs"]`. |
+| `checks.fail_must_cite` | none | Event kinds a fail review must cite. |
+| `checks.fail_cause_not_in` | none | Causes a fail review may not give. |
+| `checks.unknown_unless_complete` | false | Force unknown on incomplete attempts. |
+| `qualify` | none | Recorded for later human-label qualification. |
+
+AUT refuses a file with a missing heading, a label set that is not exactly pass, fail and unknown,
+an unknown field, `requires` value or check, or a value out of range.
+
+Each diagnosis saves every rubric as a private `rubric_snapshots` record and names the snapshots
+in its policy. Each rubric has its own evaluator identity, so editing one rubric file re-votes
+only that rubric; the other rubrics keep their votes and judgments. Any byte change in a file
+counts, even without a version bump. Each judgment records `rubric_version`, `rubric_sha256` and
+`rubric_snapshot`. Judgments made before markdown rubrics have none of these. Their diagnosis
+policy holds the old rubric text, and `rubric.legacy_version` maps it to version 1 when it equals
+the text the v1 files were moved from, else 0. Validation of an older diagnosis uses its old
+identity, so its result does not change. The first night after the update re-votes the pending
+audit's cases once, because the rubric identity changed.
+
+The diagnosis judges rubric by rubric: blocking rubrics first, each group in priority order, so
+the others get only what is left. Before markdown rubrics it went case by case; after a cut-off
+night, the first rubric may now have more cases judged than the second. `complete` counts
+blocking work only, so with no blocking rubric enabled it is complete at once. `finished` and
+`total` count blocking judgments; `optional_finished` and `optional_total` count the rest;
+`verdicts` counts both. `reason` is `budget` when any work, blocking or not, was left. The scheduled worker releases its pending audit at the first
+checkpoint where blocking work is complete, so a slow non-blocking rubric never holds the next
+audit, even if the run is cut off later.
 
 ## Prepare a scoped change
 

@@ -119,7 +119,7 @@ def test_completed_review_is_reused_after_interrupted_judgment_write(tmp_path, m
     from types import SimpleNamespace
 
     store, audit = frozen_store(tmp_path)
-    monkeypatch.setattr(judge, "RUBRICS", {"avoidable_recovery": ("Question", "Definitions")})
+    monkeypatch.setattr(judge, "_rubrics", lambda first=judge._rubrics()[:1]: first)
     monkeypatch.setattr(judge, "config_path", lambda: tmp_path / "config.toml")
     monkeypatch.setattr(judge, "memory_guard", lambda: None)
     monkeypatch.setattr(judge, "MlxLetter", lambda _: SimpleNamespace(
@@ -225,10 +225,11 @@ def test_process_deadline_resumes_without_repeating_completed_judgments(tmp_path
     script = '''
 import json,signal,sys
 from pathlib import Path
-from agent_usage_tracker.improve import schedule,judge
+from agent_usage_tracker.improve import schedule,judge,rubric
 from agent_usage_tracker.improve.store import Store
 store=Store(Path(sys.argv[1]))
 judge.config_path=lambda:store.root/"config.toml"
+judge._rubrics=lambda:[item for item in rubric.load() if item.blocking]
 judge.memory_guard=lambda:None
 class Backend:
     model_id="synthetic"

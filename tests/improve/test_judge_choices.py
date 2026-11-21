@@ -1,26 +1,27 @@
 """A choice-description change is a real evaluator change, not a cached old decision."""
 
-from copy import deepcopy
+from dataclasses import replace
 
 from agent_usage_tracker.improve import judge
 from agent_usage_tracker.improve.store import Store
 
 
-def test_description_map_order_does_not_change_model_candidate_order(monkeypatch):
-    before = judge._request({"case_id": "source"}, "completion_supported")
-    reordered = {rubric: dict(reversed(list(labels.items())))
-                 for rubric, labels in judge.CHOICE_DESCRIPTIONS.items()}
-    monkeypatch.setattr(judge, "CHOICE_DESCRIPTIONS", reordered)
-    after = judge._request({"case_id": "source"}, "completion_supported")
+def test_description_map_order_does_not_change_model_candidate_order(core_rubrics):
+    completion = core_rubrics[1]
+    before = judge._request({"case_id": "source"}, completion)
+    reordered = replace(completion, labels=dict(reversed(list(completion.labels.items()))))
+    after = judge._request({"case_id": "source"}, reordered)
     assert before.candidates == after.candidates
 
 
-def test_choice_descriptions_reach_models_and_invalidate_saved_votes(tmp_path, monkeypatch):
+def test_choice_descriptions_reach_models_and_invalidate_only_their_rubric_votes(
+        tmp_path, monkeypatch, core_rubrics):
     monkeypatch.setattr(judge, "config_path", lambda: tmp_path / "config/config.toml")
     monkeypatch.setattr(judge, "memory_guard", lambda: None)
-    descriptions = {rubric: {label: f"{rubric} meaning of {label}"
-                            for label in ("pass", "fail", "unknown")} for rubric in judge.RUBRICS}
-    monkeypatch.setattr(judge, "CHOICE_DESCRIPTIONS", descriptions, raising=False)
+    rubrics = [replace(item, labels={label: f"{item.id} meaning of {label}"
+                                     for label in ("pass", "fail", "unknown")})
+               for item in core_rubrics]
+    monkeypatch.setattr(judge, "_rubrics", lambda: rubrics)
     requests = []
 
     class Backend:
@@ -42,13 +43,17 @@ def test_choice_descriptions_reach_models_and_invalidate_saved_votes(tmp_path, m
     assert first["calls"] == 2
     again = judge.diagnose(store, audit, models=("test",), backend_for=lambda _: Backend())
     assert again["calls"] == 0
-    changed = deepcopy(descriptions)
-    changed["completion_supported"]["unknown"] = "A changed evaluator criterion"
-    monkeypatch.setattr(judge, "CHOICE_DESCRIPTIONS", changed)
+    changed = {**rubrics[1].labels, "unknown": "A changed evaluator criterion"}
+    rubrics[1] = replace(rubrics[1], labels=changed)
     updated = judge.diagnose(store, audit, models=("test",), backend_for=lambda _: Backend())
-    assert updated["calls"] == 2
+    # Only the edited rubric votes again; the other keeps its vote and judgment.
+    assert updated["calls"] == 1
+    assert requests[-1].task == "improve_completion_supported"
     assert first["job_id"] != updated["job_id"]
-    policy = store.get("diagnoses", updated["job_id"])
-    assert policy["choice_descriptions"] == changed
-    assert {row["id"]: row["desc"] for row in requests[-1].candidates} \
-        == changed["completion_supported"]
+    old, new = (store.get("diagnoses", report["job_id"])["rubrics"] for report in (first, updated))
+    assert old["avoidable_recovery"] == new["avoidable_recovery"]
+    assert old["completion_supported"] != new["completion_supported"]
+    assert store.get("rubric_snapshots", new["completion_supported"])["labels"] == changed
+    assert {row["id"]: row["desc"] for row in requests[-1].candidates} == changed
+    kept = set(first["judgment_ids"]) & set(updated["judgment_ids"])
+    assert [store.get("judgments", key)["rubric"] for key in kept] == ["avoidable_recovery"]
