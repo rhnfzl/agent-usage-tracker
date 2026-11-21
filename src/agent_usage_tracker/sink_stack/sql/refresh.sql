@@ -7,6 +7,7 @@
 DO $refresh$
 DECLARE
     refresh_started_at timestamptz;
+    extra record;
 BEGIN
 PERFORM pg_advisory_xact_lock(hashtext('agents.derived_refresh'));
 refresh_started_at := clock_timestamp();
@@ -16,8 +17,9 @@ refresh_started_at := clock_timestamp();
 -- delete the other copies: Grafana's raw panels and usage_daily (its hourly policy re-materializes
 -- the changed days) then count it once. Only that known case is settled here; any other duplicate
 -- stays, for audit_daily.dup_unexplained to report.
-DELETE FROM agents.usage_event u
-USING (
+-- One DELETE per copy, with literal values: TimescaleDB then decompresses only the compressed
+-- batch that holds the row. A joined DELETE decompresses whole chunks of old history.
+FOR extra IN
     SELECT event_id, ts FROM (
         SELECT event_id, ts,
                row_number() OVER (PARTITION BY event_id ORDER BY total_tokens DESC, ts DESC) AS rn
@@ -27,8 +29,10 @@ USING (
                               AND count(DISTINCT machine) = 1)
     ) ranked
     WHERE rn > 1
-) extra
-WHERE u.event_id = extra.event_id AND u.ts = extra.ts;
+LOOP
+    EXECUTE format('DELETE FROM agents.usage_event WHERE agent = %L AND event_id = %L AND ts = %L::timestamptz',
+                   'claude_code', extra.event_id, extra.ts);
+END LOOP;
 
 -- Window titles are kept indefinitely by default. To turn a retention limit on, add here:
 --   UPDATE agents.time_interval SET title = NULL

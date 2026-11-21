@@ -523,13 +523,24 @@ def test_refresh_deletes_claude_code_relogs_and_keeps_other_duplicates(dsn):
                           input_tokens=tokens, total_tokens=tokens, machine="t", session=session)
 
     later = T0 + timedelta(seconds=3)
-    push.insert_pg(dsn, [usage("relog", T0, "claude_code", 10), usage("relog", later, "claude_code", 12),
-                         usage("odd", T0, "codex", 5), usage("odd", later, "codex", 5)])
+    old = T0 - timedelta(days=60)      # plain history in another chunk
+    push.insert_pg(dsn, [usage(f"old{i}", old + timedelta(seconds=i), "claude_code", 1)
+                         for i in range(400)]
+                   + [usage("relog", T0, "claude_code", 10), usage("relog", later, "claude_code", 12),
+                      usage("odd", T0, "codex", 5), usage("odd", later, "codex", 5)])
     job = (SINK_STACK / "sql" / "refresh.sql").read_text(encoding="utf-8").splitlines()
     with connect(dsn) as conn:
-        conn.execute("\n".join(line for line in job if not line.startswith("\\")))
+        conn.execute("SELECT compress_chunk(c, if_not_compressed => true) "
+                     "FROM show_chunks('agents.usage_event') c")
         conn.commit()
+        # A delete that decompresses the old chunk's 400 rows fails past this limit.
+        conn.execute("SET timescaledb.max_tuples_decompressed_per_dml_transaction = 200")
+        for _ in range(2):             # the second run finds nothing left to delete
+            conn.execute("\n".join(line for line in job if not line.startswith("\\")))
+            conn.commit()
         rows = conn.execute("SELECT event_id, total_tokens FROM agents.usage_event "
                             "WHERE event_id IN ('relog', 'odd') ORDER BY 1, 2").fetchall()
+        assert conn.execute("SELECT count(*) FROM agents.usage_event "
+                            "WHERE event_id LIKE 'old%'").fetchone()[0] == 400
     # the re-log keeps the copy usage_event_dedup keeps; a Codex duplicate stays for the audit
     assert rows == [("odd", 5), ("odd", 5), ("relog", 12)]
