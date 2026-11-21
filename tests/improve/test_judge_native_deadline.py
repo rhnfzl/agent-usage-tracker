@@ -355,6 +355,15 @@ def test_cold_model_with_a_load_step_is_refused_before_loading(native_budget):
     assert result["stopped_by"]["remaining_s"] == 60
 
 
+def test_stopped_by_names_the_call_limit(native_budget):
+    store, audit, clock = native_budget
+    calls = []
+    result = judge.diagnose(store, audit, models=("slow", "fast"), max_calls=1,
+                            backend_for=backend_for(clock, calls, {"slow": 1, "fast": 1}))
+    assert result["reason"] == "budget" and result["calls"] == 1
+    assert result["stopped_by"]["limit"] == "max_calls"
+
+
 def test_load_and_rate_history_admit_the_first_call_below_half_the_budget(native_budget):
     store, audit, clock = native_budget
     store.append("model_call", call="vote", model="local", model_rev="synthetic",
@@ -419,8 +428,8 @@ def test_a_load_cut_by_the_deadline_keeps_its_start_and_phase(native_budget, mon
     store, audit, clock = native_budget
     diagnosis = interrupted_worker(store, audit, clock, monkeypatch, cut="load")
     assert diagnosis["calls"] == 0 and diagnosis["first_call_at"]
-    assert diagnosis["unfinished_call"] == {"kind": "vote", "phase": "load", "model": "local",
-                                            "model_rev": "synthetic"}
+    assert diagnosis["unfinished_call"] == {"kind": "decision", "phase": "load",
+                                            "model": "local", "model_rev": "synthetic"}
     assert not (store.root / "events.jsonl").exists() or not model_calls(store)
 
 

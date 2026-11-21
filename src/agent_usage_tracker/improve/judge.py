@@ -386,7 +386,8 @@ def diagnose(store: Store, audit_id: str, *, models: tuple[str, ...] = (
             return False
         first_call_at = first_call_at or _now()
         model, revision = identity[key]
-        unfinished_call = {"kind": kind, "phase": "load", "model": model, "model_rev": revision}
+        unfinished_call = {"kind": "decision" if kind == "vote" else kind, "phase": "load",
+                           "model": model, "model_rev": revision}
         checkpoint()
         started = time.monotonic()
         loaders[key]()
