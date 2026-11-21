@@ -29,6 +29,10 @@ or project. It shows when usage was last seen and whether scan evidence is fresh
 improvement store exists, the page links to its private report card. Use
 `aut overview --no-browser` to get the local URL and Ctrl-C to close the page.
 
+Use `aut improve inspect --case CASE_ID` to review the private context for a saved case.
+The view links text sizes, exact repeat reads and observed compactions to their frozen events.
+Captured text sizes use UTF-8 bytes and can be clipped. Actual model context tokens are unknown.
+
 ## Schedule delivery to your own sink
 
 Set the transport in your local config. The scheduled job needs access to any environment

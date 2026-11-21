@@ -5,11 +5,15 @@ from __future__ import annotations
 import hashlib
 from html import escape
 from pathlib import Path
+import re
 from typing import Any
 
 from ..config import AutError
 from ..state import atomic_write_text
 from .store import Store
+
+_READ_TOOLS = {"read", "read_file"}
+_READ_FINGERPRINT = re.compile(r"[a-f0-9]{64}")
 
 
 def _attempt(session: dict[str, Any], case: dict[str, Any]) -> list[dict[str, Any]]:
@@ -34,6 +38,74 @@ def _attempt(session: dict[str, Any], case: dict[str, Any]) -> list[dict[str, An
         return list(events[start:end])
     except (KeyError, TypeError, ValueError) as exc:
         raise AutError("improve: case does not match one captured source attempt") from exc
+
+
+def _link(index: int, label: str) -> str:
+    return f'<a href="#event-{index}">{escape(label)}</a>'
+
+
+def _context(events: list[dict[str, Any]], session: dict[str, Any],
+             snapshot: Path, revision: str) -> str:
+    context_bytes = 0
+    output_bytes = None
+    sizes: list[str] = []
+    compactions: list[str] = []
+    reads: dict[tuple[str, str], dict[str, int]] = {}
+    for index, event in enumerate(events):
+        kind = event["kind"]
+        if kind in {"prompt", "result"} and isinstance(event.get("text"), str):
+            size = len(event["text"].encode("utf-8", "replace"))
+            context_bytes += size
+            if kind == "result":
+                output_bytes = (output_bytes or 0) + size
+            linked = _link(index, "User request" if kind == "prompt" else "Tool output")
+            clipped = " (clipped)" if event.get("truncated") else ""
+            sizes.append(f"<tr><td>{linked}</td><td>{size:,}{clipped}</td>"
+                         f"<td>{context_bytes:,}</td></tr>")
+        elif kind == "compaction":
+            compactions.append(_link(index, f"Compaction {len(compactions) + 1}"))
+        elif kind == "call":
+            tool = str(event.get("tool", "")).casefold()
+            fingerprint, call_id = event.get("source_sha256"), event.get("call_id")
+            if (tool in _READ_TOOLS and isinstance(call_id, str) and call_id
+                    and isinstance(fingerprint, str) and _READ_FINGERPRINT.fullmatch(fingerprint)):
+                reads.setdefault((tool, fingerprint), {}).setdefault(call_id, index)
+
+    output_report = ("<p>No tool output size is available in this capture.</p>"
+                     if output_bytes is None else
+                     f"<p>Captured tool output <strong>{output_bytes:,} UTF-8 bytes</strong>.</p>")
+    size_report = (
+        "<table><thead><tr><th scope='col'>Captured event</th><th scope='col'>Bytes</th>"
+        "<th scope='col'>Cumulative bytes</th></tr></thead><tbody>"
+        + "".join(sizes) + "</tbody></table>"
+        if sizes else "<p>Prompt and tool output sizes are unavailable in this capture.</p>"
+    )
+    repeated = [", ".join(_link(index, f"Read {n}") for n, index in enumerate(calls.values(), 1))
+                for calls in reads.values() if len(calls) > 1]
+    repeat_report = (f"<ul>{''.join(f'<li>{links}</li>' for links in repeated)}</ul>" if repeated
+                     else "<p>No repeated explicit file read was observed.</p>")
+    if compactions:
+        compaction_report = f"<p>{len(compactions):,} observed. {', '.join(compactions)}</p>"
+    elif session.get("agent") in {"claude_code", "codex"}:
+        compaction_report = "<p>No explicit compaction was observed in this attempt.</p>"
+    else:
+        compaction_report = "<p>Compaction capture is unsupported for this evidence stream.</p>"
+    coverage = session.get("coverage")
+    incomplete = ("<p>Source capture is incomplete. Missing records can hide events.</p>"
+                  if not isinstance(coverage, dict) or not coverage.get("complete") else "")
+    clipped_report = ("<p>Clipped text contributes only the bytes saved in this revision.</p>"
+                      if any(event.get("truncated") for event in events) else "")
+    return (
+        '<section aria-labelledby="context-growth"><h2 id="context-growth">Context growth</h2>'
+        '<p>Saved prompt and tool result sizes estimate their contribution to context. '
+        'Actual model context tokens are unknown.</p>'
+        f'<p>Frozen session revision <a href="{escape(snapshot.as_uri(), quote=True)}">'
+        f'<code>{escape(revision)}</code></a>.</p>'
+        + incomplete + clipped_report + output_report + size_report
+        + "<h3>Repeated file reads</h3><p>Matches use an exact request fingerprint from explicit "
+        "file-read tools. Shell commands and other read tools are outside this check.</p>"
+        + repeat_report + "<h3>Explicit compactions</h3>" + compaction_report + "</section>"
+    )
 
 
 def write_case_view(store: Store, case_id: str) -> dict[str, Any]:
@@ -93,6 +165,7 @@ def write_case_view(store: Store, case_id: str) -> dict[str, Any]:
             'pre{white-space:pre-wrap;overflow-wrap:anywhere;font-size:.9rem}'
             'code,.reference{overflow-wrap:anywhere}.reference{font-size:.85rem;color:#43516a}'
             'a{color:#175b94}a:focus-visible{outline:3px solid #175b94}'
+            'th,td{text-align:left;padding:.35rem .55rem;border-bottom:1px solid #c6cfdb}'
             '</style></head><body><main><h1>Private case evidence</h1>'
             '<p>Review the captured request, commands, recovery and final reply together.</p>'
             f'<p class="status">{escape(status)}</p>'
@@ -103,7 +176,9 @@ def write_case_view(store: Store, case_id: str) -> dict[str, Any]:
             f'<p>{source_link}</p><p><code>{escape(str(source.get("path", "unavailable")))}</code></p>'
             f'<p>Recorded source hash: <code>{escape(str(source.get("sha256", "unavailable")))}</code></p>'
             f'<p><a href="{escape(snapshot.as_uri(), quote=True)}">Frozen source snapshot</a></p>'
-            + ''.join(supplements) + '</details>' + ''.join(blocks) + '</main></body></html>')
+            + ''.join(supplements) + '</details>'
+            + _context(events, session, snapshot, case["session_snapshot"])
+            + ''.join(blocks) + '</main></body></html>')
     target = store.path("case_views", case_id).with_suffix(".html")
     atomic_write_text(target, page)
     return {"case_id": case_id, "path": str(target), "captured_events": len(events),
