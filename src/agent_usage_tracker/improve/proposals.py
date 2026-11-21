@@ -38,6 +38,8 @@ def prepare(store: Store, case_id: str, scope: Path, target: Path, before: str,
         raise AutError("improve: proposal target is not readable text") from exc
     if not before or original.count(before) != 1 or before == after:
         raise AutError("improve: replacement must match one unique nonempty span")
+    if authority == "model_drafted_proposal" and len(after) - len(before) > 1200:
+        raise AutError("improve: drafted replacement adds more than 1200 characters")
     candidate = original.replace(before, after, 1)
     relative = target.relative_to(scope).as_posix()
     patch = "".join(difflib.unified_diff(original.splitlines(keepends=True),

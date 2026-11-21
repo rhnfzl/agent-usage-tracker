@@ -54,6 +54,19 @@ def register(sub: Any) -> None:
     proposal.add_argument("--before-file", type=Path, required=True)
     proposal.add_argument("--after-file", type=Path, required=True)
     proposal.add_argument("--candidate", type=Path, help="stage only in an independent directory")
+    drafting = actions.add_parser("draft", help="draft changes for human review in private candidates")
+    drafting.add_argument("--max-groups", type=int, default=1)
+    drafting.add_argument("--budget-usd", type=float, default=1.,
+                          help="known dollar spend cap; unknown OAuth cost stays unknown")
+    drafting.add_argument("--budget-s", type=float, default=360.)
+    drafting.add_argument("--mode", choices=("auto", "failover", "round_robin"), default="auto")
+    drafting.add_argument("--order", default="codex,claude,cursor,pi",
+                          help="comma-separated fixed or round-robin order; MLX stays last")
+    drafting.add_argument("--excerpts", choices=("none", "all"), default=None,
+                          help="send redacted conversation events too (default none)")
+    drafting.add_argument("--target", type=Path, help="explicitly offer exactly this file, including code")
+    drafting.add_argument("--reconsider", help="full rejected group key to reconsider")
+    drafting.add_argument("--explain-model", help="cached MLX model, always the last fallback")
     trial = actions.add_parser("trial", help="preview or execute an operator-supplied trial")
     source = trial.add_mutually_exclusive_group(required=True)
     source.add_argument("--spec")
@@ -174,6 +187,15 @@ def run(args: argparse.Namespace) -> None:
         if args.candidate:
             stage(store, key, args.candidate)
         result = {"proposal_id": key, "staged": bool(args.candidate)}
+    elif args.improve_cmd == "draft":
+        from . import draft
+        options = draft.settings()
+        if args.excerpts is not None:
+            options["excerpts"] = args.excerpts
+        result = draft.run(store, max_groups=args.max_groups, reconsider=args.reconsider,
+                           target=args.target, mode=args.mode, order=args.order,
+                           budget_usd=args.budget_usd, budget_s=args.budget_s,
+                           explain_model=args.explain_model, **options)
     elif args.improve_cmd == "trial":
         key = args.spec
         if args.spec_file:

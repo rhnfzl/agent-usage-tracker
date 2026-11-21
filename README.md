@@ -248,6 +248,7 @@ Bounded reviews preserve completed judgments and resume unfinished work within t
 `aut improve inspect --case CASE_ID` writes a private view of a captured attempt and its source references.
 
 `aut improve label --rubric completion_supported` opens a private human review page to check an advisory judge against captured cases.
+`aut improve draft` prepares small changes for human review in private candidates. Remote drafters receive selected redacted file text; conversation excerpts stay off by default.
 
 Captured commit results can attach redacted local diffs for `code_quality` judging and human labels. Local commit-state changes queue another advisory review.
 Missing or clipped evidence stays explicit; inspection does not upgrade a judgment.
