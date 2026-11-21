@@ -959,13 +959,13 @@
       },
       "options": {
         "mode": "markdown",
-        "content": "**Range-following** panels (KPIs, tokens/turns by agent/model, Top-10 models, Token-type split, Weekday x hour, Top projects) read raw `usage_event` (kept for good) so any window - including 'Last 24 hours' - is exact and always current. The **Lifetime** tables read the `usage_daily` rollup (all-time, ignores the picker). **$ (API-equivalent)** is shown in the **Cost** section above, priced from `agents.model_price` (rates from a price sync job; aut does not fill this table yet) - notional, since subscriptions are flat-rate; models absent from the price table drop out, never guessed. `cursor` (IDE) has no per-message model (`unknown`) and no cache attribution -- a lower bound; the accurate Cursor path is its usage API (opt-in)."
+        "content": "**Range-following** panels (KPIs, tokens/turns by agent/model, Top-10 models, Token-type split, Weekday x hour, Top projects) read raw `usage_event` (kept for good) so any window - including 'Last 24 hours' - is exact and always current. The **Lifetime** tables read the `usage_daily` rollup (all-time, ignores the picker). **API-equivalent USD** applies current catalog rates to the measured components in the selected range. Use the pricing coverage panels to see the share of tokens with rates and the known cost. Estimated total is blank when any tokens are unpriced. Logged cost comes from the source record. Refresh the catalog with `aut sync-prices --sink`. `cursor` (IDE) has no per-message model (`unknown`) and no cache attribution -- a lower bound; the accurate Cursor path is its usage API (opt-in)."
       }
     },
     {
       "id": 23,
       "type": "row",
-      "title": "💲 Cost (API-equivalent $)",
+      "title": "API-equivalent cost and price coverage",
       "collapsed": false,
       "panels": [],
       "gridPos": {
@@ -978,8 +978,8 @@
     {
       "id": 24,
       "type": "stat",
-      "title": "Total API-equivalent $",
-      "description": "Sum over the selected range. Notional / API-equivalent.",
+      "title": "Known API-equivalent USD",
+      "description": "Sum of measured components with rates. Price coverage shows how much usage this represents.",
       "datasource": {
         "type": "grafana-postgresql-datasource",
         "uid": "agents-timescaledb"
@@ -999,13 +999,12 @@
           },
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT sum((u.input_tokens*p.input_cost + u.output_tokens*p.output_cost + u.cache_read_tokens*coalesce(p.cache_read_cost,p.input_cost) + u.cache_write_tokens*coalesce(p.cache_write_cost,p.input_cost))) AS \"$\" FROM agents.usage_event u JOIN agents.model_price p ON lower(u.model)=p.model_key WHERE u.kind='agent' AND $__timeFilter(ts) AND u.machine = ANY(ARRAY[${machine:sqlstring}]::text[]) AND u.agent = ANY(ARRAY[${agent:sqlstring}]::text[]) AND coalesce(u.model,'unknown') = ANY(ARRAY[${model:sqlstring}]::text[])"
+          "rawSql": "SELECT sum(known_api_cost_usd) AS \"Known USD\"\nFROM agents.usage_price u\nWHERE $__timeFilter(ts)\n  AND u.machine = ANY(ARRAY[${machine:sqlstring}]::text[])\n  AND u.agent = ANY(ARRAY[${agent:sqlstring}]::text[])\n  AND coalesce(u.model, 'unknown') = ANY(ARRAY[${model:sqlstring}]::text[])"
         }
       ],
       "fieldConfig": {
         "defaults": {
-          "unit": "currencyUSD",
-          "decimals": 0
+          "unit": "currencyUSD"
         },
         "overrides": []
       },
@@ -1025,8 +1024,8 @@
     {
       "id": 25,
       "type": "stat",
-      "title": "Caching saved (x)",
-      "description": "Naive cost (cache reads at full input rate) / actual cost.",
+      "title": "Priced token share",
+      "description": "Tokens with a usable component rate divided by measured billable tokens, including unattributed tokens.",
       "datasource": {
         "type": "grafana-postgresql-datasource",
         "uid": "agents-timescaledb"
@@ -1046,12 +1045,12 @@
           },
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT sum((u.input_tokens*p.input_cost + u.output_tokens*p.output_cost + u.cache_read_tokens*p.input_cost + u.cache_write_tokens*coalesce(p.cache_write_cost,p.input_cost)))/nullif(sum((u.input_tokens*p.input_cost + u.output_tokens*p.output_cost + u.cache_read_tokens*coalesce(p.cache_read_cost,p.input_cost) + u.cache_write_tokens*coalesce(p.cache_write_cost,p.input_cost))),0) AS \"saved (x)\" FROM agents.usage_event u JOIN agents.model_price p ON lower(u.model)=p.model_key WHERE u.kind='agent' AND $__timeFilter(ts) AND u.machine = ANY(ARRAY[${machine:sqlstring}]::text[]) AND u.agent = ANY(ARRAY[${agent:sqlstring}]::text[]) AND coalesce(u.model,'unknown') = ANY(ARRAY[${model:sqlstring}]::text[])"
+          "rawSql": "SELECT sum(priced_tokens) / nullif(sum(coverage_tokens), 0) AS \"Priced share\"\nFROM agents.usage_price u\nWHERE $__timeFilter(ts)\n  AND u.machine = ANY(ARRAY[${machine:sqlstring}]::text[])\n  AND u.agent = ANY(ARRAY[${agent:sqlstring}]::text[])\n  AND coalesce(u.model, 'unknown') = ANY(ARRAY[${model:sqlstring}]::text[])"
         }
       ],
       "fieldConfig": {
         "defaults": {
-          "unit": "none",
+          "unit": "percentunit",
           "decimals": 2
         },
         "overrides": []
@@ -1072,8 +1071,8 @@
     {
       "id": 26,
       "type": "stat",
-      "title": "$ per active day",
-      "description": "Cost / distinct active days.",
+      "title": "Unpriced tokens",
+      "description": "Tokens missing a component rate or a billable component breakdown.",
       "datasource": {
         "type": "grafana-postgresql-datasource",
         "uid": "agents-timescaledb"
@@ -1093,13 +1092,13 @@
           },
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT sum((u.input_tokens*p.input_cost + u.output_tokens*p.output_cost + u.cache_read_tokens*coalesce(p.cache_read_cost,p.input_cost) + u.cache_write_tokens*coalesce(p.cache_write_cost,p.input_cost)))/nullif(count(DISTINCT ts::date),0) AS \"$/day\" FROM agents.usage_event u JOIN agents.model_price p ON lower(u.model)=p.model_key WHERE u.kind='agent' AND $__timeFilter(ts) AND u.machine = ANY(ARRAY[${machine:sqlstring}]::text[]) AND u.agent = ANY(ARRAY[${agent:sqlstring}]::text[]) AND coalesce(u.model,'unknown') = ANY(ARRAY[${model:sqlstring}]::text[])"
+          "rawSql": "SELECT sum(unpriced_tokens) AS \"Unpriced tokens\"\nFROM agents.usage_price u\nWHERE $__timeFilter(ts)\n  AND u.machine = ANY(ARRAY[${machine:sqlstring}]::text[])\n  AND u.agent = ANY(ARRAY[${agent:sqlstring}]::text[])\n  AND coalesce(u.model, 'unknown') = ANY(ARRAY[${model:sqlstring}]::text[])"
         }
       ],
       "fieldConfig": {
         "defaults": {
-          "unit": "currencyUSD",
-          "decimals": 2
+          "unit": "short",
+          "decimals": 0
         },
         "overrides": []
       },
@@ -1119,7 +1118,7 @@
     {
       "id": 27,
       "type": "timeseries",
-      "title": "Cost per month (by agent)",
+      "title": "Known API-equivalent USD per month",
       "datasource": {
         "type": "grafana-postgresql-datasource",
         "uid": "agents-timescaledb"
@@ -1139,7 +1138,7 @@
           },
           "format": "time_series",
           "rawQuery": true,
-          "rawSql": "SELECT date_trunc('month',ts) AS \"time\", u.agent AS metric, sum((u.input_tokens*p.input_cost + u.output_tokens*p.output_cost + u.cache_read_tokens*coalesce(p.cache_read_cost,p.input_cost) + u.cache_write_tokens*coalesce(p.cache_write_cost,p.input_cost))) AS \"$\" FROM agents.usage_event u JOIN agents.model_price p ON lower(u.model)=p.model_key WHERE u.kind='agent' AND $__timeFilter(ts) AND u.machine = ANY(ARRAY[${machine:sqlstring}]::text[]) AND u.agent = ANY(ARRAY[${agent:sqlstring}]::text[]) AND coalesce(u.model,'unknown') = ANY(ARRAY[${model:sqlstring}]::text[]) GROUP BY 1,u.agent ORDER BY 1"
+          "rawSql": "SELECT date_trunc('month', ts) AS \"time\", u.agent AS metric,\n       sum(known_api_cost_usd) AS \"Known USD\"\nFROM agents.usage_price u\nWHERE $__timeFilter(ts)\n  AND u.machine = ANY(ARRAY[${machine:sqlstring}]::text[])\n  AND u.agent = ANY(ARRAY[${agent:sqlstring}]::text[])\n  AND coalesce(u.model, 'unknown') = ANY(ARRAY[${model:sqlstring}]::text[])\nGROUP BY 1, u.agent\nORDER BY 1"
         }
       ],
       "fieldConfig": {
@@ -1167,12 +1166,13 @@
         "tooltip": {
           "mode": "multi"
         }
-      }
+      },
+      "description": "Sum of measured components with rates by agent. See the coverage panels for the selected range."
     },
     {
       "id": 28,
       "type": "table",
-      "title": "Cost by model (top 15)",
+      "title": "Pricing by model",
       "datasource": {
         "type": "grafana-postgresql-datasource",
         "uid": "agents-timescaledb"
@@ -1192,7 +1192,7 @@
           },
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT u.model AS \"model\", count(*) AS \"turns\", sum((u.input_tokens*p.input_cost + u.output_tokens*p.output_cost + u.cache_read_tokens*coalesce(p.cache_read_cost,p.input_cost) + u.cache_write_tokens*coalesce(p.cache_write_cost,p.input_cost)))::numeric(14,2) AS \"$\" FROM agents.usage_event u JOIN agents.model_price p ON lower(u.model)=p.model_key WHERE u.kind='agent' AND $__timeFilter(ts) AND u.machine = ANY(ARRAY[${machine:sqlstring}]::text[]) AND u.agent = ANY(ARRAY[${agent:sqlstring}]::text[]) AND coalesce(u.model,'unknown') = ANY(ARRAY[${model:sqlstring}]::text[]) GROUP BY 1 ORDER BY 3 DESC NULLS LAST LIMIT 15"
+          "rawSql": "SELECT u.model AS \"model\", count(*) AS \"Events\",\n       sum(coverage_tokens) AS \"Coverage tokens\",\n       sum(priced_tokens) AS \"Priced tokens\",\n       sum(unpriced_tokens) AS \"Unpriced tokens\",\n       sum(known_api_cost_usd) AS \"Known USD\",\n       CASE WHEN count(estimated_api_cost_usd) = count(*) THEN sum(estimated_api_cost_usd) END AS \"Estimated total USD\",\n       sum(logged_cost_usd) AS \"Known logged USD\",\n       count(*) FILTER (WHERE logged_cost_usd IS NULL) AS \"Events missing logged cost\",\n       extract(epoch FROM now() - min(rate_synced_at)) AS \"Oldest rate age\"\nFROM agents.usage_price u\nWHERE $__timeFilter(ts)\n  AND u.machine = ANY(ARRAY[${machine:sqlstring}]::text[])\n  AND u.agent = ANY(ARRAY[${agent:sqlstring}]::text[])\n  AND coalesce(u.model, 'unknown') = ANY(ARRAY[${model:sqlstring}]::text[])\nGROUP BY 1\nORDER BY \"Coverage tokens\" DESC"
         }
       ],
       "fieldConfig": {
@@ -1201,18 +1201,48 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "$"
+              "options": "Known USD"
             },
             "properties": [
               {
                 "id": "unit",
                 "value": "currencyUSD"
-              },
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Estimated total USD"
+            },
+            "properties": [
               {
-                "id": "custom.cellOptions",
-                "value": {
-                  "type": "color-background"
-                }
+                "id": "unit",
+                "value": "currencyUSD"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Known logged USD"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "currencyUSD"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Oldest rate age"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "s"
               }
             ]
           }
@@ -1220,12 +1250,13 @@
       },
       "options": {
         "showHeader": true
-      }
+      },
+      "description": "Measured tokens with and without a rate, the known API-equivalent cost, and the subtotal of logged costs present in the source records. Estimated total requires fully priced usage. Rate age is the oldest matched rate."
     },
     {
       "id": 29,
       "type": "table",
-      "title": "Cost by agent",
+      "title": "Pricing by agent",
       "datasource": {
         "type": "grafana-postgresql-datasource",
         "uid": "agents-timescaledb"
@@ -1245,7 +1276,7 @@
           },
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT u.agent AS \"agent\", count(*) AS \"turns\", sum((u.input_tokens*p.input_cost + u.output_tokens*p.output_cost + u.cache_read_tokens*coalesce(p.cache_read_cost,p.input_cost) + u.cache_write_tokens*coalesce(p.cache_write_cost,p.input_cost)))::numeric(14,2) AS \"$\" FROM agents.usage_event u JOIN agents.model_price p ON lower(u.model)=p.model_key WHERE u.kind='agent' AND $__timeFilter(ts) AND u.machine = ANY(ARRAY[${machine:sqlstring}]::text[]) AND u.agent = ANY(ARRAY[${agent:sqlstring}]::text[]) AND coalesce(u.model,'unknown') = ANY(ARRAY[${model:sqlstring}]::text[]) GROUP BY 1 ORDER BY 3 DESC NULLS LAST"
+          "rawSql": "SELECT u.agent AS \"agent\", count(*) AS \"Events\",\n       sum(coverage_tokens) AS \"Coverage tokens\",\n       sum(priced_tokens) AS \"Priced tokens\",\n       sum(unpriced_tokens) AS \"Unpriced tokens\",\n       sum(known_api_cost_usd) AS \"Known USD\",\n       CASE WHEN count(estimated_api_cost_usd) = count(*) THEN sum(estimated_api_cost_usd) END AS \"Estimated total USD\",\n       sum(logged_cost_usd) AS \"Known logged USD\",\n       count(*) FILTER (WHERE logged_cost_usd IS NULL) AS \"Events missing logged cost\",\n       extract(epoch FROM now() - min(rate_synced_at)) AS \"Oldest rate age\"\nFROM agents.usage_price u\nWHERE $__timeFilter(ts)\n  AND u.machine = ANY(ARRAY[${machine:sqlstring}]::text[])\n  AND u.agent = ANY(ARRAY[${agent:sqlstring}]::text[])\n  AND coalesce(u.model, 'unknown') = ANY(ARRAY[${model:sqlstring}]::text[])\nGROUP BY 1\nORDER BY \"Coverage tokens\" DESC"
         }
       ],
       "fieldConfig": {
@@ -1254,18 +1285,48 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "$"
+              "options": "Known USD"
             },
             "properties": [
               {
                 "id": "unit",
                 "value": "currencyUSD"
-              },
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Estimated total USD"
+            },
+            "properties": [
               {
-                "id": "custom.cellOptions",
-                "value": {
-                  "type": "color-background"
-                }
+                "id": "unit",
+                "value": "currencyUSD"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Known logged USD"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "currencyUSD"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Oldest rate age"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "s"
               }
             ]
           }
@@ -1273,7 +1334,8 @@
       },
       "options": {
         "showHeader": true
-      }
+      },
+      "description": "Measured tokens with and without a rate, the known API-equivalent cost, and the subtotal of logged costs present in the source records. Estimated total requires fully priced usage. Rate age is the oldest matched rate."
     }
   ]
 }

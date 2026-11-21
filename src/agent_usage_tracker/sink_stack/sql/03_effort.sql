@@ -470,13 +470,8 @@ GROUP BY 1;
 CREATE OR REPLACE VIEW agents.usage_cost AS
 SELECT u.event_id, u.ts, u.agent, coalesce(u.model, '') AS model,
        u.input_tokens, u.output_tokens, u.cache_read_tokens, u.cache_write_tokens,
-       u.reasoning_tokens, u.total_tokens,
-       u.input_tokens * p.input_cost + u.output_tokens * p.output_cost
-       + u.cache_read_tokens * coalesce(p.cache_read_cost, p.input_cost)
-       + u.cache_write_tokens * coalesce(p.cache_write_cost, p.input_cost) AS est_cost_usd
-FROM agents.usage_event_dedup u
-LEFT JOIN agents.model_price p ON p.model_key = lower(u.model)
-WHERE u.kind = 'agent';
+       u.reasoning_tokens, u.total_tokens, u.estimated_api_cost_usd AS est_cost_usd
+FROM agents.usage_price u;
 
 CREATE OR REPLACE VIEW agents.tokens_cost_by_model_daily_live AS
 SELECT (ts AT TIME ZONE '@AUT_TZ@')::date AS day, agent, model,
@@ -568,12 +563,15 @@ SELECT month,
        count(*)::int                                    AS episodes,
        percentile_cont(0.5) WITHIN GROUP (ORDER BY total_tokens)
            FILTER (WHERE outcome = 'shipped')           AS median_tokens_shipped,
-       percentile_cont(0.5) WITHIN GROUP (ORDER BY est_cost_usd)
-           FILTER (WHERE outcome = 'shipped')           AS median_cost_usd_shipped,
+       CASE WHEN count(*) FILTER (WHERE outcome = 'shipped'
+                                  AND (unpriced_turns > 0 OR est_cost_usd IS NULL)) = 0
+            THEN percentile_cont(0.5) WITHIN GROUP (ORDER BY est_cost_usd)
+                 FILTER (WHERE outcome = 'shipped') END AS median_cost_usd_shipped,
        round(sum(total_tokens) / nullif(count(*) FILTER (WHERE outcome = 'shipped'), 0))
                                                         AS tokens_per_shipped,
-       round(sum(est_cost_usd) / nullif(count(*) FILTER (WHERE outcome = 'shipped'), 0), 2)
-                                                        AS cost_usd_per_shipped
+       CASE WHEN count(*) FILTER (WHERE unpriced_turns > 0 OR est_cost_usd IS NULL) = 0
+            THEN round(sum(est_cost_usd) / nullif(count(*) FILTER (WHERE outcome = 'shipped'), 0), 2)
+       END                                             AS cost_usd_per_shipped
 FROM agents.tokens_cost_by_episode
 GROUP BY month;
 

@@ -458,7 +458,7 @@ def _token_event(o: dict[str, Any], payload: dict[str, Any], cur: FileState, pat
         output_tokens=out,
         cache_read_tokens=cached,
         cache_write_tokens=0,
-        reasoning_tokens=rea,
+        reasoning_tokens=rea if last.get("reasoning_output_tokens") is not None else None,
         total_tokens=total,
         project=project_name(cur["cwd"]),
         session=_session(cur, path),

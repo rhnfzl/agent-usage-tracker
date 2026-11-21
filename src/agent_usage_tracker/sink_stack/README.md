@@ -64,7 +64,12 @@ Then run `aut scan --dry-run` and `aut scan`.
   `docker compose exec grafana grafana cli admin reset-admin-password ...`, then update `.env`.
 - **Network:** with a LAN or Tailscale `AUT_BIND`, every host that reaches it can try to log in to Postgres, including as `postgres`, and Grafana runs over plain HTTP.
   Docker's published ports also bypass host firewalls such as ufw. Prefer a Tailscale address over a LAN address.
-- **Cost panels:** the cost panels stay empty until `agents.model_price` has rows. aut does not fill that table yet.
+- **Cost panels:** run `aut sync-prices --sink` to refresh the local file and load the sink price table.
+  Set `AUT_PRICE_PG_DSN` to a database-owner connection or to a dedicated role with schema access and
+  SELECT, INSERT and UPDATE on `agents.model_price`. The collector and Grafana roles keep their existing grants.
+  Refresh updates the returned model keys and keeps other keys in the sink. The panel shows the oldest matched rate age.
+  The known cost comes from measured components with rates. The estimated total is blank when any tokens are unpriced.
+  Logged cost remains a separate source value. Rate-based amounts represent current API list prices in USD.
 - **Backups:** your history is in the `pgdata` volume. Back it up with `docker compose exec db pg_dump -U postgres agents`.
 - **Your own Postgres:** skip Compose and run `apply.sh` with the libpq environment (`PGHOST`, `PGUSER`, ...) of a superuser on a TimescaleDB server.
   It needs `psql` 15 or newer. Without `AUT_WRITER_PASSWORD` and `AUT_RO_PASSWORD`, it leaves existing role passwords alone.

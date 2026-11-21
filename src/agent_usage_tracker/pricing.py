@@ -2,9 +2,8 @@
 pydantic/genai-prices, each filling only the models the ones before it lack.
 
 Follows the usual price-registry sync pattern, EXTENDED to also extract the two cache-cost
-fields such syncs normally skip (cache_read_input_token_cost /
-cache_creation_input_token_cost). Nothing in aut reads the file; it is kept for readers outside
-aut (see the README).
+fields cache_read_input_token_cost and cache_creation_input_token_cost. The local summary
+reads the map offline, and an explicit refresh can also load the packaged sink.
 Zero runtime deps: the fetch uses stdlib urllib. Prices are NOTIONAL / API-equivalent.
 
 Map shape: {normalized_key: {output_cost, input_cost?, cache_read_cost?, cache_write_cost?}}
@@ -14,14 +13,25 @@ in USD per token.
 from __future__ import annotations
 
 import json
+import math
+import os
 import urllib.request
-from datetime import date
+from datetime import date, datetime, timezone
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Callable
 
-from .config import AutError
+from .config import AutError, config_path
 from .net import HTTP_ERRORS
+from .sink import write_many
 from .state import atomic_write_text
+
+COMPONENT_RATES = (
+    ("input_tokens", "input_cost"),
+    ("output_tokens", "output_cost"),
+    ("cache_read_tokens", "cache_read_cost"),
+    ("cache_write_tokens", "cache_write_cost"),
+)
 
 _MODELS_DEV_PRICE_SCALE = 1_000_000  # models.dev prices are per-1M tokens
 
@@ -40,7 +50,7 @@ def normalize_model_key(model_id: str) -> str:
     key = model_id.strip().lower()
     if "@" in key:
         head, _, tail = key.rpartition("@")
-        if head and tail.isdigit():
+        if head and tail.isascii() and tail.isdigit():
             key = head
     if "@" in key:
         head, _, tail = key.rpartition("@")
@@ -50,13 +60,20 @@ def normalize_model_key(model_id: str) -> str:
     return key
 
 
+def price_key(model: str | None, rates: dict[str, dict[str, float]]) -> str:
+    """Use an exact historical rate key before trying the canonical catalog key."""
+    exact = (model or "").lower()
+    return exact if exact in rates else normalize_model_key(exact)
+
+
 def _coerce_float(value: Any) -> float | None:
     if isinstance(value, bool):  # bool is an int; a stray `true` must not become 1.0
         return None
     try:
-        return float(value)
-    except (TypeError, ValueError):
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
         return None
+    return number if math.isfinite(number) and number >= 0 else None
 
 
 def build_rate_map(
@@ -78,7 +95,8 @@ def build_rate_map(
             val = _coerce_float(spec.get(src))
             if val is not None:
                 entry[dst] = val
-        rates[normalize_model_key(model_id)] = entry
+        if key := normalize_model_key(model_id):
+            rates[key] = entry
     _merge_models_dev(rates, models_dev)
     _merge_genai_prices(rates, genai_prices)
     return rates
@@ -98,7 +116,7 @@ def _merge_models_dev(
             continue
         for model_id, spec in models.items():
             key = normalize_model_key(model_id)
-            if key in rates or not isinstance(spec, dict):
+            if not key or key in rates or not isinstance(spec, dict):
                 continue
             cost = spec.get("cost")
             if not isinstance(cost, dict):
@@ -113,6 +131,9 @@ def _merge_models_dev(
             cache_read = _coerce_float(cost.get("cache_read"))
             if cache_read is not None:
                 entry["cache_read_cost"] = cache_read / _MODELS_DEV_PRICE_SCALE
+            cache_write = _coerce_float(cost.get("cache_write"))
+            if cache_write is not None:
+                entry["cache_write_cost"] = cache_write / _MODELS_DEV_PRICE_SCALE
             rates[key] = entry
 
 
@@ -160,7 +181,7 @@ def _merge_genai_prices(
                 continue
             key = normalize_model_key(model_id)
             prices = _current_genai_prices(spec.get("prices"), today)
-            if key in rates or prices is None:
+            if not key or key in rates or prices is None:
                 continue
             entry: dict[str, float] = {}
             for src, dst in _GENAI_FIELD_MAP:
@@ -209,6 +230,7 @@ def sync_prices(
     models_dev_url: str = MODELS_DEV_URL,
     genai_prices_url: str = GENAI_PRICES_URL,
     fetch: Callable[[str], Any] | None = None,
+    pg_dsn: str | None = None,
 ) -> int:
     """Fetch -> build -> atomic write. Returns the number of priced models. Raises
     AutError if the primary source is unreachable or the map is empty, so a
@@ -221,28 +243,73 @@ def sync_prices(
             "sync-prices: LiteLLM source unreachable; keeping the existing "
             "price file."
         )
-    rates = build_rate_map(litellm, fetch(models_dev_url), fetch(genai_prices_url))
+    rates = build_rate_map(litellm)
     if not rates:
         raise AutError(
             "sync-prices: built an empty rate map; keeping the existing "
             "price file."
         )
-    # Atomic, so a concurrent reader never sees a half-written file. Shared: no secret in it, and
-    # --out can point at a path another user or service reads.
-    atomic_write_text(Path(out).expanduser(), json.dumps(rates, indent=2, sort_keys=True),
-                      shared=True)
+    _merge_models_dev(rates, fetch(models_dev_url))
+    _merge_genai_prices(rates, fetch(genai_prices_url))
+    text = json.dumps(rates, indent=2, sort_keys=True)
+    if pg_dsn:
+        load_sink_prices(pg_dsn, rates, datetime.now(timezone.utc))
+    try:
+        atomic_write_text(Path(out).expanduser(), text, shared=True)
+    except OSError as exc:
+        detail = " after the sink applied the rates" if pg_dsn else ""
+        raise AutError(f"sync-prices: could not write the local price file{detail}: {exc}") from exc
     return len(rates)
 
 
-def load_prices(path: str | Path) -> dict[str, dict[str, float]]:
-    """Load a price file; {} if absent."""
+def default_price_path() -> Path:
+    return config_path().parent / "model_prices.json"
+
+
+def read_price_snapshot(path: str | Path) -> tuple[dict[str, dict[str, float]], datetime | None]:
+    """Read rates and mtime from the same file. Older plain price maps keep their format."""
     p = Path(path).expanduser()
-    if not p.exists():
-        return {}
     try:
-        obj = json.loads(p.read_text(encoding="utf-8"))
+        with p.open(encoding="utf-8") as handle:
+            obj = json.load(handle)
+            synced_at = datetime.fromtimestamp(os.fstat(handle.fileno()).st_mtime, timezone.utc)
+    except FileNotFoundError:
+        return {}, None
     except (ValueError, OSError) as exc:
         raise AutError(f"price file {p} is unreadable/corrupt; re-run `aut sync-prices`: {exc}")
     if not isinstance(obj, dict) or not all(isinstance(v, dict) for v in obj.values()):
         raise AutError(f"price file {p} is not a table of models; re-run `aut sync-prices`")
-    return obj
+    rates = {}
+    for key, values in obj.items():
+        entry = {}
+        for _, field in COMPONENT_RATES:
+            if (rate := _coerce_float(values.get(field))) is not None:
+                entry[field] = rate
+        if key:
+            # An exact override may leave one or every component unpriced.
+            rates[key] = entry
+    return rates, synced_at
+
+
+def load_prices(path: str | Path) -> dict[str, dict[str, float]]:
+    """Load a price file, returning an empty map if the file is absent."""
+    return read_price_snapshot(path)[0]
+
+
+def load_sink_prices(dsn: str, rates: dict[str, dict[str, float]], synced_at: datetime) -> None:
+    """Upsert a validated snapshot in one transaction, keeping other existing price keys."""
+    rows = [(key, *(Decimal(str(entry[field])) if field in entry else None
+                    for _, field in COMPONENT_RATES), synced_at)
+            for key, entry in sorted(rates.items())]
+    write_many(dsn, """
+        INSERT INTO agents.model_price
+            (model_key, input_cost, output_cost, cache_read_cost, cache_write_cost, synced_at)
+        VALUES (%s, %s, %s, %s, %s, %s)
+        ON CONFLICT (model_key) DO UPDATE SET
+            input_cost = EXCLUDED.input_cost,
+            output_cost = EXCLUDED.output_cost,
+            cache_read_cost = EXCLUDED.cache_read_cost,
+            cache_write_cost = EXCLUDED.cache_write_cost,
+            synced_at = EXCLUDED.synced_at
+        WHERE agents.model_price.synced_at < EXCLUDED.synced_at
+    """, rows)

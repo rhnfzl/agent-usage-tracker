@@ -3,6 +3,7 @@ models.dev per-1M scaling, and the write/load roundtrip."""
 
 from __future__ import annotations
 
+import json
 import os
 import stat
 import tempfile
@@ -175,3 +176,89 @@ def test_sync_survives_a_missing_genai_prices_list() -> None:
         n = pricing.sync_prices(Path(d) / "p.json",
                                 fetch=lambda url: sample if url == pricing.LITELLM_URL else None)
     assert n == 1
+
+
+def test_invalid_primary_refresh_keeps_previous_snapshot_and_skips_sink(tmp_path, monkeypatch):
+    path = tmp_path / "model_prices.json"
+    pricing.sync_prices(path, fetch=lambda url: {"old": {"output_cost_per_token": 0}})
+    before = path.read_bytes()
+    monkeypatch.setattr(pricing, "load_sink_prices", lambda *args: pytest.fail("sink write"))
+    for raw in (None, {"invalid": {"output_cost_per_token": "NaN"}},
+                {"invalid": {"output_cost_per_token": -1}}):
+        def fetch(url):
+            return raw if url == pricing.LITELLM_URL else {"fallback": {"models": {
+                "other": {"cost": {"output": 2}}
+            }}}
+
+        with pytest.raises(AutError, match="keeping the existing"):
+            pricing.sync_prices(path, pg_dsn="never used", fetch=fetch)
+        assert path.read_bytes() == before
+    assert pricing.load_prices(path) == {"old": {"output_cost": 0}}
+
+
+def test_registered_price_refresh_only_connects_on_request(tmp_path, monkeypatch, capsys):
+    import argparse
+    from agent_usage_tracker import pricing_cli
+
+    parser = argparse.ArgumentParser()
+    pricing_cli.register(parser.add_subparsers())
+    sample = {"example": {"output_cost_per_token": 0}}
+    monkeypatch.setattr(pricing, "_fetch_json", lambda url: sample)
+    updates = []
+    monkeypatch.setattr(pricing, "load_sink_prices", lambda *args: updates.append(args))
+    out = tmp_path / "model_prices.json"
+    args = ["sync-prices", "--out", str(out)]
+    monkeypatch.setenv("AUT_PRICE_PG_DSN", "scratch-dsn")
+    pricing_cli.run(parser.parse_args(args))
+    assert not updates and out.exists()
+    pricing_cli.run(parser.parse_args([*args, "--sink"]))
+    assert updates[0][:2] == ("scratch-dsn", {"example": {"output_cost": 0}})
+    assert "loaded 1 model prices" in capsys.readouterr().err
+    monkeypatch.delenv("AUT_PRICE_PG_DSN")
+    with pytest.raises(AutError, match="needs AUT_PRICE_PG_DSN"):
+        pricing_cli.run(parser.parse_args([*args, "--sink"]))
+
+
+def test_zero_component_price_is_a_measured_zero_and_reasoning_is_not_added():
+    from decimal import Decimal
+    from agent_usage_tracker.event import UsageEvent
+    from agent_usage_tracker.usage_price import price_usage
+
+    row = UsageEvent("zero-price", None, "codex", "free", None,
+                     output_tokens=3, reasoning_tokens=2, total_tokens=3)
+    quote = price_usage(row, {"free": {"output_cost": 0}})
+    assert quote.priced == quote.denominator == 3
+    assert quote.known_cost == Decimal(0)
+
+
+def test_exact_legacy_rate_overrides_canonical_rate_without_filling_missing_fields(tmp_path):
+    from decimal import Decimal
+
+    from agent_usage_tracker.usage_price import price_usage
+    from price_fixture import LEGACY_RATES, legacy_price_rows
+
+    recording = legacy_price_rows()[0]
+    quote = price_usage(recording, LEGACY_RATES)
+    assert (quote.denominator, quote.priced, quote.known_cost) == (5, 4, Decimal("2"))
+    fallback = price_usage(recording, {"model-q": LEGACY_RATES["model-q"]})
+    assert (fallback.denominator, fallback.priced, fallback.known_cost) == (5, 5, Decimal("0.09"))
+
+    path = tmp_path / "rates.json"
+    path.write_text(json.dumps({**LEGACY_RATES, "vendor/model-q": {}}))
+    unpriced = price_usage(recording, pricing.load_prices(path))
+    assert (unpriced.priced, unpriced.known_cost) == (0, None)
+
+
+def test_negative_legacy_row_does_not_produce_a_price_or_negative_coverage():
+    from agent_usage_tracker.usage_price import PriceTally, price_usage
+    from price_fixture import LEGACY_RATES, legacy_price_rows
+
+    for row, denominator in zip(legacy_price_rows()[1:], (10, 0)):
+        priced = price_usage(row, LEGACY_RATES)
+        assert (priced.denominator, priced.priced, priced.known_cost) == (denominator, 0, None)
+        tally = PriceTally()
+        tally.add(priced)
+        result = tally.result()
+        assert result["unpriced_events"] == 1
+        assert result["unpriced_tokens"] == denominator
+        assert result["estimated_api_cost_usd"] is None

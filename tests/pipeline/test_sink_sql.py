@@ -18,18 +18,22 @@ import subprocess  # nosec B404 # fixed argv, the shipped apply script
 import uuid
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from decimal import Decimal
 from zoneinfo import ZoneInfo
 
 import pytest
 
 import agent_usage_tracker
-from agent_usage_tracker import episode_store, git_days, improve_publish, inspector, outcomes, push
+from agent_usage_tracker import (episode_store, git_days, improve_publish, inspector, outcomes,
+                                 pricing, push, summary)
 from agent_usage_tracker.config import DEFAULT_LEDGER_TZ, AutError, Config
 from agent_usage_tracker.event import (ActivityEvent, EventSession, TimeInterval,
                                        UsageEvent)
 from agent_usage_tracker.label import run as label_run
 from agent_usage_tracker.label.tasks import Source
 from agent_usage_tracker.sink import check_ledger_zone, connect, write_many
+from price_fixture import (CATALOG, LEGACY_RATES, PRICE_DAY, PRICE_MODEL,
+                           legacy_price_rows, price_config, price_rows)
 
 DSN = os.environ.get("AUT_TEST_PG_DSN")
 pytestmark = pytest.mark.skipif(not DSN, reason="AUT_TEST_PG_DSN is not set")
@@ -603,3 +607,122 @@ def test_improve_publish_sql_retries_latest_zeros_grants_and_dashboard(dsn):
             sql = sql.replace("$__timeTo()", "'2027-01-01'::timestamptz")
             sql = sql.replace("$__timeFilter(adopted_at)", "adopted_at >= '2026-01-01'")
             conn.execute(sql).fetchall()
+
+
+def test_shipped_price_panels_reconcile_with_local_summary(dsn, tmp_path, monkeypatch):
+    rows = price_rows()
+    push.insert_pg(dsn, rows)
+    push.insert_pg(dsn, rows)
+    path = tmp_path / "prices.json"
+    assert pricing.sync_prices(path, pg_dsn=dsn, fetch=lambda _: CATALOG) == 3
+    rates, _ = pricing.read_price_snapshot(path)
+    with connect(dsn) as conn:
+        synced_at = conn.execute(
+            "SELECT synced_at FROM agents.model_price WHERE model_key = 'model-a'"
+        ).fetchone()[0]
+    pricing.load_sink_prices(dsn, rates, synced_at)
+    pricing.load_sink_prices(dsn, {"model-a": {"output_cost": 99}}, synced_at - timedelta(days=1))
+    before = path.read_bytes()
+    with pytest.raises(AutError, match="keeping the existing"):
+        pricing.sync_prices(path, pg_dsn=dsn, fetch=lambda _: None)
+    assert path.read_bytes() == before
+    cfg = price_config(tmp_path, monkeypatch, rows + rows)
+    report = summary.build_summary(cfg, since=PRICE_DAY, until=PRICE_DAY + timedelta(days=1),
+                                   prices_path=path)
+    totals = report["totals"]["pricing"]
+    assert report["totals"]["events"] == 3
+    assert totals["estimated_api_cost_usd"] is None
+
+    dashboard = json.loads((SINK_STACK / "grafana/dashboards/agents-usage.json").read_text())
+    panel_sql = {panel["id"]: panel["targets"][0]["rawSql"] for panel in dashboard["panels"]
+                 if 24 <= panel["id"] <= 29}
+
+    def run_panel(conn, panel_id):
+        # Substitute Grafana's macros; execute the query from the shipped dashboard.
+        sql = panel_sql[panel_id].replace(
+            "$__timeFilter(ts)",
+            "ts BETWEEN '2026-06-15 00:00:00+00' AND '2026-06-15 23:59:59+00'",
+        )
+        for field, values in (
+            ("machine", "'pricing-fixture'"),
+            ("agent", "'claude_code'"),
+            ("model", f"'{PRICE_MODEL}','model-b','codex-auto-review'"),
+        ):
+            sql = sql.replace("${" + field + ":sqlstring}", values)
+        result = conn.execute(sql)
+        if panel_id in (28, 29):
+            assert [column.name for column in result.description][7:9] == [
+                "Known logged USD", "Events missing logged cost"]
+        return result.fetchall()
+
+    with connect(dsn) as conn:
+        assert conn.execute(
+            "SELECT count(*), min(synced_at), max(synced_at) FROM agents.model_price"
+        ).fetchone() == (3, synced_at, synced_at)
+        assert conn.execute(
+            "SELECT has_table_privilege('agents_writer', 'agents.model_price', 'INSERT'), "
+            "has_table_privilege('agents_ro', 'agents.model_price', 'UPDATE')"
+        ).fetchone() == (False, False)
+        conn.execute("SET ROLE agents_ro")
+        assert conn.execute(
+            "SELECT agents.price_model_key(%s), agents.price_model_key(%s), "
+            "agents.price_model_key(%s)", (PRICE_MODEL, "abc@", "@")
+        ).fetchone() == tuple(pricing.normalize_model_key(key) for key in (PRICE_MODEL, "abc@", "@"))
+        projected = conn.execute("""
+            SELECT model, coverage_tokens, priced_tokens, unpriced_tokens, unattributed_tokens,
+                   known_api_cost_usd, estimated_api_cost_usd, logged_cost_usd
+            FROM agents.usage_price
+            WHERE machine = 'pricing-fixture' ORDER BY model
+        """).fetchall()
+        local = {m["model"]: m for m in report["prices_by_model"]}
+        assert len(projected) == len(local) == 3
+        for model, denom, priced, unpriced, unattributed, known, complete, logged in projected:
+            rec = local[model]
+            assert (denom, priced, unpriced, unattributed) == (
+                rec["coverage_tokens"], rec["priced_tokens"], rec["unpriced_tokens"],
+                rec["unattributed_tokens"])
+            assert known == (Decimal(rec["known_api_cost_usd"])
+                             if rec["known_api_cost_usd"] is not None else None)
+            assert complete == (Decimal(rec["estimated_api_cost_usd"])
+                                if rec["estimated_api_cost_usd"] is not None else None)
+            assert logged == (Decimal("0.125") if model == PRICE_MODEL else None)
+        assert run_panel(conn, 24) == [(Decimal(totals["known_api_cost_usd"]),)]
+        assert float(run_panel(conn, 25)[0][0]) == pytest.approx(80 / 97)
+        assert run_panel(conn, 26) == [(17,)]
+        assert run_panel(conn, 27)[0][-1] == Decimal("1.01")
+        table_model = {row[0]: row for row in run_panel(conn, 28)}
+        assert table_model["model-b"][1:9] == (1, 22, 15, 7, Decimal("0.4"), None, None, 1)
+        assert table_model["codex-auto-review"][1:9] == (1, 10, 0, 10, None, None, None, 1)
+        aggregate, = run_panel(conn, 29)
+        assert aggregate[:9] == ("claude_code", 3, 97, 80, 17, Decimal("1.01"), None,
+                                Decimal("0.125"), 2)
+        assert aggregate[9] is not None
+        conn.execute("RESET ROLE")
+        assert conn.execute(
+            "SELECT count(*) FILTER (WHERE est_cost_usd IS NULL), sum(est_cost_usd) "
+            "FROM agents.usage_cost WHERE event_id LIKE 'price-%'"
+        ).fetchone() == (2, Decimal("0.61"))
+
+
+def test_legacy_price_rows_match_local_pricing_and_prefer_exact_alias(dsn):
+    from agent_usage_tracker.usage_price import price_usage
+
+    rows = legacy_price_rows()
+    push.insert_pg(dsn, rows)
+    pricing.load_sink_prices(dsn, LEGACY_RATES, T0)
+    with connect(dsn) as conn:
+        quotes = conn.execute("""
+            SELECT event_id, coverage_tokens, priced_tokens, unpriced_tokens,
+                   known_api_cost_usd, estimated_api_cost_usd
+            FROM agents.usage_price WHERE machine = 'legacy-pricing'
+        """).fetchall()
+    fixed = {
+        "legacy-override": (5, 4, 1, Decimal("2"), None),
+        "legacy-negative": (10, 0, 10, None, None),
+        "legacy-no-valid-counts": (0, 0, 0, None, None),
+    }
+    assert {event_id: tuple(values) for event_id, *values in quotes} == fixed
+    for row in rows:
+        quote = price_usage(row, LEGACY_RATES)
+        assert (quote.denominator, quote.priced, quote.denominator - quote.priced,
+                quote.known_cost) == fixed[row.event_id][:4]

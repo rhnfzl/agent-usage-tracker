@@ -1,5 +1,6 @@
 import json
 import os
+from pathlib import Path
 
 import pytest
 
@@ -21,6 +22,20 @@ def test_snapshot_is_private_immutable_and_tampering_is_rejected(tmp_path):
         store.get("sessions", key)
     with pytest.raises(AutError, match="changed"):
         store.put("sessions", {"events": ["private evidence"]})
+
+
+def test_private_records_use_utf8_on_a_non_utf8_system(tmp_path, monkeypatch):
+    read_text = Path.read_text
+
+    def read_text_with_legacy_default(path, encoding=None, **kwargs):
+        return read_text(path, encoding=encoding or "cp1252", **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", read_text_with_legacy_default)
+    store = Store(tmp_path / "private")
+    record = {"events": ["café"]}
+    key = store.put("sessions", record)
+    assert store.get("sessions", key) == record
+    assert store.put("sessions", record) == key
 
 
 def test_store_refuses_existing_unrelated_directory(tmp_path):
