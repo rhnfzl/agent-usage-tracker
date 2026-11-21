@@ -330,17 +330,23 @@ Accept writes nothing outside the store and the candidate:
   `superseded_by`, and decisions on the old id follow to the new one.
 - Otherwise the proposal is marked `stale` and the command fails with "target changed".
   Proposals saved before spans were recorded always go `stale` when the target changed.
-  A `stale` decision does not block the group; only a reject does.
+  A `stale` decision does not block the group; only a reject does, and a stale proposal can
+  still be rejected. A target that exists but cannot be read right now is an error, not stale.
 
-When the staged candidate is the top of its own Git clone (not a worktree of the source, which
-shares its refs), accept commits the target there on branch `aut/improve-<id8>`, with the
-proposal id in the message. The command prints what to run next: fetch that branch into the
+When the staged candidate's Git directory is its own `.git` (a clone, not a worktree, which
+writes its refs into another repository), accept commits the target there on branch
+`aut/improve-<id8>`, with the proposal id in the message. It uses Git plumbing on a private
+index, so no checkout, hook or clean filter runs, the candidate's own index and branch stay as
+they are, and only the literal target path changes. The command prints what to run next: fetch that branch into the
 real repository, or copy the staged file after checking the target digest. You review, apply
 and merge the change yourself.
 
-Reject needs a reason of 1 to 500 characters. It blocks the proposal's failure group, which the
-inbox shows as "rejected on <date>". It deletes `<store>/candidates/<id>` only; an operator's own
-`--candidate` directory stays.
+Reject needs a reason of 1 to 500 characters with at least one letter or digit, so the page's
+`"…"` placeholder pasted unedited is refused. It blocks the proposal's failure group, which the
+inbox shows as "rejected on <date>". An accepted group shows "accepted" until it is adopted. It
+deletes `<store>/candidates/<id>` (and those of proposals it superseded) only; an operator's own
+`--candidate` directory stays. A retry after a crash adds a missing journal row.
+The copied commands and next steps are quoted for a POSIX shell.
 
 After the merge, record the adoption:
 
@@ -351,10 +357,12 @@ aut improve adopt --title "Run tests with CI's pytest entrypoint, not python -m 
   --rubric avoidable_recovery --kind instruction --note "…"
 ```
 
-Adopting a proposal needs an accept first and copies its title, target, rubric ids, kind and
-group. The title is human-written, one line, at most 120 characters. The title and date are
+Adopting a proposal needs an accept first and copies its target, rubric ids, kind and group.
+It copies the title only from an operator proposal; a drafted proposal's title is model text,
+so `--title` is required. The title is human-written, one line, at most 120 characters. The title and date are
 meant for the sink (a later `publish-improve` step); targets, commit and note stay private.
-`benefit_claim` is always false. The same adoption twice is one record.
+`benefit_claim` is always false. The same proposal and commit (or, without a proposal, the same
+title and commit) is one adoption, even when the command runs again on a later day.
 
 ## Compare baseline and candidate
 
