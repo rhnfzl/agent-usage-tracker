@@ -650,7 +650,7 @@ delete the rows of this kind.
 ## Commits per day: agents.git_commit_day (`aut git-days`)
 
 `(day, commits, scanned_at, complete)`, insert-only. `complete` is a non-null boolean,
-defaulting to true for older collectors. `day` is the Europe/Amsterdam date of the author date. `commits`
+defaulting to true for older collectors. `day` is the author date's date in the ledger zone (`ledger_timezone`, the sink's `AUT_TZ`; default Europe/Amsterdam). `commits`
 counts distinct SHAs from branches, remotes, tags and registered worktree heads, including
 detached heads outside scan roots. Merges, stash and notes refs are excluded. Each object store
 is read once because worktrees share it. The scan reads repositories
@@ -671,7 +671,7 @@ best store count from the last five complete reads. A full scan also checks the 
 Existing aggregate history must pass for the configured sources before partial reads can establish complete coverage.
 Only `--allow-lower`, with every source freshly complete, can lower counts and reset the cache/history.
 `--local-only` skips all SSH sources. `aut --git-defer-remotes-until YYYY-MM-DD scan` (or `git-days`)
-skips them before that Amsterdam date, then resumes normal reads automatically.
+skips them before that ledger-zone date, then resumes normal reads automatically.
 
 `agents.git_commits_daily` exposes `day, commits, complete`, with `complete` last for compatibility.
 The newest complete scan resets the day's baseline. Rows at or after that baseline compete by

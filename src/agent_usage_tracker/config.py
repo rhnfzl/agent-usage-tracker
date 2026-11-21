@@ -27,6 +27,8 @@ DEFAULT_AGENTS = tuple(a for a in ALL_AGENTS if a not in ("activitywatch", "gene
 # this module, so this module cannot derive the list from it.
 LABEL_DECISION_TASKS = ("work_category", "steer_intent", "soft_outcome", "aw_title_relevance",
                         "writing_activity")
+# What a "day" is in the sink: must equal the sink's AUT_TZ. This default keeps existing setups.
+DEFAULT_LEDGER_TZ = "Europe/Amsterdam"
 LABEL_NOTE = "daily_note"    # generative, private: one draft per day (label/run.py), not a decision
 LABEL_TASK_NAMES = (*LABEL_DECISION_TASKS, LABEL_NOTE)
 LABEL_DAYS = 90              # the window units are rebuilt over (teach, review, eval, train)
@@ -87,6 +89,7 @@ class Config:
     webhook_secret: str | None
     pg_dsn: str | None
     home: Path
+    ledger_timezone: str = DEFAULT_LEDGER_TZ
     cursor_db_path: str | None = None      # override Cursor's state.vscdb location
     cursor_human_only: bool = False        # `cursor` emits prompts only -> safe beside cursor_api
     cursor_sdk_manifests: str | None = None  # glob of orchestrator manifest.json files (SDK usage)
@@ -355,6 +358,7 @@ def _config_from(data: dict[str, Any], path: Path) -> Config:
         webhook_secret=_resolve(transport, "webhook_secret"),
         pg_dsn=_resolve(transport, "pg_dsn"),
         home=Path(data.get("home") or Path.home()).expanduser(),
+        ledger_timezone=_text(data, "ledger_timezone") or DEFAULT_LEDGER_TZ,
         t3_activity_since=t3_since,
         cursor_db_path=_resolve(data, "cursor_db_path"),
         cursor_human_only=_as_bool(data.get("cursor_human_only", False)),

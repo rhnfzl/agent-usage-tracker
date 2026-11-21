@@ -69,3 +69,14 @@ def write_many(dsn: str, sql: str, rows: list[tuple[Any, ...]], timeout: int = 1
         with conn.cursor() as cur:
             cur.executemany(sql, rows)
         conn.commit()
+
+
+def check_ledger_zone(dsn: str, zone: str) -> None:
+    """A sink from sink_stack records its AUT_TZ. A collector that counts days in another zone
+    would write rows a day off near midnight, so it stops instead. Older sinks record nothing."""
+    with connect(dsn) as conn:
+        row = conn.execute("SELECT current_setting('aut.ledger_tz', true)").fetchone()
+    sink_zone = row[0] if row else None
+    if sink_zone and sink_zone != zone:
+        raise AutError(f"ledger_timezone is {zone} but the sink counts days in {sink_zone}: "
+                       f'set ledger_timezone = "{sink_zone}" in config.toml')

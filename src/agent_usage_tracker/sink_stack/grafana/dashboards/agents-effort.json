@@ -1,0 +1,634 @@
+{
+  "uid": "agents-effort",
+  "title": "Coding Agent Effort (private)",
+  "tags": [
+    "agents",
+    "effort",
+    "private"
+  ],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "graphTooltip": 1,
+  "refresh": "",
+  "time": {
+    "from": "now-90d",
+    "to": "now"
+  },
+  "templating": {
+    "list": []
+  },
+  "annotations": {
+    "list": []
+  },
+  "description": "Private: effort, outcomes, cost, coverage and the counting audit from the phase 5 views. Keep it on a private network; hours never leave this dashboard.",
+  "panels": [
+    {
+      "id": 1,
+      "title": "Effort",
+      "type": "row",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "panels": []
+    },
+    {
+      "id": 2,
+      "title": "Steers, commits and sessions per day",
+      "type": "timeseries",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "agents-timescaledb"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 1
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "agents-timescaledb"
+          },
+          "format": "time_series",
+          "rawSql": "SELECT day::timestamp AS time, steers, commits, interactive_sessions\nFROM agents.effort_daily\nWHERE day >= $__timeFrom()::date AND day <= $__timeTo()::date\nORDER BY 1;",
+          "editorMode": "code"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "bars",
+            "fillOpacity": 60,
+            "lineWidth": 1,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {},
+      "description": "Human steers outside scripted runs, distinct commits (superseded pre-amend SHAs left out) and interactive sessions, per local day. agents.effort_daily, refreshed nightly."
+    },
+    {
+      "id": 3,
+      "title": "Active minutes per day (private)",
+      "type": "timeseries",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "agents-timescaledb"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 1
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "agents-timescaledb"
+          },
+          "format": "time_series",
+          "rawSql": "SELECT day::timestamp AS time, active_minutes_all, active_minutes_relevant\nFROM agents.effort_daily\nWHERE day >= $__timeFrom()::date AND day <= $__timeTo()::date\nORDER BY 1;",
+          "editorMode": "code"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "m",
+          "custom": {
+            "drawStyle": "bars",
+            "fillOpacity": 60,
+            "lineWidth": 1,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {},
+      "description": "Merged active time (steer islands, ActivityWatch, manual), all and work-relevant. Private number: never published."
+    },
+    {
+      "id": 4,
+      "title": "Weekly effort",
+      "type": "table",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "agents-timescaledb"
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 24,
+        "x": 0,
+        "y": 9
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "agents-timescaledb"
+          },
+          "format": "table",
+          "rawSql": "SELECT week, steers, interactive_sessions, projects, commits, merged_commits, prs,\n       episodes_active, episodes_started, focus_blocks, parallel_peak,\n       round(active_minutes_relevant / 60, 1) AS relevant_hours\nFROM agents.effort_weekly\nWHERE week >= $__timeFrom()::date - 6 AND week <= $__timeTo()::date\nORDER BY week DESC;",
+          "editorMode": "code"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm"
+      },
+      "description": "Per ISO week. Sessions, projects, commits and episodes are counted once per week. Episodes exclude rejected ones and ones labelled non-building (learning, collaboration, other). Focus blocks: 60+ minute stretches mostly steering or editor/dev/terminal time. Parallel peak: most interactive sessions steered in one 15-minute window."
+    },
+    {
+      "id": 5,
+      "title": "Outcomes",
+      "type": "row",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 18
+      },
+      "panels": []
+    },
+    {
+      "id": 6,
+      "title": "Episode outcomes per month",
+      "type": "table",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "agents-timescaledb"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 19
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "agents-timescaledb"
+          },
+          "format": "table",
+          "rawSql": "SELECT month, episodes, shipped, reworked, open, ruled_out, no_code, undecided,\n       shipped_share, rework_share, final\nFROM agents.outcomes_monthly\nORDER BY month DESC LIMIT 12;",
+          "editorMode": "code"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm"
+      },
+      "description": "Counted episodes (no reject, building work only) by the month they started. episode_monthly counts every linked episode, so its numbers are higher; Phase 6 publishes these final months. final = complete the way episode_monthly publishes it; before that the counts can still move."
+    },
+    {
+      "id": 7,
+      "title": "Shipping and rework per month",
+      "type": "table",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "agents-timescaledb"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 19
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "agents-timescaledb"
+          },
+          "format": "table",
+          "rawSql": "SELECT month, commits, merged, reverted, reworked, open, abandoned, undecided, rework_share\nFROM agents.shipping_rework_monthly\nORDER BY month DESC LIMIT 12;",
+          "editorMode": "code"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm"
+      },
+      "description": "Commits by the month they were first seen, by their latest git outcome. Reverted = reverted within 14 days of the merge; reworked = under half the lines survive 14 days."
+    },
+    {
+      "id": 8,
+      "title": "Work mix per month",
+      "type": "table",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "agents-timescaledb"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 27
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "agents-timescaledb"
+          },
+          "format": "table",
+          "rawSql": "SELECT month, coalesce(category, 'unknown') AS category, units, unit_share, unknown_share\nFROM agents.work_mix_monthly\nORDER BY month DESC, units DESC LIMIT 60;",
+          "editorMode": "code"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm"
+      },
+      "description": "Phase 4 work_category labels. unit_share = share of labelled units among confident labels, not of active minutes: an episode day and an ActivityWatch block each count once. unknown = below the label's threshold. Empty until labels exist."
+    },
+    {
+      "id": 9,
+      "title": "Efficiency per month (notional cost)",
+      "type": "table",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "agents-timescaledb"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 27
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "agents-timescaledb"
+          },
+          "format": "table",
+          "rawSql": "SELECT month, shipped, episodes, median_tokens_shipped, round(median_cost_usd_shipped::numeric, 2) AS median_cost_usd_shipped,\n       tokens_per_shipped, cost_usd_per_shipped\nFROM agents.efficiency_by_episode\nORDER BY month DESC LIMIT 12;",
+          "editorMode": "code"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm"
+      },
+      "description": "Tokens and API-equivalent cost of counted episodes: median per shipped episode, and all episodes per shipped one. Notional: subscriptions are flat-rate."
+    },
+    {
+      "id": 10,
+      "title": "Cost per day by model (notional)",
+      "type": "timeseries",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "agents-timescaledb"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 35
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "agents-timescaledb"
+          },
+          "format": "time_series",
+          "rawSql": "SELECT day::timestamp AS time, model AS metric, sum(est_cost_usd) AS cost\nFROM agents.tokens_cost_by_model_daily\nWHERE day >= $__timeFrom()::date AND day <= $__timeTo()::date\nGROUP BY 1, 2 ORDER BY 1, 2;",
+          "editorMode": "code"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "custom": {
+            "drawStyle": "bars",
+            "fillOpacity": 60,
+            "lineWidth": 1,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {},
+      "description": "API-equivalent USD per local day and model, reasoning tokens never added; an unpriced model shows no cost."
+    },
+    {
+      "id": 11,
+      "title": "Interventions",
+      "type": "row",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 43
+      },
+      "panels": []
+    },
+    {
+      "id": 12,
+      "title": "Interrupts and rejections per month",
+      "type": "table",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "agents-timescaledb"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 44
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "agents-timescaledb"
+          },
+          "format": "table",
+          "rawSql": "SELECT month, cases, interrupts, rejections, before_tool_errors_avg, after_tool_errors_avg,\n       before_retries, after_retries, before_runaways, after_runaways, before_commits, after_commits\nFROM agents.intervention_monthly\nORDER BY month DESC LIMIT 12;",
+          "editorMode": "code"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm"
+      },
+      "description": "Interrupts and rejections followed by a steer: the interrupted turn against the turn after the steer (tool errors, retry and runaway flags, commits)."
+    },
+    {
+      "id": 13,
+      "title": "Data quality",
+      "type": "row",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 52
+      },
+      "panels": []
+    },
+    {
+      "id": 14,
+      "title": "Coverage: days each source reported",
+      "type": "table",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "agents-timescaledb"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 53
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "agents-timescaledb"
+          },
+          "format": "table",
+          "rawSql": "SELECT month,\n       max(days) FILTER (WHERE source = 'agents') AS agents,\n       max(days) FILTER (WHERE source = 'activitywatch') AS activitywatch,\n       max(days) FILTER (WHERE source = 'outcomes') AS outcomes,\n       max(days) FILTER (WHERE source = 'labels') AS labels\nFROM agents.coverage_monthly\nGROUP BY month ORDER BY month DESC LIMIT 12;",
+          "editorMode": "code"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm"
+      },
+      "description": "Local days per month with data from each source. An empty cell: that source never reported in the month."
+    },
+    {
+      "id": 15,
+      "title": "Counting audit, last 14 days",
+      "type": "table",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "agents-timescaledb"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 53
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "agents-timescaledb"
+          },
+          "format": "table",
+          "rawSql": "SELECT day, raw_usage_rows, dedup_usage_rows, dup_groups, dup_unexplained, activity_ts_conflicts,\n       scripted_share, stale_collectors, links_without_session, overlap_share\nFROM agents.audit_daily\nWHERE day > current_date - 14\nORDER BY day DESC;",
+          "editorMode": "code"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm"
+      },
+      "description": "dup_unexplained = usage events stored twice that the Claude Code re-log rule does not explain; a monitoring check should alert on it. overlap_share = share of per-source active minutes that overlap another source."
+    },
+    {
+      "id": 16,
+      "title": "Provisional semantic estimates",
+      "type": "row",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 61
+      },
+      "panels": []
+    },
+    {
+      "id": 17,
+      "title": "Developer intent estimates",
+      "type": "table",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "agents-timescaledb"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 62
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "agents-timescaledb"
+          },
+          "format": "table",
+          "rawSql": "SELECT month, label, units AS sampled_units, estimated_units, estimated_share, unknown_share, quality FROM agents.working_label_monthly WHERE task = 'steer_intent' ORDER BY month DESC, estimated_units DESC LIMIT 100;",
+          "editorMode": "code"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm"
+      },
+      "description": "Provisional Sonnet primary categories, sampling-weighted from the frozen historical baseline. Estimates, not verified facts or hours. Unknown cases remain in the denominator."
+    },
+    {
+      "id": 18,
+      "title": "Agent outcome estimates",
+      "type": "table",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "agents-timescaledb"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 62
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "agents-timescaledb"
+          },
+          "format": "table",
+          "rawSql": "SELECT month, label, units AS sampled_units, estimated_units, estimated_share, unknown_share, quality FROM agents.working_label_monthly WHERE task = 'soft_outcome' ORDER BY month DESC, estimated_units DESC LIMIT 100;",
+          "editorMode": "code"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm"
+      },
+      "description": "Provisional Sonnet outcome categories from the frozen historical baseline. Estimates of sampled work units, separate from measured git and episode outcomes. Unknown cases remain visible."
+    },
+    {
+      "id": 19,
+      "title": "Reviewed signal estimates",
+      "type": "table",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "agents-timescaledb"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 70
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "agents-timescaledb"
+          },
+          "format": "table",
+          "rawSql": "SELECT month, question, answer, units, review_source, quality FROM agents.working_signal_monthly ORDER BY month DESC, question, answer LIMIT 200;",
+          "editorMode": "code"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm"
+      },
+      "description": "Provisional direct agent-review counts only. Yes, no, uncertain (unknown), and not reviewed remain separate. This deliberately selected subset does not estimate population prevalence. These are not human-verified labels."
+    }
+  ]
+}

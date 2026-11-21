@@ -1,0 +1,16 @@
+apiVersion: 1
+datasources:
+  # The dashboards name this uid. agents_ro cannot read window titles.
+  - name: agents
+    uid: agents-timescaledb
+    type: grafana-postgresql-datasource
+    url: db:5432
+    user: agents_ro
+    editable: false
+    jsonData:
+      database: agents
+      sslmode: disable
+      timescaledb: true
+      postgresVersion: 1700
+    secureJsonData:
+      password: $AUT_RO_PASSWORD

@@ -20,10 +20,10 @@ Use it to answer:
 With [uv](https://docs.astral.sh/uv/getting-started/installation/) installed, try a local export:
 
 ```bash
-uvx --from git+https://github.com/rhnfzl/agent-usage-tracker aut --agents claude_code,codex,cursor_cli,pi export --out usage.csv
+uvx agent-usage-tracker --agents claude_code,codex,cursor_cli,pi export --out usage.csv
 ```
 
-AUT is a collector and CLI. Dashboards and websites read your database; this repository does not ship a hosted dashboard.
+AUT is a collector and CLI. For history and dashboards, it ships a Docker Compose sink (TimescaleDB and Grafana) that runs on your laptop or a homelab. There is no hosted service.
 
 [Quick start](#quick-start) · [Collectors](#collectors) · [Local labels](#local-labels-aut-label) · [Privacy](#privacy-model) · [Documentation](#documentation)
 
@@ -52,9 +52,11 @@ The base install uses the standard library, plus `tzdata` on Windows.
 Install with [uv](https://docs.astral.sh/uv/getting-started/installation/):
 
 ```bash
-uv tool install git+https://github.com/rhnfzl/agent-usage-tracker
+uv tool install agent-usage-tracker
 aut --agents claude_code,codex,cursor_cli,pi export --out usage.csv
 ```
+
+For the newest `main` instead of the latest release, install from `git+https://github.com/rhnfzl/agent-usage-tracker`.
 
 No database or configuration file is required for this export.
 It reads your current user's logs and writes usage rows to a local CSV.
@@ -66,7 +68,7 @@ An unreadable source makes export exit nonzero, so a partial file cannot silentl
 Install the PostgreSQL extra:
 
 ```bash
-uv tool install "agent-usage-tracker[postgres] @ git+https://github.com/rhnfzl/agent-usage-tracker"
+uv tool install "agent-usage-tracker[postgres]"
 ```
 
 Create `~/.config/agent-usage-tracker/config.toml` with your machine label and database connection:
@@ -80,7 +82,9 @@ pg_dsn = "env:AUT_PG_DSN"
 ```
 
 Set `AUT_PG_DSN` to your provisioned database connection.
-The database needs AUT's tables and views; the [deploy runbook](DEPLOY.md) describes the sink contract.
+The database needs AUT's tables and views. The [sink stack](src/agent_usage_tracker/sink_stack/README.md) provides them with one `docker compose up`;
+the [deploy runbook](DEPLOY.md) describes the sink contract.
+Set `ledger_timezone` to the sink's `AUT_TZ`.
 On macOS and Linux, protect the configuration with `chmod 600`.
 On Windows, restrict its directory permissions to your account.
 
@@ -322,7 +326,9 @@ uv run --no-sync mypy
 ```
 
 The [CI workflow](.github/workflows/ci.yml) tests Linux, macOS, and Windows across supported Python versions.
-SQL integration tests require an isolated PostgreSQL 16 database through `AUT_TEST_PG_DSN`; otherwise those tests skip.
+SQL integration tests require a scratch database on a TimescaleDB server and `psql`, through `AUT_TEST_PG_DSN` with a literal IP address and port; otherwise those tests skip.
+To release, raise `__version__` in `src/agent_usage_tracker/__init__.py`, merge, and push the tag `v<version>`.
+The [release workflow](.github/workflows/release.yml) builds it and publishes it to PyPI through trusted publishing.
 Use synthetic fixtures in public contributions. Keep session logs, personal labels, and private benchmarks out of commits.
 
 MIT licensed. See [LICENSE](LICENSE).

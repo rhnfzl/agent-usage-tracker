@@ -1,0 +1,9 @@
+apiVersion: 1
+providers:
+  - name: aut
+    folder: Coding agents
+    type: file
+    disableDeletion: true
+    allowUiUpdates: false
+    options:
+      path: /etc/aut-dashboards

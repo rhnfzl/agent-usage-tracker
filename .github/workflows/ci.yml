@@ -37,20 +37,21 @@ jobs:
         env:
           TZ: ${{ matrix.tz }}
 
-  # The sink layer's SQL against a real server; every other job skips these tests.
+  # The sink layer's SQL against a real server, on the shipped schema (sink_stack/apply.sh, with
+  # psql from the runner image); every other job skips these tests. Same image as compose.yaml.
   sink-sql:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     services:
       postgres:
-        image: postgres:16
+        image: timescale/timescaledb:2.32.1-pg17
         env:
           POSTGRES_PASSWORD: aut
         ports: ["5432:5432"]
         options: >-
-          --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 10
+          --health-cmd "pg_isready -h 127.0.0.1" --health-interval 5s --health-timeout 5s --health-retries 10
     env:
-      AUT_TEST_PG_DSN: postgresql://postgres:aut@localhost:5432/postgres
+      AUT_TEST_PG_DSN: postgresql://postgres:aut@127.0.0.1:5432/postgres
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -58,6 +59,11 @@ jobs:
           python-version: "3.11"
       - run: pip install -e ".[test,postgres]"
       - run: pytest -q tests/pipeline/test_sink_sql.py
+      - name: compose file is valid
+        working-directory: src/agent_usage_tracker/sink_stack
+        run: >-
+          AUT_PG_ADMIN_PASSWORD=x AUT_WRITER_PASSWORD=x AUT_RO_PASSWORD=x
+          AUT_GRAFANA_ADMIN_PASSWORD=x AUT_TZ=UTC docker compose config --quiet
 
   lint:
     runs-on: ubuntu-latest

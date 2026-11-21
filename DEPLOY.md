@@ -2,10 +2,15 @@
 
 Two halves: the **collector** (this repo, on every machine) and the **sink** (one central
 install of Postgres/TimescaleDB). Collectors write to it over `pg_dsn`. An n8n webhook in front
-is optional: it carries usage rows only, for machines with no route to Postgres. The sink's own
-files live in a separate infrastructure repo; this page names what they must provide.
+is optional: it carries usage rows only, for machines with no route to Postgres.
 
 ## A. Sink (once)
+
+The quickest sink is the Docker Compose stack in
+[src/agent_usage_tracker/sink_stack/](src/agent_usage_tracker/sink_stack/README.md): TimescaleDB,
+the schema, an hourly view refresh and Grafana with the dashboards, on a laptop or a homelab.
+Its `apply.sh` also applies the schema to a TimescaleDB server you run yourself. The rest of this
+section describes what any sink must provide.
 
 | Piece | Purpose |
 |---|---|
@@ -27,9 +32,12 @@ CREATE DATABASE agents;
 -- generate strong passwords and keep them out of any repo
 CREATE ROLE agents_writer LOGIN PASSWORD 'REDACTED';   -- the collectors' pg_dsn, and n8n if you run the webhook
 CREATE ROLE agents_ro     LOGIN PASSWORD 'REDACTED';   -- Grafana
-\i /path/agents_schema.sql
-\i /path/agents_grants.sql
 ```
+
+Then apply the schema as that superuser: `AUT_TZ=<zone> AUT_WRITER_PASSWORD=... AUT_RO_PASSWORD=...
+sh src/agent_usage_tracker/sink_stack/apply.sh` with the libpq environment (`PGHOST`, `PGUSER`,
+`PGPASSWORD`, `PGDATABASE=agents`; psql 15 or newer). It sets both role passwords, records the
+zone, then applies `sql/01_schema.sql` to `sql/04_grants.sql` in order. Run `sql/refresh.sql` once a day or more as the superuser.
 
 Before upgrading a collector that writes partial Git counts, add
 `agents.git_commit_day.complete boolean NOT NULL DEFAULT true` and update
@@ -60,8 +68,9 @@ Tailscale, a VPN, or the wrapper's SSH tunnel (`AUT_TUNNEL_HOST`, `AUT_TUNNEL_SP
 
 ### 3. Grafana
 
-Add an `agents` datasource with a fixed UID (provisioned, not made in the UI), pointing at db
-`agents` as `agents_ro`, and import the dashboard. aut publishes nothing itself; every
+Add an `agents` datasource with the UID `agents-timescaledb` (provisioned, not made in the UI),
+pointing at db `agents` as `agents_ro`, and import the dashboards in
+`src/agent_usage_tracker/sink_stack/grafana/dashboards/`. The Compose stack does both. aut publishes nothing itself; every
 aggregate is a view in the sink.
 
 ### 4. Public stats JSON (optional)
@@ -75,7 +84,7 @@ tunnel. Label every USD figure "estimated". Never expose titles or anything only
 See [README.md](README.md) and [packaging/README.md](packaging/README.md). Short version:
 
 ```bash
-uv tool install "agent-usage-tracker[postgres] @ git+https://github.com/rhnfzl/agent-usage-tracker"
+uv tool install "agent-usage-tracker[postgres]"
 mkdir -p ~/.config/agent-usage-tracker
 cp config.example.toml ~/.config/agent-usage-tracker/config.toml   # machine, agents, [transport]
 chmod 600 ~/.config/agent-usage-tracker/config.toml

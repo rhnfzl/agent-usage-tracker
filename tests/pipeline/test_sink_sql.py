@@ -1,121 +1,113 @@
 """The sink layer's SQL, run against a real Postgres. Skipped unless AUT_TEST_PG_DSN is set.
 
-Run: `AUT_TEST_PG_DSN=postgresql://... pytest tests/pipeline/test_sink_sql.py`. The DSN must be a scratch
-database: the tests create the `agents` schema, and refuse to touch a database that already has one.
-
-STAND_IN_SCHEMA is this file's own copy of the tables the code touches, with the keys, NOT NULLs and
-CHECKs of the deployed DDL in the infrastructure repo (DEPLOY.md), checked against it on 2026-11-05.
-It leaves out Timescale, the views, column defaults, numeric precision and event_session.first_seen.
-So this catches invalid SQL, a wrong column, a refused value and an ON CONFLICT target with no
-matching key. It cannot notice the deployed DDL changing later; tests/pipeline/test_sink.py only
-checks the stand-in names what CONTRACT.md names.
+Run: `AUT_TEST_PG_DSN=postgresql://postgres:pw@127.0.0.1:5432/scratch pytest tests/pipeline/test_sink_sql.py`
+(one literal IP address and port, no PG* variables set). The DSN must be a
+superuser on a scratch database of a TimescaleDB server, with `psql` on PATH: the fixture applies
+the shipped schema (sink_stack/apply.sh, the same script `docker compose up` runs), and refuses to
+touch a database that already has an `agents` schema. It creates the agents_writer and agents_ro
+roles on that server if they are missing, and drops the ones it created at the end.
 """
 
 from __future__ import annotations
 
+import ipaddress
 import os
+import shutil
+import subprocess  # nosec B404 # fixed argv, the shipped apply script
 import uuid
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
 
+import agent_usage_tracker
 from agent_usage_tracker import episode_store, git_days, inspector, outcomes, push
-from agent_usage_tracker.config import Config
+from agent_usage_tracker.config import DEFAULT_LEDGER_TZ, AutError, Config
 from agent_usage_tracker.event import (ActivityEvent, EventSession, TimeInterval,
                                        UsageEvent)
 from agent_usage_tracker.label import run as label_run
 from agent_usage_tracker.label.tasks import Source
-from agent_usage_tracker.sink import connect, write_many
+from agent_usage_tracker.sink import check_ledger_zone, connect, write_many
 
 DSN = os.environ.get("AUT_TEST_PG_DSN")
 pytestmark = pytest.mark.skipif(not DSN, reason="AUT_TEST_PG_DSN is not set")
 
-STAND_IN_SCHEMA = """
-CREATE SCHEMA agents;
-CREATE TABLE agents.usage_event (
-    event_id text, ts timestamptz, machine text NOT NULL, agent text NOT NULL, kind text NOT NULL,
-    model text, provider text, input_tokens bigint NOT NULL, output_tokens bigint NOT NULL,
-    cache_read_tokens bigint NOT NULL, cache_write_tokens bigint NOT NULL, reasoning_tokens bigint,
-    total_tokens bigint NOT NULL, est_cost_usd numeric, project text, PRIMARY KEY (event_id, ts));
-CREATE TABLE agents.event_session (
-    event_id text PRIMARY KEY, machine text NOT NULL, agent text NOT NULL, session_id text NOT NULL,
-    parent_session_id text, run_origin text NOT NULL, turn_id text);
-CREATE TABLE agents.activity_event (
-    event_id text, ts timestamptz, machine text NOT NULL, agent text NOT NULL, kind text NOT NULL,
-    session_id text, turn_id text, attrs jsonb NOT NULL, PRIMARY KEY (event_id, ts));
-CREATE TABLE agents.time_interval (
-    event_id text, ts timestamptz, end_ts timestamptz NOT NULL, machine text NOT NULL,
-    source text NOT NULL, app text, title text, category text, work_relevant boolean NOT NULL,
-    attrs jsonb NOT NULL, PRIMARY KEY (event_id, ts));
-CREATE TABLE agents.collector_scan (
-    machine text, collector text, started_at timestamptz NOT NULL, finished_at timestamptz,
-    status text NOT NULL, events integer NOT NULL, human integer NOT NULL, newest_ts timestamptz,
-    error text, aut_version text, PRIMARY KEY (machine, collector, finished_at));
-CREATE TABLE agents.commit_outcome (
-    sha text, repo_key text, state text, survival numeric, decided_at timestamptz,
-    PRIMARY KEY (sha, repo_key, state, decided_at));
-CREATE TABLE agents.manual_outcome (
-    session_id text, outcome text NOT NULL, ts timestamptz, repo_key text,
-    PRIMARY KEY (session_id, ts));
-CREATE TABLE agents.episode (
-    episode_id uuid PRIMARY KEY, first_ts timestamptz NOT NULL, last_ts timestamptz NOT NULL,
-    n_sessions integer NOT NULL, n_seed_sessions integer NOT NULL, n_steers integer NOT NULL,
-    n_commits integer NOT NULL, n_prs integer NOT NULL, outcome text NOT NULL,
-    outcome_source text NOT NULL, confirmed boolean NOT NULL);
-CREATE TABLE agents.episode_member (
-    episode_id uuid REFERENCES agents.episode (episode_id) ON DELETE CASCADE, session_id text,
-    role text NOT NULL, repo_keys text[] NOT NULL, PRIMARY KEY (episode_id, session_id));
-CREATE TABLE agents.episode_correction (
-    id uuid PRIMARY KEY, ts timestamptz NOT NULL, action text NOT NULL, a_session text NOT NULL,
-    b_session text, attrs jsonb NOT NULL);
-CREATE TABLE agents.daily_note (
-    day date PRIMARY KEY, text text NOT NULL, model_id text NOT NULL, created_at timestamptz NOT NULL);
-CREATE TABLE agents.git_commit_day (
-    day date NOT NULL, commits integer NOT NULL CHECK (commits >= 0),
-    scanned_at timestamptz NOT NULL, complete boolean NOT NULL DEFAULT true,
-    PRIMARY KEY (day, scanned_at));
-CREATE VIEW agents.git_commits_daily AS
-WITH latest_complete AS (
-    SELECT DISTINCT ON (day) day, scanned_at FROM agents.git_commit_day
-    WHERE complete ORDER BY day, scanned_at DESC
-), candidates AS (
-    SELECT g.day, g.commits, g.complete, g.scanned_at FROM agents.git_commit_day g
-    LEFT JOIN latest_complete c USING (day)
-    WHERE c.day IS NULL OR g.scanned_at >= c.scanned_at
-)
-SELECT DISTINCT ON (day) day, commits, complete FROM candidates
-ORDER BY day, commits DESC, complete DESC, scanned_at DESC;
-ALTER TABLE agents.event_session ADD CHECK (run_origin IN ('interactive', 'automated', 'subagent', 'unknown'));
-ALTER TABLE agents.time_interval ADD CHECK (source IN ('aw', 'manual')), ADD CHECK (end_ts > ts);
-ALTER TABLE agents.collector_scan ADD CHECK (status IN ('ok', 'error'));
-ALTER TABLE agents.commit_outcome ADD CHECK (survival BETWEEN 0 AND 1), ADD CHECK (state IN (
-    'merged', 'reverted', 'reworked', 'open', 'abandoned', 'superseded', 'undecided'));
-ALTER TABLE agents.manual_outcome ADD CHECK (outcome IN ('shipped', 'ruled_out', 'open'));
-ALTER TABLE agents.episode ADD CHECK (outcome_source IN ('git', 'manual')), ADD CHECK (outcome IN (
-    'shipped', 'reworked', 'open', 'ruled_out', 'no_code', 'undecided'));
-ALTER TABLE agents.episode_member ADD CHECK (role IN ('seed', 'child'));
-ALTER TABLE agents.episode_correction ADD CHECK (action IN ('merge', 'split', 'confirm', 'reject'));
-"""
+SINK_STACK = Path(agent_usage_tracker.__file__).parent / "sink_stack"
 
 T0 = datetime(2026, 6, 15, 12, tzinfo=timezone.utc)
 DAY = T0.astimezone().date().isoformat()
 EPISODE = uuid.UUID("0f0f0f0f-0000-4000-8000-000000000001")
 
 
+def _psql_env(dsn: str) -> dict[str, str]:
+    """The environment that sends psql to exactly the server and database the scratch check reads.
+
+    Checked before the first connection: anything libpq could resolve differently for psycopg and
+    for psql (an inherited PG* variable, an unknown key, a second host to fail over to) stops here.
+    """
+    from psycopg.conninfo import conninfo_to_dict
+    if not shutil.which("psql"):
+        pytest.fail("AUT_TEST_PG_DSN is set but psql is not on PATH: the schema is applied with psql")
+    if inherited := sorted(k for k in os.environ if k.startswith("PG")):
+        pytest.fail(f"unset {inherited}: put the whole connection in AUT_TEST_PG_DSN")
+    info = conninfo_to_dict(dsn)
+    names = {"host": "PGHOST", "port": "PGPORT", "user": "PGUSER", "password": "PGPASSWORD",
+             "dbname": "PGDATABASE", "sslmode": "PGSSLMODE"}
+    if unknown := sorted(set(info) - set(names)):
+        pytest.fail(f"AUT_TEST_PG_DSN uses {unknown}: the test passes only {sorted(names)} to psql")
+    # A hostname can resolve to several servers, and a missing host or port falls back to client
+    # build defaults, so both clients could reach different servers: one literal endpoint only.
+    host, port = str(info.get("host", "")), str(info.get("port", ""))
+    try:
+        literal = host.startswith("/") or bool(ipaddress.ip_address(host))
+    except ValueError:
+        literal = False
+    if not literal or "," in host or not port.isdigit():
+        pytest.fail("AUT_TEST_PG_DSN must name one IP address (or socket directory) and one port, "
+                    "for example postgresql://postgres:pw@127.0.0.1:5432/scratch")
+    # No role passwords: apply.sh then leaves existing roles alone, so a test against a server
+    # that also holds a real sink cannot lock its collectors and Grafana out.
+    env = {k: v for k, v in os.environ.items() if k not in ("AUT_WRITER_PASSWORD", "AUT_RO_PASSWORD")}
+    return env | {names[k]: str(v) for k, v in info.items()} | {"AUT_TZ": DEFAULT_LEDGER_TZ}
+
+
 @pytest.fixture(scope="module")
 def dsn():
+    env = _psql_env(DSN)
     with connect(DSN) as conn:
         if conn.execute("SELECT 1 FROM pg_namespace WHERE nspname = 'agents'").fetchone():
             pytest.fail("AUT_TEST_PG_DSN already has an agents schema: use a scratch database")
-        conn.execute(STAND_IN_SCHEMA)
-        conn.commit()
+        roles = ("agents_writer", "agents_ro")
+        had = {r for (r,) in conn.execute("SELECT rolname FROM pg_roles WHERE rolname = ANY(%s)",
+                                          (list(roles),))}
     try:
+        run = subprocess.run(["sh", str(SINK_STACK / "apply.sh")], env=env, capture_output=True,
+                             text=True, check=False)  # nosec B603 B607
+        assert run.returncode == 0, run.stderr[-4000:]
         yield DSN
     finally:
         with connect(DSN) as conn:
-            conn.execute("DROP SCHEMA agents CASCADE")
+            conn.execute("DROP SCHEMA IF EXISTS agents CASCADE")
+            for role in (r for r in roles if r not in had):  # roles are server-wide: drop ours only
+                if conn.execute("SELECT 1 FROM pg_roles WHERE rolname = %s", (role,)).fetchone():
+                    conn.execute(f'DROP OWNED BY "{role}"')
+                    conn.execute(f'DROP ROLE "{role}"')
             conn.commit()
+
+
+def test_the_sink_records_its_zone_and_a_collector_in_another_zone_stops(dsn):
+    check_ledger_zone(dsn, DEFAULT_LEDGER_TZ)
+    with pytest.raises(AutError, match="set ledger_timezone"):
+        check_ledger_zone(dsn, "Pacific/Auckland")
+
+
+def test_agents_ro_reads_hours_in_the_sink_zone(dsn):
+    with connect(dsn) as conn:
+        # per database: a test database must not change the zone of a real sink on the server
+        assert conn.execute("SELECT setconfig FROM pg_db_role_setting s JOIN pg_roles r "
+                            "ON r.oid = s.setrole JOIN pg_database d ON d.oid = s.setdatabase "
+                            "WHERE r.rolname = 'agents_ro' AND d.datname = current_database()"
+                            ).fetchone()[0] == [f"TimeZone={DEFAULT_LEDGER_TZ}"]
 
 
 def _rows(dsn: str, table: str) -> int:
@@ -230,11 +222,33 @@ def test_git_daily_coverage_round_trip(dsn):
     assert git_days.load_stored(dsn) == {day: (5, True)}
 
 
-def test_a_degraded_heartbeat_does_not_lose_the_scan_on_the_deployed_check(dsn):
+def _scan_status_check(dsn: str, statuses: str) -> None:
+    with connect(dsn) as conn:
+        conn.execute("ALTER TABLE agents.collector_scan DROP CONSTRAINT collector_scan_status_check")
+        conn.execute("ALTER TABLE agents.collector_scan ADD CONSTRAINT collector_scan_status_check "
+                     f"CHECK (status IN ({statuses})) NOT VALID")  # new rows only
+        conn.commit()
+
+
+def test_a_degraded_heartbeat_is_stored_as_degraded(dsn):
+    cfg = Config(machine="deg-new", agents=(), webhook_url=None, webhook_secret=None, pg_dsn=dsn,
+                 home=Path("."))
+    push.send_scan_rows(dsn, [push.scan_row(cfg, "aw", T0, status="degraded", error="OSError")])
+    with connect(dsn) as conn:
+        assert conn.execute("SELECT status FROM agents.collector_scan WHERE machine = 'deg-new'"
+                            ).fetchall() == [("degraded",)]
+
+
+def test_a_degraded_heartbeat_does_not_lose_the_scan_on_an_older_ok_error_check(dsn):
+    # a sink deployed before 'degraded' existed refuses it; the scan must still land, as error
     cfg = Config(machine="deg", agents=(), webhook_url=None, webhook_secret=None, pg_dsn=dsn,
                  home=Path("."))
-    push.send_scan_rows(dsn, [push.scan_row(cfg, "aw", T0, status="degraded", error="OSError"),
-                              push.scan_row(cfg, "pi", T0)])
+    _scan_status_check(dsn, "'ok', 'error'")
+    try:
+        push.send_scan_rows(dsn, [push.scan_row(cfg, "aw", T0, status="degraded", error="OSError"),
+                                  push.scan_row(cfg, "pi", T0)])
+    finally:
+        _scan_status_check(dsn, "'ok', 'error', 'degraded'")
     with connect(dsn) as conn:
         assert conn.execute("SELECT collector, status, error FROM agents.collector_scan WHERE "
                             "machine = 'deg' ORDER BY 1").fetchall() \
@@ -498,3 +512,38 @@ def test_mature_outcome_runner_reads_and_rechecks_real_episode_rows(
             result = label_run.run_label(cfg, ["soft_outcome"], local_estimates=True,
                 now=now+timedelta(days=1), backend_for=lambda task, choice: Model())["soft_outcome"]
             assert result["rows"] == 0 and scored == [str(eid)]
+
+
+# Last in the file: the refresh job rebuilds every derived view and records a sink scan.
+def test_refresh_deletes_claude_code_relogs_and_keeps_other_duplicates(dsn):
+    session = EventSession("s-relog", None, "interactive", "t1")
+
+    def usage(eid: str, ts: datetime, agent: str, tokens: int) -> UsageEvent:
+        return UsageEvent(event_id=eid, ts=ts.isoformat(), agent=agent, model="m", provider="p",
+                          input_tokens=tokens, total_tokens=tokens, machine="t", session=session)
+
+    later = T0 + timedelta(seconds=3, microseconds=123456)
+    old = T0 - timedelta(days=60)      # plain history in another chunk
+    push.insert_pg(dsn, [usage(f"old{i}", old + timedelta(seconds=i), "claude_code", 1)
+                         for i in range(400)]
+                   + [usage("relog", T0 + timedelta(microseconds=654321), "claude_code", 10), usage("relog", later, "claude_code", 12),
+                      usage("odd", T0, "codex", 5), usage("odd", later, "codex", 5)])
+    job = (SINK_STACK / "sql" / "refresh.sql").read_text(encoding="utf-8").splitlines()
+    with connect(dsn) as conn:
+        conn.execute("SELECT compress_chunk(c, if_not_compressed => true) "
+                     "FROM show_chunks('agents.usage_event') c")
+        conn.commit()
+        # A delete that decompresses the old chunk's 400 rows fails past this limit.
+        conn.execute("SET timescaledb.max_tuples_decompressed_per_dml_transaction = 200")
+        # Kolkata prints as IST, which Postgres reads back as UTC+2: the keys must not round-trip.
+        conn.execute("SET DateStyle = 'SQL, DMY'")
+        conn.execute("SET TimeZone = 'Asia/Kolkata'")
+        for _ in range(2):             # the second run finds nothing left to delete
+            conn.execute("\n".join(line for line in job if not line.startswith("\\")))
+            conn.commit()
+        rows = conn.execute("SELECT event_id, total_tokens FROM agents.usage_event "
+                            "WHERE event_id IN ('relog', 'odd') ORDER BY 1, 2").fetchall()
+        assert conn.execute("SELECT count(*) FROM agents.usage_event "
+                            "WHERE event_id LIKE 'old%'").fetchone()[0] == 400
+    # the re-log keeps the copy usage_event_dedup keeps; a Codex duplicate stays for the audit
+    assert rows == [("odd", 5), ("odd", 5), ("relog", 12)]
