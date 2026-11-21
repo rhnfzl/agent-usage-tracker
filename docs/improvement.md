@@ -265,7 +265,7 @@ The group key is a digest of five signals:
 | `rubric` | the judgment |
 | `cause` | the evidence review's cause, else `unreviewed` |
 | `tool` | the call answered by the anchor result: the first result the review cites, else the case's last error result. MCP tools show as `mcp:server` |
-| `error_class` | the anchor's text, lower-cased, with paths, long hex runs, numbers and quoted strings removed, matched against a fixed table (`command_not_found`, `no_such_file`, `missing_module`, `permission_denied`, `timeout`, `unknown_tool`, `shell_glob`, `push_rejected`, `conflict`, `syntax_error`, `test_failure`, `nonzero_exit`). The whole text is matched, because Claude Code and Codex print `Exit code 1` first. No match gives `other:` and 8 hex of a digest of the first line |
+| `error_class` | the anchor's text, lower-cased, with paths, long hex runs, numbers and quoted strings removed, matched against a fixed table (`command_not_found`, `no_such_file`, `missing_module`, `permission_denied`, `timeout`, `unknown_tool`, `user_declined`, `shell_glob`, `push_rejected`, `conflict`, `syntax_error`, `test_failure`, `nonzero_exit`). The whole text is matched, because Claude Code and Codex print `Exit code 1` first. No match gives `other:` and 8 hex of a digest of the first line |
 | `command_family` | the anchor call's command, as for rubric `requires` (for example `git push`, `python -m pytest`, `pytest`) |
 
 The project is left out of the key, so the same failure in three repositories is one group;

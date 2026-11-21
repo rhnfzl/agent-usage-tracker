@@ -39,7 +39,7 @@ def test_the_cycle_refreshes_groups_before_the_inbox(store, monkeypatch):
                                                     "exit_code": -9})
     monkeypatch.setattr(schedule.groups, "date", type("D", (date,), {"today": lambda: TODAY}))
     schedule.run_once(store, budget_s=1)
-    page = (store.root / "inbox.html").read_text()
+    page = (store.root / "inbox.html").read_text(encoding="utf-8")
     assert "avoidable_recovery · instruction · Bash · python -m pytest · command_not_found" in page
 
 
@@ -53,15 +53,15 @@ def test_the_inbox_escapes_group_signals_and_survives_a_bad_report(store):
                   "last_work_day": "2026-11-20", "recurring": False, "audit_incidents": 0}]}
     store.append("groups", report_id=store.put("group_reports", report))
     inbox.write(store, [])
-    page = (store.root / "inbox.html").read_text()
+    page = (store.root / "inbox.html").read_text(encoding="utf-8")
     assert "<script>" not in page and "&lt;script&gt;x&lt;/script&gt; · c" in page
     assert "&lt;b&gt; (1)" in page
     store.append("groups", report_id=store.put("group_reports", {"groups": [{"old": 1}]}))
     inbox.write(store, [])                                 # an older record shape
-    assert "could not be read" in (store.root / "inbox.html").read_text()
+    assert "could not be read" in (store.root / "inbox.html").read_text(encoding="utf-8")
     store.append("groups", report_id="0" * 64)            # missing record
     inbox.write(store, [])
-    assert "could not be read" in (store.root / "inbox.html").read_text()
+    assert "could not be read" in (store.root / "inbox.html").read_text(encoding="utf-8")
 
 
 def test_groups_command_prints_the_report(store, tmp_path, capsys, monkeypatch):
