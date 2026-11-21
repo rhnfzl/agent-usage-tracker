@@ -1,3 +1,4 @@
+import html
 import json
 from datetime import date
 
@@ -74,3 +75,70 @@ def test_groups_command_prints_the_report(store, tmp_path, capsys, monkeypatch):
     result = json.loads(capsys.readouterr().out)
     assert (result["window_days"], result["threshold"]) == (7, 2)
     assert result["groups"][0]["recurring"]
+
+
+def _proposal(store, tmp_path, title, **extra):
+    from agent_usage_tracker.improve.proposals import prepare
+
+    source = tmp_path / "source"
+    source.mkdir(exist_ok=True)
+    (source / f"{len(store.keys('proposals'))}.md").write_text("Use the old command.\n")
+    case = store.put("cases", {"events": [{"id": "e", "kind": "result"}]})
+    return prepare(store, case, source, source / f"{len(store.keys('proposals'))}.md", "old",
+                   "<new>", extra={"title": title, **extra})
+
+
+def test_the_page_lists_open_proposals_with_safe_commands(tmp_path, monkeypatch):
+    from agent_usage_tracker.improve import decide
+
+    monkeypatch.setattr(groups, "repository", lambda path: None)
+    store = Store(tmp_path / "my store; rm -rf x")
+    shown = _proposal(store, tmp_path, "<script>alert(1)</script>")
+    hidden = _proposal(store, tmp_path, "Already decided")
+    decide.reject(store, hidden, "no")
+    inbox.write(store, [])
+    page = (store.root / "inbox.html").read_text(encoding="utf-8")
+    short = decide.short_id(store, shown)
+    root = f"--root '{store.root}'"
+    shown_text = html.unescape(page)
+    assert f"aut improve {root} inbox accept {short}" in shown_text
+    assert f"aut improve {root} inbox reject {short} --reason" in shown_text
+    assert "<script>" not in page and "&lt;script&gt;alert(1)&lt;/script&gt;" in page
+    assert "&lt;new&gt;" in page and "Already decided" not in page and hidden[:8] not in page
+
+
+def test_the_page_uses_the_plain_command_for_the_default_store(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    store = Store(tmp_path / "aut" / "improve")
+    key = _proposal(store, tmp_path, "T")
+    inbox.write(store, [])
+    assert f"aut improve inbox accept {key[:8]}" in (store.root / "inbox.html").read_text("utf-8")
+
+
+def test_judgments_show_rubric_version_and_trigger(store):
+    case = store.put("cases", {"trigger": "error_result", "events": []})
+    inbox.write(store, [judge(store, case, version=3)])
+    page = (store.root / "inbox.html").read_text(encoding="utf-8")
+    assert "<td>avoidable_recovery</td><td>3</td><td>error_result</td><td>fail</td>" in page
+
+
+def test_a_decision_rewrites_the_page_and_groups_show_their_status(store, tmp_path, capsys,
+                                                                   monkeypatch):
+    from agent_usage_tracker import cli
+
+    for n in range(3):
+        judge(store, failing_case(store, f"s{n}"))
+    monkeypatch.setattr(groups, "date", type("D", (date,), {"today": lambda: TODAY}))
+    group = groups.refresh(store)["groups"][0]["group_key"]
+    key = _proposal(store, tmp_path, "Drafted fix", group_key=group)
+    inbox.write(store, [])
+    page = (store.root / "inbox.html").read_text(encoding="utf-8")
+    assert "Drafted fix" in page and "<td>proposed</td>" in page
+    listing = cli.main(["improve", "--root", str(store.root), "inbox", "list"])
+    summary = json.loads(capsys.readouterr().out)
+    assert listing == 0 and summary["proposals"][0]["id"] == key
+    assert summary["groups"][0]["status"] == "proposed" and "Drafted" not in json.dumps(summary)
+    assert cli.main(["improve", "--root", str(store.root), "inbox", "reject", key[:8],
+                     "--reason", "wrong layer"]) == 0
+    page = (store.root / "inbox.html").read_text(encoding="utf-8")
+    assert "Drafted fix" not in page and "<td>rejected on " in page

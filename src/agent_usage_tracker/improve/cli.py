@@ -72,8 +72,50 @@ def register(sub: Any) -> None:
     grouping.add_argument("--days", type=int, default=14)
     grouping.add_argument("--threshold", type=int, default=3,
                           help="distinct tasks that make a group recurring")
+    inbox = actions.add_parser("inbox", help="list, accept or reject proposals")
+    choices = inbox.add_subparsers(dest="inbox_cmd", required=True)
+    choices.add_parser("list", help="open proposals and failure groups: ids and counts, no text")
+    accept = choices.add_parser("accept", help="accept a proposal; commits only in its candidate")
+    accept.add_argument("id", help="proposal id or a unique prefix of 6 or more hex characters")
+    accept.add_argument("--note")
+    reject = choices.add_parser("reject", help="reject a proposal and block its group")
+    reject.add_argument("id", help="proposal id or a unique prefix of 6 or more hex characters")
+    reject.add_argument("--reason", required=True, help="why, 1 to 500 characters")
+    adopt = actions.add_parser("adopt", help="record a merged change (the title and date are "
+                               "published later; targets and commit stay private)")
+    adopt.add_argument("proposal", nargs="?", help="an accepted proposal id")
+    adopt.add_argument("--title", help="human-written, at most 120 characters")
+    adopt.add_argument("--commit", required=True)
+    adopt.add_argument("--pr", type=int)
+    adopt.add_argument("--date", help="YYYY-MM-DD, default today")
+    adopt.add_argument("--target", action="append", default=[])
+    adopt.add_argument("--rubric", action="append", default=[])
+    adopt.add_argument("--kind", choices=("instruction", "skill", "config", "code"))
+    adopt.add_argument("--note")
     study_cli.register(actions)
     actions.add_parser("status", help="show local progress counts without trace text")
+
+
+def _decide(store: Store, args: argparse.Namespace) -> dict[str, Any]:
+    from . import decide, inbox
+    if args.improve_cmd == "inbox" and args.inbox_cmd == "list":
+        return inbox.summary(store)
+    if args.improve_cmd == "adopt":
+        if not args.proposal and not args.title:
+            raise AutError("improve: adopt needs a proposal id or --title")
+        result = decide.adopt(store, decide.resolve(store, args.proposal) if args.proposal
+                              else None, commit=args.commit, title=args.title, pr=args.pr,
+                              adopted_at=args.date, targets=args.target, rubric_ids=args.rubric,
+                              kind=args.kind, note=args.note)
+    elif args.inbox_cmd == "accept":
+        result = decide.accept(store, decide.resolve(store, args.id), args.note)
+    else:
+        result = decide.reject(store, decide.resolve(store, args.id), args.reason)
+    try:    # the decision is saved; a page that cannot be rebuilt now is rebuilt next cycle
+        inbox.rewrite(store)
+    except Exception as exc:
+        result["inbox_error"] = type(exc).__name__
+    return result
 
 
 def run(args: argparse.Namespace) -> None:
@@ -104,6 +146,8 @@ def run(args: argparse.Namespace) -> None:
     elif args.improve_cmd == "groups":
         from .groups import refresh
         result = refresh(store, window_days=args.days, threshold=args.threshold)
+    elif args.improve_cmd in {"inbox", "adopt"}:
+        result = _decide(store, args)
     elif args.improve_cmd == "inspect":
         from .case_view import write_case_view
         result = write_case_view(store, args.case)
@@ -140,6 +184,8 @@ def run(args: argparse.Namespace) -> None:
         result = {"records": {kind: len(store.keys(kind)) for kind in kinds},
                   "private": True, "human_verified": False}
     print(json.dumps(result, sort_keys=True))
+    if result.get("status") == "stale":
+        raise AutError(result["message"])
     if args.improve_cmd in {"run", "diagnose", "audit"} \
             and result.get("status") in {"timeout", "error", "budget"}:
         raise AutError(f"improve: {args.improve_cmd} {result['status']}")
