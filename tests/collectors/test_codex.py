@@ -13,6 +13,7 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import shutil
 import tempfile
 from datetime import datetime
 from pathlib import Path
@@ -403,5 +404,13 @@ def test_archived_rollouts_are_read_and_a_moved_file_keeps_its_event_ids(tmp_pat
     archived = tmp_path / ".codex/archived_sessions/rollout-archived.jsonl"
     archived.parent.mkdir(parents=True)
     live.rename(archived)
-    assert {r.event_id for r in _collect(codex, tmp_path, wm)} <= before
+    shutil.rmtree(tmp_path / ".codex/sessions")     # Codex can leave no active directory behind
+    assert {r.event_id for r in _collect(codex, tmp_path, wm)} == before
     assert {r.event_id for r in _collect(codex, tmp_path)} == before
+
+
+def test_a_home_with_only_archived_sessions_is_read(tmp_path):
+    _write_jsonl(tmp_path / ".codex/archived_sessions/rollout-old.jsonl", [
+        _meta("old", source="cli"), _ev(T(1), type="user_message", message="question"), _tok(T(2))])
+    assert not (tmp_path / ".codex/sessions").exists()
+    assert _usage(_collect(codex, tmp_path)) and _usage(_collect(codex, tmp_path), "human")

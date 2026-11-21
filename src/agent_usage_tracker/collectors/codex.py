@@ -67,6 +67,7 @@ def sessions_dir(home: Path) -> Path:
 def session_files(home: Path) -> list[str]:
     # Codex moves finished rollouts to archived_sessions; event ids are content-based, so a moved
     # file re-read under its new path re-emits the same ids and the sink dedups them.
+    # Plain .jsonl only: the .jsonl.zst archives are from older Codex builds (last seen 2026-04).
     return [path for root in sessions_dirs(home)
             for pattern in (root / "**" / "rollout-*.jsonl",
                             root.parent / "archived_sessions" / "rollout-*.jsonl")
@@ -591,7 +592,9 @@ def _trim_state(cur: FileState) -> None:
 
 
 def collect(cfg: Config, wm: dict[str, Any]) -> Iterator[Batch]:
-    if not any(root.exists() for root in sessions_dirs(cfg.home)):
+    # The discovered files decide: a home can hold archived_sessions with no sessions/ at all.
+    paths = session_files(cfg.home)
+    if not paths:
         return
     keys = RepoKeys(cfg.repo_key_salt)
     imports = imported_until(cfg.home)
@@ -606,4 +609,4 @@ def collect(cfg: Config, wm: dict[str, Any]) -> Iterator[Batch]:
         _trim_state(cur)
         return events
 
-    yield from file_batches(NAME, session_files(cfg.home), wm["files"], _fresh_state, chunk_rows)
+    yield from file_batches(NAME, paths, wm["files"], _fresh_state, chunk_rows)
