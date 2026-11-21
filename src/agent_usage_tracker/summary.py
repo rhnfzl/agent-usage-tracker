@@ -111,7 +111,7 @@ class _Totals:
         self.events += 1
         self.pricing.add(cost)
         for name in COUNTS:
-            value = getattr(row, name)
+            value = row.observed_token_count(name)
             if value is None:
                 self.missing[name] += 1
             else:

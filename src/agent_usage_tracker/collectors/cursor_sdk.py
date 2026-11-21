@@ -24,6 +24,7 @@ import glob
 import json
 import os
 from collections import Counter
+from dataclasses import dataclass
 from typing import Any, Callable, Iterator
 
 from ..config import Config
@@ -31,6 +32,23 @@ from ..event import UsageEvent, make_event_id
 from ._util import noop_advance, project_name, raise_if_unreadable, safe_int, warn_skipped
 
 NAME = "cursor_sdk"
+_COMPONENTS = ("input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens")
+
+
+@dataclass(slots=True)
+class _ManifestUsageEvent(UsageEvent):
+    # The manifest can omit splits. The sink still expects the normalized numeric fields.
+    unknown_token_components: tuple[str, ...] = ()
+
+    def observed_token_count(self, name: str) -> int | None:
+        if name in self.unknown_token_components:
+            return None
+        return UsageEvent.observed_token_count(self, name)
+
+    def to_dict(self) -> dict[str, Any]:
+        value = UsageEvent.to_dict(self)
+        del value["unknown_token_components"]
+        return value
 
 
 def _run_event(r: object, pos: int, ticket: object, project: str | None) -> UsageEvent | None:
@@ -50,7 +68,7 @@ def _run_event(r: object, pos: int, ticket: object, project: str | None) -> Usag
     idx = r.get("index")
     run_disc = str(pos if idx is None else idx)
     model = r.get("model")
-    return UsageEvent(
+    return _ManifestUsageEvent(
         event_id=make_event_id(NAME, str(ticket), run_disc, str(r.get("run_id") or "")),
         ts=r.get("finished_at") or r.get("started_at"),
         agent=NAME,
@@ -62,6 +80,7 @@ def _run_event(r: object, pos: int, ticket: object, project: str | None) -> Usag
         cache_write_tokens=cw,
         total_tokens=total,
         project=project,
+        unknown_token_components=tuple(key for key in _COMPONENTS if u.get(key) is None),
     )
 
 

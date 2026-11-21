@@ -58,14 +58,19 @@ def _tokens(totals: Totals, key: str) -> int | str | None:
 
 
 def _pricing(report: Summary) -> str:
-    logged = report["totals"]["logged_cost_usd"]
+    totals = report["totals"]
+    logged = totals["logged_cost_usd"]
+    missing = totals["unknown_events"]["logged_cost_usd"]
+    label = "Known logged subtotal" if logged is not None and missing else "Logged cost"
     display = f"${logged:.6g}" if logged is not None else "unknown"
+    missing_note = (f' · {missing:,} {"event" if missing == 1 else "events"} without logged cost'
+                    if missing else "")
     rates = _cell(report["rate_status"])
     synced = _cell(report["rate_synced_at"])
     seconds = report["rate_age_seconds"]
     age = "unknown" if seconds is None else f"{seconds:,} s"
     models = (
-        ("All models", report["totals"]["pricing"]),
+        ("All models", totals["pricing"]),
         *((model["model"], model) for model in report["prices_by_model"]),
     )
     costs = _table(
@@ -79,7 +84,7 @@ def _pricing(report: Summary) -> str:
     return (
         '<h2>Pricing</h2><div class="panel">'
         f'<p>Rate file {rates} · last updated {synced} · age {age}</p>{costs}'
-        f'<p>Logged cost (USD) <strong>{display}</strong></p>'
+        f'<p>{label} (USD) <strong>{display}</strong>{missing_note}</p>'
         '<p class="muted">Estimates use local API rates. Provider billing is separate.</p></div>'
     )
 

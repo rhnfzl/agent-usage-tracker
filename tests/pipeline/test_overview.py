@@ -87,3 +87,15 @@ def test_overview_rejects_bad_cli_dates_before_serving(tmp_path, monkeypatch):
     monkeypatch.setattr(overview_cli.local_page, "serve", lambda *a, **kw: pytest.fail("server"))
     with pytest.raises(overview_cli.AutError, match="--since and --until"):
         overview_cli.run(fixture(tmp_path), args)
+
+
+def test_overview_labels_known_logged_subtotal(tmp_path, monkeypatch):
+    from price_fixture import price_config, price_rows
+
+    config = price_config(tmp_path, monkeypatch, price_rows())
+    report = build_summary(config, since=date(2026, 6, 15), until=date(2026, 6, 16),
+                           prices_path=tmp_path / "missing")
+    page = render(report, {"collectors": [], "issues": []}, "/tok", "custom", False)
+    assert b"Known logged subtotal (USD) <strong>$0.125</strong>" in page
+    assert b"2 events without logged cost" in page
+    assert b"Logged cost (USD) <strong>$0.125</strong>" not in page
