@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import json
-from datetime import date
+import os
+from datetime import date, datetime, time, timezone
 from pathlib import Path
 from typing import Any
 
@@ -11,6 +12,18 @@ from .config import Config
 
 SINCE = date(2026, 6, 15)
 UNTIL = date(2026, 6, 16)
+NOW = datetime.combine(UNTIL, time.min, timezone.utc)
+
+
+def sample_prices(home: Path) -> Path:
+    path = home / "model_prices.json"
+    path.write_text(json.dumps({"claude-opus-4-8": {
+        "input_cost": 0.00001, "output_cost": 0.00002, "cache_read_cost": 0.000001,
+        "cache_write_cost": 0.00001,
+    }}), encoding="utf-8")
+    stamp = datetime.combine(SINCE, time.min, timezone.utc).timestamp()
+    os.utime(path, (stamp, stamp))
+    return path
 
 
 def _write(home: Path, name: str, rows: list[dict[str, Any]]) -> None:

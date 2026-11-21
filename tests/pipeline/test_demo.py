@@ -28,6 +28,9 @@ def test_demo_logs_pass_through_the_real_collectors(tmp_path, monkeypatch):
 def test_demo_uses_summary_without_reading_the_caller_config(tmp_path, monkeypatch, capsys):
     config = tmp_path / "unreadable.toml"
     config.write_bytes(b"!unreadable")
+    (tmp_path / "model_prices.json").write_text(
+        '{"codex-auto-review":{"input_cost":1000,"output_cost":1000,"cache_read_cost":1000}}',
+        encoding="utf-8")
     monkeypatch.setenv("AUT_CONFIG", str(config))
     monkeypatch.setenv("AUT_STATE", str(tmp_path / "no-state.json"))
     parser = argparse.ArgumentParser()
@@ -40,5 +43,10 @@ def test_demo_uses_summary_without_reading_the_caller_config(tmp_path, monkeypat
     assert report["totals"]["events"] == 2 and report["totals"]["tokens"]["total_tokens"] == 1140
     assert report["totals"]["unknown_events"]["reasoning_tokens"] == 1
     assert {row["key"] for row in report["groups"]} == {"claude-opus-4-8", "codex-auto-review"}
+    pricing = report["totals"]["pricing"]
+    assert pricing["priced_tokens"] == 100 and pricing["unpriced_tokens"] == 1040
+    assert pricing["known_api_cost_usd"] == "0.000930"
+    assert pricing["estimated_api_cost_usd"] is None
+    assert report["rate_age_seconds"] == 86400
     assert not (tmp_path / "no-state.json").exists()
     assert config.read_bytes() == b"!unreadable"

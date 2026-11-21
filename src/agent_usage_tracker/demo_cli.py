@@ -20,8 +20,9 @@ def run(args: argparse.Namespace) -> None:
     with TemporaryDirectory(prefix="aut-demo-") as directory:
         cfg = demo.fixture(Path(directory))
         report = summary.build_summary(cfg, since=demo.SINCE, until=demo.UNTIL,
-                                       group_by=args.group_by)
+                                       group_by=args.group_by, now=demo.NOW,
+                                       prices_path=demo.sample_prices(cfg.home))
     if args.json:
         print(json.dumps({"synthetic": True, **report}, sort_keys=True, allow_nan=False))
     else:
-        print("Synthetic demo\n" + summary.render(report))
+        print("Synthetic demo with sample rates\n" + summary.render(report))

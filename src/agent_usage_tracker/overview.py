@@ -56,11 +56,28 @@ def _tokens(totals: Totals, key: str) -> int | str | None:
 
 def _pricing(report: Summary) -> str:
     logged = report["totals"]["logged_cost_usd"]
-    display = f"${logged:.6g}" if logged is not None else "Unknown"
+    display = f"${logged:.6g}" if logged is not None else "unknown"
+    rates = _cell(report["rate_status"])
+    synced = _cell(report["rate_synced_at"])
+    seconds = report["rate_age_seconds"]
+    age = "unknown" if seconds is None else f"{seconds:,} s"
+    models = (
+        ("All models", report["totals"]["pricing"]),
+        *((model["model"], model) for model in report["prices_by_model"]),
+    )
+    costs = _table(
+        "API-equivalent cost by model",
+        ("Model", "Priced tokens", "Unpriced tokens", "Coverage basis",
+         "Cost for priced tokens (USD)", "Estimated total (USD)"),
+        ((label, values["priced_tokens"], values["unpriced_tokens"], values["coverage_tokens"],
+          values["known_api_cost_usd"], values["estimated_api_cost_usd"])
+         for label, values in models),
+    )
     return (
-        '<h2>Pricing</h2><div class="panel"><p>Estimated API cost and rate coverage are '
-        'unknown for this report.</p><p>Logged cost (USD) '
-        f'<strong>{display}</strong></p></div>'
+        '<h2>Pricing</h2><div class="panel">'
+        f'<p>Rate file {rates} · last updated {synced} · age {age}</p>{costs}'
+        f'<p>Logged cost (USD) <strong>{display}</strong></p>'
+        '<p class="muted">Estimates use local API rates. Provider billing is separate.</p></div>'
     )
 
 

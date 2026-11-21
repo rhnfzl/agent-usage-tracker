@@ -1,4 +1,6 @@
 import argparse
+from datetime import date
+import json
 from pathlib import Path
 
 import pytest
@@ -6,6 +8,8 @@ import pytest
 from agent_usage_tracker import overview_cli
 from agent_usage_tracker.demo import fixture
 from agent_usage_tracker.improve.store import Store
+from agent_usage_tracker.overview import render
+from agent_usage_tracker.summary import build_summary
 
 
 def test_overview_reads_real_summary_and_private_evidence(tmp_path, monkeypatch, capsys):
@@ -48,18 +52,31 @@ def test_overview_reads_real_summary_and_private_evidence(tmp_path, monkeypatch,
 
 
 def test_overview_escapes_local_project_names(tmp_path, monkeypatch):
+    monkeypatch.setenv("AUT_CONFIG", str(tmp_path / "config.toml"))
     cfg = fixture(tmp_path)
     transcript = next(Path(tmp_path).glob(".claude/projects/*/*.jsonl"))
     transcript.write_text(transcript.read_text().replace("sample-project", "<script>alert(1)<&"))
-    from agent_usage_tracker.overview import render
-    from agent_usage_tracker.summary import build_summary
-    from datetime import date
-
     report = build_summary(cfg, since=date(2026, 6, 15), until=date(2026, 6, 16),
                            group_by="project")
     page = render(report, {"collectors": [], "issues": []}, "/tok", "custom", False)
     assert b"<script>alert(1)" not in page
     assert b"&lt;script&gt;alert(1)" in page
+
+
+def test_overview_distinguishes_priced_and_unpriced_usage(tmp_path):
+    config = fixture(tmp_path / "home")
+    rates = tmp_path / "sample-prices.json"
+    rates.write_text(json.dumps({"claude-opus-4-8": {
+        "input_cost": 0.00001, "output_cost": 0.00002, "cache_read_cost": 0.000001,
+        "cache_write_cost": 0.00001,
+    }}), encoding="utf-8")
+    report = build_summary(config, since=date(2026, 6, 15), until=date(2026, 6, 16),
+                           prices_path=rates)
+    page = render(report, {"collectors": [], "issues": []}, "/tok", "custom", False)
+    assert b"Rate file available" in page and b"age" in page
+    assert b"Unpriced tokens" in page and b"Logged cost (USD)" in page
+    assert b"<td>All models</td><td>100</td><td>1,040</td><td>1,140</td>" in page
+    assert b"<td>0.000930</td><td>unknown</td>" in page
 
 
 def test_overview_rejects_bad_cli_dates_before_serving(tmp_path, monkeypatch):
