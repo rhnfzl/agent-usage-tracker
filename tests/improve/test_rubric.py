@@ -286,6 +286,34 @@ def test_applies_checks_triggers_finals_test_commands_and_outputs():
     ("cd repo && python -m pytest -q 2>&1 | tail", "Bash", "python -m pytest"),
     ('echo "a;b"; git status', "Bash", "echo"),
     ('pytest "unbalanced', "Bash", "pytest"),
+    # a value-taking flag's value is not the subcommand
+    ("uv run --with pytest python x.py", "Bash", "uv run python"),
+    ("uv --directory test run pytest", "Bash", "uv run pytest"),
+    ("npm --prefix test run build", "Bash", "npm run"),
+    ("pnpm --filter test build", "Bash", "pnpm build"),
+    ("pnpm -C test build", "Bash", "pnpm build"),
+    ("go -C test build", "Bash", "go build"),
+    ("gh -R owner/test pr view", "Bash", "gh pr"),
+    ("cargo -C test build", "Bash", "cargo build"),
+    ("poetry -C test run pytest", "Bash", "poetry run pytest"),
+    # wrappers found in stored commands: an rtk hook rewrite, env, time, command
+    ("rtk git status", "Bash", "git status"),
+    ("rtk proxy python -m pytest", "Bash", "python -m pytest"),
+    ("rtk test cargo test", "Bash", "cargo test"),
+    ("rtk err npm run build", "Bash", "npm run"),
+    ("cd x && rtk pytest -q", "Bash", "pytest"),
+    ("env FOO=1 rtk go test ./...", "Bash", "go test"),
+    ("time pytest -q", "Bash", "pytest"),
+    ("time -p uv run pytest", "Bash", "uv run pytest"),
+    ("command git push", "Bash", "git push"),
+    ("command -v git", "Bash", "command"),
+    ("time -f %e pytest", "Bash", "pytest"),
+    ("timeout -s KILL 10 pytest", "Bash", "pytest"),
+    ("rtk -v git status", "Bash", "git status"),
+    # a quoted phrase is never part of a family
+    ('git "Confidential client A"', "Bash", "git other"),
+    ('python -m "a b"', "Bash", "python -m other"),
+    ('"my secret tool" --run', "Bash", "other"),
 ])
 def test_command_family(call_text, tool, family):
     assert rubric.command_family(call_text, tool) == family
@@ -330,6 +358,11 @@ def five_rubric_store(tmp_path, monkeypatch, sessions=2):
             {"id": f"b{n}", "kind": "boundary", "text": "turn_complete", "call_id": ""}]})
         for n in range(sessions)]
     return store, store.put("audits", {"session_ids": ids})
+
+
+def journal_kinds(store):
+    return [json.loads(line)["kind"] for line in
+            (store.root / "events.jsonl").read_text().splitlines()]
 
 
 class Recorder:
@@ -493,10 +526,42 @@ def test_cached_blocking_work_publishes_complete_before_the_first_extra_call(tmp
 
     monkeypatch.setattr(judge, "memory_guard", low_memory)
     seen = []
+    report = judge.diagnose(store, audit, models=("test",), backend_for=lambda _: Recorder([]),
+                            progress=seen.append)
+    assert seen[1]["complete"] and seen[1]["optional_finished"] == 0
+    # low memory before an extra rubric skips the extras; the finished night stays finished
+    assert report["complete"] and report["reason"] == "optional_error"
+    assert report["optional_skipped"] == [{"rubric": "verbosity", "error": "AutError"}]
+    assert "diagnosis" in journal_kinds(store)
+
+
+def test_a_bad_extra_rubric_vote_does_not_fail_the_night(tmp_path, monkeypatch):
+    store, audit = five_rubric_store(tmp_path, monkeypatch, sessions=1)
+
+    class Broken(Recorder):
+        def distribution(self, request):
+            if request.task == "improve_verbosity":
+                return {"pass": 2.0}
+            return super().distribution(request)
+
+    report = judge.diagnose(store, audit, models=("test",), backend_for=lambda _: Broken([]))
+    # the bad vote skips only its case: redundant_tests is still judged after it
+    assert report["complete"] and (report["finished"], report["optional_finished"]) == (2, 1)
+    assert report["optional_skipped"] == [{"rubric": "verbosity", "error": "AutError"}]
+    assert report["reason"] == "optional_error"
+    assert "unfinished_call" not in report
+    assert "diagnosis" in journal_kinds(store)
+
+
+def test_low_memory_during_blocking_work_still_raises(tmp_path, monkeypatch):
+    store, audit = five_rubric_store(tmp_path, monkeypatch, sessions=1)
+
+    def low_memory():
+        raise AutError("improve: not enough free memory")
+
+    monkeypatch.setattr(judge, "memory_guard", low_memory)
     with pytest.raises(AutError, match="memory"):
-        judge.diagnose(store, audit, models=("test",), backend_for=lambda _: Recorder([]),
-                       progress=seen.append)
-    assert seen[-1]["complete"] and seen[-1]["optional_finished"] == 0
+        judge.diagnose(store, audit, models=("test",), backend_for=lambda _: Recorder([]))
 
 
 def test_a_policy_without_rubrics_accepts_only_the_two_historical_ids(tmp_path):

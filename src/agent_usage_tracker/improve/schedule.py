@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import html
 import argparse
 import json
 import math
@@ -21,6 +20,8 @@ from types import FrameType
 
 from ..config import AutError
 from ..state import LockBusy, _locked, atomic_write_text
+from . import groups
+from .inbox import write as inbox
 from .judge import diagnose
 from .store import Store, audit
 from .trial import command
@@ -57,30 +58,6 @@ def _cooperative_deadline(deadline: float) -> Iterator[None]:
             signal.setitimer(signal.ITIMER_REAL,
                             max(.001, previous_timer[0] - (time.monotonic() - started)),
                             previous_timer[1])
-
-
-def inbox(store: Store, judgment_ids: list[str]) -> None:
-    rows = [store.get("judgments", key) for key in judgment_ids]
-    entries = []
-    for row in rows:
-        review = row.get("review") or {}
-        entries.append("<tr><td>" + html.escape(row["rubric"]) + "</td><td>"
-                       + html.escape(row["verdict"]) + "</td><td>"
-                       + html.escape(review.get("rationale", "Local decision-model estimate"))
-                       + "</td><td><code>" + html.escape(row["case_id"][:12]) + "</code></td></tr>")
-    page = ("<!doctype html><html lang=en><meta charset=utf-8>"
-            "<meta name=viewport content='width=device-width, initial-scale=1'>"
-            "<title>Private improvement inbox</title><style>"
-            "body{font:16px system-ui;margin:2rem;max-width:75rem;line-height:1.5}"
-            "td,th{text-align:left;padding:.7rem;border-bottom:1px solid #ccc}"
-            "table{border-collapse:collapse;width:100%} .scroll{overflow:auto}"
-            "</style><h1>Private improvement inbox</h1>"
-            "<p>Local model estimates. Unknowns remain unresolved. These are not human labels "
-            "or proof of task quality. Routine review does not require a human.</p>"
-            "<div class=scroll role=region aria-label='Model judgments' tabindex=0><table>"
-            "<tr><th>Criterion</th><th>Estimate</th><th>Evidence review</th><th>Case</th></tr>"
-            + "".join(entries) + "</table></div></html>")
-    atomic_write_text(store.root / "inbox.html", page)
 
 
 def _pending(store: Store) -> dict[str, Any]:
@@ -200,10 +177,19 @@ def run_once(store: Store, *, days: int = 7, limit: int = 30, case_limit: int = 
             except (OSError, ValueError, KeyError, TypeError) as exc:
                 if result["accepted"]:
                     raise AutError("improve: worker did not preserve its matching result") from exc
+            diagnosis = report.get("diagnosis", report.get("progress", {}).get("diagnosis", {}))
+            if audit_id is None and not result["accepted"] and diagnosis.get("complete"):
+                # A worker killed after its early release never wrote pending again; a freezer
+                # that started after that release must still see a new write identity.
+                atomic_write_text(store.root / "pending_cycle.json",
+                                  json.dumps({"policy_id": key, "audit": None}) + "\n")
             store.append("cycle_finished", **report)
             atomic_write_text(store.root / "last_cycle.json", json.dumps(report, indent=2) + "\n")
-            inbox(store, report.get("diagnosis", report.get("progress", {}).get("diagnosis", {}))
-                  .get("judgment_ids", []))
+            try:    # after the worker, outside its budget; old judgments are worth grouping too
+                groups.refresh(store)
+            except Exception as exc:    # grouping must never fail the cycle or skip the inbox
+                store.append("groups_error", error=type(exc).__name__)
+            inbox(store, diagnosis.get("judgment_ids", []))
             return report
     except LockBusy:
         return {"status": "busy"}
@@ -274,7 +260,9 @@ def _worker(store: Store, policy_id: str, run_id: str, *,
     except _BudgetExpired:     # keeps the last checkpoint's complete: blocking work may be done
         judged = {**judged, "reason": "budget"}
     report.update(status="ok" if judged["complete"] else "deferred", diagnosis=judged)
-    if judged["complete"] and not provided and not cleared:
+    # Write again even after an early release: a freezer that started after that release must
+    # see a new write identity, or it would freeze an audit while this cycle was still judging.
+    if judged["complete"] and not provided:
         atomic_write_text(pending_path, json.dumps({"policy_id": policy_id, "audit": None}) + "\n")
     atomic_write_text(store.root / "worker_result.json",
                       json.dumps({"run_id": run_id, "report": report}) + "\n")

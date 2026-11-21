@@ -460,6 +460,8 @@ def diagnose(store: Store, audit_id: str, *, models: tuple[str, ...] = (
     optional = set(keys) - active
     reason = "complete"
     skipped = False
+    optional_skipped: list[dict[str, str]] = []
+    in_optional = False     # work is sorted blocking first, so this only turns on
     evidence = {"cases": len(rows), "eligible": sum(_eligible(row) for row in rows)}
 
     def checkpoint() -> dict[str, Any]:
@@ -478,6 +480,8 @@ def diagnose(store: Store, audit_id: str, *, models: tuple[str, ...] = (
             report["first_call_at"] = first_call_at
         if unfinished_call is not None:
             report["unfinished_call"] = unfinished_call
+        if optional_skipped:
+            report["optional_skipped"] = list(optional_skipped)
         if progress:
             progress(report)
         return report
@@ -494,6 +498,7 @@ def diagnose(store: Store, audit_id: str, *, models: tuple[str, ...] = (
     try:
         with _locked(store.root / "diagnose", blocking=False), ExitStack() as resources:
             for (rubric, case), key in zip(work, keys):
+                in_optional = not rubric.blocking
                 if key in decisions:
                     value = store.get("judgments", decisions[key])
                     tally[value["verdict"]] += 1
@@ -517,6 +522,7 @@ def diagnose(store: Store, audit_id: str, *, models: tuple[str, ...] = (
                 votes = []
                 refs = []
                 refused = False
+                failed = None
                 for name in models:
                     vote_key = digest({"decision": key, "model": policy["model_identity"][name]})
                     if vote_key not in cache:
@@ -549,10 +555,18 @@ def diagnose(store: Store, audit_id: str, *, models: tuple[str, ...] = (
                         try:
                             distribution = backend.distribution(_request(case, rubric))
                             done = True
+                            aggregate([distribution])
+                        except Exception as exc:
+                            if rubric.blocking:
+                                raise
+                            failed = type(exc).__name__
                         finally:    # a cut-off call still leaves its row, without a rate
                             record("vote", name, size, at,
                                    time.monotonic() - started if done else None)
-                        aggregate([distribution])
+                        if failed:  # one bad extra vote skips this case, not the other extras
+                            optional_skipped.append({"rubric": rubric.id, "error": failed})
+                            unfinished_call = None
+                            break
                         cache[vote_key] = store.put("votes", {
                             "evaluation_key": vote_key, "job_id": job_id, "case_id": case["case_id"],
                             "rubric": rubric.id, "model": backend.model_id,
@@ -563,6 +577,9 @@ def diagnose(store: Store, audit_id: str, *, models: tuple[str, ...] = (
                     vote = store.get("votes", cache[vote_key])
                     votes.append(vote["distribution"])
                     refs.append(cache[vote_key])
+                if failed:
+                    checkpoint()
+                    continue
                 if refused and spent():
                     reason = "budget"
                     break
@@ -657,8 +674,17 @@ def diagnose(store: Store, audit_id: str, *, models: tuple[str, ...] = (
                 tally[result["verdict"]] += 1
                 finished, optional_finished = count(rubric, finished, optional_finished)
                 checkpoint()
+            in_optional = False     # errors after the loop (lock release, cleanup) still raise
     except LockBusy:
         reason = "model_busy"
+    except Exception as exc:
+        # Blocking work is done; an error outside a vote (low memory, a model that cannot load)
+        # stops the extras instead of turning a finished night into an error. A bad vote only
+        # skips its case (above). Only the type is kept: a message could quote model output.
+        if not in_optional:
+            raise
+        optional_skipped.append({"rubric": rubric.id, "error": type(exc).__name__})
+        unfinished_call = None      # the failed call ended; nothing is still running
     finally:
         for backend in [*backends.values(), *([explainer] if explainer else [])]:
             close = getattr(backend, "close", None)
@@ -666,6 +692,8 @@ def diagnose(store: Store, audit_id: str, *, models: tuple[str, ...] = (
                 close()
     if skipped and reason == "complete":
         reason = "budget"
+    elif optional_skipped and reason == "complete":
+        reason = "optional_error"
     report = checkpoint()
     store.append("diagnosis", **report)
     return report
