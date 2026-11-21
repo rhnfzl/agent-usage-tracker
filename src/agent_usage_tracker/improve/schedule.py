@@ -250,10 +250,17 @@ def _worker(store: Store, policy_id: str, run_id: str, *,
     # The judge's own budget starts after the audit; the outer deadline still bounds both.
     deadline = min(outer, time.monotonic() + budget_s) - min(5., budget_s / 10)
 
+    cleared = False
+
     def checkpoint(progress: dict[str, Any]) -> None:
-        nonlocal judged
+        nonlocal judged, cleared
         judged = progress
         report["diagnosis"] = judged
+        # Blocking work done: release the audit now, so an alarm or a kill during a non-blocking
+        # rubric's call cannot hold it open for the next night.
+        if judged.get("complete") and not provided and not cleared:
+            atomic_write_text(pending_path, json.dumps({"policy_id": policy_id, "audit": None}) + "\n")
+            cleared = True
         atomic_write_text(store.root / "worker_result.json",
                           json.dumps({"run_id": run_id, "report": report}) + "\n")
 
@@ -264,10 +271,10 @@ def _worker(store: Store, policy_id: str, run_id: str, *,
                               limit=policy["case_limit"], budget_s=policy["budget_s"],
                               max_calls=policy["max_calls"], explain_model=policy["explain_model"],
                               deadline=deadline, progress=checkpoint)
-    except _BudgetExpired:
-        judged = {**judged, "complete": False, "reason": "budget"}
+    except _BudgetExpired:     # keeps the last checkpoint's complete: blocking work may be done
+        judged = {**judged, "reason": "budget"}
     report.update(status="ok" if judged["complete"] else "deferred", diagnosis=judged)
-    if judged["complete"] and not provided:
+    if judged["complete"] and not provided and not cleared:
         atomic_write_text(pending_path, json.dumps({"policy_id": policy_id, "audit": None}) + "\n")
     atomic_write_text(store.root / "worker_result.json",
                       json.dumps({"run_id": run_id, "report": report}) + "\n")
