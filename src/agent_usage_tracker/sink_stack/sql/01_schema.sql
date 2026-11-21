@@ -146,12 +146,12 @@ CALL refresh_continuous_aggregate('agents.usage_daily', NULL, NULL);
 
 -- One row per event_id. Claude Code sometimes re-logs the same message with a different ts,
 -- and the hypertable key is (event_id, ts) (Timescale needs ts in it), so both rows persist and
--- every sum over usage_event counts that turn twice. This view is the only place re-logs are
--- settled: it keeps the row with the largest total_tokens (ts DESC breaks ties, and is unique
+-- every sum over usage_event counts that turn twice. This view settles every duplicate at read
+-- time: it keeps the row with the largest total_tokens (ts DESC breaks ties, and is unique
 -- per event_id because of the primary key); agents.audit_daily checks what it settles. Derived views and new queries should
--- read this view, not usage_event. usage_daily still sums raw rows (a continuous aggregate
--- cannot read a view), so it stays inflated until a one-off dedup removes the duplicates
--- from the table. Idempotent: CREATE OR REPLACE.
+-- read this view, not usage_event. usage_daily sums raw rows (a continuous aggregate
+-- cannot read a view); the refresh job (refresh.sql) deletes Claude Code's re-logged copies from
+-- the table, so it and usage_daily count them once after the next run. Idempotent: CREATE OR REPLACE.
 CREATE OR REPLACE VIEW agents.usage_event_dedup AS
 SELECT DISTINCT ON (event_id) *
 FROM agents.usage_event

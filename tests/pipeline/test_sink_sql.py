@@ -512,3 +512,24 @@ def test_mature_outcome_runner_reads_and_rechecks_real_episode_rows(
             result = label_run.run_label(cfg, ["soft_outcome"], local_estimates=True,
                 now=now+timedelta(days=1), backend_for=lambda task, choice: Model())["soft_outcome"]
             assert result["rows"] == 0 and scored == [str(eid)]
+
+
+# Last in the file: the refresh job rebuilds every derived view and records a sink scan.
+def test_refresh_deletes_claude_code_relogs_and_keeps_other_duplicates(dsn):
+    session = EventSession("s-relog", None, "interactive", "t1")
+
+    def usage(eid: str, ts: datetime, agent: str, tokens: int) -> UsageEvent:
+        return UsageEvent(event_id=eid, ts=ts.isoformat(), agent=agent, model="m", provider="p",
+                          input_tokens=tokens, total_tokens=tokens, machine="t", session=session)
+
+    later = T0 + timedelta(seconds=3)
+    push.insert_pg(dsn, [usage("relog", T0, "claude_code", 10), usage("relog", later, "claude_code", 12),
+                         usage("odd", T0, "codex", 5), usage("odd", later, "codex", 5)])
+    job = (SINK_STACK / "sql" / "refresh.sql").read_text(encoding="utf-8").splitlines()
+    with connect(dsn) as conn:
+        conn.execute("\n".join(line for line in job if not line.startswith("\\")))
+        conn.commit()
+        rows = conn.execute("SELECT event_id, total_tokens FROM agents.usage_event "
+                            "WHERE event_id IN ('relog', 'odd') ORDER BY 1, 2").fetchall()
+    # the re-log keeps the copy usage_event_dedup keeps; a Codex duplicate stays for the audit
+    assert rows == [("odd", 5), ("odd", 5), ("relog", 12)]
