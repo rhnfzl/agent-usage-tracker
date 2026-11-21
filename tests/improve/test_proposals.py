@@ -105,3 +105,22 @@ def test_stage_preserves_executable_mode(tmp_path):
     proposal = prepare(store, case, root, target, "old", "new")
     staged = stage(store, proposal, tmp_path / "candidate")
     assert staged.stat().st_mode & 0o777 == 0o755
+
+
+def test_prepare_keeps_the_span_and_extra_fields_but_not_core_overrides(tmp_path):
+    root = tmp_path / "source"
+    root.mkdir()
+    target = root / "rules.md"
+    target.write_text("Use old.\n")
+    store = Store(tmp_path / "private")
+    case = store.put("cases", {"events": [{"id": "e", "kind": "result"}]})
+    key = prepare(store, case, root, target, "old", "new", authority="model_drafted_proposal",
+                  extra={"title": "T", "rollback": "Revert the commit."})
+    saved = store.get("proposals", key)
+    assert saved["span"] == {"before": "old", "after": "new"}
+    assert (saved["title"], saved["rollback"], saved["authority"]) == (
+        "T", "Revert the commit.", "model_drafted_proposal")
+    with pytest.raises(AutError, match="core"):
+        prepare(store, case, root, target, "old", "new", extra={"after": "x"})
+    with pytest.raises(AutError, match="authority"):
+        prepare(store, case, root, target, "old", "new", authority="model")
