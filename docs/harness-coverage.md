@@ -48,7 +48,7 @@ On macOS, bounded app-folder name matches appear as candidates.
 Doctor does not read app contents or retain unmatched app names.
 Other platforms retain native-source and explicit-registry checks; app inventory remains unknown.
 
-A catalog entry can add three optional fields, so a new harness is one data entry:
+A catalog entry can add four optional fields, so a new harness is one data entry:
 
 - `detect.paths`: up to 8 activity paths such as session stores, each starting with `~/` and
   without `..`. Doctor walks them for metadata only: at most 256 entries per harness and 4 levels,

@@ -421,6 +421,9 @@ def test_alert_state_ages_out_and_forgets_after_a_week():
     gone, text = alert_state({"issues": []}, {"alerts": alerts}, later)
     assert text is None and gone                             # absent: kept for a week
     assert alert_state(report, {"alerts": gone}, later + timedelta(days=3))[1] is None
-    assert alert_state(report, {"alerts": gone}, later + timedelta(days=8))[1] == \
+    # A scan gap alone never re-alerts a present issue; a week of absence forgets it.
+    assert alert_state(report, {"alerts": alerts}, later + timedelta(days=10))[1] is None
+    forgotten, _ = alert_state({"issues": []}, {"alerts": gone}, later + timedelta(days=7))
+    assert forgotten == {}
+    assert alert_state(report, {"alerts": forgotten}, later + timedelta(days=8))[1] == \
         "new: cursor payloads missing"
-    assert alert_state({"issues": []}, {"alerts": gone}, later + timedelta(days=8))[0] == {}

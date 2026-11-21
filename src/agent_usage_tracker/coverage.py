@@ -569,8 +569,9 @@ def alert_state(report: dict[str, Any], previous: dict[str, Any],
     alerts = {key: entry for key, entry in prior.items() if key not in current and live(entry)}
     start = now - timedelta(hours=ALERT_HOURS) if baseline else now
     for key in current:
-        entry = live(prior.get(key))
-        first = _stamp(entry.get("first_seen")) if entry else None
+        # A present key keeps its first sighting even after a gap in scans; only absence forgets it.
+        entry = prior.get(key)
+        first = _stamp(entry.get("first_seen")) if isinstance(entry, dict) else None
         alerts[key] = {"first_seen": (first or start).isoformat(), "last_seen": now.isoformat()}
     new = [key for key in current
            if now - (_stamp(alerts[key]["first_seen"]) or now) < timedelta(hours=ALERT_HOURS)]

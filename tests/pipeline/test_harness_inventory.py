@@ -165,7 +165,7 @@ def age(path, days_ago):
     import time
 
     stamp = time.time() - days_ago * 86400
-    os.utime(path, (stamp, stamp), follow_symlinks=False)
+    os.utime(path, (stamp, stamp))
 
 
 def entry(**detect):
@@ -214,7 +214,6 @@ def test_a_symlinked_directory_is_not_followed(roots, tmp_path):
     touch(tmp_path / "elsewhere/new.json", 0)
     (tmp_path / ".tool").mkdir()
     (tmp_path / ".tool/link").symlink_to(tmp_path / "elsewhere", target_is_directory=True)
-    age(tmp_path / ".tool/link", 30)
     age(tmp_path / ".tool", 30)
     assert only(harness_inventory.discover(tmp_path, entry(paths=["~/.tool"])))["activity"] == "stale"
 
