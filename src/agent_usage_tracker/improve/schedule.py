@@ -20,7 +20,7 @@ from types import FrameType
 
 from ..config import AutError
 from ..state import LockBusy, _locked, atomic_write_text
-from . import groups
+from . import groups, outputs
 from .inbox import write as inbox
 from .judge import diagnose
 from .store import Store, audit
@@ -189,6 +189,10 @@ def run_once(store: Store, *, days: int = 7, limit: int = 30, case_limit: int = 
                 groups.refresh(store)
             except Exception as exc:    # grouping must never fail the cycle or skip the inbox
                 store.append("groups_error", error=type(exc).__name__)
+            try:
+                outputs.refresh(store)
+            except Exception as exc:
+                store.append("outputs_error", error=type(exc).__name__)
             inbox(store, diagnosis.get("judgment_ids", []))
             return report
     except LockBusy:
