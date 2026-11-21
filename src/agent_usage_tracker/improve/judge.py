@@ -4,18 +4,19 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import time
 from collections import deque
 from contextlib import ExitStack
 from datetime import datetime, timezone
-from typing import Any, Callable
+from typing import Any, Callable, Iterable
 
 from ..config import AutError, config_path
 from ..label.backends import MlxLetter, find_model, make_backend
 from ..label.core import Backend, Choice, Request
 from ..label.local import memory_guard
 from ..redact import redact
-from ..state import LockBusy, _locked
+from ..state import LockBusy, _locked, atomic_write_text
 from . import rubric as rubrics_mod
 from .rubric import CAUSES, LABELS, Rubric, applies
 from .store import Store, digest
@@ -320,6 +321,38 @@ def evaluation_key(evaluator_id: str, case_id: str, rubric_id: str) -> str:
     return digest({"evaluator": evaluator_id, "case": case_id, "rubric": rubric_id})
 
 
+def queued(store: Store) -> list[str]:
+    path = store.root / "judge_queue.json"
+    if not path.resolve().is_relative_to(store.root):
+        raise AutError("improve: judge queue escapes its private store")
+    try:
+        if path.stat().st_size > 1024 * 1024:
+            raise ValueError
+        rows = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return []
+    except (OSError, ValueError) as exc:
+        raise AutError("improve: invalid judge queue") from exc
+    if not isinstance(rows, list) or len(rows) > 10000 \
+            or any(not isinstance(key, str) or not re.fullmatch(r"[a-f0-9]{64}", key)
+                   for key in rows) or len(set(rows)) != len(rows):
+        raise AutError("improve: invalid judge queue")
+    return rows
+
+
+def update_queue(store: Store, *, add: Iterable[str] = (), remove: Iterable[str] = ()) -> None:
+    """Read-modify-write under one lock, so another sitting's newly queued ids survive."""
+    with _locked(store.root / "judge_queue"):
+        current = queued(store)
+        removed = set(remove)
+        rows = list(dict.fromkeys([key for key in current if key not in removed] + sorted(add)))
+        if len(rows) > 10000 or any(not isinstance(key, str)
+                                   or not re.fullmatch(r"[a-f0-9]{64}", key) for key in rows):
+            raise AutError("improve: invalid judge queue")
+        if rows != current:
+            atomic_write_text(store.root / "judge_queue.json", json.dumps(rows) + "\n")
+
+
 def diagnose(store: Store, audit_id: str, *, models: tuple[str, ...] = (
              "pplx-decider-flash", "clef-flash"), limit: int = 12, budget_s: int = 300,
              max_calls: int = 50, explain_model: str | None = None,
@@ -337,6 +370,15 @@ def diagnose(store: Store, audit_id: str, *, models: tuple[str, ...] = (
     if not rubrics:
         raise AutError("improve: no enabled rubrics")
     rows = cases(store, audit_id, limit=limit)
+    queued_ids = queued(store)[:8]
+    extra = []
+    normal_ids = {row["case_id"] for row in rows}
+    for key in queued_ids:
+        case = store.get("cases", key)
+        if not _eligible(case):
+            raise AutError("improve: queued case has incomplete evidence")
+        if key not in normal_ids:
+            extra.append({**case, "case_id": key})
     explainer = MlxLetter(explain_model) if explain_model else None
     if explainer:
         explainer.prepare()
@@ -349,7 +391,7 @@ def diagnose(store: Store, audit_id: str, *, models: tuple[str, ...] = (
               "model_identity": {name: {"id": backend.model_id, "revision": backend.model_rev,
                                         "protocol": getattr(backend, "protocol", "")}
                                  for name, backend in backends.items()},
-              "cases": [row["case_id"] for row in rows],
+              "cases": [row["case_id"] for row in [*rows, *extra]],
               "rubrics": {rubric.id: rubrics_mod.snapshot(store, rubric) for rubric in rubrics},
               "explain_model": explain_model,
               "explain_revision": explainer.model_rev if explainer else None,
@@ -359,6 +401,9 @@ def diagnose(store: Store, audit_id: str, *, models: tuple[str, ...] = (
     # Rubric-first, blocking rubrics before the rest, so the extras get only what is left.
     work = [(rubric, row) for rubric in sorted(rubrics, key=lambda r: (not r.blocking, r.priority, r.id))
             for row in [row for row in rows if applies(rubric, row, None)][:rubric.max_cases]]
+    # Labelled cases are extra work, after the normal blocking work. They cannot hold an audit.
+    work += [(rubric, row) for rubric in rubrics for row in
+             [row for row in extra if applies(rubric, row, None)][:rubric.max_cases]]
     calls = 0
     unfinished_call: dict[str, Any] | None = None
     # Admission keys are (kind, name): the explainer is its own model object even under a vote name.
@@ -456,7 +501,8 @@ def diagnose(store: Store, audit_id: str, *, models: tuple[str, ...] = (
         review_cache.setdefault(saved["evaluation_key"], []).append(saved)
     keys = [evaluation_key(evaluators[rubric.id], case["case_id"], rubric.id)
             for rubric, case in work]
-    active = {key for key, (rubric, _) in zip(keys, work) if rubric.blocking}
+    active = {key for key, (rubric, case) in zip(keys, work)
+              if rubric.blocking and case["case_id"] in normal_ids}
     optional = set(keys) - active
     reason = "complete"
     skipped = False
@@ -465,6 +511,12 @@ def diagnose(store: Store, audit_id: str, *, models: tuple[str, ...] = (
     evidence = {"cases": len(rows), "eligible": sum(_eligible(row) for row in rows)}
 
     def checkpoint() -> dict[str, Any]:
+        completed = [case_id for case_id in queued_ids if (needed := [
+            evaluation_key(evaluators[r.id], case_id, r.id) for r in rubrics
+            if applies(r, store.get("cases", case_id), None)]) and all(
+                key in decisions for key in needed)]
+        if completed:
+            update_queue(store, remove=completed)
         # complete counts blocking work only; a non-blocking rubric never holds the audit open.
         report = {"job_id": job_id, "complete": finished == len(active),
                   "finished": finished, "total": len(active),
@@ -486,8 +538,8 @@ def diagnose(store: Store, audit_id: str, *, models: tuple[str, ...] = (
             progress(report)
         return report
 
-    def count(rubric: Rubric, blocking: int, extra: int) -> tuple[int, int]:
-        return (blocking + 1, extra) if rubric.blocking else (blocking, extra + 1)
+    def count(key: str, blocking: int, extra: int) -> tuple[int, int]:
+        return (blocking + 1, extra) if key in active else (blocking, extra + 1)
 
     def marks(rubric: Rubric) -> dict[str, Any]:
         return {"rubric_version": rubric.version, "rubric_sha256": rubric.sha256,
@@ -498,12 +550,12 @@ def diagnose(store: Store, audit_id: str, *, models: tuple[str, ...] = (
     try:
         with _locked(store.root / "diagnose", blocking=False), ExitStack() as resources:
             for (rubric, case), key in zip(work, keys):
-                in_optional = not rubric.blocking
+                in_optional = key not in active
                 if key in decisions:
                     value = store.get("judgments", decisions[key])
                     tally[value["verdict"]] += 1
-                    finished, optional_finished = count(rubric, finished, optional_finished)
-                    if rubric.blocking and finished == len(active):
+                    finished, optional_finished = count(key, finished, optional_finished)
+                    if not in_optional and finished == len(active):
                         checkpoint()    # publish complete before any non-blocking model work
                     continue
                 if time.monotonic() >= deadline:
@@ -516,7 +568,7 @@ def diagnose(store: Store, audit_id: str, *, models: tuple[str, ...] = (
                               "evidence_ids": [event["id"] for event in case["events"]]}
                     decisions[key] = store.put("judgments", result)
                     tally["unknown"] += 1
-                    finished, optional_finished = count(rubric, finished, optional_finished)
+                    finished, optional_finished = count(key, finished, optional_finished)
                     checkpoint()
                     continue
                 votes = []
@@ -557,7 +609,7 @@ def diagnose(store: Store, audit_id: str, *, models: tuple[str, ...] = (
                             done = True
                             aggregate([distribution])
                         except Exception as exc:
-                            if rubric.blocking:
+                            if not in_optional:
                                 raise
                             failed = type(exc).__name__
                         finally:    # a cut-off call still leaves its row, without a rate
@@ -672,7 +724,7 @@ def diagnose(store: Store, audit_id: str, *, models: tuple[str, ...] = (
                               review_model_rev=explainer.model_rev if explainer else None)
                 decisions[key] = store.put("judgments", result)
                 tally[result["verdict"]] += 1
-                finished, optional_finished = count(rubric, finished, optional_finished)
+                finished, optional_finished = count(key, finished, optional_finished)
                 checkpoint()
             in_optional = False     # errors after the loop (lock release, cleanup) still raise
     except LockBusy:

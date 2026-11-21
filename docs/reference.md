@@ -38,6 +38,7 @@ other command refuses it.
 | `aut label backfill --task T --days N` | label one task over the last N days; the nightly watermark is not moved back. `soft_outcome` always covers the last 14 days, whatever `--days` or `--since` say (it notes this on stderr) | same |
 | `aut label teach --task T --n N [--budget-usd X] [--days D]` | teacher (silver) labels for a stratified sample of up to N units (default spend cap 5 USD, window 90 days) | same, plus `claude` on `PATH` |
 | `aut label review [--task T] [--days D]` | answer gold labels one unit at a time on a local page | `pg_dsn` |
+| `aut improve label --rubric ID [--limit N]` | compare advisory judges with human labels on a token-protected local page; no model calls | eligible cases in the private store |
 | `aut label eval --task T [--days D]` | score every backend on your gold labels (saved scores are re-used) and print one table: quality, speed, memory | same as `run` |
 | `aut label eval --task T --final --model M [--days D]` | score M on the final test days, which nothing else reads | an eval record of M |
 | `aut label choose --task T [--model M]` | with `--model`, write M's saved result into `label.json`; without it, print the table and a recommendation and write nothing | an eval record |
