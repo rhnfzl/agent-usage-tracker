@@ -154,7 +154,8 @@ Invalid reviews retain their bounded, redacted responses in private `review_atte
 One schema repair is allowed. Both attempts count against the model-call and time budgets.
 They are not human labels or calibrated accuracy measurements.
 Ask a human only when evidence cannot settle a required fact, authority, or preference.
-The private `inbox.html` shows escaped review text and case identifiers.
+The private `inbox.html` shows escaped review text and case identifiers, and the top 10
+failure groups (next section).
 
 ## Rubrics
 
@@ -221,17 +222,67 @@ counts, even without a version bump. Each judgment records `rubric_version`, `ru
 `rubric_snapshot`. Judgments made before markdown rubrics have none of these. Their diagnosis
 policy holds the old rubric text, and `rubric.legacy_version` maps it to version 1 when it equals
 the text the v1 files were moved from, else 0. Validation of an older diagnosis uses its old
-identity, so its result does not change. The first night after the update re-votes the pending
-audit's cases once, because the rubric identity changed.
+identity, so its result does not change. Because the rubric identity changed, the first night
+or two after the update re-vote the pending audit's cases once: under a tight call budget the
+blocking re-votes alone can fill the first night, and the next night finishes from the saved
+votes. Older judgments outside the pending audit are re-voted once, when a later audit picks
+their cases up again.
 
 The diagnosis judges rubric by rubric: blocking rubrics first, each group in priority order, so
 the others get only what is left. Before markdown rubrics it went case by case; after a cut-off
 night, the first rubric may now have more cases judged than the second. `complete` counts
 blocking work only, so with no blocking rubric enabled it is complete at once. `finished` and
 `total` count blocking judgments; `optional_finished` and `optional_total` count the rest;
-`verdicts` counts both. `reason` is `budget` when any work, blocking or not, was left. The scheduled worker releases its pending audit at the first
+`verdicts` counts both. `reason` is `budget` when any work, blocking or not, was left.
+An error during non-blocking work never fails the diagnosis. An invalid model vote skips that
+case only; an error outside a vote, such as low memory, stops the remaining non-blocking
+rubrics. `reason` is then `optional_error` (or `budget` when blocking work was also left) and
+`optional_skipped` lists each rubric and error type. A skipped case is tried again next night.
+An error during blocking work still fails the run.
+The scheduled worker releases its pending audit at the first
 checkpoint where blocking work is complete, so a slow non-blocking rubric never holds the next
-audit, even if the run is cut off later.
+audit, even if the run is cut off later. When the run ends it writes the released state once
+more, so an `audit --cycle` that started during the non-blocking work returns `superseded`.
+
+## Group recurring failures
+
+```bash
+aut improve groups --days 14 --threshold 3
+```
+
+This reads the stored judgments, runs no model, and saves a new report. It groups judgments whose case falls in the
+last `--days` local work days (the date of the case's first timestamped event) and that are
+`fail`, or `unknown` with at least one model voting `fail` at the rubric threshold (a split
+vote). Only the newest judgment per case and rubric counts: the highest `rubric_version`, then
+the one the latest diagnosis listed. A diagnosis that was killed journals no list, so a tie
+among its judgments falls back to a fixed but arbitrary order. Cases dated after today are
+left out.
+
+The group key is a digest of five signals:
+
+| Signal | From |
+|---|---|
+| `rubric` | the judgment |
+| `cause` | the evidence review's cause, else `unreviewed` |
+| `tool` | the call answered by the anchor result: the first error result the review cites, else the first result it cites, else the case's last error result. MCP tools show as `mcp:server` |
+| `error_class` | the anchor's text, lower-cased, with paths, long hex runs, numbers and quoted strings removed, matched against a fixed table. A JSON-shaped result (Codex command and MCP results, T3 dict outputs) is matched on its error fields (`error`, `stderr`, `message`), else its output fields (`output`, `content`, ...), plus a non-zero `exit_code`, not on the raw JSON. A successful anchor has an empty error class (`command_not_found`, `no_such_file`, `missing_module`, `permission_denied`, `timeout`, `unknown_tool`, `user_declined`, `shell_glob`, `push_rejected`, `conflict`, `syntax_error`, `test_failure`, `nonzero_exit`). The whole text is matched, because Claude Code and Codex print `Exit code 1` first. No match gives `other:` and 8 hex of a digest of the first line |
+| `command_family` | the anchor call's command, as for rubric `requires` (for example `git push`, `python -m pytest`, `pytest`) |
+
+The project is left out of the key, so the same failure in three repositories is one group;
+`projects` counts its tasks per repository. `distinct_tasks` counts distinct sessions (the
+same identity studies use), so one long session counts once. A group is `recurring` at
+`--threshold` tasks or more. `audit_incidents` counts the newest scheduled audit's error results
+with the same tool, error class and command family, including results no case sampled.
+Groups sort by recurring, then tasks, then last work day.
+
+Each run saves a private `group_reports` record and journals `groups`; the command prints the
+report as JSON. A record holds ids, signal names and counts only, never evidence text. A tool or
+command name that is long or has unusual characters becomes `other`. Records that cannot be
+read are counted as `skipped`.
+
+`aut improve run` and `aut improve diagnose` refresh the groups after the worker exits, outside the judge's budget and
+on every outcome. A grouping failure journals `groups_error` with the error type and never
+fails the cycle or the inbox.
 
 ## Prepare a scoped change
 
@@ -382,7 +433,7 @@ Matching worker checkpoints remain available when the outer deadline kills the w
 Results from an earlier worker or another policy cannot count as the current result.
 The command returns their identifiers without printing captured trace text.
 An interrupted or budget-limited cycle resumes its frozen audit before collecting another batch.
-The process writes `last_cycle.json` and refreshes `inbox.html`.
+The process writes `last_cycle.json`, refreshes the failure groups and then `inbox.html`.
 It does not apply proposals, execute trial commands, or upload evidence.
 
 A pending frozen audit is reused while its own `--days` and `--limit` match the run.
@@ -395,7 +446,8 @@ aut improve audit --cycle --days 7 --limit 30 --budget-s 1500
 ```
 
 It returns `frozen`, `kept` (a matching audit is already pending), `busy`, `budget`, or
-`superseded` (a cycle finished while it built, so it queues nothing).
+`superseded` (a cycle finished while it built, so it queues nothing; this includes a cycle
+that released its audit early and was still judging non-blocking rubrics when the build began).
 Only `budget` exits 1, and it leaves the pending audit unchanged.
 `--cycle` takes no `--project`. Plain `aut improve audit` is unchanged and writes no pending audit.
 `packaging/launchd/dev.aut.improve-audit.plist` is a template that runs this step at 03:50.
