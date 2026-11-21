@@ -1,5 +1,8 @@
 from dataclasses import replace
+from datetime import date, datetime, timezone
+
 import pytest
+from agent_usage_tracker import summary
 from agent_usage_tracker.config import Config, DEFAULT_AGENTS, AutError
 from agent_usage_tracker.collectors import generic_sdk
 from agent_usage_tracker.sdk import emit_usage
@@ -51,6 +54,21 @@ def test_retry_copy_rewrite_and_metadata(tmp_path):
     emit_usage(path, record(id="event2"), producer="app")
     rows, _ = next(generic_sdk.collect(cfg(tmp_path), wm))
     assert len(rows) == 1 and rows[0].model is None and rows[0].provider is None
+
+
+def test_summary_reports_valid_sdk_records_it_cannot_count(tmp_path):
+    path = tmp_path / "events.jsonl"
+    emit_usage(path, record(), producer="app")
+    emit_usage(path, record(id="incomplete", input_tokens=None), producer="app")
+    emit_usage(path, record(id="counter", counter="synthetic"), producer="app")
+    report = summary.build_summary(cfg(tmp_path), since=date(2026, 11, 13),
+                                   until=date(2026, 11, 15),
+                                   now=datetime(2026, 11, 15, tzinfo=timezone.utc))
+    assert report["totals"]["events"] == 1
+    [source] = report["sources"]
+    assert source["status"] == "partial"
+    assert source["skipped_records"] == {"unsupported_usage": 1, "unavailable_usage": 1}
+    assert "Retained usage does not cover" in report["price_forecast"]["reason"]
 
 
 def test_partial_malformed_and_conflict(tmp_path):

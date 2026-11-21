@@ -18,8 +18,9 @@ from .state import _locked, atomic_write_text, state_path
 
 # Keep the guided starter small. config.example.toml documents the optional features.
 _STARTER = """# Local reporting works with this file as-is.
-machine = "local"
-agents = ["claude_code", "codex", "cursor", "cursor_cli", "pi"]
+# Set these to override the hostname and default sources.
+# machine = "work-laptop"
+# agents = ["claude_code", "codex", "cursor", "cursor_cli", "pi"]
 
 # Set these only if you want to send usage to your own sink.
 [transport]
@@ -73,13 +74,17 @@ def receipt(args: argparse.Namespace) -> dict[str, Any]:
     config_action = "kept" if _existing_config(path) else "would_create"
     if args.apply:
         config_action = _create_config(path)
-    cfg = load_config()
-    transport = bool(cfg.has_webhook or cfg.has_pg)
     schedule_mode = "uninstall" if args.uninstall else "install" if args.apply else "preview"
-    schedule_status = "not_requested"
-    if args.uninstall:
-        schedule_status = setup_schedule.change("uninstall", None)
-    elif args.schedule:
+    # A broken config must not keep a managed timer running.
+    schedule_status = setup_schedule.change("uninstall", None) if args.uninstall else "not_requested"
+    try:
+        cfg = load_config()
+    except AutError:
+        if not args.uninstall:
+            raise
+        cfg = None
+    transport = bool(cfg.has_webhook or cfg.has_pg) if cfg is not None else None
+    if cfg is not None and args.schedule and not args.uninstall:
         if not setup_schedule.manager():
             schedule_status = "unavailable"
         elif not transport:
@@ -96,23 +101,26 @@ def receipt(args: argparse.Namespace) -> dict[str, Any]:
             else:
                 schedule_status = (setup_schedule.change("install", _installed_aut())
                                    if args.apply else "would_install")
-    health = build_report(cfg)
+    health: dict[str, Any] = (build_report(cfg) if cfg is not None else
+                              {"collectors": [], "sources": [],
+                               "delivery": {"pending": {}, "status": "unknown"}})
     collectors = health["collectors"]
     queue = health["delivery"]
-    enabled = set(cfg.agents)
+    agents = list(cfg.agents) if cfg is not None else []
     observed = {item["collector"]: item["observation"]["receipt_status"]
                 for item in collectors if item["configured"]}
     return {
         "version": 1,
-        "configured": {"status": "present" if _existing_config(path) else "missing",
+        "configured": {"status": "unreadable" if cfg is None else
+                       "present" if _existing_config(path) else "missing",
                        "action": config_action, "path": str(path),
-                       "collectors": list(cfg.agents), "sink_configured": transport},
-        "observed": {"scan_status": "observed" if any(
+                       "collectors": agents, "sink_configured": transport},
+        "observed": {"scan_status": "unknown" if cfg is None else "observed" if any(
             state in {"fresh", "stale"} for state in observed.values()) else "not_observed",
             "scan_receipts": observed,
             "sources": [{"id": item["id"], "availability": item["availability"]}
-                        for item in health["sources"] if item["engine"] in enabled]},
-        "delivered": {"status": "pending" if queue["pending"] else
+                        for item in health["sources"] if item["engine"] in agents]},
+        "delivered": {"status": "unknown" if cfg is None else "pending" if queue["pending"] else
                       "unverified" if transport else "not_configured",
                       "queue_status": queue["status"], "pending": queue["pending"],
                       "scope": "local_queue_only"},

@@ -119,7 +119,8 @@ def _clean_row(row: dict[str, Any]) -> dict[str, Any] | None:
             "activity": {kind: _count(activity.get(kind)) for kind in sorted(_ACTIVITY)
                          if _count(activity.get(kind))},
             "diagnostics": {"skipped": {key: _count(skipped.get(key)) for key in
-                ("malformed_records", "activity_errors", "unreadable_files", "missing_payloads")
+                ("malformed_records", "activity_errors", "unreadable_files", "missing_payloads",
+                 "unsupported_usage", "unavailable_usage")
                 if _count(skipped.get(key))}, "clients": sorted(observed.clients),
                 "client_overflow": bool(diagnostics.get("client_overflow")) or
                     isinstance(clients, list) and len(clients) > 32}}
@@ -416,7 +417,8 @@ def build_report(cfg: Config, *, now: datetime | None = None) -> dict[str, Any]:
         skipped = observation.get("diagnostics", {}).get("skipped", {})
         if any(skipped.get(k) for k in ("malformed_records", "activity_errors")):
             _issue(issues, "parser_loss", "collector:" + engine)
-        if skipped.get("missing_payloads"):
+        if any(skipped.get(key) for key in ("missing_payloads", "unsupported_usage",
+                                           "unavailable_usage")):
             _issue(issues, "source_payload_missing", "collector:" + engine)
         if skipped.get("unreadable_files"):
             _issue(issues, "source_unreadable", "collector:" + engine)

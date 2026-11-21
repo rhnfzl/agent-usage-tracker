@@ -60,4 +60,5 @@ manual timer, or a system without a supported user scheduler, see
 [the scheduler templates](../packaging/README.md). Use `aut summary` for local reporting on demand.
 
 `aut setup --uninstall` removes only the scan entry created by guided setup. It keeps config,
-scan state and logs. Custom daily jobs and manual scan timers have their own removal procedures.
+scan state and logs. It can remove the managed entry when the config is unreadable.
+Custom daily jobs and manual scan timers have their own removal procedures.

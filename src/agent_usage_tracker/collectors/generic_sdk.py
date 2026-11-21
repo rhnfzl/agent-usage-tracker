@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import Counter
 import glob
 import hashlib
 import json
@@ -9,6 +10,7 @@ import os
 import sys
 from typing import Any, Callable, Iterator
 
+from .. import diagnostics
 from ..config import AutError, Config
 from ..event import Batch, UsageEvent, make_event_id
 from ..observations import COUNTS, MAX_BATCH_RECORDS, MAX_FILE_BYTES, MAX_STORE_RECORDS
@@ -80,6 +82,7 @@ def collect(cfg: Config, wm: dict[str, Any]) -> Iterator[Batch]:
         except (OSError, ValueError, TypeError) as exc:
             raise AutError("generic_sdk malformed or unreadable local source") from exc
     if unsupported or unavailable:
+        diagnostics.note_skips(Counter(unsupported_usage=unsupported, unavailable_usage=unavailable))
         print(
             f"aut: generic_sdk unsupported={unsupported} unavailable={unavailable}", file=sys.stderr
         )

@@ -71,7 +71,9 @@ def run_statusline(args: argparse.Namespace) -> None:
     for window in windows:
         label = WINDOWS[window["window"]]
         used = window["used_percent"]
-        if used is None or window["freshness"] != "current" or window["coverage"] == "conflicting":
+        if window["coverage"] == "conflicting":
+            parts.append(f"{label} quota conflicting")
+        elif used is None or window["freshness"] != "current":
             parts.append(f"{label} quota {window['freshness'] if used is not None else 'unknown'}")
         else:
             text = f"{label} {used:g}%"

@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 from agent_usage_tracker import setup_cli, setup_schedule
-from agent_usage_tracker.config import AutError
+from agent_usage_tracker.config import AutError, load_config
 
 
 @pytest.fixture
@@ -53,6 +53,35 @@ def test_apply_preserves_existing_config_and_uses_offline_defaults(home, capsys)
     assert report["configured"]["action"] == "kept"
     assert report["delivered"]["status"] == "unverified"
     assert 'machine = "my-machine"' in path.read_text()
+
+
+def test_apply_keeps_default_machine_identity_and_sources(home, monkeypatch):
+    monkeypatch.setattr("agent_usage_tracker.config.socket.gethostname", lambda: "fixture-host.example")
+    before = load_config()
+    assert before.machine == "fixture-host"
+    setup("--apply")
+    after = load_config()
+    assert (after.machine, after.agents) == (before.machine, before.agents)
+
+
+def test_uninstall_can_remove_managed_timer_with_unreadable_config(home, monkeypatch, capsys):
+    path = home / ".config/agent-usage-tracker/config.toml"
+    path.parent.mkdir(parents=True)
+    path.write_text("[invalid", encoding="utf-8")
+    calls = []
+
+    def remove(action, executable):
+        calls.append((action, executable))
+        return "removed"
+
+    monkeypatch.setattr(setup_schedule, "change", remove)
+    setup("--uninstall", "--json")
+    assert calls == [("uninstall", None)]
+    report = json.loads(capsys.readouterr().out)
+    assert report["schedule"]["status"] == "removed"
+    assert report["configured"]["status"] == "unreadable"
+    assert report["observed"]["scan_status"] == report["delivered"]["status"] == "unknown"
+    assert path.read_text(encoding="utf-8") == "[invalid"
 
 
 def test_launchd_install_and_remove_only_managed_files(home, monkeypatch):

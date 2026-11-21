@@ -174,7 +174,7 @@ def capture_claude_quota(payload: Any, *, scope: str, db: Path, cache: Path | No
                     if at < prior_at:
                         oldest = previous["samples"][0] if previous else None
                         if oldest and timestamp(oldest["timestamp"]) == at and oldest != row:
-                            stored = ingest(db, [row], source=SOURCE, stream=STREAM, role="primary")
+                            stored = ingest(db, [row], source=SOURCE, stream=STREAM, role="crosscheck")
                             receipt["conflicts"] += stored["conflicts"]
                             windows[key] = {"samples": [last], "conflict": True}
                         else:
@@ -186,7 +186,8 @@ def capture_claude_quota(payload: Any, *, scope: str, db: Path, cache: Path | No
                     if at > prior_at and all(last[k] == row[k] for k in ("remaining", "reset")):
                         receipt["unchanged"] += 1
                         continue
-                stored = ingest(db, [row], source=SOURCE, stream=STREAM, role="primary")
+                # Quota must leave the provider's primary usage stream available.
+                stored = ingest(db, [row], source=SOURCE, stream=STREAM, role="crosscheck")
                 for count in ("accepted", "duplicates", "conflicts"):
                     receipt[count] += stored[count]
                 if stored["conflicts"] or (last and row["timestamp"] == last["timestamp"]):

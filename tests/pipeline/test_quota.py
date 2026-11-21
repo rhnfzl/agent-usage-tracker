@@ -66,6 +66,25 @@ def test_documented_payload_maps_to_private_observation_store_and_replays(store)
     assert "quota" not in public_draft(report)
 
 
+@pytest.mark.parametrize("quota_first", (False, True))
+def test_statusline_quota_coexists_with_primary_claude_usage(store, quota_first):
+    def import_usage():
+        return observations.ingest(store[0], [{
+            "version": 1, "kind": "usage", "id": "claude-usage",
+            "timestamp": T0.isoformat(), "output_tokens": 4,
+        }], source="claude_code", stream="usage", role="primary")
+
+    if not quota_first:
+        assert import_usage()["accepted"] == 1
+    assert capture(store, payload(50), T0)["accepted"] == 1
+    if quota_first:
+        assert import_usage()["accepted"] == 1
+    report = build_report(store[0], now=T0.isoformat())
+    assert report["coverage"]["additive_usage"] == 1
+    [record] = report["quotas"]
+    assert record["source"] == "claude_code" and record["remaining"] == 5000
+
+
 @pytest.mark.parametrize("percent", (None, 0))
 def test_missing_or_zero_fields_stay_distinct(store, percent):
     assert capture(store, payload(percent, RESET if percent is None else None), T0)["accepted"] == 1
@@ -123,6 +142,16 @@ def test_conflicting_and_out_of_order_counters(store):
     assert value["pace_percent_per_hour"] is None
     assert capture(store, payload(49), nxt + timedelta(minutes=2))["conflicts"] == 1
     assert window_at(store, nxt + timedelta(minutes=2))["used_percent"] is None
+
+
+def test_compact_statusline_names_conflicting_counters(store, monkeypatch, capsys):
+    later = T0 + timedelta(minutes=1)
+    capture(store, payload(51), T0)
+    capture(store, payload(50), later)
+    report = operational_status.statusline_snapshot(quota_path=store[1], now=later)
+    monkeypatch.setattr(quota_cli, "statusline_snapshot", lambda: report)
+    quota_cli.run_statusline(argparse.Namespace(json=False))
+    assert "5h quota conflicting" in capsys.readouterr().out
 
 
 def test_statusline_uses_only_bounded_cached_state(store, tmp_path, monkeypatch):
