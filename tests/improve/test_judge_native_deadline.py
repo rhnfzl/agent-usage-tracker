@@ -97,7 +97,7 @@ def test_cached_votes_and_judgments_need_no_native_call_window(native_budget):
 
 
 def review_setup(monkeypatch):
-    monkeypatch.setattr(judge, "RUBRICS", {"avoidable_recovery": ("Question", "Definitions")})
+    monkeypatch.setattr(judge, "_rubrics", lambda first=judge._rubrics()[:1]: first)
     monkeypatch.setattr(judge, "MlxLetter", lambda _: SimpleNamespace(
         model_rev="synthetic", prepare=lambda: None, close=lambda: None))
 
@@ -455,7 +455,7 @@ def test_admission_rechecks_after_the_load_consumes_time(native_budget):
 
 def test_a_large_case_does_not_starve_smaller_cases_after_it(native_budget, monkeypatch):
     store, audit, clock = native_budget
-    monkeypatch.setattr(judge, "RUBRICS", {"avoidable_recovery": ("Question", "Definitions")})
+    monkeypatch.setattr(judge, "_rubrics", lambda first=judge._rubrics()[:1]: first)
     big = store.put("sessions", {"agent": "codex", "origin": "interactive",
         "coverage": {"complete": True}, "events": [
             {"id": "p", "kind": "prompt", "text": "x" * 25000},
@@ -494,7 +494,7 @@ def test_a_large_case_does_not_starve_smaller_cases_after_it(native_budget, monk
 def test_a_refused_large_case_stays_pending_while_a_smaller_case_is_judged(
         native_budget, monkeypatch):
     store, audit, clock = native_budget
-    monkeypatch.setattr(judge, "RUBRICS", {"avoidable_recovery": ("Question", "Definitions")})
+    monkeypatch.setattr(judge, "_rubrics", lambda first=judge._rubrics()[:1]: first)
     big = store.put("sessions", {"agent": "codex", "origin": "interactive",
         "coverage": {"complete": True}, "events": [
             {"id": "p", "kind": "prompt", "text": "x" * 25000},
@@ -540,7 +540,7 @@ def test_memory_guard_returns_the_free_percentage(monkeypatch):
 
 def test_explainer_load_is_timed_and_rechecked_like_a_vote_model(native_budget, monkeypatch):
     store, audit, clock = native_budget
-    monkeypatch.setattr(judge, "RUBRICS", {"avoidable_recovery": ("Question", "Definitions")})
+    monkeypatch.setattr(judge, "_rubrics", lambda first=judge._rubrics()[:1]: first)
     loads, reviews, votes = [], [], []
 
     def load():
