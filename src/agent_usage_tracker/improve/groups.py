@@ -46,9 +46,30 @@ def _normalise(line: str) -> str:
     return " ".join(line.split())
 
 
+# Keys whose string value is the message of a JSON-shaped result (Codex CommandExecution and
+# MCP errors, T3 dict outputs). Classifying the raw JSON would turn every quoted value into <q>.
+_MESSAGE_KEYS = ("error", "stderr", "message", "output", "aggregated_output", "content", "text")
+
+
+def _message(text: str) -> str:
+    try:
+        value = json.loads(text)
+    except ValueError:
+        return text
+    if not isinstance(value, dict):
+        return text
+    parts: list[str] = []
+    for item in (value, *(v for v in value.values() if isinstance(v, dict))):
+        parts += [item[k] for k in _MESSAGE_KEYS if isinstance(item.get(k), str)]
+    code = value.get("exit_code", value.get("exitCode"))
+    if type(code) is int and code != 0:
+        parts.append(f"exit code {code}")
+    return "\n".join(parts) or text
+
+
 def error_class(text: str) -> str:
     """A table name, or `other:` and 8 hex of the normalised first line; never the text."""
-    lines = [line for line in map(_normalise, text.splitlines()) if line]
+    lines = [line for line in map(_normalise, _message(text).splitlines()) if line]
     if not lines:
         return ""
     # The whole text, not only the first line: Claude Code and Codex put `Exit code 1` first.
@@ -88,7 +109,9 @@ def signals(judgment: dict[str, Any], case: dict[str, Any],
     cited = [by_id[ref] for ref in review.get("evidence_ids", [])
              if ref in by_id and by_id[ref]["kind"] == "result"]
     errors = [e for e in events if e["kind"] == "result" and e.get("status") == "error"]
-    anchor = cited[0] if cited else errors[-1] if errors else None
+    # A cited success (the command that showed the work) is context, not the failure.
+    anchor = next((e for e in cited if e.get("status") == "error"),
+                  cited[0] if cited else errors[-1] if errors else None)
     tool, error, family = _anchor_signals(anchor, events, session.get("events", []))
     return {"rubric": judgment["rubric"], "cause": review.get("cause") or "unreviewed",
             "tool": tool, "error_class": error, "command_family": family}
@@ -133,8 +156,12 @@ def _audit_incidents(store: Store, rows: list[dict[str, Any]]) -> tuple[str | No
         if store.get("audits", row["audit_id"]).get("project"):
             continue
         counts: Counter[Any] = Counter()
+        sessions: dict[str, list[dict[str, Any]]] = {}
         for incident in shortlist(store, row["audit_id"])["incidents"]:
-            events = store.get("sessions", incident["snapshots"][0])["events"]
+            snapshot = incident["snapshots"][0]
+            if snapshot not in sessions:
+                sessions[snapshot] = store.get("sessions", snapshot)["events"]
+            events = sessions[snapshot]
             event = next(e for e in events if e["id"] == incident["event_id"])
             counts[_anchor_signals(event, events)] += 1
         return row["audit_id"], counts
@@ -185,7 +212,7 @@ def refresh(store: Store, *, window_days: int = 14, threshold: int = 3,
             if cwd not in projects:
                 repo = repository(Path(cwd)) if cwd else None
                 projects[cwd] = Path(repo).parent.name if repo else "(none)"
-        except (AutError, KeyError, TypeError, ValueError):
+        except (AutError, KeyError, TypeError, ValueError, OverflowError):
             skipped += 1
             continue
         key = digest(values)

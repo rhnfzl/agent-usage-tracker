@@ -197,3 +197,59 @@ def test_refresh_rejects_bad_arguments(store):
         groups.refresh(store, window_days=0)
     with pytest.raises(AutError):
         groups.refresh(store, threshold=0)
+
+
+def test_t3_shell_items_without_a_tool_name_keep_their_command():
+    assert command_family("git push origin main", "command_execution") == "git push"
+    assert command_family("pytest -q", "command_execution") == "pytest"
+
+
+def test_a_json_shaped_result_is_classified_by_its_message():
+    def codex(output, code=1):
+        return json.dumps({"exit_code": code, "output": output}, sort_keys=True)
+    missing = codex("zsh: command not found: uvx", 127)
+    failed = codex("== 2 failed, 3 passed in 1s ==")
+    assert groups.error_class(missing) == "command_not_found"
+    assert groups.error_class(failed) == "test_failure"
+    assert groups.error_class(codex("make: Error 2", 2)) == "nonzero_exit"
+    assert groups.error_class(json.dumps({"message": "Unknown tool: x"})) == "unknown_tool"
+    assert groups.error_class(json.dumps({"isError": True,
+                                          "content": "permission denied"})) == "permission_denied"
+    nested = json.dumps({"error": {"message": "request timed out"}})
+    assert groups.error_class(nested) == "timeout"
+    assert groups.error_class(json.dumps(["a", "b"])).startswith("other:")
+
+
+def test_a_cited_error_beats_a_cited_success_as_the_anchor(store):
+    for session in ("a", "b"):
+        ok = {"id": f"{session}-ok", "kind": "result", "text": f"On branch {session}",
+              "call_id": f"{session}-g", "tool": "", "status": "success", "timestamp": None}
+        git = {"id": f"{session}-gc", "kind": "call", "text": json.dumps({"command": "git status"}),
+               "call_id": f"{session}-g", "tool": "Bash", "status": "unknown", "timestamp": None}
+        case_id = failing_case(store, session, error="Exit code 1\n2 failed",
+                               command="uv run pytest")
+        case = store.get("cases", case_id)
+        case["events"] = [case["events"][0], git, ok, *case["events"][1:]]
+        case_id = store.put("cases", case)
+        row = {"case_id": case_id, "rubric": "completion_supported", "verdict": "fail",
+               "rubric_version": 1, "votes": ["fail", "fail"],
+               "review": {"verdict": "fail", "cause": "model", "rationale": "r",
+                          "evidence_ids": [f"{session}-ok", f"{session}-r"]}}
+        store.put("judgments", row)
+    [group] = groups.refresh(store, today=TODAY)["groups"]
+    assert group["signals"]["command_family"] == "uv run pytest"
+    assert group["signals"]["error_class"] == "test_failure"
+    assert group["distinct_tasks"] == 2
+
+
+def test_a_far_future_timestamp_is_skipped_not_fatal(store, monkeypatch):
+    judge(store, failing_case(store, "ok"))
+    judge(store, failing_case(store, "bad"))
+    real = groups._work_day
+    def work_day(case):
+        if case["events"][0]["id"].startswith("bad"):
+            raise OverflowError("date value out of range")
+        return real(case)
+    monkeypatch.setattr(groups, "_work_day", work_day)
+    report = groups.refresh(store, today=TODAY)
+    assert report["skipped"] == 1 and report["groups"][0]["distinct_tasks"] == 1

@@ -264,8 +264,8 @@ The group key is a digest of five signals:
 |---|---|
 | `rubric` | the judgment |
 | `cause` | the evidence review's cause, else `unreviewed` |
-| `tool` | the call answered by the anchor result: the first result the review cites, else the case's last error result. MCP tools show as `mcp:server` |
-| `error_class` | the anchor's text, lower-cased, with paths, long hex runs, numbers and quoted strings removed, matched against a fixed table (`command_not_found`, `no_such_file`, `missing_module`, `permission_denied`, `timeout`, `unknown_tool`, `user_declined`, `shell_glob`, `push_rejected`, `conflict`, `syntax_error`, `test_failure`, `nonzero_exit`). The whole text is matched, because Claude Code and Codex print `Exit code 1` first. No match gives `other:` and 8 hex of a digest of the first line |
+| `tool` | the call answered by the anchor result: the first error result the review cites, else the first result it cites, else the case's last error result. MCP tools show as `mcp:server` |
+| `error_class` | the anchor's text, lower-cased, with paths, long hex runs, numbers and quoted strings removed, matched against a fixed table. A JSON-shaped result (Codex command and MCP results, T3 dict outputs) is matched on its message fields (`error`, `stderr`, `message`, `output`, ...) and a non-zero `exit_code`, not on the raw JSON (`command_not_found`, `no_such_file`, `missing_module`, `permission_denied`, `timeout`, `unknown_tool`, `user_declined`, `shell_glob`, `push_rejected`, `conflict`, `syntax_error`, `test_failure`, `nonzero_exit`). The whole text is matched, because Claude Code and Codex print `Exit code 1` first. No match gives `other:` and 8 hex of a digest of the first line |
 | `command_family` | the anchor call's command, as for rubric `requires` (for example `git push`, `python -m pytest`, `pytest`) |
 
 The project is left out of the key, so the same failure in three repositories is one group;
@@ -280,7 +280,7 @@ report as JSON. A record holds ids, signal names and counts only, never evidence
 command name that is long or has unusual characters becomes `other`. Records that cannot be
 read are counted as `skipped`.
 
-`aut improve run` refreshes the groups after its worker exits, outside the judge's budget and
+`aut improve run` and `aut improve diagnose` refresh the groups after the worker exits, outside the judge's budget and
 on every outcome. A grouping failure journals `groups_error` with the error type and never
 fails the cycle or the inbox.
 

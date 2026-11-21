@@ -251,7 +251,9 @@ def _shell_text(text: str, tool: str) -> str | None:
             return command[2] if len(command) > 2 and command[1] in {"-c", "-lc"} \
                 else shlex.join(command)
         return command if isinstance(command, str) else None
-    return text if tool in {"Bash", "bash", "exec_command", "shell", "local_shell"} else None
+    # T3 names a shell item `command_execution` when it carries no toolName.
+    return text if tool in {"Bash", "bash", "exec_command", "shell", "local_shell",
+                            "command_execution"} else None
 
 
 # Flags whose next word is their value, so that word is never read as the subcommand.
