@@ -254,20 +254,46 @@ def _shell_text(text: str, tool: str) -> str | None:
     return text if tool in {"Bash", "bash", "exec_command", "shell", "local_shell"} else None
 
 
+# Flags whose next word is their value, so that word is never read as the subcommand.
+_VALUE_FLAGS = {
+    "env": {"-u", "--unset", "-C", "--chdir"},
+    "git": {"-C", "-c", "--git-dir", "--work-tree", "--namespace"},
+    "gh": {"-R", "--repo"},
+    "npm": {"-C", "--prefix", "-w", "--workspace", "--userconfig", "--cache", "--registry",
+            "--loglevel"},
+    "pnpm": {"-C", "--dir", "-F", "--filter", "--loglevel", "--reporter"},
+    "uv": {"--directory", "--project", "--with", "--with-editable", "--with-requirements", "-p",
+           "--python", "--package", "--extra", "--group", "--index", "--index-url",
+           "--extra-index-url", "--env-file", "--cache-dir", "--config-file", "--color"},
+    "poetry": {"-C", "--directory", "-P", "--project"},
+    "cargo": {"-C", "-Z", "--config", "--color"},
+    "go": {"-C"},
+}
+
+
+def _skip_flags(words: list[str], tool: str) -> list[str]:
+    values = _VALUE_FLAGS.get(tool, set())
+    while words and words[0].startswith("-"):
+        words = words[2:] if words[0] in values else words[1:]
+    return words
+
+
 def _family(words: list[str]) -> str:
-    while words and (re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", words[0])
-                     or words[0] in {"env", "npx", "timeout"}):
-        if words[0] == "env":
-            words = words[1:]
-            while words and words[0].startswith("-"):
-                words = words[2:] if words[0] in {"-u", "--unset", "-C", "--chdir"} else words[1:]
-        elif words[0] == "timeout":     # timeout [options] DURATION COMMAND
-            words = words[1:]
-            while words and words[0].startswith("-"):
-                words = words[1:]
-            words = words[1:]
+    while words:
+        head = words[0]
+        if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", head) or head in {"npx", "rtk"}:
+            # A Claude Code hook rewrites `git status` to `rtk git status`; `rtk proxy`, `err`,
+            # `test` and `summary` run the command that follows them.
+            words = words[2:] if head == "rtk" and words[1:2] and words[1] in {
+                "proxy", "err", "test", "summary"} else words[1:]
+        elif head in {"env", "time"}:
+            words = _skip_flags(words[1:], head)
+        elif head == "command" and words[1:2] not in (["-v"], ["-V"]):
+            words = _skip_flags(words[1:], head)
+        elif head == "timeout":     # timeout [options] DURATION COMMAND
+            words = _skip_flags(words[1:], head)[1:]
         else:
-            words = words[1:]
+            break
     if not words:
         return ""
     first = re.sub(r"\.exe$", "", words[0].rsplit("/", 1)[-1], flags=re.IGNORECASE)
@@ -284,17 +310,13 @@ def _family(words: list[str]) -> str:
         return first
     if first not in {"git", "gh", "npm", "pnpm", "uv", "poetry", "cargo", "go"}:
         return first
-    i = 0
-    while i < len(rest) and rest[i].startswith("-"):
-        i += 2 if first == "git" and rest[i] in {"-C", "-c"} else 1
-    if i >= len(rest):
+    rest = _skip_flags(rest, first)
+    if not rest:
         return first
-    if first in {"uv", "poetry"} and rest[i] == "run":    # uv run X is X's family under uv run
-        after = rest[i + 1:]
-        while after and after[0].startswith("-"):
-            after = after[1:]
+    if first in {"uv", "poetry"} and rest[0] == "run":    # uv run X is X's family under uv run
+        after = _skip_flags(rest[1:], first)
         return f"{first} run {_family(after)}" if after else f"{first} run"
-    return f"{first} {rest[i]}"
+    return f"{first} {rest[0]}"
 
 
 def _segments(command: str) -> list[list[str]]:
@@ -318,7 +340,8 @@ def _segments(command: str) -> list[list[str]]:
 
 def command_family(call_text: str, tool: str) -> str:
     """A short stable name for what a call ran, such as `git push` or `python -m pytest`.
-    Leading `cd ...`, `source ...`, `VAR=...`, `env`, `npx` and `timeout` are skipped, and
+    Leading `cd ...`, `source ...`, `VAR=...`, `env`, `npx`, `timeout`, `time`, `command` and
+    `rtk` are skipped, as are the values of known value-taking flags, and
     `bash -c '...'` is read inside. Non-shell tools give the tool name, with MCP tools
     shortened to `mcp:server`."""
     command = _shell_text(call_text, tool)

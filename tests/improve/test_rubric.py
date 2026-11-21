@@ -286,6 +286,27 @@ def test_applies_checks_triggers_finals_test_commands_and_outputs():
     ("cd repo && python -m pytest -q 2>&1 | tail", "Bash", "python -m pytest"),
     ('echo "a;b"; git status', "Bash", "echo"),
     ('pytest "unbalanced', "Bash", "pytest"),
+    # a value-taking flag's value is not the subcommand
+    ("uv run --with pytest python x.py", "Bash", "uv run python"),
+    ("uv --directory test run pytest", "Bash", "uv run pytest"),
+    ("npm --prefix test run build", "Bash", "npm run"),
+    ("pnpm --filter test build", "Bash", "pnpm build"),
+    ("pnpm -C test build", "Bash", "pnpm build"),
+    ("go -C test build", "Bash", "go build"),
+    ("gh -R owner/test pr view", "Bash", "gh pr"),
+    ("cargo -C test build", "Bash", "cargo build"),
+    ("poetry -C test run pytest", "Bash", "poetry run pytest"),
+    # wrappers found in stored commands: an rtk hook rewrite, env, time, command
+    ("rtk git status", "Bash", "git status"),
+    ("rtk proxy python -m pytest", "Bash", "python -m pytest"),
+    ("rtk test cargo test", "Bash", "cargo test"),
+    ("rtk err npm run build", "Bash", "npm run"),
+    ("cd x && rtk pytest -q", "Bash", "pytest"),
+    ("env FOO=1 rtk go test ./...", "Bash", "go test"),
+    ("time pytest -q", "Bash", "pytest"),
+    ("time -p uv run pytest", "Bash", "uv run pytest"),
+    ("command git push", "Bash", "git push"),
+    ("command -v git", "Bash", "command"),
 ])
 def test_command_family(call_text, tool, family):
     assert rubric.command_family(call_text, tool) == family
