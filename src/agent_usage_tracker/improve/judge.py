@@ -376,6 +376,10 @@ def diagnose(store: Store, audit_id: str, *, models: tuple[str, ...] = (
                       "remaining_s": round(remaining, 3), "next_chars": size}
         return False
 
+    def spent() -> bool:
+        """True when no later call can start either: out of calls or out of time."""
+        return calls >= max_calls or deadline - time.monotonic() <= 0
+
     def ensure_loaded(kind: str, name: str, size: int) -> bool:
         """Load a model before its first timed call; True when this call loaded it.
         A deadline can only interrupt once native work returns, so the start is saved first
@@ -421,6 +425,7 @@ def diagnose(store: Store, audit_id: str, *, models: tuple[str, ...] = (
     active = {digest({"evaluator": evaluator_id, "case": row["case_id"], "rubric": rubric})
               for row in rows for rubric in RUBRICS}
     reason = "complete"
+    skipped = False
     evidence = {"cases": len(rows), "eligible": sum(_eligible(row) for row in rows)}
 
     def checkpoint() -> dict[str, Any]:
@@ -467,12 +472,13 @@ def diagnose(store: Store, audit_id: str, *, models: tuple[str, ...] = (
                         continue
                     votes = []
                     refs = []
+                    refused = False
                     for name in models:
                         vote_key = digest({"decision": key, "model": policy["model_identity"][name]})
                         if vote_key not in cache:
                             size = size_of(case)
                             if not can_call("vote", name, size):
-                                reason = "budget"
+                                refused = True
                                 break
                             if not model_locked:
                                 resources.enter_context(_locked(config_path().parent / "replay-model",
@@ -480,10 +486,10 @@ def diagnose(store: Store, audit_id: str, *, models: tuple[str, ...] = (
                                 free_pct = memory_guard()
                                 model_locked = True
                             if not can_call("vote", name, size):
-                                reason = "budget"
+                                refused = True
                                 break
                             if ensure_loaded("vote", name, size) and not can_call("vote", name, size):
-                                reason = "budget"
+                                refused = True
                                 break
                             backend = backends[name]
                             unfinished_call = {"kind": "decision", "phase": "inference",
@@ -513,8 +519,12 @@ def diagnose(store: Store, audit_id: str, *, models: tuple[str, ...] = (
                         vote = store.get("votes", cache[vote_key])
                         votes.append(vote["distribution"])
                         refs.append(cache[vote_key])
-                    if reason == "budget":
+                    if refused and spent():
+                        reason = "budget"
                         break
+                    if refused:     # too large for the time left: leave it pending, try later cases
+                        skipped = True
+                        continue
                     result = aggregate(votes)
                     review = None
                     review_errors = []
@@ -538,22 +548,20 @@ def diagnose(store: Store, audit_id: str, *, models: tuple[str, ...] = (
                                 break
                         if review is None and len(saved_attempts) < 2:
                             size = size_of(case)
-                            if not can_call("review", explain_model, size):
-                                reason = "budget"
-                                break
-                            if not model_locked:
+                            refused = not can_call("review", explain_model, size)
+                            if not refused and not model_locked:
                                 resources.enter_context(_locked(config_path().parent / "replay-model",
                                                                 blocking=False))
                                 free_pct = memory_guard()
                                 model_locked = True
                             feedback = review_errors[-1].split("\n", 1)[0] if review_errors else ""
                             for attempt in range(len(saved_attempts), 2):
-                                if not can_call("review", explain_model, size):
-                                    reason = "budget"
+                                if refused or not can_call("review", explain_model, size):
+                                    refused = True
                                     break
                                 if ensure_loaded("review", explain_model, size) and not can_call(
                                         "review", explain_model, size):
-                                    reason = "budget"
+                                    refused = True
                                     break
                                 unfinished_call = {"kind": "review", "phase": "inference",
                                     "model": explain_model,
@@ -583,8 +591,12 @@ def diagnose(store: Store, audit_id: str, *, models: tuple[str, ...] = (
                                 checkpoint()
                                 if review is not None:
                                     break
-                        if reason == "budget":
+                        if refused and spent():
+                            reason = "budget"
                             break
+                        if refused:
+                            skipped = True
+                            continue
                         if review is None or review["verdict"] != result["verdict"]:
                             result["verdict"] = "unknown"
                     if rubric == "completion_supported" and (not coverage.get("complete")
@@ -610,6 +622,8 @@ def diagnose(store: Store, audit_id: str, *, models: tuple[str, ...] = (
             close = getattr(backend, "close", None)
             if close:
                 close()
+    if skipped and reason == "complete":
+        reason = "budget"
     report = checkpoint()
     store.append("diagnosis", **report)
     return report

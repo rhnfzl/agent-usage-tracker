@@ -491,6 +491,44 @@ def test_a_large_case_does_not_starve_smaller_cases_after_it(native_budget, monk
     assert result["complete"] and result["calls"] == 2
 
 
+def test_a_refused_large_case_stays_pending_while_a_smaller_case_is_judged(
+        native_budget, monkeypatch):
+    store, audit, clock = native_budget
+    monkeypatch.setattr(judge, "RUBRICS", {"avoidable_recovery": ("Question", "Definitions")})
+    big = store.put("sessions", {"agent": "codex", "origin": "interactive",
+        "coverage": {"complete": True}, "events": [
+            {"id": "p", "kind": "prompt", "text": "x" * 25000},
+            {"id": "a", "kind": "reply", "text": "Checked"}]})
+    small = store.put("sessions", {"agent": "codex", "origin": "interactive",
+        "coverage": {"complete": True}, "events": [
+            {"id": "p", "kind": "prompt", "text": "y" * 2500},
+            {"id": "a", "kind": "reply", "text": "Checked"}]})
+    audit = store.put("audits", {"session_ids": [big, small]})
+    # Seeded history: the big case needs about 250 s, the small one about 30 s.
+    store.append("model_call", call="vote", model="local", model_rev="synthetic",
+                 input_chars=2000, infer_s=10.0)
+    calls = []
+
+    class Backend:
+        model_id = "local"
+        model_rev = "synthetic"
+
+        def distribution(self, request):
+            calls.append(request.unit_id)
+            clock[0] += 1
+            return {"pass": .99, "fail": .005, "unknown": .005}
+
+    first = judge.diagnose(store, audit, models=("local",), budget_s=180,
+                           backend_for=lambda _: Backend())
+    assert first["calls"] == 1 and first["finished"] == 1
+    assert first["reason"] == "budget" and not first["complete"]
+    assert first["stopped_by"]["limit"] == "time" and first["stopped_by"]["next_chars"] > 25000
+    clock[0] = 0
+    later = judge.diagnose(store, audit, models=("local",), budget_s=600,
+                           backend_for=lambda _: Backend())
+    assert later["complete"] and later["calls"] == 1 and len(calls) == 2
+
+
 def test_memory_guard_returns_the_free_percentage(monkeypatch):
     from agent_usage_tracker.label import local
 

@@ -100,6 +100,8 @@ New model calls need enough remaining time for their expected duration.
 Each model and operation starts with an allowance of half the original diagnosis budget.
 Later calls reserve twice the longest observed duration for that model and operation during this run.
 AUT checks admission again after acquiring shared resources. A deferred call does not spend a call count.
+A case too large for the time left stays pending, and AUT still assesses later cases that fit.
+The run stops when the time or the call count is spent.
 Cached votes, judgments, and reviews remain usable without a new inference allowance.
 Rejected explanatory reviews still contribute their measured duration before a repair attempt.
 This estimate does not guarantee preemption of an unusually slow native call.
