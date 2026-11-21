@@ -7,6 +7,7 @@ from __future__ import annotations
 import contextlib
 import http.client
 import io
+import json
 import re
 import tempfile
 from pathlib import Path
@@ -204,3 +205,22 @@ def test_the_shipped_schema_takes_its_time_zone_from_the_install():
         code = "\n".join(line.split("--")[0] for line in f.read_text(encoding="utf-8").splitlines())
         assert not re.search(r"AT TIME ZONE '(?!@AUT_TZ@')", code), f.name
     assert "@AUT_TZ@" in (SINK_STACK / "apply.sh").read_text(encoding="utf-8")
+
+
+def test_improvement_dashboard_separates_samples_and_labels_uncertainty():
+    dashboard = json.loads((SINK_STACK / "grafana/dashboards/agents-effort.json").read_text())
+    panels = dashboard["panels"][-3:]
+    assert panels[0]["title"] == "Improvement loop (advisory)"
+    rates = panels[1]
+    assert len(rates["targets"]) == 3
+    for target, trigger in zip(rates["targets"], ("control", "error_result", "merge")):
+        sql = target["rawSql"]
+        assert f"trigger = '{trigger}'" in sql and "harness" in sql
+        assert "bool_and(qualified)" in sql and "(unqualified)" in sql
+        assert "NULLIF(sum(passed + failed), 0)" in sql
+    assert "not a prevalence estimate" in rates["description"]
+    assert "not that it caused a change" in rates["description"]
+    for panel in panels[1:]:
+        for target in panel["targets"]:
+            assert not re.search(r"\b(machine|case_id|session_id|rationale|commit)\b", target["rawSql"])
+    assert "improve_adoption" in dashboard["annotations"]["list"][-1]["target"]["rawSql"]

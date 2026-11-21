@@ -935,3 +935,22 @@ People can change coding tools without assuming that a successful collector capt
   Doctor does not fetch a website or manufacture a publisher receipt.
 
 The [coverage guide](docs/harness-coverage.md) defines the registry, limits and supported fields.
+
+### Advisory improvement scores
+
+`aut publish-improve` sends sampled verdict counts and human adoption metadata to the private sink.
+It sends no evidence text, paths, case identifiers, session identifiers, rationale or commit SHAs.
+
+`agents.improve_score_daily` is append-only, keyed by
+`(day, rubric_id, rubric_version, harness, trigger, pushed_at)`.
+Counts are `passed`, `failed`, `unknown` (nonnegative integers), with a boolean `qualified`.
+`day` is the work date in the configured ledger time zone.
+Triggers are `control`, `error_result`, or `merge`; versions are nonnegative integers.
+`agents.improve_score_latest` exposes the latest push for each key without `pushed_at`.
+A zero row clears a key removed inside the publisher's recomputed date window.
+
+`agents.improve_adoption` holds `adoption_id` (first 16 hex of the private record key),
+`adopted_at` (local noon), operator-written `title` (1..120 characters),
+`kind` (`instruction`, `skill`, `config`, `code`), `rubric_ids` (text array), and optional integer `pr`.
+Adoptions use `ON CONFLICT (adoption_id) DO NOTHING`. They do not claim a benefit.
+The writer can select and insert both tables. Grafana reads only the latest score view and adoption table.

@@ -76,6 +76,25 @@ def test_failed_daily_job_retries_until_success(scheduled, command, marker):
                                                          else "label run") == 2
 
 
+def test_improve_publish_is_opt_in_daily_and_retries_after_failure(scheduled):
+    home, conf, env = scheduled
+    assert run_wrapper(env).returncode == 0
+    assert "publish-improve" not in (home / "calls").read_text()
+    with (conf / "scan.env").open("a") as settings:
+        settings.write("AUT_IMPROVE_PUBLISH=1\n")
+    failure = home / "fail-publish-improve"
+    failure.touch()
+    assert run_wrapper(env).returncode == 0
+    assert not (conf / "publish-improve-day").exists()
+    failure.unlink()
+    assert run_wrapper(env).returncode == 0
+    assert (conf / "publish-improve-day").exists()
+    assert run_wrapper(env).returncode == 0
+    calls = (home / "calls").read_text().splitlines()
+    assert calls.count("publish-improve") == 2
+    assert calls.index("outcomes") < calls.index("publish-improve")
+
+
 @pytest.mark.parametrize("startup_delay", [0, 2.1])
 def test_overlapping_wrappers_skip_without_repeating_daily_work(scheduled, startup_delay):
     home, conf, env = scheduled
