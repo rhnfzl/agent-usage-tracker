@@ -56,7 +56,9 @@ Pi uses its recorded stop reason, omits copied parent entries, and keeps branche
 order ineligible. Cursor CLI reads the latest root and its linked blobs in one read-only transaction.
 It excludes registered automated chats and subagent chats. A later request can close an earlier
 request with a final observed reply. The trailing request and roots with missing evidence remain
-ineligible. Cursor CLI groups events by the request timestamp and does not infer missing workspace paths.
+ineligible. Compacted Cursor history remains ineligible. An attachment omission marks its attempt
+incomplete and keeps the attachment bytes out of the saved evidence. Cursor CLI groups events by
+the request timestamp and does not infer missing workspace paths.
 Captured events are redacted and limited to 6,000 characters.
 Coverage exposes incomplete lines, clipped events, missing results, and copied history.
 Codex stores some replies both as native messages with structured memory citations and as

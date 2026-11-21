@@ -9,20 +9,24 @@ from agent_usage_tracker.improve.store import Store, audit
 STAMP = "2026-04-12T10:00:00Z"
 
 
-def _pi(home: Path, *, branched: bool = False) -> None:
+def _pi(home: Path, *, branched: bool = False, retry: bool = False) -> None:
     path = home / ".pi" / "agent" / "sessions" / "project" / "trace.jsonl"
     path.parent.mkdir(parents=True)
     records = [{"type": "session", "id": "pi-run", "cwd": str(home), "timestamp": STAMP}]
-    for index, message in enumerate([
+    messages = [
         {"role": "user", "content": "Check the build"},
         {"role": "assistant", "stopReason": "toolUse", "content": [
             {"type": "thinking", "thinking": "private reasoning"},
-            {"type": "toolCall", "id": "check", "name": "bash", "arguments": {"command": "false"}},
+            {"type": "toolCall", "id": "check", "name": "bash",
+             "arguments": {"command": "false", "token": "dummy-private-field"}},
         ]},
         {"role": "toolResult", "toolCallId": "check", "toolName": "bash", "isError": True,
          "content": [{"type": "text", "text": "Process exited with code 1"}]},
         {"role": "assistant", "stopReason": "stop", "content": [{"type": "text", "text": "Failed"}]},
-    ]):
+    ]
+    if retry:
+        messages.insert(3, {"role": "assistant", "stopReason": "error", "content": []})
+    for index, message in enumerate(messages):
         parent = str(index - 1) if index else None
         records.append({"type": "message", "id": str(index),
                         "parentId": "0" if branched and index == 3 else parent,
@@ -30,7 +34,7 @@ def _pi(home: Path, *, branched: bool = False) -> None:
     path.write_text("".join(json.dumps(row) + "\n" for row in records), encoding="utf-8")
 
 
-def _cursor(home: Path) -> Path:
+def _cursor(home: Path, *, compacted: bool = False, image: bool = False) -> Path:
     path = home / ".cursor" / "chats" / "project" / "cursor-run" / "store.db"
     path.parent.mkdir(parents=True)
     with sqlite3.connect(path) as db:
@@ -51,6 +55,13 @@ def _cursor(home: Path) -> Path:
             {"role": "assistant", "content": [{"type": "text", "text": "Failed"}]},
             {"role": "user", "content": "Next request", "providerOptions": {"cursor": {"requestId": "b"}}},
         ]
+        if image:
+            rows[1]["content"] = [
+                {"type": "text", "text": rows[1]["content"]},
+                {"type": "image", "image": "unretained-image-bytes"}]
+        if compacted:
+            rows.insert(1, {"role": "user", "content": "prior private context",
+                            "providerOptions": {"cursor": {"isSummary": True}}})
         ids = []
         for row in rows:
             raw = json.dumps(row).encode()
@@ -83,6 +94,7 @@ def test_native_sources_produce_private_grounded_cases(tmp_path):
             "prompt", "call", "result", "reply", "boundary"]
     assert "hidden system context" not in str(found)
     assert "private reasoning" not in str(found)
+    assert "dummy-private-field" not in str(found)
     assert path.read_bytes() == before
 
 
@@ -117,3 +129,51 @@ def test_cursor_keeps_an_incomplete_root_ineligible(tmp_path):
     found = cases(store, report["audit_id"])
     assert found
     assert all(not row["coverage"]["complete"] for row in found)
+
+
+def test_corrupt_cursor_root_leaves_other_sources_readable(tmp_path):
+    home = tmp_path / "home"
+    _pi(home)
+    path = _cursor(home)
+    with sqlite3.connect(path) as db:
+        (raw,) = db.execute("SELECT value FROM meta WHERE key='0'").fetchone()
+        root = json.loads(bytes.fromhex(raw))["latestRootBlobId"]
+        db.execute("UPDATE blobs SET data=? WHERE id=?", (b"\x0a", root))
+    db.close()
+    store = Store(tmp_path / "private")
+    report = audit(store, home, since_epoch=0, idle_s=0)
+    assert report["sessions"] == 1
+    assert report["unreadable_sources"] == 1
+    assert {row["agent"] for row in cases(store, report["audit_id"])} == {"pi"}
+
+
+def test_cursor_compacted_prefix_cannot_count_as_a_complete_attempt(tmp_path):
+    home = tmp_path / "home"
+    _cursor(home, compacted=True)
+    store = Store(tmp_path / "private")
+    report = audit(store, home, since_epoch=0, idle_s=0)
+    [failure] = [row for row in cases(store, report["audit_id"]) if row["trigger"] == "error_result"]
+    assert not failure["coverage"]["complete"]
+    assert any(e["kind"] == "compaction" for e in failure["events"])
+    assert "prior private context" not in str(failure)
+
+
+def test_cursor_keeps_an_attachment_attempt_ineligible_without_retaining_its_bytes(tmp_path):
+    home = tmp_path / "home"
+    _cursor(home, image=True)
+    store = Store(tmp_path / "private")
+    report = audit(store, home, since_epoch=0, idle_s=0)
+    [failure] = [row for row in cases(store, report["audit_id"]) if row["trigger"] == "error_result"]
+    assert not failure["coverage"]["complete"]
+    assert "[Attachment omitted]" in failure["events"][0]["text"]
+    assert "unretained-image-bytes" not in str(failure)
+
+
+def test_pi_keeps_a_retried_model_error_in_the_same_attempt(tmp_path):
+    home = tmp_path / "home"
+    _pi(home, retry=True)
+    store = Store(tmp_path / "private")
+    report = audit(store, home, since_epoch=0, idle_s=0)
+    [failure] = [row for row in cases(store, report["audit_id"]) if row["trigger"] == "error_result"]
+    assert failure["coverage"]["complete"]
+    assert failure["events"][-2]["text"] == "Failed"
