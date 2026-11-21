@@ -89,7 +89,11 @@ def safe_int(value: object, default: int = 0) -> int:
 def count_field(record: dict[str, Any], key: str) -> int:
     """A token count from a log record; absent or null is 0. Raises on a malformed one, which the
     caller counts as a malformed record."""
-    return int(record.get(key) or 0)
+    raw = record.get(key) or 0
+    count = int(raw)
+    if count < 0 or (isinstance(raw, float) and raw < 0):
+        raise ValueError("negative token count")
+    return count
 
 
 def noop_advance() -> None:

@@ -398,3 +398,21 @@ def test_warn_skipped_names_the_failure_type_of_each_activity_skip(capsys) -> No
     warn_skipped("x", Counter({"activity:KeyError": 2, "activity:TypeError": 1}))
     err = capsys.readouterr().err
     assert "3 activity record(s)" in err and "KeyError x2, TypeError x1" in err
+
+
+@pytest.mark.parametrize("negative", [-5, "-5", -0.5])
+def test_claude_negative_count_is_malformed_and_replay_keeps_the_valid_id(tmp_path, capsys, negative):
+    from agent_usage_tracker.event import make_event_id
+
+    def turn(ident, count):
+        return {"type": "assistant", "uuid": ident, "timestamp": "2026-07-18T10:00:00Z",
+                "message": {"model": "m", "usage": {"input_tokens": count, "output_tokens": 10}}}
+
+    _write_jsonl(tmp_path / ".claude/projects/p/s.jsonl", [turn("bad", negative), turn("good", "5")])
+    cfg = _cfg(tmp_path)
+    events = _drain(claude_code.collect, cfg)
+    assert [(row.event_id, row.total_tokens) for row in events] == [
+        (make_event_id("claude_code", "good"), 15)]
+    assert "1 malformed record(s) skipped" in capsys.readouterr().err
+    assert [row.event_id for row in _drain(claude_code.collect, cfg)] == [
+        make_event_id("claude_code", "good")]

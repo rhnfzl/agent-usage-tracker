@@ -7,7 +7,7 @@ from decimal import Decimal
 from typing import TypedDict
 
 from .event import UsageEvent
-from .pricing import COMPONENT_RATES, normalize_model_key
+from .pricing import COMPONENT_RATES, price_key
 
 
 @dataclass(frozen=True)
@@ -19,6 +19,10 @@ class PricedUsage:
 
 
 def price_counts(counts: list[int], total: int, rate: dict[str, float]) -> PricedUsage:
+    if total < 0 or any(n < 0 for n in counts):
+        # A bad count makes the row unpriced. Keep the positive evidence in coverage.
+        positive = sum(n for n in counts if n > 0)
+        return PricedUsage(None, max(positive, total), 0, max(0, total - positive))
     # Reasoning is already included in output. A missing rate only matters for a used component.
     known = [(n, Decimal(str(rate[key]))) for n, (_, key) in zip(counts, COMPONENT_RATES)
              if n > 0 and key in rate]
@@ -32,7 +36,7 @@ def price_counts(counts: list[int], total: int, rate: dict[str, float]) -> Price
 
 
 def price_usage(row: UsageEvent, rates: dict[str, dict[str, float]]) -> PricedUsage:
-    key = normalize_model_key(row.model) if row.model else ""
+    key = price_key(row.model, rates)
     counts = [getattr(row, field) for field, _ in COMPONENT_RATES]
     return price_counts(counts, row.total_tokens, rates.get(key, {}))
 
@@ -59,7 +63,7 @@ class PriceTally:
         self.denominator += row.denominator
         self.priced += row.priced
         self.unattributed += row.unattributed
-        self.unpriced_events += row.priced < row.denominator
+        self.unpriced_events += row.known_cost is None or row.priced < row.denominator
         if row.known_cost is not None:
             self.known_cost = (self.known_cost or Decimal(0)) + row.known_cost
 
@@ -91,7 +95,7 @@ def compare_prices(models: tuple[str, str], rates: dict[str, dict[str, float]],
         "model_cost_usd": None,
         "reason": None,
     }
-    keys = tuple(normalize_model_key(model) for model in models)
+    keys = tuple(price_key(model, rates) for model in models)
     if keys[0] == keys[1] or any(key not in rates for key in keys):
         result["reason"] = "Two distinct models with local rates are required."
         return result

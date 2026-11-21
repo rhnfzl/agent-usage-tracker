@@ -3,6 +3,7 @@ models.dev per-1M scaling, and the write/load roundtrip."""
 
 from __future__ import annotations
 
+import json
 import os
 import stat
 import tempfile
@@ -228,3 +229,36 @@ def test_zero_component_price_is_a_measured_zero_and_reasoning_is_not_added():
     quote = price_usage(row, {"free": {"output_cost": 0}})
     assert quote.priced == quote.denominator == 3
     assert quote.known_cost == Decimal(0)
+
+
+def test_exact_legacy_rate_overrides_canonical_rate_without_filling_missing_fields(tmp_path):
+    from decimal import Decimal
+
+    from agent_usage_tracker.usage_price import price_usage
+    from price_fixture import LEGACY_RATES, legacy_price_rows
+
+    recording = legacy_price_rows()[0]
+    quote = price_usage(recording, LEGACY_RATES)
+    assert (quote.denominator, quote.priced, quote.known_cost) == (5, 4, Decimal("2"))
+    fallback = price_usage(recording, {"model-q": LEGACY_RATES["model-q"]})
+    assert (fallback.denominator, fallback.priced, fallback.known_cost) == (5, 5, Decimal("0.09"))
+
+    path = tmp_path / "rates.json"
+    path.write_text(json.dumps({**LEGACY_RATES, "vendor/model-q": {}}))
+    unpriced = price_usage(recording, pricing.load_prices(path))
+    assert (unpriced.priced, unpriced.known_cost) == (0, None)
+
+
+def test_negative_legacy_row_does_not_produce_a_price_or_negative_coverage():
+    from agent_usage_tracker.usage_price import PriceTally, price_usage
+    from price_fixture import LEGACY_RATES, legacy_price_rows
+
+    for row, denominator in zip(legacy_price_rows()[1:], (10, 0)):
+        priced = price_usage(row, LEGACY_RATES)
+        assert (priced.denominator, priced.priced, priced.known_cost) == (denominator, 0, None)
+        tally = PriceTally()
+        tally.add(priced)
+        result = tally.result()
+        assert result["unpriced_events"] == 1
+        assert result["unpriced_tokens"] == denominator
+        assert result["estimated_api_cost_usd"] is None

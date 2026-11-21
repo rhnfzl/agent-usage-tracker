@@ -1192,7 +1192,7 @@
           },
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT u.model AS \"model\", count(*) AS \"Events\",\n       sum(coverage_tokens) AS \"Coverage tokens\",\n       sum(priced_tokens) AS \"Priced tokens\",\n       sum(unpriced_tokens) AS \"Unpriced tokens\",\n       sum(known_api_cost_usd) AS \"Known USD\",\n       CASE WHEN sum(unpriced_tokens) = 0 THEN sum(estimated_api_cost_usd) END AS \"Estimated total USD\",\n       sum(logged_cost_usd) AS \"Logged USD\",\n       extract(epoch FROM now() - min(rate_synced_at)) AS \"Oldest rate age\"\nFROM agents.usage_price u\nWHERE $__timeFilter(ts)\n  AND u.machine = ANY(ARRAY[${machine:sqlstring}]::text[])\n  AND u.agent = ANY(ARRAY[${agent:sqlstring}]::text[])\n  AND coalesce(u.model, 'unknown') = ANY(ARRAY[${model:sqlstring}]::text[])\nGROUP BY 1\nORDER BY \"Coverage tokens\" DESC"
+          "rawSql": "SELECT u.model AS \"model\", count(*) AS \"Events\",\n       sum(coverage_tokens) AS \"Coverage tokens\",\n       sum(priced_tokens) AS \"Priced tokens\",\n       sum(unpriced_tokens) AS \"Unpriced tokens\",\n       sum(known_api_cost_usd) AS \"Known USD\",\n       CASE WHEN count(estimated_api_cost_usd) = count(*) THEN sum(estimated_api_cost_usd) END AS \"Estimated total USD\",\n       sum(logged_cost_usd) AS \"Known logged USD\",\n       count(*) FILTER (WHERE logged_cost_usd IS NULL) AS \"Events missing logged cost\",\n       extract(epoch FROM now() - min(rate_synced_at)) AS \"Oldest rate age\"\nFROM agents.usage_price u\nWHERE $__timeFilter(ts)\n  AND u.machine = ANY(ARRAY[${machine:sqlstring}]::text[])\n  AND u.agent = ANY(ARRAY[${agent:sqlstring}]::text[])\n  AND coalesce(u.model, 'unknown') = ANY(ARRAY[${model:sqlstring}]::text[])\nGROUP BY 1\nORDER BY \"Coverage tokens\" DESC"
         }
       ],
       "fieldConfig": {
@@ -1225,7 +1225,7 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "Logged USD"
+              "options": "Known logged USD"
             },
             "properties": [
               {
@@ -1251,7 +1251,7 @@
       "options": {
         "showHeader": true
       },
-      "description": "Measured tokens with and without a rate, the known API-equivalent cost, and logged cost. Estimated total requires rates for every token. Rate age is the oldest matched rate."
+      "description": "Measured tokens with and without a rate, the known API-equivalent cost, and the subtotal of logged costs present in the source records. Estimated total requires fully priced usage. Rate age is the oldest matched rate."
     },
     {
       "id": 29,
@@ -1276,7 +1276,7 @@
           },
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT u.agent AS \"agent\", count(*) AS \"Events\",\n       sum(coverage_tokens) AS \"Coverage tokens\",\n       sum(priced_tokens) AS \"Priced tokens\",\n       sum(unpriced_tokens) AS \"Unpriced tokens\",\n       sum(known_api_cost_usd) AS \"Known USD\",\n       CASE WHEN sum(unpriced_tokens) = 0 THEN sum(estimated_api_cost_usd) END AS \"Estimated total USD\",\n       sum(logged_cost_usd) AS \"Logged USD\",\n       extract(epoch FROM now() - min(rate_synced_at)) AS \"Oldest rate age\"\nFROM agents.usage_price u\nWHERE $__timeFilter(ts)\n  AND u.machine = ANY(ARRAY[${machine:sqlstring}]::text[])\n  AND u.agent = ANY(ARRAY[${agent:sqlstring}]::text[])\n  AND coalesce(u.model, 'unknown') = ANY(ARRAY[${model:sqlstring}]::text[])\nGROUP BY 1\nORDER BY \"Coverage tokens\" DESC"
+          "rawSql": "SELECT u.agent AS \"agent\", count(*) AS \"Events\",\n       sum(coverage_tokens) AS \"Coverage tokens\",\n       sum(priced_tokens) AS \"Priced tokens\",\n       sum(unpriced_tokens) AS \"Unpriced tokens\",\n       sum(known_api_cost_usd) AS \"Known USD\",\n       CASE WHEN count(estimated_api_cost_usd) = count(*) THEN sum(estimated_api_cost_usd) END AS \"Estimated total USD\",\n       sum(logged_cost_usd) AS \"Known logged USD\",\n       count(*) FILTER (WHERE logged_cost_usd IS NULL) AS \"Events missing logged cost\",\n       extract(epoch FROM now() - min(rate_synced_at)) AS \"Oldest rate age\"\nFROM agents.usage_price u\nWHERE $__timeFilter(ts)\n  AND u.machine = ANY(ARRAY[${machine:sqlstring}]::text[])\n  AND u.agent = ANY(ARRAY[${agent:sqlstring}]::text[])\n  AND coalesce(u.model, 'unknown') = ANY(ARRAY[${model:sqlstring}]::text[])\nGROUP BY 1\nORDER BY \"Coverage tokens\" DESC"
         }
       ],
       "fieldConfig": {
@@ -1309,7 +1309,7 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "Logged USD"
+              "options": "Known logged USD"
             },
             "properties": [
               {
@@ -1335,7 +1335,7 @@
       "options": {
         "showHeader": true
       },
-      "description": "Measured tokens with and without a rate, the known API-equivalent cost, and logged cost. Estimated total requires rates for every token. Rate age is the oldest matched rate."
+      "description": "Measured tokens with and without a rate, the known API-equivalent cost, and the subtotal of logged costs present in the source records. Estimated total requires fully priced usage. Rate age is the oldest matched rate."
     }
   ]
 }

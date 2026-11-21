@@ -32,7 +32,8 @@ from agent_usage_tracker.event import (ActivityEvent, EventSession, TimeInterval
 from agent_usage_tracker.label import run as label_run
 from agent_usage_tracker.label.tasks import Source
 from agent_usage_tracker.sink import check_ledger_zone, connect, write_many
-from price_fixture import CATALOG, PRICE_DAY, PRICE_MODEL, price_config, price_rows
+from price_fixture import (CATALOG, LEGACY_RATES, PRICE_DAY, PRICE_MODEL,
+                           legacy_price_rows, price_config, price_rows)
 
 DSN = os.environ.get("AUT_TEST_PG_DSN")
 pytestmark = pytest.mark.skipif(not DSN, reason="AUT_TEST_PG_DSN is not set")
@@ -648,7 +649,11 @@ def test_shipped_price_panels_reconcile_with_local_summary(dsn, tmp_path, monkey
             ("model", f"'{PRICE_MODEL}','model-b','codex-auto-review'"),
         ):
             sql = sql.replace("${" + field + ":sqlstring}", values)
-        return conn.execute(sql).fetchall()
+        result = conn.execute(sql)
+        if panel_id in (28, 29):
+            assert [column.name for column in result.description][7:9] == [
+                "Known logged USD", "Events missing logged cost"]
+        return result.fetchall()
 
     with connect(dsn) as conn:
         assert conn.execute(
@@ -686,14 +691,38 @@ def test_shipped_price_panels_reconcile_with_local_summary(dsn, tmp_path, monkey
         assert run_panel(conn, 26) == [(17,)]
         assert run_panel(conn, 27)[0][-1] == Decimal("1.01")
         table_model = {row[0]: row for row in run_panel(conn, 28)}
-        assert table_model["model-b"][1:8] == (1, 22, 15, 7, Decimal("0.4"), None, None)
-        assert table_model["codex-auto-review"][1:8] == (1, 10, 0, 10, None, None, None)
+        assert table_model["model-b"][1:9] == (1, 22, 15, 7, Decimal("0.4"), None, None, 1)
+        assert table_model["codex-auto-review"][1:9] == (1, 10, 0, 10, None, None, None, 1)
         aggregate, = run_panel(conn, 29)
-        assert aggregate[:8] == ("claude_code", 3, 97, 80, 17, Decimal("1.01"), None,
-                                Decimal("0.125"))
-        assert aggregate[8] is not None
+        assert aggregate[:9] == ("claude_code", 3, 97, 80, 17, Decimal("1.01"), None,
+                                Decimal("0.125"), 2)
+        assert aggregate[9] is not None
         conn.execute("RESET ROLE")
         assert conn.execute(
             "SELECT count(*) FILTER (WHERE est_cost_usd IS NULL), sum(est_cost_usd) "
             "FROM agents.usage_cost WHERE event_id LIKE 'price-%'"
         ).fetchone() == (2, Decimal("0.61"))
+
+
+def test_legacy_price_rows_match_local_pricing_and_prefer_exact_alias(dsn):
+    from agent_usage_tracker.usage_price import price_usage
+
+    rows = legacy_price_rows()
+    push.insert_pg(dsn, rows)
+    pricing.load_sink_prices(dsn, LEGACY_RATES, T0)
+    with connect(dsn) as conn:
+        quotes = conn.execute("""
+            SELECT event_id, coverage_tokens, priced_tokens, unpriced_tokens,
+                   known_api_cost_usd, estimated_api_cost_usd
+            FROM agents.usage_price WHERE machine = 'legacy-pricing'
+        """).fetchall()
+    fixed = {
+        "legacy-override": (5, 4, 1, Decimal("2"), None),
+        "legacy-negative": (10, 0, 10, None, None),
+        "legacy-no-valid-counts": (0, 0, 0, None, None),
+    }
+    assert {event_id: tuple(values) for event_id, *values in quotes} == fixed
+    for row in rows:
+        quote = price_usage(row, LEGACY_RATES)
+        assert (quote.denominator, quote.priced, quote.denominator - quote.priced,
+                quote.known_cost) == fixed[row.event_id][:4]

@@ -34,17 +34,28 @@ SELECT u.event_id, u.ts, u.machine, u.agent, u.model,
        c.priced_tokens,
        totals.coverage_tokens - c.priced_tokens AS unpriced_tokens,
        totals.coverage_tokens - c.component_tokens AS unattributed_tokens,
-       CASE WHEN totals.coverage_tokens = 0 THEN 0 ELSE c.known_cost END AS known_api_cost_usd,
-       CASE WHEN totals.coverage_tokens = c.priced_tokens
+       CASE WHEN v.usable_counts AND totals.coverage_tokens = 0
+            THEN 0 ELSE c.known_cost END AS known_api_cost_usd,
+       CASE WHEN v.usable_counts AND totals.coverage_tokens = c.priced_tokens
             THEN coalesce(c.known_cost, 0) END AS estimated_api_cost_usd
 FROM agents.usage_event_dedup u
-LEFT JOIN agents.model_price p ON p.model_key = agents.price_model_key(u.model)
+LEFT JOIN LATERAL (
+    SELECT p.*
+    FROM agents.model_price p
+    WHERE p.model_key IN (lower(u.model), agents.price_model_key(u.model))
+    ORDER BY (p.model_key = lower(u.model)) DESC
+    LIMIT 1
+) p ON true
 CROSS JOIN LATERAL (
-    SELECT sum(tokens) AS component_tokens,
-           coalesce(sum(tokens) FILTER (WHERE rate >= 0 AND rate < 'Infinity'::numeric), 0)
-               AS priced_tokens,
-           sum(tokens * rate) FILTER (WHERE tokens > 0 AND rate >= 0 AND rate < 'Infinity'::numeric)
-               AS known_cost
+    SELECT least(u.input_tokens, u.output_tokens, u.cache_read_tokens, u.cache_write_tokens,
+                 u.total_tokens) >= 0 AS usable_counts
+) v
+CROSS JOIN LATERAL (
+    SELECT sum(greatest(tokens, 0)) AS component_tokens,
+           coalesce(sum(tokens) FILTER (WHERE v.usable_counts AND rate >= 0
+                                        AND rate < 'Infinity'::numeric), 0) AS priced_tokens,
+           sum(tokens * rate) FILTER (WHERE v.usable_counts AND tokens > 0 AND rate >= 0
+                                      AND rate < 'Infinity'::numeric) AS known_cost
     FROM (VALUES (u.input_tokens, p.input_cost), (u.output_tokens, p.output_cost),
                  (u.cache_read_tokens, p.cache_read_cost), (u.cache_write_tokens, p.cache_write_cost))
          AS components(tokens, rate)

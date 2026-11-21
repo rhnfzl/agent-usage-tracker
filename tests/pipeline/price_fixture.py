@@ -44,3 +44,19 @@ def price_config(tmp_path, monkeypatch, rows):
     monkeypatch.setitem(REGISTRY, "claude_code", Collector(collect))
     return Config("pricing-fixture", ("claude_code",), None, None, None, tmp_path,
                   ledger_timezone="UTC")
+
+
+LEGACY_RATES = {"vendor/model-q": {"output_cost": 0.5},
+                "model-q": {"input_cost": 0.01, "output_cost": 0.02}}
+
+
+def legacy_price_rows():
+    ts = PRICE_TIMESTAMP.isoformat()
+    return [
+        UsageEvent("legacy-override", ts, "claude_code", "Vendor/Model-Q", None,
+                   input_tokens=1, output_tokens=4, total_tokens=5, machine="legacy-pricing"),
+        UsageEvent("legacy-negative", ts, "claude_code", "model-q", None,
+                   input_tokens=-5, output_tokens=10, total_tokens=5, machine="legacy-pricing"),
+        UsageEvent("legacy-no-valid-counts", ts, "claude_code", "model-q", None,
+                   input_tokens=-5, total_tokens=-5, machine="legacy-pricing"),
+    ]

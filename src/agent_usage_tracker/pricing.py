@@ -60,6 +60,12 @@ def normalize_model_key(model_id: str) -> str:
     return key
 
 
+def price_key(model: str | None, rates: dict[str, dict[str, float]]) -> str:
+    """Use an exact historical rate key before trying the canonical catalog key."""
+    exact = (model or "").lower()
+    return exact if exact in rates else normalize_model_key(exact)
+
+
 def _coerce_float(value: Any) -> float | None:
     if isinstance(value, bool):  # bool is an int; a stray `true` must not become 1.0
         return None
@@ -279,7 +285,8 @@ def read_price_snapshot(path: str | Path) -> tuple[dict[str, dict[str, float]], 
         for _, field in COMPONENT_RATES:
             if (rate := _coerce_float(values.get(field))) is not None:
                 entry[field] = rate
-        if key and entry:
+        if key:
+            # An exact override may leave one or every component unpriced.
             rates[key] = entry
     return rates, synced_at
 
