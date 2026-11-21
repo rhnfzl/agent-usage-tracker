@@ -13,7 +13,7 @@ import pytest
 from agent_usage_tracker import cli
 from agent_usage_tracker.config import AutError
 from agent_usage_tracker.improve import judge, qualify, rubric, validation
-from agent_usage_tracker.improve.store import Store
+from agent_usage_tracker.improve.store import Store, digest
 
 RUBRIC = next(r for r in rubric.load() if r.id == "completion_supported")
 
@@ -255,6 +255,17 @@ def test_mismatched_judgment_snapshot_cannot_qualify(tmp_path):
     key = case(store, "wrong-version")
     jid = judgment(store, key, "fail")
     store.put("judgments", {**store.get("judgments", jid), "rubric_version": True})
+    with pytest.raises(AutError, match="versioned judgment"):
+        qualify.run(store, RUBRIC.id)
+
+
+def test_current_snapshot_cannot_use_original_job_bound_key(tmp_path):
+    store = Store(tmp_path / "store")
+    key = case(store, "current")
+    jid = judgment(store, key)
+    row = store.get("judgments", jid)
+    store.put("judgments", {**row, "evaluation_key": digest({
+        "job": row["job_id"], "case": key, "rubric": RUBRIC.id})})
     with pytest.raises(AutError, match="versioned judgment"):
         qualify.run(store, RUBRIC.id)
 

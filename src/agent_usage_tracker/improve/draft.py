@@ -202,8 +202,10 @@ def packet(group: dict[str, Any], store: Store, offered: list[dict[str, Any]], *
             redact(str((row.get("review") or {}).get("rationale", "")))[:2000]
             for j in group["judgment_ids"] if (row := store.get("judgments", j))["case_id"] == key]}
         if excerpts:
-            item["events"] = redact(json.dumps(store.get("cases", key)["events"],
-                                                ensure_ascii=False))[:4000]
+            events = [{field: redact(value) if isinstance(value, str) else value
+                       for field, value in event.items()}
+                      for event in store.get("cases", key)["events"]]
+            item["events"] = redact(json.dumps(events, ensure_ascii=False))[:4000]
         cases.append(item)
     data = {"signals": group["signals"], "distinct_tasks": group["distinct_tasks"],
             "projects": list(group["projects"].values()), "audit_incidents": group["audit_incidents"],

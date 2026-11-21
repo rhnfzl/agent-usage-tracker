@@ -353,6 +353,19 @@ def evaluation_key(evaluator_id: str, case_id: str, rubric_id: str,
     return digest(value)
 
 
+def policy_evaluation_key(policy: dict[str, Any], case_id: str, rubric_id: str,
+                          outputs_id: str | None = None, *, trigger: str | None = None) -> str:
+    """Read the original job-bound identity without changing current evaluator keys."""
+    rubrics = policy.get("rubrics")
+    if type(policy.get("version")) is int and policy["version"] == 1 \
+            and "model_identity" not in policy and isinstance(rubrics, dict) \
+            and isinstance(rubrics.get(rubric_id), list) \
+            and outputs_id is None and trigger != "merge":
+        return digest({"job": digest(policy), "case": case_id, "rubric": rubric_id})
+    return evaluation_key(evaluator(policy, rubric_id), case_id, rubric_id, outputs_id,
+                          trigger=trigger)
+
+
 def queued(store: Store, *, name: str = "judge_queue") -> list[str]:
     if name not in {"judge_queue", "merge_queue"}:
         raise AutError("improve: invalid judge queue name")

@@ -277,6 +277,16 @@ def test_multiline_secret_redacted_before_json_and_protected(setup):
         draft.validate(answer(before="supersecret"), offered, ["avoidable_recovery"])
 
 
+def test_opted_in_events_are_redacted_before_json_escaping(setup):
+    home, repo, target, store, group = setup
+    offered = draft.targets(group, store, home=home)
+    group["case_ids"] = [store.put("cases", {"events": [
+        {"kind": "result", "text": "EVENT_SENTINEL\npassword\n=event-secret"}]})]
+    group["judgment_ids"] = []
+    prompt = draft.packet(group, store, offered, excerpts=True)
+    assert "EVENT_SENTINEL" in prompt and "event-secret" not in prompt
+
+
 @pytest.mark.skipif(os.name == "nt", reason="POSIX FIFO target")
 def test_special_files_never_opened_as_text_targets(setup, monkeypatch):
     home, repo, target, store, group = setup

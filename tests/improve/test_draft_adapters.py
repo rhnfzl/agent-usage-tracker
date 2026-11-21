@@ -36,6 +36,16 @@ def test_discovery_fails_closed_for_unsupported_remote_flavors(tmp_path, monkeyp
     assert {r["cli"] for r in rows} == set(adapters.NAMES)
 
 
+def test_windows_pi_unavailable_without_process_tree_deadline(tmp_path, monkeypatch):
+    monkeypatch.setattr(adapters.os, "name", "nt")
+    monkeypatch.setattr(adapters.shutil, "which", lambda name: "/fake/" + name)
+    monkeypatch.setattr(adapters, "quota_headroom", lambda _: {})
+    monkeypatch.setattr(adapters, "_probe_pi", lambda *a, **kw:
+                        {"available": True, "model": "fake"})
+    pi = next(r for r in adapters.discover(tmp_path) if r["cli"] == "pi")
+    assert not pi["available"] and "deadline" in pi["reason"]
+
+
 def test_pi_protocol_empty_home_no_extensions_tools_context_and_ephemeral(tmp_path):
     auth = tmp_path / "auth.json"
     auth.write_text(json.dumps({"anthropic": {"type": "oauth", "access": "secret",
@@ -97,6 +107,7 @@ def test_quota_reports_are_read_only_fresh_and_unknown_stays_unknown(tmp_path):
     assert path.read_bytes() == original
 
 
+@pytest.mark.skipif(os.name == "nt", reason="remote process-tree deadline is POSIX-only")
 def test_actual_subprocess_deadline_kills_a_stalled_protocol(tmp_path):
     script = tmp_path / "sleep.py"
     script.write_text("import time; time.sleep(60)")

@@ -109,9 +109,9 @@ def judgments(store: Store, rubric: Rubric) -> list[dict[str, Any]]:
                 if attached["case_id"] != row["case_id"]:
                     raise ValueError
             if row["case_id"] not in policy["cases"] or row["evaluation_key"] != \
-                    judge.evaluation_key(judge.evaluator(policy, rubric.id), row["case_id"],
-                                         rubric.id, row.get("outputs_id"),
-                                         trigger=row.get("trigger")):
+                    judge.policy_evaluation_key(policy, row["case_id"], rubric.id,
+                                                row.get("outputs_id"),
+                                                trigger=row.get("trigger")):
                 raise ValueError
             if "rubric_snapshot" in row:
                 snapshot = store.get("rubric_snapshots", row["rubric_snapshot"])

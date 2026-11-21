@@ -267,7 +267,9 @@ counts, even without a version bump. Each judgment records `rubric_version`, `ru
 `rubric_snapshot`. Judgments made before markdown rubrics have none of these. Their diagnosis
 policy holds the old rubric text, and `rubric.legacy_version` maps it to version 1 when it equals
 the text the v1 files were moved from, else 0. Validation of an older diagnosis uses its old
-identity, so its result does not change. Because the rubric identity changed, the first night
+identity, so its result does not change. Readers also retain the original version-1 job-bound
+keys, without rewriting saved judgments or treating version-0 history as a current qualification.
+Because the rubric identity changed, the first night
 or two after the update re-vote the pending audit's cases once: under a tight call budget the
 blocking re-votes alone can fill the first night, and the next night finishes from the saved
 votes. Older judgments outside the pending audit are re-voted once, when a later audit picks
@@ -387,11 +389,13 @@ human accept/reject commands. A shared clone depends on the source object store 
 
 ### Adapter limits
 
-The verified remote protocol is **Pi 1.5.0** with a configured model and unexpired file-based
+The verified remote protocol is **Pi 1.5.0 on POSIX** with a configured model and unexpired file-based
 OAuth credentials. It uses a temporary credential-only home and an empty working directory.
 Tools, MCP, extensions, skills, context files, templates, themes and session persistence are
 disabled explicitly. Only the chosen provider's credential is copied; the source is not refreshed
 or changed. Other Pi versions fail closed until their isolation is checked.
+Windows Pi discovery also fails closed: the existing subprocess runner cannot kill its complete
+process tree there. Local MLX remains a Mac option. No Windows remote deadline is claimed.
 
 Installed Codex 0.171.0 has no verified zero-tools control. Cursor 2026.11.05 print mode retains
 tools. Claude 2.1.330 OAuth mode cannot prove absence of managed hooks; bare mode disables OAuth

@@ -127,6 +127,8 @@ def discover(home: Path, *, explain_model: str | None = None,
             row["reason"] = "CLI not on PATH"
         elif name in unsupported:
             row["reason"] = unsupported[name]
+        elif os.name != "posix":
+            row["reason"] = "Pi process-tree deadline cleanup is not verified on this platform"
         else:
             try:
                 row.update(_probe_pi(exe, home, max(.001, timeout / 2)))
