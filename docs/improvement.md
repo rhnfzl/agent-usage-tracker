@@ -232,7 +232,12 @@ the others get only what is left. Before markdown rubrics it went case by case; 
 night, the first rubric may now have more cases judged than the second. `complete` counts
 blocking work only, so with no blocking rubric enabled it is complete at once. `finished` and
 `total` count blocking judgments; `optional_finished` and `optional_total` count the rest;
-`verdicts` counts both. `reason` is `budget` when any work, blocking or not, was left. The scheduled worker releases its pending audit at the first
+`verdicts` counts both. `reason` is `budget` when any work, blocking or not, was left.
+An error during non-blocking work, such as low memory or an invalid model distribution, stops
+the non-blocking rubrics without failing the diagnosis: `reason` is `optional_error` (or
+`budget` when blocking work was also left) and `optional_skipped` names the rubric and the
+error type. An error during blocking work still
+fails the run. The scheduled worker releases its pending audit at the first
 checkpoint where blocking work is complete, so a slow non-blocking rubric never holds the next
 audit, even if the run is cut off later. When the run ends it writes the released state once
 more, so an `audit --cycle` that started during the non-blocking work returns `superseded`.

@@ -353,6 +353,11 @@ def five_rubric_store(tmp_path, monkeypatch, sessions=2):
     return store, store.put("audits", {"session_ids": ids})
 
 
+def journal_kinds(store):
+    return [json.loads(line)["kind"] for line in
+            (store.root / "events.jsonl").read_text().splitlines()]
+
+
 class Recorder:
     model_id = "test"
     model_rev = "fixed"
@@ -514,10 +519,40 @@ def test_cached_blocking_work_publishes_complete_before_the_first_extra_call(tmp
 
     monkeypatch.setattr(judge, "memory_guard", low_memory)
     seen = []
+    report = judge.diagnose(store, audit, models=("test",), backend_for=lambda _: Recorder([]),
+                            progress=seen.append)
+    assert seen[1]["complete"] and seen[1]["optional_finished"] == 0
+    # low memory before an extra rubric skips the extras; the finished night stays finished
+    assert report["complete"] and report["reason"] == "optional_error"
+    assert report["optional_skipped"] == {"rubric": "verbosity", "error": "AutError"}
+    assert "diagnosis" in journal_kinds(store)
+
+
+def test_a_bad_extra_rubric_vote_does_not_fail_the_night(tmp_path, monkeypatch):
+    store, audit = five_rubric_store(tmp_path, monkeypatch, sessions=1)
+
+    class Broken(Recorder):
+        def distribution(self, request):
+            if request.task == "improve_verbosity":
+                return {"pass": 2.0}
+            return super().distribution(request)
+
+    report = judge.diagnose(store, audit, models=("test",), backend_for=lambda _: Broken([]))
+    assert report["complete"] and (report["finished"], report["optional_finished"]) == (2, 0)
+    assert report["optional_skipped"]["rubric"] == "verbosity"
+    assert "unfinished_call" not in report
+    assert "diagnosis" in journal_kinds(store)
+
+
+def test_low_memory_during_blocking_work_still_raises(tmp_path, monkeypatch):
+    store, audit = five_rubric_store(tmp_path, monkeypatch, sessions=1)
+
+    def low_memory():
+        raise AutError("improve: not enough free memory")
+
+    monkeypatch.setattr(judge, "memory_guard", low_memory)
     with pytest.raises(AutError, match="memory"):
-        judge.diagnose(store, audit, models=("test",), backend_for=lambda _: Recorder([]),
-                       progress=seen.append)
-    assert seen[-1]["complete"] and seen[-1]["optional_finished"] == 0
+        judge.diagnose(store, audit, models=("test",), backend_for=lambda _: Recorder([]))
 
 
 def test_a_policy_without_rubrics_accepts_only_the_two_historical_ids(tmp_path):

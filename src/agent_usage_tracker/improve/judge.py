@@ -460,6 +460,8 @@ def diagnose(store: Store, audit_id: str, *, models: tuple[str, ...] = (
     optional = set(keys) - active
     reason = "complete"
     skipped = False
+    optional_skipped: dict[str, str] | None = None
+    in_optional = False     # work is sorted blocking first, so this only turns on
     evidence = {"cases": len(rows), "eligible": sum(_eligible(row) for row in rows)}
 
     def checkpoint() -> dict[str, Any]:
@@ -478,6 +480,8 @@ def diagnose(store: Store, audit_id: str, *, models: tuple[str, ...] = (
             report["first_call_at"] = first_call_at
         if unfinished_call is not None:
             report["unfinished_call"] = unfinished_call
+        if optional_skipped is not None:
+            report["optional_skipped"] = optional_skipped
         if progress:
             progress(report)
         return report
@@ -494,6 +498,7 @@ def diagnose(store: Store, audit_id: str, *, models: tuple[str, ...] = (
     try:
         with _locked(store.root / "diagnose", blocking=False), ExitStack() as resources:
             for (rubric, case), key in zip(work, keys):
+                in_optional = not rubric.blocking
                 if key in decisions:
                     value = store.get("judgments", decisions[key])
                     tally[value["verdict"]] += 1
@@ -659,6 +664,15 @@ def diagnose(store: Store, audit_id: str, *, models: tuple[str, ...] = (
                 checkpoint()
     except LockBusy:
         reason = "model_busy"
+    except Exception as exc:
+        # Blocking work is done; a failing extra rubric (low memory, a bad distribution) skips
+        # the extras instead of turning a finished night into an error. Only the type is kept,
+        # because a message could quote model output.
+        if not in_optional:
+            raise
+        optional_skipped = {"rubric": rubric.id, "error": type(exc).__name__}
+        unfinished_call = None      # the failed call ended; nothing is still running
+        reason = "budget" if skipped else "optional_error"
     finally:
         for backend in [*backends.values(), *([explainer] if explainer else [])]:
             close = getattr(backend, "close", None)
