@@ -17,9 +17,13 @@ other command refuses it.
 | `aut backfill --sessions-only [--dry-run]` | re-read all history and send only session rows; the watermark is untouched | `pg_dsn` (not with `--dry-run`) |
 | `aut backfill --activity-only [--dry-run]` | the same for activity rows (steers, commits, turns, links, ...); never usage. Both flags may be given together | `pg_dsn` (not with `--dry-run`) |
 | `aut status` | show machine, agents, transports, watermarks and the age of the last good backup | |
+| `aut setup [--apply] [--schedule] [--json]` | preview first-run settings, or explicitly create a config or a scan schedule. `--uninstall` removes only the setup-managed schedule | a configured sink for scheduling |
+| `aut demo [--group-by GROUP] [--json]` | run the usage summary on synthetic logs | |
+| `aut summary [--period PERIOD] [--group-by GROUP] [--json]` | show local usage with source coverage and price gaps. `--since` and `--until` select an explicit ledger date range | local logs |
+| `aut overview [--period PERIOD] [--group-by GROUP] [--no-browser]` | open local usage, source health and available private evidence on a token-protected loopback page | local logs |
 | `aut backup [--check]` | an encrypted, deduplicated restic snapshot of the logs, config, label files and `repo_key.salt` ([docs/new-laptop.md](new-laptop.md)), then the retention (`restic forget`: 14 daily, 8 weekly, 12 monthly; `--prune` once a week). Skips with exit 0 while another run holds the lock, on battery below 20%, or when the repository is unreachable. `--check` runs `restic check` and sends nothing | `[backup]` in `config.toml`, `restic` on `PATH` |
 | `aut export [--out FILE]` | write all usage rows as CSV (stdout by default), deduplicated, columns in sink order for `COPY`. Exits 1 if a collector that feeds the CSV could not fully read a source, so the CSV is partial (`activitywatch` has no usage rows, so it never does); `backfill --sessions-only`/`--activity-only` do the same for the collectors with those rows | |
-| `aut sync-prices [--out FILE] [--litellm-url URL] [--models-dev-url URL] [--genai-prices-url URL]` | build the API-equivalent price map, `model_prices.json` in the config dir by default; the URLs must be http(s) | network |
+| `aut sync-prices [--out FILE] [--sink]` | refresh the local API-equivalent price map. The optional source URL flags accept HTTP(S). `--sink` also loads the packaged sink price table | network. Sink loading also needs the PostgreSQL extra and `AUT_PRICE_PG_DSN` |
 | `aut time add --start T --end T` | record a manual active-time interval in local time, e.g. `--start "2026-11-03 09:00"` | `pg_dsn` |
 | `aut time add --minutes N [--at T] [--not-relevant]` | the same as a length ending at `--at` (default now); `--not-relevant` marks it not work time. At most 16 hours, never in the future | `pg_dsn` |
 | `aut outcomes [--fetch] [--dry-run]` | score every commit row against your local clones and write `agents.commit_outcome`. `--fetch` fetches first and asks `gh`. `--dry-run` writes nothing and never fetches or asks `gh`, even with `--fetch` | `pg_dsn`, clones under `outcome_repo_roots` |
@@ -113,7 +117,8 @@ Files aut keeps on this machine:
 | `repo_key.salt`, `outcomes_cache.json` | next to the state file |
 | `state.corrupt` | next to the state file: a copy of a corrupt `state.json`, kept before aut starts clean. A `state.json` aut has no permission to read stops the run instead and is left as it is |
 | `state.lock` | next to the state file: an empty file, the advisory lock for one short watermark save, so overlapping `scan` and `label` runs keep each other's watermarks |
-| `model_prices.json`, `label.json` | next to `config.toml`. Nothing in aut reads `model_prices.json`; it is kept for readers outside aut |
+| `model_prices.json` | next to `config.toml`. Summary reads this file offline. Use `aut summary --prices FILE` to choose another local file |
+| `label.json` | next to `config.toml` |
 | `label-local.json` | next to `config.toml`; saved provisional local recipes, member revisions, coefficients, and cutoffs |
 | `cursor-automated.json` | next to the state file; trusted scripted Cursor chat IDs |
 | replay manifests and progress; `outcome-coverage.json` | `~/.local/share/aut/label/replay/` and `~/.local/share/aut/label/outcome-coverage.json` (`$XDG_DATA_HOME`); replay manifests contain private redacted input text |

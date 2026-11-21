@@ -10,9 +10,11 @@
   aut status            show config + watermark state
   aut doctor --json     inspect source coverage without writing or connecting
   aut setup             preview configuration and optional scan scheduling
+  aut demo              run the usage report on synthetic agent logs
+  aut overview          open a private local usage and source health page
   aut export [--out F]  write all usage as CSV (bulk load, offline bridge); never the watermark
   aut summary [--json]  show local usage, source coverage and unknown values by date
-  aut sync-prices [--out F]
+  aut sync-prices [--out F] [--sink]
                         refresh the API-equivalent model price map
   aut time add --start <local> --end <local> | --minutes N [--at <local end>] [--not-relevant]
                         record a manual active-time interval (needs transport.pg_dsn)
@@ -64,11 +66,11 @@ import sys
 from datetime import date, datetime, timedelta
 from typing import Sequence
 
-from . import (backup, cursor_run, git_days, inspector, manual_time, outcomes, pricing, review,
-               scan, setup_cli, summary_cli)
+from . import (backup, cursor_run, demo_cli, git_days, inspector, manual_time, outcomes, pricing_cli,
+               review, scan, setup_cli, summary_cli)
 from .collectors import REGISTRY
 from .config import (ALL_AGENTS, LABEL_DAYS, LABEL_DECISION_TASKS, LABEL_TASK_NAMES, AutError,
-                     Config, ledger_zone, load_config, config_path)
+                     Config, ledger_zone, load_config)
 from .push import is_operational_failure, outbox_status, redacted_error, replay_outbox, webhook_url_allowed
 from .state import collector_wm, load_state
 
@@ -273,13 +275,6 @@ def cmd_backup(cfg: Config, args: argparse.Namespace) -> None:
     backup.run_backup(cfg, check=args.check)
 
 
-def cmd_sync_prices(args: argparse.Namespace) -> None:
-    out = args.out or str(config_path().parent / "model_prices.json")
-    n = pricing.sync_prices(out, litellm_url=args.litellm_url, models_dev_url=args.models_dev_url,
-                            genai_prices_url=args.genai_prices_url)
-    print(f"synced {n} model prices -> {out}", file=sys.stderr)
-
-
 def cmd_cursor_run(args: argparse.Namespace) -> None:
     cursor_run.run(args.model, args.workspace, sys.stdin)
 
@@ -300,8 +295,8 @@ def cmd_publish_improve(cfg: Config, args: argparse.Namespace) -> None:
     print(json.dumps(run_publish(cfg, days=args.days, dry_run=args.dry_run)))
 
 
-_NO_CONFIG_COMMANDS = {"sync-prices": cmd_sync_prices, "cursor-run": cmd_cursor_run,
-                       "scan-job": cmd_scan_job, "setup": setup_cli.run}
+_NO_CONFIG_COMMANDS = {"sync-prices": pricing_cli.run, "cursor-run": cmd_cursor_run,
+                       "scan-job": cmd_scan_job, "setup": setup_cli.run, "demo": demo_cli.run}
 _AGENT_COMMANDS = {"scan": cmd_scan, "backfill": cmd_backfill, "export": cmd_export,
                    "status": cmd_status, "summary": summary_cli.run}
 _COMMANDS = {"time": cmd_time_add, "outcomes": cmd_outcomes, "outcome": cmd_outcome,
@@ -321,9 +316,13 @@ def _build_parser() -> argparse.ArgumentParser:
     from .improve.cli import register
     register(sub)
     from .observation_cli import register as register_observations
+    from .overview_cli import register as register_overview
     register_observations(sub)
+    register_overview(sub)
     setup_cli.register(sub)
+    demo_cli.register(sub)
     summary_cli.register(sub)
+    pricing_cli.register(sub)
     sub.add_parser("scan-job", help="run the locked scheduled scan and retry unfinished daily jobs")
     sub.add_parser("retry-delivery", help="send deferred session/activity/time rows using pg_dsn")
     p_scan = sub.add_parser("scan", help="push new usage since the watermark")
@@ -343,11 +342,6 @@ def _build_parser() -> argparse.ArgumentParser:
     p_export.add_argument("--out", help="output CSV file (default: stdout)")
     for sp in (p_scan, p_back, p_status, p_export):     # accepted after the subcommand too
         sp.add_argument("--agents", default=argparse.SUPPRESS, help=agents_help)
-    p_sync = sub.add_parser("sync-prices", help="refresh the API-equivalent model price map")
-    p_sync.add_argument("--out", help="output JSON (default: <config-dir>/model_prices.json)")
-    p_sync.add_argument("--litellm-url", default=pricing.LITELLM_URL)
-    p_sync.add_argument("--models-dev-url", default=pricing.MODELS_DEV_URL)
-    p_sync.add_argument("--genai-prices-url", default=pricing.GENAI_PRICES_URL)
     p_cursor = sub.add_parser("cursor-run", help="run a scripted Cursor request with a registered origin")
     p_cursor.add_argument("--model", required=True, help="explicit Cursor model identifier")
     p_cursor.add_argument("--workspace", required=True, help="workspace for this scripted request")
@@ -474,6 +468,10 @@ def _dispatch(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None
         return
 
     cfg = load_config()
+    if args.cmd == "overview":
+        from .overview_cli import run as run_overview
+        run_overview(cfg, args)
+        return
     if args.cmd in _COMMANDS:
         _COMMANDS[args.cmd](cfg, args)
         return

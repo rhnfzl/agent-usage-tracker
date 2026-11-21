@@ -67,11 +67,15 @@ An unreadable source makes export exit nonzero, so a partial file cannot silentl
 
 Use the summary to see recorded usage by agent, model, or project.
 It reads local logs without a database, a provider account, or a network connection.
+Try a synthetic example first, or preview local setup.
 
 ```bash
+aut demo
+aut setup
 aut summary
 aut summary --period week --group-by model
 aut summary --since 2026-06-01 --until 2026-07-01 --group-by project --json
+aut overview
 ```
 
 The report uses the configured ledger time zone. The end date is exclusive.
@@ -79,8 +83,12 @@ Source coverage describes what AUT can read. JSON uses `null` when no values are
 The `unknown_events` field shows how many records lack each value.
 Keep the output private if it includes project names.
 
-Preview first-run settings with `aut setup`. Use `aut setup --apply` to create a starter
-configuration if you need one. The [first-run guide](docs/first-run.md) covers optional scheduled delivery.
+Use `aut setup --apply` to create a starter configuration if you need one.
+The [first-run guide](docs/first-run.md) covers optional scheduled delivery.
+
+`aut sync-prices` explicitly refreshes local API list rates. The summary separates the known
+estimated subtotal from the full estimate and from costs recorded in source logs.
+Use `aut summary --compare-prices MODEL_A MODEL_B` to apply two rates to the same observed token mix.
 
 ### Keep history in your own database
 
@@ -312,7 +320,9 @@ Read the [full privacy and network-call reference](docs/reference.md#privacy-mod
 |---|---|
 | `aut status` | Check configuration, progress, and backup age |
 | `aut setup` | Preview configuration, source checks, and delivery status |
+| `aut demo` | Try the local summary on synthetic agent logs |
 | `aut summary --period week` | See local usage, source coverage, and unknown counts |
+| `aut overview` | Open a private page with usage, source health, and available evidence |
 | `aut scan --dry-run` | Inspect parsed totals without sending rows |
 | `aut scan` | Deliver new usage and activity |
 | `aut export --out usage.csv` | Export local usage without a sink |
