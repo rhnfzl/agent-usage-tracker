@@ -88,6 +88,7 @@ def test_eval_record_choose_and_event(tmp_path, monkeypatch):
         recs = bakeoff.run_eval(cfg, TASK, src=src, now=BASE,
                                 backends=[Oracle(size_mb=4000), Oracle("stop", size_mb=10)])
         good, bad = recs
+        assert good["ledger_timezone"] == bad["ledger_timezone"] == ZONE
         final = sum(evalset.final_test(q, LEDGER) for q in reqs.values())
         assert 0 < final and good["n"] == len(golds) - final == good["n_cal"] == good["n_held"]
         assert sum(good["folds"].values()) == good["n"] and len(good["folds"]) == evalset.FOLDS
@@ -461,6 +462,41 @@ def test_train_encoder_and_backend(tmp_path):
             enc.distribution(req)
         assert any(isinstance(b, backends.Encoder) for b in
                    bakeoff.default_backends(_cfg(tmp_path), TASK))
+
+
+@pytest.mark.parametrize("cached", [False, True])
+def test_eval_rejects_foreign_encoder_before_cached_scores(tmp_path, no_sink, cached):
+    with _env(tmp_path):
+        cfg, src, _reqs = _gold(tmp_path, LABELS * 20)
+        path = backends.encoder_path(TASK)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"task_ver": tasks.TASKS[TASK].ver,
+                                    "ledger_timezone": "Asia/Tokyo", "labels": LABELS, "w": {}}))
+        if cached:
+            bakeoff.run_eval(cfg, TASK, src=src, now=BASE,
+                             backends=[backends.Encoder(TASK, zone="Asia/Tokyo")])
+        before = evalset.read_jsonl(evalset.eval_path(TASK, "eval"))
+        with pytest.raises(AutError, match="no backend produced an evaluation"):
+            bakeoff.run_eval(cfg, TASK, src=src, now=BASE,
+                             backends=[backends.Encoder(TASK, zone=ZONE)])
+        assert evalset.read_jsonl(evalset.eval_path(TASK, "eval")) == before
+
+
+def test_final_rejects_foreign_encoder_before_cached_scores(tmp_path, no_sink):
+    with _env(tmp_path):
+        cfg, src, _reqs = _gold(tmp_path, LABELS * 20)
+        path = backends.encoder_path(TASK)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"task_ver": tasks.TASKS[TASK].ver,
+                                    "ledger_timezone": "Asia/Tokyo", "labels": LABELS, "w": {}}))
+        foreign = backends.Encoder(TASK, zone="Asia/Tokyo")
+        bakeoff.run_eval(cfg, TASK, src=src, now=BASE, backends=[foreign])
+        bakeoff.run_final(cfg, TASK, foreign.model_id, src=src, now=BASE, backend=foreign)
+        before = evalset.read_jsonl(evalset.eval_path(TASK, "final"))
+        with pytest.raises(backends.BackendUnavailable, match="another ledger_timezone"):
+            bakeoff.run_final(cfg, TASK, foreign.model_id, src=src, now=BASE,
+                              backend=backends.Encoder(TASK, zone=ZONE))
+        assert evalset.read_jsonl(evalset.eval_path(TASK, "final")) == before
 
 
 def test_corrupt_choice_file_warns_and_choose_keeps_it(tmp_path, monkeypatch, capsys):

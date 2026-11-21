@@ -383,14 +383,16 @@ def run_eval(cfg: Config, task: str, days: int = LABEL_DAYS, *, src: Source | No
             print(f"aut: label eval: {b.model_id} has no gold outside its training days; left out",
                   file=sys.stderr)
             continue
-        append_jsonl(eval_path(task, "eval"), {"ts": now.isoformat(),
-                                               "ledger_timezone": cfg.ledger_timezone, **rec})
+        rec["ledger_timezone"] = cfg.ledger_timezone
+        append_jsonl(eval_path(task, "eval"), {"ts": now.isoformat(), **rec})
         if cfg.pg_dsn:
             send_activity_rows(cfg.pg_dsn, [ActivityEvent(
                 event_id=make_event_id("eval", json.dumps(rec, sort_keys=True)),
                 ts=now.isoformat(), agent="label", kind="eval", session_id=None, turn_id=None,
                 attrs=rec, machine=cfg.machine)])
         recs.append(rec)
+    if not recs:
+        raise AutError("label eval: no backend produced an evaluation; check the models left out above")
     return recs
 
 

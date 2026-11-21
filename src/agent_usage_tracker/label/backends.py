@@ -700,15 +700,19 @@ class Encoder:
             self._m = m
         return self._m
 
-    def distribution(self, req: Request) -> dict[str, float]:
+    def prepare(self) -> None:
         m = self._load()
-        if m.get("task_ver") != req.task_ver:
-            raise BackendUnavailable(f"label: the {self.task} encoder is for another task "
-                                     "version; run `aut label train-encoder` again")
         if self.zone is not None and not record_zone_ok(m, self.zone):
             raise BackendUnavailable(f"label: the {self.task} encoder was trained on days in "
                                      f"another ledger_timezone than {self.zone}; run "
                                      "`aut label train-encoder` again")
+
+    def distribution(self, req: Request) -> dict[str, float]:
+        self.prepare()
+        m = self._load()
+        if m.get("task_ver") != req.task_ver:
+            raise BackendUnavailable(f"label: the {self.task} encoder is for another task "
+                                     "version; run `aut label train-encoder` again")
         w, labels = m["w"], m["labels"]
         z = [0.0] * len(labels)
         for f in features(req.facts):
