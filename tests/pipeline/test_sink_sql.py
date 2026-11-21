@@ -522,7 +522,7 @@ def test_refresh_deletes_claude_code_relogs_and_keeps_other_duplicates(dsn):
         return UsageEvent(event_id=eid, ts=ts.isoformat(), agent=agent, model="m", provider="p",
                           input_tokens=tokens, total_tokens=tokens, machine="t", session=session)
 
-    later = T0 + timedelta(seconds=3)
+    later = T0 + timedelta(seconds=3, microseconds=123456)
     old = T0 - timedelta(days=60)      # plain history in another chunk
     push.insert_pg(dsn, [usage(f"old{i}", old + timedelta(seconds=i), "claude_code", 1)
                          for i in range(400)]
@@ -535,6 +535,9 @@ def test_refresh_deletes_claude_code_relogs_and_keeps_other_duplicates(dsn):
         conn.commit()
         # A delete that decompresses the old chunk's 400 rows fails past this limit.
         conn.execute("SET timescaledb.max_tuples_decompressed_per_dml_transaction = 200")
+        # Kolkata prints as IST, which Postgres reads back as UTC+2: the keys must not round-trip.
+        conn.execute("SET DateStyle = 'SQL, DMY'")
+        conn.execute("SET TimeZone = 'Asia/Kolkata'")
         for _ in range(2):             # the second run finds nothing left to delete
             conn.execute("\n".join(line for line in job if not line.startswith("\\")))
             conn.commit()

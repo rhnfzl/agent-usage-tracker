@@ -30,8 +30,10 @@ FOR extra IN
     ) ranked
     WHERE rn > 1
 LOOP
+    -- ts written as UTC ISO text: the session's DateStyle and zone abbreviations cannot shift it.
     EXECUTE format('DELETE FROM agents.usage_event WHERE agent = %L AND event_id = %L AND ts = %L::timestamptz',
-                   'claude_code', extra.event_id, extra.ts);
+                   'claude_code', extra.event_id,
+                   to_char(timezone('UTC', extra.ts), 'YYYY-MM-DD HH24:MI:SS.US') || '+00');
 END LOOP;
 
 -- Window titles are kept indefinitely by default. To turn a retention limit on, add here:
