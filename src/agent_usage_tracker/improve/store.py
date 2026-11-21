@@ -80,7 +80,7 @@ class Store:
     def get(self, kind: str, key: str) -> dict[str, Any]:
         path = self.path(kind, key)
         try:
-            value = json.loads(path.read_text())
+            value = json.loads(path.read_text(encoding="utf-8"))
             valid = isinstance(value, dict) and digest(value) == key
         except (OSError, TypeError, ValueError) as exc:
             raise AutError("improve: private record is missing or invalid") from exc
