@@ -40,6 +40,20 @@ def test_reference_preview_never_executes_oracle(tmp_path, monkeypatch):
     assert validation.validate(store, spec, job)["execution_required"]
 
 
+def test_reference_reads_original_job_bound_judgment(tmp_path):
+    store, spec, previous, _ = setup_reference(tmp_path)
+    policy = {**store.get("diagnoses", previous), "version": 1,
+              "rubrics": {"completion_supported": ["Historic question", "Historic definition"]}}
+    job = store.put("diagnoses", policy)
+    key = policy["cases"][0]
+    identity = store.put("judgments", {"case_id": key, "rubric": "completion_supported",
+        "verdict": "fail", "job_id": job, "evaluation_key": digest({
+            "job": job, "case": key, "rubric": "completion_supported"})})
+    report = validation.validate(store, spec, job, execute=True)
+    assert report["counts"].get("detected_failures", 0) == 1
+    assert report["cases"][0]["judgment_id"] == identity
+
+
 @pytest.mark.parametrize("trigger", ["control", "merge"])
 def test_reference_uses_frozen_output_identity_with_legacy_fallback(tmp_path, trigger):
     from agent_usage_tracker.improve import judge, rubric
