@@ -154,8 +154,9 @@ Invalid reviews retain their bounded, redacted responses in private `review_atte
 One schema repair is allowed. Both attempts count against the model-call and time budgets.
 They are not human labels or calibrated accuracy measurements.
 Ask a human only when evidence cannot settle a required fact, authority, or preference.
-The private `inbox.html` shows escaped review text and case identifiers, and the top 10
-failure groups (next section).
+The private `inbox.html` shows open proposals with copy-ready accept and reject commands, the
+top 10 failure groups with their status (next section), the last cycle's judgments with
+escaped review text, rubric version, trigger and case identifiers, and the last 5 adopted fixes.
 
 ## Rubrics
 
@@ -302,6 +303,67 @@ Add `--candidate /path/to/isolated/worktree` to stage there.
 Staging rejects a changed source base, path escapes, and unrelated candidate edits.
 It cannot stage into the original scope itself.
 The operator supplies the target and replacement. Historical text and model output cannot authorise writes.
+
+## Accept, reject and adopt
+
+Decide on a proposal from a terminal. The inbox page shows each open proposal's diff and the
+commands to copy. An id is the full key or a unique prefix of 6 or more hex characters.
+
+```bash
+aut improve inbox list                      # open proposals and groups: ids and counts, no text
+aut improve inbox accept 3fa2c1d0 [--note "…"]
+aut improve inbox reject 3fa2c1d0 --reason "…"
+```
+
+Each decision is a new private `decisions` record and a `decision` journal row. The latest
+decision per proposal wins. Running the same decision again changes nothing and says so. A
+conflicting decision, such as a reject after an accept, is refused. One lock makes concurrent
+decisions safe, and the page is rebuilt after each one.
+
+Accept writes nothing outside the store and the candidate:
+
+- If the target still has the saved digest, the proposal is accepted as it is.
+- If the target changed but the old span still occurs exactly once and outside any generated
+  `<!-- BEGIN … -->` … `<!-- END … -->` block, a new proposal is prepared from the same span,
+  with the same extra fields and `supersedes: <old id>`. It is staged in
+  `<store>/candidates/<new id>` when the old one was staged. The old id is marked `stale` with
+  `superseded_by`, and decisions on the old id follow to the new one.
+- Otherwise the proposal is marked `stale` and the command fails with "target changed".
+  Proposals saved before spans were recorded always go `stale` when the target changed.
+  A `stale` decision does not block the group; only a reject does, and a stale proposal can
+  still be rejected. A target that exists but cannot be read right now is an error, not stale.
+
+When the staged candidate's Git directory is its own real `.git` directory (a clone, not a
+worktree or a `.git` symlink, which write into another repository), accept commits the target there on branch
+`aut/improve-<id8>`, with the proposal id in the message. It uses Git plumbing on a private
+index, so no checkout, hook or clean filter runs, the candidate's own index and branch stay as
+they are, and only the literal target path changes. The command prints what to run next: fetch that branch into the
+real repository, or copy the staged file after checking the target digest. You review, apply
+and merge the change yourself.
+
+Reject needs a reason of 1 to 500 characters with at least one letter or digit, so the page's
+`"…"` placeholder pasted unedited is refused. It blocks the proposal's failure group, which the
+inbox shows as "rejected on <date>", even when another proposal of the group was accepted. An
+accepted group shows "accepted" until it is adopted. It
+deletes `<store>/candidates/<id>` (and those of proposals it superseded) only; an operator's own
+`--candidate` directory stays. A retry after a crash adds a missing journal row.
+The copied commands and next steps are quoted for a POSIX shell.
+
+After the merge, record the adoption:
+
+```bash
+aut improve adopt 3fa2c1d0 --commit <sha> [--pr N]
+aut improve adopt --title "Run tests with CI's pytest entrypoint, not python -m pytest" \
+  --commit ef03df5 --pr 53 --date 2026-11-14 --target ~/.claude/CLAUDE.md \
+  --rubric avoidable_recovery --kind instruction --note "…"
+```
+
+Adopting a proposal needs an accept first and copies its target, rubric ids, kind and group.
+It copies the title only from an operator proposal; a drafted proposal's title is model text,
+so `--title` is required. The title is human-written, one line, at most 120 characters. The title and date are
+meant for the sink (a later `publish-improve` step); targets, commit and note stay private.
+`benefit_claim` is always false. The same proposal and commit (or, without a proposal, the same
+title and commit) is one adoption, even when the command runs again on a later day.
 
 ## Compare baseline and candidate
 

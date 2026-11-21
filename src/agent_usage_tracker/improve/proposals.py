@@ -18,8 +18,14 @@ def file_digest(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+AUTHORITIES = ("operator_scoped_proposal", "model_drafted_proposal")
+
+
 def prepare(store: Store, case_id: str, scope: Path, target: Path, before: str,
-            after: str) -> str:
+            after: str, *, authority: str = AUTHORITIES[0],
+            extra: dict[str, Any] | None = None) -> str:
+    if authority not in AUTHORITIES:
+        raise AutError("improve: unknown proposal authority")
     case = store.get("cases", case_id)
     if not case.get("events"):
         raise AutError("improve: a proposal needs source evidence")
@@ -41,8 +47,12 @@ def prepare(store: Store, case_id: str, scope: Path, target: Path, before: str,
         "target": relative, "before_sha256": file_digest(target),
         "after_sha256": hashlib.sha256(candidate.encode()).hexdigest(),
         "before": original, "after": candidate, "diff": patch,
-        "authority": "operator_scoped_proposal", "state": "draft",
+        "span": {"before": before, "after": after}, "authority": authority, "state": "draft",
         "rollback": "Restore the exact saved before content in an isolated candidate."}
+    if extra:
+        if extra.keys() & (value.keys() - {"rollback"}):
+            raise AutError("improve: proposal extra fields cannot replace its core fields")
+        value.update(extra)
     key = store.put("proposals", value)
     store.append("proposal_prepared", proposal_id=key, case_id=case_id)
     return key
