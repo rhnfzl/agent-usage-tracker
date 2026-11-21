@@ -505,7 +505,9 @@ def build_report(cfg: Config, *, now: datetime | None = None) -> dict[str, Any]:
         _issue(issues, "catalog_unavailable", "catalog", "info")
     from .harness_inventory import discover
     agents = frozenset(cfg.agents)
-    inventory = discover(cfg.home, harnesses, readers=agents)
+    # The t3 collector refuses to read without its cutover, so it qualifies nothing until set.
+    readers = agents if cfg.t3_activity_since else agents - {"t3"}
+    inventory = discover(cfg.home, harnesses, readers=readers)
     if inventory["status"] == "limited":
         _issue(issues, "harness_inventory_limited", "inventory", "info")
     wraps = {entry.get("id"): entry.get("wraps") for entry in harnesses}

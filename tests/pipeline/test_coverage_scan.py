@@ -408,11 +408,25 @@ def harness_issues(cfg, agents=None):
 
 
 def test_reader_qualified_t3_code_raises_no_harness_issue(inventory_home, world):
+    from dataclasses import replace
+
     (world / "Applications" / "T3 Code.app").mkdir()
-    issues = harness_issues(inventory_home, agents=("t3",))
+    cutover = replace(inventory_home, t3_activity_since="2026-11-01T00:00:00+00:00")
+    issues = harness_issues(cutover, agents=("t3",))
     assert not [key for key in issues if key[1] == "t3-code"]
-    assert ("harness_route_unverified", "t3-code") in harness_issues(inventory_home,
-                                                                    agents=("codex",))
+    assert ("harness_route_unverified", "t3-code") in harness_issues(cutover, agents=("codex",))
+
+
+@pytest.mark.parametrize("cutover, issue", [
+    ("2026-11-01T00:00:00+00:00", None), (None, "harness_active_unread")])
+def test_recent_t3_use_is_read_only_with_its_cutover(inventory_home, cutover, issue):
+    from dataclasses import replace
+
+    db = inventory_home.home / ".t3/userdata/state.sqlite"
+    db.parent.mkdir(parents=True, exist_ok=True)
+    db.write_text("")
+    issues = harness_issues(replace(inventory_home, t3_activity_since=cutover), agents=("t3",))
+    assert {code for code, source in issues if source == "t3-code"} == ({issue} - {None})
 
 
 def test_recent_unread_harness_is_a_warning_and_a_recent_wrapper_is_info(inventory_home):
