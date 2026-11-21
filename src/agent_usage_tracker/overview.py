@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 from html import escape
-from typing import Any, Iterable
+from typing import TYPE_CHECKING, Any, Iterable
 
 from .local_page import head
 from .summary import GROUPS, Summary, Totals
+
+if TYPE_CHECKING:
+    from .quota import QuotaSnapshot, QuotaWindow
 
 PERIODS = ("today", "week", "month")
 _CSS = """
@@ -81,8 +84,35 @@ def _pricing(report: Summary) -> str:
     )
 
 
+def _quota_pace(window: QuotaWindow) -> str:
+    pace = window["pace_percent_per_hour"]
+    if pace is None:
+        return f'Unknown ({(window["pace_reason"] or "no evidence").replace("_", " ")})'
+    forecast = ("projected to reach limit" if window["reaches_limit_before_reset"]
+                else "projected below limit at reset")
+    return f"{pace:g} percentage points/hour, {forecast}"
+
+
+def _quota(snapshot: QuotaSnapshot) -> str:
+    heading = f'<h2>Quota</h2><p class="muted">Local cache {_cell(snapshot["cache_status"])}</p>'
+    if not snapshot["windows"]:
+        return heading + "<p>No cached quota observations.</p>"
+    periods = {"five_hour": "5 hours", "seven_day": "7 days"}
+    return heading + _table(
+        "Cached quota observations",
+        ("Source", "Local scope", "Window", "Used", "Observed (UTC)", "Resets (UTC)",
+         "Freshness", "Coverage", "Pace"),
+        (("Claude Code" if window["source"] == "claude_code" else window["source"],
+          window["scope"][:8], periods.get(window["window"], window["window"]),
+          f"{percent:g}%" if (percent := window["used_percent"]) is not None else None,
+          window["observed_at"], window["reset_at"], window["freshness"], window["coverage"],
+          _quota_pace(window)) for window in snapshot["windows"]),
+    )
+
+
 def render(report: Summary, health: dict[str, Any], root: str, period: str,
-           private_evidence: bool, *, error: str | None = None) -> bytes:
+           private_evidence: bool, *, error: str | None = None,
+           quota: QuotaSnapshot | None = None) -> bytes:
     window, group_by, totals = report["window"], report["group_by"], report["totals"]
     since = window["since"] if period == "custom" else ""
     until = window["until"] if period == "custom" else ""
@@ -135,6 +165,7 @@ def render(report: Summary, health: dict[str, Any], root: str, period: str,
         f'<h2>Usage by {escape(group_by)}</h2>{usage}'
         '<p class="muted">Reasoning is part of output. Counts reflect observed records.</p>'
         + _pricing(report)
+        + (_quota(quota) if quota is not None else "")
         + f'<h2>Source health</h2>{source_health}'
         + issue_list
         + '<p class="muted">Run <code>aut doctor --json</code> for full coverage evidence.</p>'

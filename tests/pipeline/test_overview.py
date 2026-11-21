@@ -80,6 +80,7 @@ def test_overview_distinguishes_priced_and_unpriced_usage(tmp_path):
 
 
 def test_overview_rejects_bad_cli_dates_before_serving(tmp_path, monkeypatch):
+    monkeypatch.setenv("AUT_CONFIG", str(tmp_path / "config.toml"))
     parser = argparse.ArgumentParser()
     overview_cli.register(parser.add_subparsers(required=True))
     args = parser.parse_args(["overview", "--until", "2026-06-16"])

@@ -15,7 +15,8 @@ from .coverage import build_report
 from .improve import report_card
 from .improve.store import Store
 from .label.core import data_dir
-from .summary import GROUPS, Group, build_summary
+from .quota import quota_snapshot
+from .summary import GROUPS, Group, Summary, build_summary
 
 
 def register(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
@@ -37,9 +38,13 @@ def run(cfg: Config, args: argparse.Namespace) -> None:
     token = local_page.new_token()
     root = f"/{token}"
 
+    def render_view(report: Summary, period: str, error: str | None = None) -> bytes:
+        return overview.render(report, health, root, period, has_evidence, error=error,
+                               quota=quota_snapshot())
+
     def on_get(path: str) -> bytes | None:
         if not path:
-            return overview.render(initial, health, root, initial_period, has_evidence)
+            return render_view(initial, initial_period)
         if path == "/improvement" and has_evidence:
             try:
                 evidence = Store(improvement_root, read_only=True)
@@ -65,9 +70,9 @@ def run(cfg: Config, args: argparse.Namespace) -> None:
             else:
                 raise ValueError
         except (AutError, ValueError):
-            return overview.render(initial, health, root, initial_period, has_evidence,
-                                   error="Choose two dates in order for Custom, or select a period.")
-        return overview.render(report, health, root, period, has_evidence)
+            return render_view(initial, initial_period,
+                               "Choose two dates in order for Custom, or select a period.")
+        return render_view(report, period)
 
     def ready(url: str) -> None:
         if args.no_browser:

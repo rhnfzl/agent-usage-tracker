@@ -28,6 +28,8 @@ The overview opens a private loopback page. Choose a date range and group by age
 or project. It shows when usage was last seen and whether scan evidence is fresh. If an
 improvement store exists, the page links to its private report card. Use
 `aut overview --no-browser` to get the local URL and Ctrl-C to close the page.
+Quota appears after a [local capture](quota.md). The overview reads the cache for each page
+request and shows freshness, the reset time and any supported pace estimate.
 
 Use `aut improve inspect --case CASE_ID` to review the private context for a saved case.
 The view links text sizes, exact repeat reads and observed compactions to their frozen events.
