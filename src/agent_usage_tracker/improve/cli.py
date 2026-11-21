@@ -61,12 +61,12 @@ def register(sub: Any) -> None:
     drafting.add_argument("--budget-s", type=float, default=360.)
     drafting.add_argument("--mode", choices=("auto", "failover", "round_robin"), default="auto")
     drafting.add_argument("--order", default="codex,claude,cursor,pi",
-                          help="comma-separated fixed or round-robin order; MLX stays last")
+                          help="comma-separated fixed or round-robin order; local models stay last")
     drafting.add_argument("--excerpts", choices=("none", "all"), default=None,
                           help="send redacted conversation events too (default none)")
     drafting.add_argument("--target", type=Path, help="explicitly offer exactly this file, including code")
     drafting.add_argument("--reconsider", help="full rejected group key to reconsider")
-    drafting.add_argument("--explain-model", help="cached MLX model, always the last fallback")
+    drafting.add_argument("--explain-model", help="cached MLX model for local fallback")
     trial = actions.add_parser("trial", help="preview or execute an operator-supplied trial")
     source = trial.add_mutually_exclusive_group(required=True)
     source.add_argument("--spec")

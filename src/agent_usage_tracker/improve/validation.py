@@ -12,7 +12,7 @@ from typing import Any, Iterable
 
 from ..config import AutError
 from . import rubric
-from .judge import LABELS, policy_evaluation_key
+from .judge import LABELS, aggregate, policy_evaluation_key
 from .proposals import file_digest
 from .store import Store, digest
 from .trial import command
@@ -63,6 +63,42 @@ def _oracle_inputs(spec: dict[str, Any]) -> None:
         path = Path(name)
         if not path.is_absolute() or not path.is_file() or file_digest(path) != expected:
             raise AutError("improve: reference oracle input changed")
+
+
+def _model_scores(store: Store, policy: dict[str, Any], rows: list[dict[str, Any]],
+                  evaluation_keys: list[str]) -> dict[str, Any]:
+    models = list(policy.get("model_identity", {}).values())
+    pinned = {(model["id"], model["revision"]) for model in models}
+    saved = {saved_vote["evaluation_key"]: saved_vote for key in store.keys("votes")
+             if (saved_vote := store.get("votes", key)).get("evaluation_key")} if models else {}
+    thresholds: dict[str, float] = {}
+    for name, snapshot in policy.get("rubrics", {}).items():
+        if models and isinstance(snapshot, str):
+            thresholds[name] = store.get("rubric_snapshots", snapshot)["threshold"]
+    results: dict[str, list[tuple[str, dict[tuple[str, str], str]]]] = {}
+    for row, evaluation in zip(rows, evaluation_keys, strict=True):
+        votes: dict[tuple[str, str], str] = {}
+        if models:
+            for model in models:
+                vote = saved.get(digest({"decision": evaluation, "model": model}))
+                if vote is None:
+                    continue
+                label = aggregate([vote["distribution"]],
+                                  minimum=thresholds.get(row["rubric"], .7))["votes"][0]
+                identity = (model["id"], model["revision"])
+                votes[identity] = label if votes.get(identity, label) == label else "unknown"
+        elif row["judgment_id"] is not None:
+            judgment = store.get("judgments", row["judgment_id"])
+            for key, label in zip(judgment.get("vote_ids", []), judgment.get("votes", []),
+                                  strict=True):
+                vote = store.get("votes", key)
+                identity = (vote["model"], vote["model_rev"])
+                votes[identity] = label if votes.get(identity, label) == label else "unknown"
+        results.setdefault(row["rubric"], []).append((row["expected"], votes))
+    return {rubric_id: [{"model": model, "model_rev": rev,
+            **score((expected, votes.get((model, rev))) for expected, votes in comparisons)}
+            for model, rev in sorted(pinned | {identity for _, votes in comparisons for identity in votes})]
+            for rubric_id, comparisons in results.items()}
 
 
 def validate(store: Store, spec_id: str, diagnosis_id: str, *,
@@ -136,10 +172,12 @@ def validate(store: Store, spec_id: str, diagnosis_id: str, *,
     judgments = {value["evaluation_key"]: (key, value) for key in store.keys("judgments")
                  if (value := store.get("judgments", key))}
     rows = []
+    evaluation_keys = []
     for ref in references:
         key = policy_evaluation_key(policy, cases[ref["evidence_sha256"]], ref["rubric"])
         key = policy.get("evaluation_keys", {}).get(cases[ref["evidence_sha256"]], {}).get(
             ref["rubric"], key)
+        evaluation_keys.append(key)
         if key not in judgments:
             rows.append({**ref, "observed": None, "judgment_id": None})
             continue
@@ -152,6 +190,7 @@ def validate(store: Store, spec_id: str, diagnosis_id: str, *,
     report = {"spec_id": spec_id, "diagnosis_id": diagnosis_id, "oracle_id": oracle_id,
         "input_id": input_id,
         **score((row["expected"], row["observed"]) for row in rows),
+        "model_scores": _model_scores(store, policy, rows, evaluation_keys),
         "split": spec["split"], "cases": rows,
         "scope": "executable references only; not real-work accuracy",
         "human_verified": False, "automation_qualified": False,

@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from ..config import AutError
+from . import studies
 from .store import Store
 from .studies import assess, create, shortlist
 from .study_followup import followup, transfer
@@ -22,6 +23,9 @@ def register(subparsers: Any) -> None:
     action.add_argument("--spec-file", type=Path, required=True)
     action = actions.add_parser("assess", help="report each stored proof stage")
     action.add_argument("--study", required=True)
+    action = actions.add_parser("run", help="verify an isolated proposal using its frozen study")
+    action.add_argument("--study", required=True)
+    action.add_argument("--execute", action="store_true")
     for name in ("followup", "transfer"):
         action = actions.add_parser(name)
         action.add_argument("--study", required=True)
@@ -35,6 +39,8 @@ def run(args: argparse.Namespace, store: Store) -> dict[str, Any]:
         return shortlist(store, args.audit)
     if args.study_cmd == "assess":
         return assess(store, args.study)
+    if args.study_cmd == "run":
+        return studies.run(store, args.study, execute=args.execute)
     try:
         spec = json.loads(args.spec_file.read_text())
     except (OSError, ValueError) as exc:

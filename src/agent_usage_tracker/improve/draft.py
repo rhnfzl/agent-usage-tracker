@@ -276,22 +276,37 @@ def settings() -> dict[str, Any]:
         raise AutError("improve: draft settings must be a table")
     allowlist = value.get("draft_targets", [])
     excerpts = value.get("draft_excerpts", "none")
+    gguf = value.get("draft_gguf")
+    gpu_layers = value.get("draft_gguf_gpu_layers", 0)
+    pi_model = value.get("draft_pi_model")
     if not isinstance(allowlist, list) or len(allowlist) > 32 \
             or any(not isinstance(p, str) for p in allowlist) \
             or not isinstance(excerpts, str) or excerpts not in {"none", "all"}:
         raise AutError("improve: invalid draft_targets or draft_excerpts")
-    return {"allowlist": allowlist, "excerpts": excerpts}
+    if gguf is not None and (not isinstance(gguf, str) or not Path(gguf).expanduser().is_absolute()):
+        raise AutError("improve: draft_gguf must be an absolute local path")
+    if type(gpu_layers) is not int or not 0 <= gpu_layers <= 999:
+        raise AutError("improve: draft_gguf_gpu_layers must be 0..999")
+    if pi_model is not None and (not isinstance(pi_model, str)
+                                 or not re.fullmatch(r"[\w.:-]{1,120}/[\w./:-]{1,120}", pi_model)):
+        raise AutError("improve: draft_pi_model must be provider/model")
+    return {"allowlist": allowlist, "excerpts": excerpts,
+            "gguf_model": Path(gguf).expanduser() if gguf is not None else None,
+            "gguf_gpu_layers": gpu_layers, "pi_model": pi_model}
 
 
 def run(store: Store, *, home: Path | None = None, max_groups: int = 1,
         reconsider: str | None = None, target: Path | None = None, excerpts: str = "none",
         allowlist: list[str] | None = None, mode: str = "auto", order: str = "codex,claude,cursor,pi",
-        budget_usd: float = 1., budget_s: float = 360., explain_model: str | None = None
+        budget_usd: float = 1., budget_s: float = 360., explain_model: str | None = None,
+        gguf_model: Path | None = None, gguf_gpu_layers: int = 0, pi_model: str | None = None,
         ) -> dict[str, Any]:
     if not 1 <= max_groups <= 10 or not math.isfinite(budget_usd) or not 0 < budget_usd <= 100 \
             or not math.isfinite(budget_s) or not 0 < budget_s <= 3600 \
             or excerpts not in {"none", "all"} or mode not in {"auto", "failover", "round_robin"}:
         raise AutError("improve: invalid draft limits or selection mode")
+    if type(gguf_gpu_layers) is not int or not 0 <= gguf_gpu_layers <= 999:
+        raise AutError("improve: draft_gguf_gpu_layers must be 0..999")
     names = order.split(",")
     if not names or len(set(names)) != len(names) or set(names) - set(adapters.NAMES):
         raise AutError("improve: draft order must contain unique drafter names")
@@ -304,7 +319,8 @@ def run(store: Store, *, home: Path | None = None, max_groups: int = 1,
         if not eligible:
             return report
         discovered = adapters.discover(home, explain_model=explain_model,
-                                       timeout=min(15., budget_s))
+                                       gguf_model=gguf_model, gguf_gpu_layers=gguf_gpu_layers,
+                                       pi_model=pi_model, timeout=min(15., budget_s))
         for group in eligible:
             offered = targets(group, store, home=home, target=target, allowlist=allowlist,
                               skipped=report["skipped"])
@@ -331,17 +347,18 @@ def run(store: Store, *, home: Path | None = None, max_groups: int = 1,
                     break
                 adapter = ranked[chosen]
                 remaining = budget_usd - report["known_spend_usd"]
-                if adapter["cli"] != "mlx" and remaining <= 0:
+                local = adapter["cli"] in adapters.LOCAL
+                if not local and remaining <= 0:
                     chosen += 1
                     continue
                 prompt = packet(group, store, offered,
-                                excerpts=excerpts == "all" or adapter["cli"] == "mlx",
+                                excerpts=excerpts == "all" or local,
                                 feedback=feedback)
                 packet_id = store.put("draft_packets", {"prompt": prompt, "cli": adapter["cli"]})
                 row: dict[str, Any] = {"group_key": group["group_key"], "cli": adapter["cli"],
                     "packet_id": packet_id, "attempt": attempt + 1, "cost_usd": None,
                     "selection": selection, "reason": adapter.get("reason")}
-                report["unpriced_calls"] += adapter["cli"] != "mlx"
+                report["unpriced_calls"] += not local
                 try:
                     text, cost = adapters.invoke(adapter, prompt, budget_usd=remaining,
                         timeout=min(180., deadline - time.monotonic()), explain_model=explain_model)
@@ -350,7 +367,7 @@ def run(store: Store, *, home: Path | None = None, max_groups: int = 1,
                         if not math.isfinite(cost) or cost < 0:
                             raise RuntimeError("invalid reported cost")
                         report["known_spend_usd"] += cost
-                        report["unpriced_calls"] -= adapter["cli"] != "mlx"
+                        report["unpriced_calls"] -= not local
                 except (RuntimeError, OSError, ValueError, AutError, subprocess.SubprocessError):
                     row["status"] = "error"
                     chosen += 1
