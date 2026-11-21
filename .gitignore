@@ -22,3 +22,6 @@ state.json
 
 # desloppify local state
 .desloppify/
+
+# the sink stack's secrets, beside compose.yaml
+src/agent_usage_tracker/sink_stack/.env

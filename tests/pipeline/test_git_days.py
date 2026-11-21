@@ -36,6 +36,12 @@ ME, ALIAS, SHARED, BOT = "me@example.com", "Me@Example.org", "shared@example.inv
     "claude[bot]@users.noreply.github.com"
 
 
+@pytest.fixture(autouse=True)
+def _sink_zone_matches(monkeypatch):
+    # the zone check reads a real sink; tests/pipeline/test_sink_sql.py covers it
+    monkeypatch.setattr(git_days, "check_ledger_zone", lambda dsn, zone: None)
+
+
 def _cfg(tmp: Path, **kw) -> Config:
     base = dict(machine="t", agents=(), webhook_url=None, webhook_secret=None,
                 pg_dsn="postgresql://x", home=tmp, git_days_enabled=True,

@@ -42,7 +42,7 @@
   aut label choose --task T [--model M] | train-encoder --task T
                         the table, or M's saved result -> label.json; the encoder
   aut git-days [--dry-run] [--allow-lower]
-                        your commits per Amsterdam day from every clone, counts only
+                        your commits per ledger day from every clone, counts only
                         -> agents.git_commit_day ([git_days]; `aut scan` runs it daily if enabled)
   aut backup [--check]  encrypted restic backup of the logs, salt and label files ([backup] in
                         config.toml); --check verifies the repository and sends nothing

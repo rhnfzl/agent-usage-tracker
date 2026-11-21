@@ -1,4 +1,4 @@
-"""`aut git-days`: the owner's commits per Amsterdam day, from every clone, to agents.git_commit_day.
+"""`aut git-days`: the owner's commits per ledger day (ledger_timezone), from every clone, to agents.git_commit_day.
 
 Reads branches, remotes, tags and all registered worktree heads (no merges, stash or notes),
 including detached heads outside scan roots, in each object store under [git_days] roots and,
@@ -35,12 +35,11 @@ from .config import AutError, Config
 from .git_safe import HARDENED_ENV, git_argv
 from .git_day_cache import Snapshot, Status, load_cache, merge_sources
 from .push import JobBeat, job_heartbeat, redacted_error
-from .sink import connect, write_many
+from .sink import check_ledger_zone, connect, write_many
 from .repo_keys import RepoKeys, require_readable_salt
 from .state import _locked, atomic_write_text, collector_wm, load_state, save_state, state_path
 
 NAME = "git_days"                   # its aut state entry and heartbeat collector
-LEDGER_TZ = "Europe/Amsterdam"      # the ledger's day, as in the sink's views
 LOG_ARGS = ("log", "--branches", "--remotes", "--tags", "--no-merges", "--format=%H%x09%aI%x09%ae")
 _PRUNE = ("node_modules", ".venv", "venv", "vendor", "__pycache__")
 _MAX_DEPTH = 6                      # folders below a root; its .git sits one deeper
@@ -328,11 +327,14 @@ def load_stored(dsn: str) -> dict[date, tuple[int, bool]]:
                 conn.execute("SELECT day, commits, complete FROM agents.git_commits_daily").fetchall()}
 
 
-def _ledger_zone() -> tzinfo:
+def _ledger_zone(cfg: Config) -> tzinfo:
+    """The ledger's day, as in the sink's views."""
     try:
-        return ZoneInfo(LEDGER_TZ)
-    except ZoneInfoNotFoundError:
-        raise AutError("git-days needs the time zone database here: pip install tzdata") from None
+        return ZoneInfo(cfg.ledger_timezone)
+    except (ZoneInfoNotFoundError, ValueError):
+        raise AutError(f"git-days: ledger_timezone {cfg.ledger_timezone!r} is unknown here: check "
+                       "the name, or install the time zone database (the system tzdata package, "
+                       "or pip install tzdata)") from None
 
 
 def run(cfg: Config, *, dry_run: bool, allow_lower: bool = False, now: datetime | None = None,
@@ -344,7 +346,9 @@ def run(cfg: Config, *, dry_run: bool, allow_lower: bool = False, now: datetime 
         if not cfg.git_days_identities:
             raise AutError("git-days needs [git_days] identities in config.toml")
         dsn = None if dry_run else cfg.require_pg("git-days")
-        tz = tz or _ledger_zone()
+        if dsn:
+            check_ledger_zone(dsn, cfg.ledger_timezone)
+        tz = tz or _ledger_zone(cfg)
         deferred = local_only or (defer_remotes_until is not None
                                   and now.astimezone(tz).date() < defer_remotes_until)
         cache_path = state_path().with_name('git-days-sources.json')
@@ -477,7 +481,7 @@ def run_if_due(cfg: Config, now: datetime | None = None, *,
         state = load_state()
         wm = collector_wm(state, NAME)
         deferred = (defer_remotes_until is not None
-                    and now.astimezone(_ledger_zone()).date() < defer_remotes_until)
+                    and now.astimezone(_ledger_zone(cfg)).date() < defer_remotes_until)
         new_remote_reader = (wm.get("partial_pending") is True and bool(cfg.git_days_remotes)
                              and not deferred
                              and wm.get("remote_scan_version") != _REMOTE_SCAN_VERSION)

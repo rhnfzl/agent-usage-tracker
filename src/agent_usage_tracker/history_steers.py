@@ -22,7 +22,7 @@ from .collectors.codex import is_scheduled_automation
 from .config import Config
 from .event import ActivityEvent, make_event_id
 from .push import send_activity_rows
-from .sink import connect
+from .sink import check_ledger_zone, connect
 
 # agent -> (file under home, text key, time key, time units per second, first day, last day)
 SOURCES = {"claude_code": (".claude/history.jsonl", "display", "timestamp", 1000,
@@ -56,11 +56,11 @@ def daily_counts(path: Path, text_key: str, time_key: str, per_second: int, firs
     return days
 
 
-def counted_days(dsn: str) -> set[tuple[str, date]]:
-    """(agent, local day) pairs that already have counted steers."""
+def counted_days(dsn: str, zone: str) -> set[tuple[str, date]]:
+    """(agent, ledger day) pairs that already have counted steers."""
     with connect(dsn) as conn:
-        rows = conn.execute("SELECT DISTINCT agent, (ts AT TIME ZONE 'Europe/Amsterdam')::date "
-                            "FROM agents.activity_event WHERE kind = 'steer'").fetchall()
+        rows = conn.execute("SELECT DISTINCT agent, (ts AT TIME ZONE %s)::date "
+                            "FROM agents.activity_event WHERE kind = 'steer'", (zone,)).fetchall()
     return {(a, d) for a, d in rows}
 
 
@@ -81,7 +81,8 @@ def estimates(cfg: Config, counted: set[tuple[str, date]]) -> list[ActivityEvent
 
 def run(cfg: Config, dry_run: bool) -> Counter[str]:
     dsn = cfg.require_pg("history-steers")
-    rows = estimates(cfg, counted_days(dsn))
+    check_ledger_zone(dsn, cfg.ledger_timezone)
+    rows = estimates(cfg, counted_days(dsn, cfg.ledger_timezone))
     if not dry_run:
         send_activity_rows(dsn, rows)
     return Counter({a: sum(r.attrs["count"] for r in rows if r.agent == a) for a in SOURCES})

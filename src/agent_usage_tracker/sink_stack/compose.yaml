@@ -1,0 +1,94 @@
+# The aut sink: TimescaleDB with the aut schema, an hourly refresh of the derived views, and
+# Grafana with the dashboards. Same file on a laptop or a homelab; see README.md beside it.
+name: aut-sink
+
+x-pg-admin: &pg-admin
+  PGHOST: db
+  PGUSER: postgres
+  PGDATABASE: agents
+  PGPASSWORD: ${AUT_PG_ADMIN_PASSWORD:?set AUT_PG_ADMIN_PASSWORD in .env}
+
+services:
+  db:
+    image: timescale/timescaledb:2.32.1-pg17
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: agents
+      POSTGRES_PASSWORD: ${AUT_PG_ADMIN_PASSWORD:?set AUT_PG_ADMIN_PASSWORD in .env}
+      TIMESCALEDB_TELEMETRY: "off"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "${AUT_BIND:-127.0.0.1}:${AUT_PG_PORT:-5432}:5432"
+    healthcheck:
+      # Over TCP: during first-start setup the server listens on its socket only, and the
+      # schema service connects over TCP.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U postgres -d agents"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+
+  # Runs once per `up`, then exits. The other services wait for it to succeed.
+  schema:
+    image: timescale/timescaledb:2.32.1-pg17
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      <<: *pg-admin
+      AUT_TZ: ${AUT_TZ:?set AUT_TZ in .env}
+      AUT_WRITER_PASSWORD: ${AUT_WRITER_PASSWORD:?set AUT_WRITER_PASSWORD in .env}
+      AUT_RO_PASSWORD: ${AUT_RO_PASSWORD:?set AUT_RO_PASSWORD in .env}
+    volumes:
+      - ./apply.sh:/stack/apply.sh:ro
+      - ./sql:/stack/sql:ro
+    entrypoint: ["sh", "/stack/apply.sh"]
+    restart: "no"
+
+  refresh:
+    image: timescale/timescaledb:2.32.1-pg17
+    restart: unless-stopped
+    depends_on:
+      schema:
+        condition: service_completed_successfully
+    environment:
+      <<: *pg-admin
+      AUT_REFRESH_SECONDS: ${AUT_REFRESH_SECONDS:-3600}
+    volumes:
+      - ./sql:/stack/sql:ro
+    entrypoint:
+      - sh
+      - -c
+      - |
+        while :; do
+          if psql -X -q -f /stack/sql/refresh.sql; then
+            sleep "$${AUT_REFRESH_SECONDS}" || sleep 3600
+          else
+            echo "refresh: failed, retrying in a minute" >&2
+            sleep 60
+          fi
+        done
+
+  grafana:
+    image: grafana/grafana:12.4.11
+    restart: unless-stopped
+    depends_on:
+      schema:
+        condition: service_completed_successfully
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${AUT_GRAFANA_ADMIN_PASSWORD:?set AUT_GRAFANA_ADMIN_PASSWORD in .env}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      AUT_RO_PASSWORD: ${AUT_RO_PASSWORD:?set AUT_RO_PASSWORD in .env}
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/etc/aut-dashboards:ro
+      - grafana:/var/lib/grafana
+    ports:
+      - "${AUT_BIND:-127.0.0.1}:${AUT_GRAFANA_PORT:-3000}:3000"
+
+volumes:
+  pgdata:
+  grafana:

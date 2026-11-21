@@ -1,0 +1,1279 @@
+{
+  "uid": "agents-usage",
+  "title": "Coding Agent Token Usage",
+  "tags": [
+    "agents",
+    "tokens",
+    "llm"
+  ],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 2,
+  "editable": true,
+  "graphTooltip": 1,
+  "refresh": "",
+  "time": {
+    "from": "now-90d",
+    "to": "now"
+  },
+  "timepicker": {
+    "refresh_intervals": [
+      "1h",
+      "6h",
+      "12h",
+      "24h"
+    ],
+    "quick_ranges": [
+      {
+        "display": "Last 24 hours",
+        "from": "now-24h",
+        "to": "now"
+      },
+      {
+        "display": "Last 7 days",
+        "from": "now-7d",
+        "to": "now"
+      },
+      {
+        "display": "Last 30 days",
+        "from": "now-30d",
+        "to": "now"
+      },
+      {
+        "display": "Last 90 days",
+        "from": "now-90d",
+        "to": "now"
+      },
+      {
+        "display": "Last 6 months",
+        "from": "now-6M",
+        "to": "now"
+      },
+      {
+        "display": "Last 1 year",
+        "from": "now-1y",
+        "to": "now"
+      },
+      {
+        "display": "This year",
+        "from": "now/y",
+        "to": "now/y"
+      }
+    ]
+  },
+  "templating": {
+    "list": [
+      {
+        "name": "machine",
+        "type": "query",
+        "datasource": {
+          "type": "grafana-postgresql-datasource",
+          "uid": "agents-timescaledb"
+        },
+        "label": "Machine",
+        "multi": true,
+        "includeAll": true,
+        "current": {
+          "text": "All",
+          "value": [
+            "$__all"
+          ]
+        },
+        "refresh": 2,
+        "sort": 1,
+        "query": "SELECT DISTINCT machine AS __text, machine AS __value FROM agents.usage_daily WHERE machine IS NOT NULL ORDER BY 1",
+        "options": [],
+        "definition": "SELECT DISTINCT machine AS __text, machine AS __value FROM agents.usage_daily WHERE machine IS NOT NULL ORDER BY 1"
+      },
+      {
+        "name": "agent",
+        "type": "query",
+        "datasource": {
+          "type": "grafana-postgresql-datasource",
+          "uid": "agents-timescaledb"
+        },
+        "label": "Agent",
+        "multi": true,
+        "includeAll": true,
+        "current": {
+          "text": "All",
+          "value": [
+            "$__all"
+          ]
+        },
+        "refresh": 2,
+        "sort": 1,
+        "query": "SELECT DISTINCT agent AS __text, agent AS __value FROM agents.usage_daily WHERE agent IS NOT NULL ORDER BY 1",
+        "options": [],
+        "definition": "SELECT DISTINCT agent AS __text, agent AS __value FROM agents.usage_daily WHERE agent IS NOT NULL ORDER BY 1"
+      },
+      {
+        "name": "model",
+        "type": "query",
+        "datasource": {
+          "type": "grafana-postgresql-datasource",
+          "uid": "agents-timescaledb"
+        },
+        "label": "Model",
+        "multi": true,
+        "includeAll": true,
+        "current": {
+          "text": "All",
+          "value": [
+            "$__all"
+          ]
+        },
+        "refresh": 2,
+        "sort": 1,
+        "query": "SELECT DISTINCT coalesce(model,'unknown') AS __text, coalesce(model,'unknown') AS __value FROM agents.usage_daily ORDER BY 1",
+        "options": [],
+        "definition": "SELECT DISTINCT coalesce(model,'unknown') AS __text, coalesce(model,'unknown') AS __value FROM agents.usage_daily ORDER BY 1"
+      }
+    ]
+  },
+  "annotations": {
+    "list": []
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Overview",
+      "type": "row",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "panels": []
+    },
+    {
+      "id": 2,
+      "title": "Total tokens",
+      "type": "stat",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "agents-timescaledb"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 4,
+        "x": 0,
+        "y": 1
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "agents-timescaledb"
+          },
+          "format": "table",
+          "rawSql": "SELECT sum(total_tokens) AS v FROM agents.usage_event WHERE $__timeFilter(ts) AND machine = ANY(ARRAY[${machine:sqlstring}]::text[])\nAND agent = ANY(ARRAY[${agent:sqlstring}]::text[])\nAND coalesce(model,'unknown') = ANY(ARRAY[${model:sqlstring}]::text[]);",
+          "editorMode": "code"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#5794F2"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "value",
+        "justifyMode": "center"
+      },
+      "description": "Total tokens in the selected period. Respects $machine/$agent/$model."
+    },
+    {
+      "id": 3,
+      "title": "Output tokens",
+      "type": "stat",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "agents-timescaledb"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 4,
+        "x": 4,
+        "y": 1
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "agents-timescaledb"
+          },
+          "format": "table",
+          "rawSql": "SELECT sum(output_tokens) AS v FROM agents.usage_event WHERE $__timeFilter(ts) AND machine = ANY(ARRAY[${machine:sqlstring}]::text[])\nAND agent = ANY(ARRAY[${agent:sqlstring}]::text[])\nAND coalesce(model,'unknown') = ANY(ARRAY[${model:sqlstring}]::text[]);",
+          "editorMode": "code"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#B877D9"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "value",
+        "justifyMode": "center"
+      },
+      "description": "Generated output tokens (the part you 'write')."
+    },
+    {
+      "id": 4,
+      "title": "Agent turns",
+      "type": "stat",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "agents-timescaledb"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 4,
+        "x": 8,
+        "y": 1
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "agents-timescaledb"
+          },
+          "format": "table",
+          "rawSql": "SELECT count(*) FILTER (WHERE kind = 'agent') AS v FROM agents.usage_event WHERE $__timeFilter(ts) AND machine = ANY(ARRAY[${machine:sqlstring}]::text[])\nAND agent = ANY(ARRAY[${agent:sqlstring}]::text[])\nAND coalesce(model,'unknown') = ANY(ARRAY[${model:sqlstring}]::text[]);",
+          "editorMode": "code"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#73BF69"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "value",
+        "justifyMode": "center"
+      },
+      "description": "How many times the agent replied (assistant turns)."
+    },
+    {
+      "id": 5,
+      "title": "Human turns",
+      "type": "stat",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "agents-timescaledb"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 4,
+        "x": 12,
+        "y": 1
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "agents-timescaledb"
+          },
+          "format": "table",
+          "rawSql": "SELECT count(*) FILTER (WHERE kind = 'human') AS v FROM agents.usage_event WHERE $__timeFilter(ts) AND machine = ANY(ARRAY[${machine:sqlstring}]::text[])\nAND agent = ANY(ARRAY[${agent:sqlstring}]::text[]);",
+          "editorMode": "code"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#E0B400"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "value",
+        "justifyMode": "center"
+      },
+      "description": "How many prompts YOU sent interactively. Collectors already leave out subagents, `codex exec` and scheduled automation."
+    },
+    {
+      "id": 6,
+      "title": "Active days",
+      "type": "stat",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "agents-timescaledb"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 4,
+        "x": 16,
+        "y": 1
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "agents-timescaledb"
+          },
+          "format": "table",
+          "rawSql": "SELECT count(DISTINCT time_bucket('1 day', ts, current_setting('TimeZone'))) AS v FROM agents.usage_event WHERE $__timeFilter(ts) AND machine = ANY(ARRAY[${machine:sqlstring}]::text[])\nAND agent = ANY(ARRAY[${agent:sqlstring}]::text[])\nAND coalesce(model,'unknown') = ANY(ARRAY[${model:sqlstring}]::text[]);",
+          "editorMode": "code"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#37A2A2"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "value",
+        "justifyMode": "center"
+      }
+    },
+    {
+      "id": 7,
+      "title": "Cache-read share",
+      "type": "gauge",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "agents-timescaledb"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 4,
+        "x": 20,
+        "y": 1
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "agents-timescaledb"
+          },
+          "format": "table",
+          "rawSql": "SELECT 100.0 * sum(cache_read_tokens) / nullif(sum(cache_read_tokens + input_tokens), 0) AS \"Cache-read share\"\nFROM agents.usage_event WHERE $__timeFilter(ts) AND machine = ANY(ARRAY[${machine:sqlstring}]::text[])\nAND agent = ANY(ARRAY[${agent:sqlstring}]::text[])\nAND coalesce(model,'unknown') = ANY(ARRAY[${model:sqlstring}]::text[]);",
+          "editorMode": "code"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 50
+              },
+              {
+                "color": "green",
+                "value": 80
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showThresholdLabels": false
+      },
+      "description": "Share of prompt tokens served from cache. Here the color IS meaningful (a low share is genuinely worse), so the ratio keeps its red/yellow/green scale."
+    },
+    {
+      "id": 8,
+      "title": "Trends",
+      "type": "row",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 6
+      },
+      "panels": []
+    },
+    {
+      "id": 9,
+      "title": "Tokens/day by agent",
+      "type": "timeseries",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "agents-timescaledb"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 7
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "agents-timescaledb"
+          },
+          "format": "time_series",
+          "rawSql": "SELECT time_bucket('1 day', ts, current_setting('TimeZone')) AS time, agent AS metric, sum(total_tokens) AS tokens\nFROM agents.usage_event WHERE $__timeFilter(ts) AND machine = ANY(ARRAY[${machine:sqlstring}]::text[])\nAND agent = ANY(ARRAY[${agent:sqlstring}]::text[])\nAND coalesce(model,'unknown') = ANY(ARRAY[${model:sqlstring}]::text[])\nGROUP BY 1, agent ORDER BY time ASC, metric ASC;",
+          "editorMode": "code"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 25,
+            "stacking": {
+              "mode": "normal"
+            },
+            "lineWidth": 1,
+            "lineInterpolation": "smooth",
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "id": 10,
+      "title": "Tokens/day by model",
+      "type": "timeseries",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "agents-timescaledb"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 7
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "agents-timescaledb"
+          },
+          "format": "time_series",
+          "rawSql": "SELECT time_bucket('1 day', ts, current_setting('TimeZone')) AS time, coalesce(model,'unknown') AS metric, sum(total_tokens) AS tokens\nFROM agents.usage_event WHERE $__timeFilter(ts) AND machine = ANY(ARRAY[${machine:sqlstring}]::text[])\nAND agent = ANY(ARRAY[${agent:sqlstring}]::text[])\nAND coalesce(model,'unknown') = ANY(ARRAY[${model:sqlstring}]::text[])\nGROUP BY 1, coalesce(model,'unknown') ORDER BY time ASC, metric ASC;",
+          "editorMode": "code"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 25,
+            "stacking": {
+              "mode": "normal"
+            },
+            "lineWidth": 1,
+            "lineInterpolation": "smooth",
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "id": 11,
+      "title": "Token-type split /day (raw)",
+      "type": "timeseries",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "agents-timescaledb"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 15
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "agents-timescaledb"
+          },
+          "format": "time_series",
+          "rawSql": "SELECT time_bucket('1 day', ts, current_setting('TimeZone')) AS time, t.kind AS metric, sum(t.val) AS tokens\nFROM agents.usage_event e\nCROSS JOIN LATERAL (VALUES\n  ('input', e.input_tokens), ('output_excl_reasoning', e.output_tokens - coalesce(e.reasoning_tokens, 0)),\n  ('cache_read', e.cache_read_tokens), ('cache_write', e.cache_write_tokens),\n  ('reasoning', coalesce(e.reasoning_tokens, 0))) AS t(kind, val)\nWHERE $__timeFilter(ts) AND machine = ANY(ARRAY[${machine:sqlstring}]::text[])\nAND agent = ANY(ARRAY[${agent:sqlstring}]::text[])\nAND coalesce(model,'unknown') = ANY(ARRAY[${model:sqlstring}]::text[])\nGROUP BY 1, t.kind ORDER BY time ASC, metric ASC;",
+          "editorMode": "code"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 25,
+            "stacking": {
+              "mode": "normal"
+            },
+            "lineWidth": 1,
+            "lineInterpolation": "smooth",
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {},
+      "description": "Raw usage_event. Reasoning is a subset of output, so output is shown excluding reasoning and the stacked slices sum to the true total. Follows the time picker (raw rows are kept for good)."
+    },
+    {
+      "id": 12,
+      "title": "Turns/day by agent",
+      "type": "timeseries",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "agents-timescaledb"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 15
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "agents-timescaledb"
+          },
+          "format": "time_series",
+          "rawSql": "SELECT time_bucket('1 day', ts, current_setting('TimeZone')) AS time, agent AS metric, count(*) AS turns\nFROM agents.usage_event WHERE $__timeFilter(ts) AND kind = 'agent' AND machine = ANY(ARRAY[${machine:sqlstring}]::text[])\nAND agent = ANY(ARRAY[${agent:sqlstring}]::text[])\nAND coalesce(model,'unknown') = ANY(ARRAY[${model:sqlstring}]::text[])\nGROUP BY 1, agent ORDER BY time ASC, metric ASC;",
+          "editorMode": "code"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "stacking": {
+              "mode": "none"
+            },
+            "lineWidth": 2,
+            "lineInterpolation": "smooth",
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {},
+      "description": "Assistant turns (activity volume) per tool."
+    },
+    {
+      "id": 13,
+      "title": "Breakdowns",
+      "type": "row",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 23
+      },
+      "panels": []
+    },
+    {
+      "id": 14,
+      "title": "Top-10 models",
+      "type": "bargauge",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "agents-timescaledb"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 24
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "agents-timescaledb"
+          },
+          "format": "table",
+          "rawSql": "SELECT coalesce(model,'unknown') AS metric, sum(total_tokens) AS tokens\nFROM agents.usage_event WHERE $__timeFilter(ts) AND machine = ANY(ARRAY[${machine:sqlstring}]::text[])\nAND agent = ANY(ARRAY[${agent:sqlstring}]::text[])\nAND coalesce(model,'unknown') = ANY(ARRAY[${model:sqlstring}]::text[])\nGROUP BY 1 ORDER BY tokens DESC LIMIT 10;",
+          "editorMode": "code"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": true
+        },
+        "displayMode": "gradient",
+        "orientation": "horizontal"
+      }
+    },
+    {
+      "id": 15,
+      "title": "Lifetime tokens by machine",
+      "type": "table",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "agents-timescaledb"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 24
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "agents-timescaledb"
+          },
+          "format": "table",
+          "rawSql": "SELECT machine AS \"Machine\", sum(total_tokens) AS \"Tokens\", sum(turns) AS \"Turns\",\n       round(100.0 * sum(cache_read_tokens) / nullif(sum(cache_read_tokens + input_tokens), 0), 1) AS \"Cache %\",\n       round(100.0 * sum(total_tokens) / sum(sum(total_tokens)) OVER (), 1) AS \"Share %\"\nFROM agents.usage_daily WHERE kind = 'agent' AND machine = ANY(ARRAY[${machine:sqlstring}]::text[])\nAND agent = ANY(ARRAY[${agent:sqlstring}]::text[])\nAND coalesce(model,'unknown') = ANY(ARRAY[${model:sqlstring}]::text[]) GROUP BY machine ORDER BY \"Tokens\" DESC;",
+          "editorMode": "code"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {},
+      "description": "Lifetime (ignores time picker); respects $machine/$agent/$model."
+    },
+    {
+      "id": 16,
+      "title": "Lifetime tokens by agent + model",
+      "type": "table",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "agents-timescaledb"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 24
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "agents-timescaledb"
+          },
+          "format": "table",
+          "rawSql": "SELECT agent AS \"Agent\", coalesce(model,'unknown') AS \"Model\", sum(total_tokens) AS \"Tokens\",\n       sum(turns) AS \"Turns\",\n       round(100.0 * sum(cache_read_tokens) / nullif(sum(cache_read_tokens + input_tokens), 0), 1) AS \"Cache %\"\nFROM agents.usage_daily WHERE kind = 'agent' AND machine = ANY(ARRAY[${machine:sqlstring}]::text[])\nAND agent = ANY(ARRAY[${agent:sqlstring}]::text[])\nAND coalesce(model,'unknown') = ANY(ARRAY[${model:sqlstring}]::text[]) GROUP BY 1, 2 ORDER BY \"Tokens\" DESC;",
+          "editorMode": "code"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {},
+      "description": "Lifetime (ignores time picker); respects filters."
+    },
+    {
+      "id": 17,
+      "title": "Cadence (raw usage_event)",
+      "type": "row",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 32
+      },
+      "panels": []
+    },
+    {
+      "id": 18,
+      "title": "Agent activity (weekday x hour)",
+      "type": "heatmap",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "agents-timescaledb"
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 0,
+        "y": 33
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "agents-timescaledb"
+          },
+          "format": "table",
+          "rawSql": "WITH e AS (\n  SELECT extract(hour FROM ts)::int AS hour, extract(isodow FROM ts)::int AS dow, total_tokens AS tokens\n  FROM agents.usage_event WHERE $__timeFilter(ts) AND kind = 'agent' AND machine = ANY(ARRAY[${machine:sqlstring}]::text[])\nAND agent = ANY(ARRAY[${agent:sqlstring}]::text[])\nAND coalesce(model,'unknown') = ANY(ARRAY[${model:sqlstring}]::text[]))\nSELECT g.hour AS \"Hour\",\n  coalesce(sum(tokens) FILTER (WHERE dow=1),0) AS \"Mon\",\n  coalesce(sum(tokens) FILTER (WHERE dow=2),0) AS \"Tue\",\n  coalesce(sum(tokens) FILTER (WHERE dow=3),0) AS \"Wed\",\n  coalesce(sum(tokens) FILTER (WHERE dow=4),0) AS \"Thu\",\n  coalesce(sum(tokens) FILTER (WHERE dow=5),0) AS \"Fri\",\n  coalesce(sum(tokens) FILTER (WHERE dow=6),0) AS \"Sat\",\n  coalesce(sum(tokens) FILTER (WHERE dow=7),0) AS \"Sun\"\nFROM generate_series(0,23) AS g(hour) LEFT JOIN e ON e.hour = g.hour\nGROUP BY g.hour ORDER BY g.hour;",
+          "editorMode": "code"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {
+        "calculate": false,
+        "cellGap": 2,
+        "rowsFrame": {
+          "layout": "auto"
+        },
+        "yAxis": {
+          "axisLabel": "Weekday"
+        },
+        "color": {
+          "mode": "scheme",
+          "scheme": "Greens",
+          "steps": 64,
+          "reverse": true,
+          "scale": "exponential",
+          "exponent": 0.4
+        }
+      },
+      "description": "Agent token volume by hour-of-day (x) and weekday (y). Darker = more (exponential colour scale - the data is very skewed, so a linear scale would look near-binary). Typical-week rhythm: the whole range is folded into a fixed 7x24 grid, so the axes stay put - only intensities move. Raw usage_event; follows the picker."
+    },
+    {
+      "id": 19,
+      "title": "When I prompt (weekday x hour)",
+      "type": "heatmap",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "agents-timescaledb"
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 12,
+        "y": 33
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "agents-timescaledb"
+          },
+          "format": "table",
+          "rawSql": "WITH e AS (\n  SELECT extract(hour FROM ts)::int AS hour, extract(isodow FROM ts)::int AS dow\n  FROM agents.usage_event WHERE $__timeFilter(ts) AND kind = 'human' AND machine = ANY(ARRAY[${machine:sqlstring}]::text[])\nAND agent = ANY(ARRAY[${agent:sqlstring}]::text[]))\nSELECT g.hour AS \"Hour\",\n  coalesce(count(e.hour) FILTER (WHERE dow=1),0) AS \"Mon\",\n  coalesce(count(e.hour) FILTER (WHERE dow=2),0) AS \"Tue\",\n  coalesce(count(e.hour) FILTER (WHERE dow=3),0) AS \"Wed\",\n  coalesce(count(e.hour) FILTER (WHERE dow=4),0) AS \"Thu\",\n  coalesce(count(e.hour) FILTER (WHERE dow=5),0) AS \"Fri\",\n  coalesce(count(e.hour) FILTER (WHERE dow=6),0) AS \"Sat\",\n  coalesce(count(e.hour) FILTER (WHERE dow=7),0) AS \"Sun\"\nFROM generate_series(0,23) AS g(hour) LEFT JOIN e ON e.hour = g.hour\nGROUP BY g.hour ORDER BY g.hour;",
+          "editorMode": "code"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {
+        "calculate": false,
+        "cellGap": 2,
+        "rowsFrame": {
+          "layout": "auto"
+        },
+        "yAxis": {
+          "axisLabel": "Weekday"
+        },
+        "color": {
+          "mode": "scheme",
+          "scheme": "Blues",
+          "steps": 64,
+          "reverse": true,
+          "scale": "exponential",
+          "exponent": 0.4
+        }
+      },
+      "description": "Your INTERACTIVE prompts by hour-of-day (x) and weekday (y). Darker = more. Hours and days are in the sink time zone (AUT_TZ). Tooltip: top number = hour, Value = prompt count, Name = weekday."
+    },
+    {
+      "id": 20,
+      "title": "Projects (raw usage_event)",
+      "type": "row",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 42
+      },
+      "panels": []
+    },
+    {
+      "id": 21,
+      "title": "Top projects",
+      "type": "table",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "agents-timescaledb"
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 24,
+        "x": 0,
+        "y": 43
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "agents-timescaledb"
+          },
+          "format": "table",
+          "rawSql": "WITH n AS (\n  SELECT nullif(regexp_replace(coalesce(project,'(none)'), '^-+|-+$', '', 'g'), '') AS proj,\n         agent, total_tokens, cache_read_tokens, input_tokens, ts\n  FROM agents.usage_event WHERE $__timeFilter(ts) AND kind = 'agent' AND machine = ANY(ARRAY[${machine:sqlstring}]::text[])\nAND agent = ANY(ARRAY[${agent:sqlstring}]::text[])\nAND coalesce(model,'unknown') = ANY(ARRAY[${model:sqlstring}]::text[]))\nSELECT coalesce(proj,'(none)') AS \"Project\",\n       string_agg(DISTINCT agent, ', ' ORDER BY agent) AS \"Agents\",\n       sum(total_tokens) AS \"Tokens\",\n       count(*) AS \"Turns\",\n       round(100.0 * sum(cache_read_tokens) / nullif(sum(cache_read_tokens + input_tokens), 0), 1) AS \"Cache %\",\n       max(ts)::date AS \"Last active\"\nFROM n GROUP BY 1 ORDER BY \"Tokens\" DESC LIMIT 20;",
+          "editorMode": "code"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {},
+      "description": "Raw usage_event, follows the time picker. 'Agents' = which tools worked this project."
+    },
+    {
+      "id": 22,
+      "title": "Retention & accuracy note",
+      "type": "text",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "agents-timescaledb"
+      },
+      "gridPos": {
+        "h": 3,
+        "w": 24,
+        "x": 0,
+        "y": 76
+      },
+      "targets": [],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {
+        "mode": "markdown",
+        "content": "**Range-following** panels (KPIs, tokens/turns by agent/model, Top-10 models, Token-type split, Weekday x hour, Top projects) read raw `usage_event` (kept for good) so any window - including 'Last 24 hours' - is exact and always current. The **Lifetime** tables read the `usage_daily` rollup (all-time, ignores the picker). **$ (API-equivalent)** is shown in the **Cost** section above, priced from `agents.model_price` (rates from a price sync job; aut does not fill this table yet) - notional, since subscriptions are flat-rate; models absent from the price table drop out, never guessed. `cursor` (IDE) has no per-message model (`unknown`) and no cache attribution -- a lower bound; the accurate Cursor path is its usage API (opt-in)."
+      }
+    },
+    {
+      "id": 23,
+      "type": "row",
+      "title": "💲 Cost (API-equivalent $)",
+      "collapsed": false,
+      "panels": [],
+      "gridPos": {
+        "x": 0,
+        "y": 53,
+        "w": 24,
+        "h": 1
+      }
+    },
+    {
+      "id": 24,
+      "type": "stat",
+      "title": "Total API-equivalent $",
+      "description": "Sum over the selected range. Notional / API-equivalent.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "agents-timescaledb"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 54,
+        "w": 8,
+        "h": 5
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "agents-timescaledb"
+          },
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT sum((u.input_tokens*p.input_cost + u.output_tokens*p.output_cost + u.cache_read_tokens*coalesce(p.cache_read_cost,p.input_cost) + u.cache_write_tokens*coalesce(p.cache_write_cost,p.input_cost))) AS \"$\" FROM agents.usage_event u JOIN agents.model_price p ON lower(u.model)=p.model_key WHERE u.kind='agent' AND $__timeFilter(ts) AND u.machine = ANY(ARRAY[${machine:sqlstring}]::text[]) AND u.agent = ANY(ARRAY[${agent:sqlstring}]::text[]) AND coalesce(u.model,'unknown') = ANY(ARRAY[${model:sqlstring}]::text[])"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "value"
+      }
+    },
+    {
+      "id": 25,
+      "type": "stat",
+      "title": "Caching saved (x)",
+      "description": "Naive cost (cache reads at full input rate) / actual cost.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "agents-timescaledb"
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 54,
+        "w": 8,
+        "h": 5
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "agents-timescaledb"
+          },
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT sum((u.input_tokens*p.input_cost + u.output_tokens*p.output_cost + u.cache_read_tokens*p.input_cost + u.cache_write_tokens*coalesce(p.cache_write_cost,p.input_cost)))/nullif(sum((u.input_tokens*p.input_cost + u.output_tokens*p.output_cost + u.cache_read_tokens*coalesce(p.cache_read_cost,p.input_cost) + u.cache_write_tokens*coalesce(p.cache_write_cost,p.input_cost))),0) AS \"saved (x)\" FROM agents.usage_event u JOIN agents.model_price p ON lower(u.model)=p.model_key WHERE u.kind='agent' AND $__timeFilter(ts) AND u.machine = ANY(ARRAY[${machine:sqlstring}]::text[]) AND u.agent = ANY(ARRAY[${agent:sqlstring}]::text[]) AND coalesce(u.model,'unknown') = ANY(ARRAY[${model:sqlstring}]::text[])"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "decimals": 2
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "value"
+      }
+    },
+    {
+      "id": 26,
+      "type": "stat",
+      "title": "$ per active day",
+      "description": "Cost / distinct active days.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "agents-timescaledb"
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 54,
+        "w": 8,
+        "h": 5
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "agents-timescaledb"
+          },
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT sum((u.input_tokens*p.input_cost + u.output_tokens*p.output_cost + u.cache_read_tokens*coalesce(p.cache_read_cost,p.input_cost) + u.cache_write_tokens*coalesce(p.cache_write_cost,p.input_cost)))/nullif(count(DISTINCT ts::date),0) AS \"$/day\" FROM agents.usage_event u JOIN agents.model_price p ON lower(u.model)=p.model_key WHERE u.kind='agent' AND $__timeFilter(ts) AND u.machine = ANY(ARRAY[${machine:sqlstring}]::text[]) AND u.agent = ANY(ARRAY[${agent:sqlstring}]::text[]) AND coalesce(u.model,'unknown') = ANY(ARRAY[${model:sqlstring}]::text[])"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "decimals": 2
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "value"
+      }
+    },
+    {
+      "id": 27,
+      "type": "timeseries",
+      "title": "Cost per month (by agent)",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "agents-timescaledb"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 59,
+        "w": 24,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "agents-timescaledb"
+          },
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT date_trunc('month',ts) AS \"time\", u.agent AS metric, sum((u.input_tokens*p.input_cost + u.output_tokens*p.output_cost + u.cache_read_tokens*coalesce(p.cache_read_cost,p.input_cost) + u.cache_write_tokens*coalesce(p.cache_write_cost,p.input_cost))) AS \"$\" FROM agents.usage_event u JOIN agents.model_price p ON lower(u.model)=p.model_key WHERE u.kind='agent' AND $__timeFilter(ts) AND u.machine = ANY(ARRAY[${machine:sqlstring}]::text[]) AND u.agent = ANY(ARRAY[${agent:sqlstring}]::text[]) AND coalesce(u.model,'unknown') = ANY(ARRAY[${model:sqlstring}]::text[]) GROUP BY 1,u.agent ORDER BY 1"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "custom": {
+            "drawStyle": "bars",
+            "stacking": {
+              "mode": "normal"
+            },
+            "fillOpacity": 70,
+            "lineWidth": 1
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "sum"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    },
+    {
+      "id": 28,
+      "type": "table",
+      "title": "Cost by model (top 15)",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "agents-timescaledb"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 67,
+        "w": 12,
+        "h": 9
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "agents-timescaledb"
+          },
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT u.model AS \"model\", count(*) AS \"turns\", sum((u.input_tokens*p.input_cost + u.output_tokens*p.output_cost + u.cache_read_tokens*coalesce(p.cache_read_cost,p.input_cost) + u.cache_write_tokens*coalesce(p.cache_write_cost,p.input_cost)))::numeric(14,2) AS \"$\" FROM agents.usage_event u JOIN agents.model_price p ON lower(u.model)=p.model_key WHERE u.kind='agent' AND $__timeFilter(ts) AND u.machine = ANY(ARRAY[${machine:sqlstring}]::text[]) AND u.agent = ANY(ARRAY[${agent:sqlstring}]::text[]) AND coalesce(u.model,'unknown') = ANY(ARRAY[${model:sqlstring}]::text[]) GROUP BY 1 ORDER BY 3 DESC NULLS LAST LIMIT 15"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "$"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "currencyUSD"
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-background"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "showHeader": true
+      }
+    },
+    {
+      "id": 29,
+      "type": "table",
+      "title": "Cost by agent",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "agents-timescaledb"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 67,
+        "w": 12,
+        "h": 9
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "agents-timescaledb"
+          },
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT u.agent AS \"agent\", count(*) AS \"turns\", sum((u.input_tokens*p.input_cost + u.output_tokens*p.output_cost + u.cache_read_tokens*coalesce(p.cache_read_cost,p.input_cost) + u.cache_write_tokens*coalesce(p.cache_write_cost,p.input_cost)))::numeric(14,2) AS \"$\" FROM agents.usage_event u JOIN agents.model_price p ON lower(u.model)=p.model_key WHERE u.kind='agent' AND $__timeFilter(ts) AND u.machine = ANY(ARRAY[${machine:sqlstring}]::text[]) AND u.agent = ANY(ARRAY[${agent:sqlstring}]::text[]) AND coalesce(u.model,'unknown') = ANY(ARRAY[${model:sqlstring}]::text[]) GROUP BY 1 ORDER BY 3 DESC NULLS LAST"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "$"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "currencyUSD"
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-background"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "showHeader": true
+      }
+    }
+  ]
+}

@@ -19,7 +19,7 @@ from agent_usage_tracker.config import AutError, Config
 from agent_usage_tracker.event import (ActivityEvent, CollectorUnavailable, EventSession,
                                        UsageEvent)
 from fake_psycopg import _fake_psycopg
-from test_sink_sql import STAND_IN_SCHEMA
+from test_sink_sql import SINK_STACK
 
 WEBHOOK = "https://hooks.example/h"
 DSN = "postgresql://localhost/agents"
@@ -187,14 +187,20 @@ def test_truncated_body_is_a_handled_fetch_failure(monkeypatch) -> None:
         assert "skipping this run" in str(exc), exc
 
 
-def test_stand_in_schema_names_only_what_the_contract_names():
-    # the Postgres tests run on a schema of their own: it may not grow a table or column the
-    # contract does not know, or they stop saying anything about the contract
+def test_the_shipped_schema_creates_every_relation_the_contract_names():
+    # CONTRACT.md documents the sink; the shipped SQL is the sink. A name only one of them has
+    # means a user's fresh `docker compose up` misses something the docs promise.
     contract = (Path(__file__).parents[2] / "CONTRACT.md").read_text(encoding="utf-8")
-    tables = re.findall(r"CREATE TABLE agents\.(\w+) \((.*?)\);", STAND_IN_SCHEMA, re.S)
-    assert tables
-    for table, body in tables:
-        assert f"agents.{table}" in contract or f"`{table}`" in contract, table
-        for col in re.sub(r"PRIMARY KEY \([^)]*\)", "", body).split(","):
-            if col.strip():
-                assert re.search(rf"\b{col.split()[0]}\b", contract), (table, col)
+    sql = "\n".join(f.read_text(encoding="utf-8") for f in sorted((SINK_STACK / "sql").glob("0*.sql")))
+    created = set(re.findall(r"CREATE (?:OR REPLACE )?(?:TABLE|VIEW|MATERIALIZED VIEW|FUNCTION)"
+                             r"(?: IF NOT EXISTS)? agents\.(\w+)", sql))
+    named = set(re.findall(r"agents\.(\w+)", contract))
+    assert named and named <= created, sorted(named - created)
+
+
+def test_the_shipped_schema_takes_its_time_zone_from_the_install():
+    # apply.sh replaces the placeholder with AUT_TZ; a literal zone would bucket days wrongly
+    for f in (SINK_STACK / "sql").glob("*.sql"):
+        code = "\n".join(line.split("--")[0] for line in f.read_text(encoding="utf-8").splitlines())
+        assert not re.search(r"AT TIME ZONE '(?!@AUT_TZ@')", code), f.name
+    assert "@AUT_TZ@" in (SINK_STACK / "apply.sh").read_text(encoding="utf-8")

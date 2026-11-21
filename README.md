@@ -23,7 +23,7 @@ With [uv](https://docs.astral.sh/uv/getting-started/installation/) installed, tr
 uvx --from git+https://github.com/rhnfzl/agent-usage-tracker aut --agents claude_code,codex,cursor_cli,pi export --out usage.csv
 ```
 
-AUT is a collector and CLI. Dashboards and websites read your database; this repository does not ship a hosted dashboard.
+AUT is a collector and CLI. For history and dashboards, it ships a Docker Compose sink (TimescaleDB and Grafana) that runs on your laptop or a homelab. There is no hosted service.
 
 [Quick start](#quick-start) · [Collectors](#collectors) · [Local labels](#local-labels-aut-label) · [Privacy](#privacy-model) · [Documentation](#documentation)
 
@@ -80,7 +80,9 @@ pg_dsn = "env:AUT_PG_DSN"
 ```
 
 Set `AUT_PG_DSN` to your provisioned database connection.
-The database needs AUT's tables and views; the [deploy runbook](DEPLOY.md) describes the sink contract.
+The database needs AUT's tables and views. The [sink stack](src/agent_usage_tracker/sink_stack/README.md) provides them with one `docker compose up`;
+the [deploy runbook](DEPLOY.md) describes the sink contract.
+Set `ledger_timezone` to the sink's `AUT_TZ`.
 On macOS and Linux, protect the configuration with `chmod 600`.
 On Windows, restrict its directory permissions to your account.
 
@@ -322,7 +324,7 @@ uv run --no-sync mypy
 ```
 
 The [CI workflow](.github/workflows/ci.yml) tests Linux, macOS, and Windows across supported Python versions.
-SQL integration tests require an isolated PostgreSQL 16 database through `AUT_TEST_PG_DSN`; otherwise those tests skip.
+SQL integration tests require a scratch database on a TimescaleDB server and `psql`, through `AUT_TEST_PG_DSN` with a literal IP address and port; otherwise those tests skip.
 Use synthetic fixtures in public contributions. Keep session logs, personal labels, and private benchmarks out of commits.
 
 MIT licensed. See [LICENSE](LICENSE).

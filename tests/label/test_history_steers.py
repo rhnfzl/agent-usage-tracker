@@ -25,7 +25,8 @@ def _write(p: Path, rows: list[dict]) -> None:
 def test_only_typed_inputs_inside_the_gap_count(tmp_path, monkeypatch):
     sent = []
     monkeypatch.setattr(hs, "send_activity_rows", lambda dsn, rows: sent.extend(rows))
-    monkeypatch.setattr(hs, "counted_days", lambda dsn: {("codex", date(2026, 7, 6))})
+    monkeypatch.setattr(hs, "counted_days", lambda dsn, zone: {("codex", date(2026, 7, 6))})
+    monkeypatch.setattr(hs, "check_ledger_zone", lambda dsn, zone: None)
     claude = [{"display": t, "timestamp": _ms("2026-04-08T10:00")} for t in
               ("fix it", "/clear", "!ls", "   ", "<task-notification>x", "again")]
     claude += [{"display": "edge", "timestamp": _ms(d)} for d in
