@@ -641,6 +641,65 @@ Use the private store as its working directory. The worker no longer depends on 
 Verify an installed run before changing the timer. Preserve the previous timer configuration for rollback.
 Local MLX inference still requires Apple silicon. Base commands need the existing cross-platform CI matrix before broader distribution.
 
+### Read a private report card
+
+The report card shows stored improvement evidence, open proposals and adoption comparisons in one local report.
+Sampled judgments remain advisory. The report does not establish prevalence, causal benefit or payback.
+
+```bash
+aut improve report-card --days 28 --format md
+aut improve --root /private/store report-card --format html
+aut improve report-card --format json
+```
+
+Days must be between 1 and 366. The command always writes `report-card.md` and `report-card.html` in the private store.
+It prints the selected format to stdout. Both report files use private file permissions.
+Treat stdout and these files as private. No network connection, model call or sink credential resolution occurs.
+The command reads only `ledger_timezone` from the configuration file, with the normal default when absent.
+
+The current window includes today and compares with the preceding window of equal length.
+Case dates use their first timestamped event in the ledger zone. Timestamps without a zone mean UTC.
+Counts reuse `scores.daily`, including its newest-judgment and legacy-version rules.
+Rubric versions, harnesses and triggers remain separate. Pass, fail and unknown counts appear for both windows.
+Failure rates divide fail by pass plus fail. Unknown judgments stay visible outside that denominator.
+Changes compare the same rubric version, harness and trigger and show percentage points.
+
+Each adoption compares 14 ledger dates before its date with 14 dates after it, excluding the adoption date.
+These are calendar dates of work, including weekends. Future case dates do not enter either side.
+Each side needs at least 10 known control judgments before displaying its failure rate.
+Smaller samples display `too few cases`, with known and unknown counts. Rubric versions remain separate.
+Task counts mean distinct sessions. Group-linked adoption counts use recorded membership across stored group reports.
+Explicit signal-linked adoptions can match tool, error class and command family in captured cases.
+Missing group membership or usable signals leaves task counts unavailable.
+These are observed before/after counts, not a causal estimate or a measured benefit.
+
+Recurring groups use the latest saved group report, with that report's own window shown.
+No group refresh runs. Proposal age comes from its preparation journal date, or remains unavailable.
+The report shows open proposal titles, owner components, staged flags and shell-quoted decision commands.
+Coverage uses the latest saved audit and cached `coverage.json`, without scanning source logs or querying usage stores.
+Harness gaps require recorded usage events and no stored improvement session for that harness.
+Missing cached coverage remains unknown. The incomplete-evidence fraction uses newest current-version judgments in the current window.
+
+Loop cost shows model-call records, recorded load/inference seconds, diagnosis reports, labels and human decision events.
+Load rows are separate from inference calls. Untimed records remain explicit.
+Diagnosis call totals sum completed invocation reports and overlap model-call records. Do not add these totals.
+Missing timing is unknown. Label event counts include undo events.
+Drafter USD sums known costs for proposals prepared inside the window; missing costs are counted separately.
+The report makes no payback calculation.
+
+JSON contains counts, identifiers, booleans, nulls and enum values only.
+Dates, titles, owner text, commands, rates, durations and money amounts appear only in the private human reports.
+Transcript text, rationale, patches and target paths do not appear in either report.
+The decision commands can include the shell-quoted private store path. All operator and model text is escaped for each output format.
+
+**Write footprint and specification ruling:** the labelling specification requires the report card to recalculate current qualifications.
+That requirement takes precedence over the report section's original two-file-only statement.
+The command calls existing `qualify.run` for each enabled rubric before building the report.
+This permits only its existing derived qualification records, qualification journal entries, queue synchronization and lock effects,
+plus the two report files. Source evidence, judgments, human labels and decisions stay unchanged.
+A new empty store receives the normal store initialization files. Existing support files are not rewritten.
+`build`, `to_markdown`, `to_html` and `to_json` are otherwise read-only.
+
 ### Publish advisory scores and adoption markers
 
 You can compare sampled judge scores with the dates you adopt fixes in the private effort dashboard.

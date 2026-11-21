@@ -67,6 +67,9 @@ def register(sub: Any) -> None:
     labelling = actions.add_parser("label", help="check advisory judges with private human labels")
     labelling.add_argument("--rubric", required=True)
     labelling.add_argument("--limit", type=int, default=30)
+    card = actions.add_parser("report-card", help="write a private improvement report")
+    card.add_argument("--days", type=int, default=28)
+    card.add_argument("--format", choices=("md", "html", "json"), default="md")
     desktop = actions.add_parser("desktop", help="import private native-app command evidence")
     desktop.add_argument("--trace", type=Path, required=True, help="raw trace file or segment directory")
     desktop.add_argument("--responses", type=Path, help="local response companion JSONL")
@@ -123,6 +126,13 @@ def _decide(store: Store, args: argparse.Namespace) -> dict[str, Any]:
 
 def run(args: argparse.Namespace) -> None:
     root = args.root or Path(os.environ.get("AUT_IMPROVE_ROOT", str(data_dir() / "improve")))
+    if args.improve_cmd == "report-card":
+        from .report_card import write
+        root = root.expanduser()
+        store = Store(root, read_only=True) if (root / ".aut-improve").is_file() else Store(root)
+        store.read_only = False  # Refresh qualifications without rewriting existing support files.
+        print(write(store, days=args.days, format=args.format), end="\n")
+        return
     store = Store(root)
     if args.improve_cmd == "study":
         result = study_cli.run(args, store)
