@@ -379,3 +379,60 @@ def test_the_adopt_step_keeps_a_custom_store(store, tmp_path):
     _, key = proposal(store, tmp_path)
     steps = decide.accept(store, key)["next"]
     assert f"aut improve --root {store.root} adopt {key}" in steps[-1]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="symlinks need extra rights on Windows")
+def test_a_git_symlink_into_the_source_gets_no_commit(store, tmp_path):
+    source = repo(tmp_path)
+    case = store.put("cases", {"events": [{"id": "e", "kind": "result"}]})
+    key = prepare(store, case, source, source / "rules.md", "old", "new")
+    candidate = tmp_path / "candidate"
+    candidate.mkdir()
+    (candidate / ".git").symlink_to(source / ".git")
+    stage(store, key, candidate)
+    before = git(source, "for-each-ref")
+    assert decide.accept(store, key)["candidate_commit"] is None
+    assert git(source, "for-each-ref") == before
+
+
+def test_a_stale_decision_without_its_journal_row_is_repaired(store, tmp_path):
+    _, key = proposal(store, tmp_path)
+    store.put("decisions", {"version": 1, "proposal_id": key, "group_key": None,
+                            "action": "stale", "reason": None, "note": None,
+                            "candidate_commit": None, "decided_at": "2026-11-21T00:00:00+00:00"})
+    with pytest.raises(AutError, match="stale"):
+        decide.accept(store, key)
+    rows = [json.loads(r) for r in (store.root / "events.jsonl").read_text().splitlines()]
+    assert [row["action"] for row in rows if row["kind"] == "decision"] == ["stale"]
+
+
+def test_a_passing_read_error_during_re_prepare_is_not_stale(store, tmp_path, monkeypatch):
+    _, key = proposal(store, tmp_path)
+    monkeypatch.setattr(decide, "file_digest", lambda path: "changed")
+
+    def locked(self):
+        raise PermissionError("sharing violation")
+
+    monkeypatch.setattr(decide.Path, "read_bytes", locked)
+    with pytest.raises(AutError, match="cannot be read now"):
+        decide.accept(store, key)
+    assert store.keys("decisions") == []
+
+
+def test_rejecting_the_newest_id_removes_its_ancestors_candidates(store, tmp_path):
+    source, old = proposal(store, tmp_path)
+    stage(store, old, store.root / "candidates" / old)
+    (source / "rules.md").write_text("Intro.\nUse the old command.\n")
+    new = decide._reprepare(store, old, store.get("proposals", old), source / "rules.md")
+    stage(store, new, store.root / "candidates" / new)
+    decide._record(store, old, store.get("proposals", old), "stale", superseded_by=new)
+    assert decide.reject(store, new, "no")["candidate_removed"]
+    assert not (store.root / "candidates" / old).exists()
+
+
+def test_a_group_rejection_wins_over_an_accept_in_the_same_group(store, tmp_path):
+    _, first = proposal(store, tmp_path, group_key="g")
+    _, second = proposal(store, tmp_path, text="Use the old way.\n", group_key="g")
+    decide.accept(store, first)
+    decide.reject(store, second, "not this one")
+    assert decide.group_status(store)["g"].startswith("rejected on ")

@@ -333,8 +333,8 @@ Accept writes nothing outside the store and the candidate:
   A `stale` decision does not block the group; only a reject does, and a stale proposal can
   still be rejected. A target that exists but cannot be read right now is an error, not stale.
 
-When the staged candidate's Git directory is its own `.git` (a clone, not a worktree, which
-writes its refs into another repository), accept commits the target there on branch
+When the staged candidate's Git directory is its own real `.git` directory (a clone, not a
+worktree or a `.git` symlink, which write into another repository), accept commits the target there on branch
 `aut/improve-<id8>`, with the proposal id in the message. It uses Git plumbing on a private
 index, so no checkout, hook or clean filter runs, the candidate's own index and branch stay as
 they are, and only the literal target path changes. The command prints what to run next: fetch that branch into the
@@ -343,7 +343,8 @@ and merge the change yourself.
 
 Reject needs a reason of 1 to 500 characters with at least one letter or digit, so the page's
 `"…"` placeholder pasted unedited is refused. It blocks the proposal's failure group, which the
-inbox shows as "rejected on <date>". An accepted group shows "accepted" until it is adopted. It
+inbox shows as "rejected on <date>", even when another proposal of the group was accepted. An
+accepted group shows "accepted" until it is adopted. It
 deletes `<store>/candidates/<id>` (and those of proposals it superseded) only; an operator's own
 `--candidate` directory stays. A retry after a crash adds a missing journal row.
 The copied commands and next steps are quoted for a POSIX shell.

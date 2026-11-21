@@ -105,7 +105,7 @@ def group_status(store: Store) -> dict[str, str]:
             status[group] = max(status.get(group, ""), f"rejected on {decision['decided_at'][:10]}")
         elif group and decision and decision["action"] == "accept":
             accepted.add(group)
-    status |= dict.fromkeys(accepted, "accepted")
+    status |= {group: "accepted" for group in accepted if group not in status}  # reject wins
     for key in open_proposals(store):
         if group := store.get("proposals", key).get("group_key"):
             status[group] = "proposed"
@@ -130,13 +130,20 @@ def _follow(latest: dict[str, dict[str, Any]], proposal_id: str) -> str:
     return _chain(latest, proposal_id)[-1]
 
 
-def _journaled(store: Store, kind: str, field: str, key: str, **attrs: Any) -> None:
-    """Add the journal row a crash between a record write and its journal row left out."""
-    if not any(row.get("kind") == kind and row.get(field) == key for row in _journal(store)):
-        store.append(kind, **{field: key}, **attrs)
+def _repair_journal(store: Store) -> None:
+    """Add the journal rows a crash between a record write and its journal row left out."""
+    rows = _journal(store)
+    for kind, field, record in (("decision", "decision_id", "decisions"),
+                                ("adoption", "adoption_id", "adoptions")):
+        seen = {row.get(field) for row in rows if row.get("kind") == kind}
+        for key in store.keys(record):
+            if key not in seen:
+                value = store.get(record, key)
+                store.append(kind, **{field: key, "proposal_id": value["proposal_id"]},
+                             **({"action": value["action"]} if kind == "decision" else {}))
 
 
-def _settled(store: Store, latest: dict[str, dict[str, Any]], proposal_id: str,
+def _settled(latest: dict[str, dict[str, Any]], proposal_id: str,
              action: str) -> dict[str, Any] | None:
     decision = latest.get(proposal_id)
     if decision is None:
@@ -146,8 +153,6 @@ def _settled(store: Store, latest: dict[str, dict[str, Any]], proposal_id: str,
     done = f"{_PAST[decision['action']]} on {decision['decided_at'][:10]}"
     if decision["action"] != action:
         raise AutError(f"improve: proposal {proposal_id[:8]} was already {done}")
-    _journaled(store, "decision", "decision_id", decision["decision_id"],
-               proposal_id=proposal_id, action=action)
     return {"status": "unchanged", "proposal_id": proposal_id,
             "decision_id": decision["decision_id"], "message": f"Already {done}; nothing changed."}
 
@@ -180,7 +185,9 @@ def _commit(proposal_id: str, proposal: dict[str, Any], candidate: Path) -> str 
     """Commit the staged file on aut/improve-<id8> inside the candidate, with plumbing only, so
     no checkout, hook or clean filter runs. None unless the candidate's git dir is its own
     `.git`: a worktree writes its refs into another repository."""
-    own = str((candidate / ".git").resolve())
+    own = str(candidate.resolve() / ".git")     # a .git symlink resolves elsewhere
+    if (candidate / ".git").is_symlink() or not (candidate / ".git").is_dir():
+        return None
     gitdir = _git(candidate, "rev-parse", "--absolute-git-dir", check=False)
     if gitdir.returncode or str(Path(gitdir.stdout.strip()).resolve()) != own \
             or repository(candidate) != own:
@@ -216,18 +223,20 @@ def _reprepare(store: Store, proposal_id: str, proposal: dict[str, Any],
     try:
         text = source.read_bytes().decode("utf-8")
         start = text.index(span["before"]) if text.count(span["before"]) == 1 else -1
-    except (OSError, UnicodeError, TypeError, KeyError):
+    except FileNotFoundError:
+        return None
+    except OSError as exc:      # passing: must not become a permanent stale
+        raise AutError("improve: the proposal target cannot be read now; try again") from exc
+    except (UnicodeError, TypeError, KeyError):
         return None
     end = start + len(span["before"])
     if start < 0 or any(low < end and start < high for low, high in managed_spans(text)):
         return None
     extra = {key: value for key, value in proposal.items() if key not in _CORE}
-    try:
-        return prepare(store, proposal["case_id"], Path(proposal["scope"]), source,
-                       span["before"], span["after"], authority=proposal["authority"],
-                       extra=extra | {"supersedes": proposal_id})
-    except AutError:
-        return None
+    # an error here (scope, case or read) raises and records nothing, rather than going stale
+    return prepare(store, proposal["case_id"], Path(proposal["scope"]), source,
+                   span["before"], span["after"], authority=proposal["authority"],
+                   extra=extra | {"supersedes": proposal_id})
 
 
 def _next_steps(store: Store, proposal_id: str, proposal: dict[str, Any],
@@ -252,9 +261,10 @@ def _next_steps(store: Store, proposal_id: str, proposal: dict[str, Any],
 def accept(store: Store, proposal_id: str, note: str | None = None) -> dict[str, Any]:
     note = _text(note, 500, "note")
     with _locked(store.root / "decide"):
+        _repair_journal(store)
         latest = decisions(store)
         proposal_id = _follow(latest, proposal_id)
-        if done := _settled(store, latest, proposal_id, "accept"):
+        if done := _settled(latest, proposal_id, "accept"):
             return done
         proposal = store.get("proposals", proposal_id)
         source = Path(proposal["scope"]) / proposal["target"]
@@ -277,7 +287,7 @@ def accept(store: Store, proposal_id: str, note: str | None = None) -> dict[str,
                 _record(store, proposal_id, proposal, "stale", superseded_by=new_id,
                         reason="target changed outside the span; superseded")
                 newest = _follow(latest, new_id)
-                if done := _settled(store, latest, newest, "accept"):    # raises after a reject
+                if done := _settled(latest, newest, "accept"):    # raises after a reject
                     return done
                 raise AutError(f"improve: superseded by {newest[:8]}; accept that id")
             if candidate:   # the old candidate holds the old content, so stage beside it
@@ -322,15 +332,17 @@ def reject(store: Store, proposal_id: str, reason: str) -> dict[str, Any]:
     if not text or not any(c.isalnum() for c in text):    # the page's placeholder is "…"
         raise AutError("improve: a reject needs a reason")
     with _locked(store.root / "decide"):
+        _repair_journal(store)
         latest = decisions(store)
         chain = _chain(latest, proposal_id)
         proposal_id = chain[-1]
-        result = _settled(store, latest, proposal_id, "reject")
+        result = _settled(latest, proposal_id, "reject")
         if result is None:
             proposal = store.get("proposals", proposal_id)
             key = _record(store, proposal_id, proposal, "reject", reason=text)
             result = {"status": "rejected", "proposal_id": proposal_id, "decision_id": key}
-        result["candidate_removed"] = any([_remove_candidate(store, key) for key in chain])
+        family = set(chain) | {key for key in latest if _follow(latest, key) == proposal_id}
+        result["candidate_removed"] = any([_remove_candidate(store, key) for key in sorted(family)])
     return result
 
 
@@ -348,6 +360,7 @@ def adopt(store: Store, proposal_id: str | None = None, *, commit: str,
           targets: list[str] | None = None, rubric_ids: list[str] | None = None,
           kind: str | None = None, note: str | None = None) -> dict[str, Any]:
     with _locked(store.root / "decide"):
+        _repair_journal(store)
         proposal: dict[str, Any] = {}
         if proposal_id is not None:
             latest = decisions(store)
@@ -386,7 +399,6 @@ def adopt(store: Store, proposal_id: str | None = None, *, commit: str,
         for key in store.keys("adoptions"):     # again on a later day is still the same adoption
             old = store.get("adoptions", key)
             if all(old.get(name) == value[name] for name in same):
-                _journaled(store, "adoption", "adoption_id", key, proposal_id=old["proposal_id"])
                 return {"status": "unchanged", "adoption_id": key, "adopted_at": old["adopted_at"],
                         "notice": NOTICE}
         key = store.put("adoptions", value)
