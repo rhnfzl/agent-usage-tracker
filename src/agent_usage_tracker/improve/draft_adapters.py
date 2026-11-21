@@ -23,7 +23,8 @@ from ..sources import engine_homes
 from ..state import _locked, atomic_write_text
 from .trial import command
 
-NAMES = ("codex", "claude", "cursor", "pi", "mlx")
+LOCAL = ("mlx", "gguf")
+NAMES = ("codex", "claude", "cursor", "pi", *LOCAL)
 PI_FLAGS = ("--no-tools", "--no-mcp", "--no-extensions", "--no-skills", "--no-context-files",
             "--no-session", "--no-prompt-templates", "--no-themes", "--offline", "--no-approve")
 _ALIASES = {"claude_code": "claude", "cursor_agent": "cursor", "cursor-agent": "cursor"}
@@ -38,7 +39,8 @@ def _env(home: Path, agent: Path) -> dict[str, str]:
     return env
 
 
-def _probe_pi(exe: str, home: Path, timeout: float) -> dict[str, Any]:
+def _probe_pi(exe: str, home: Path, timeout: float, *,
+              model_ref: str | None = None) -> dict[str, Any]:
     # Help must not load installed extensions just to discover available flags.
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
@@ -53,11 +55,15 @@ def _probe_pi(exe: str, home: Path, timeout: float) -> dict[str, Any]:
     for profile in engine_homes(home, "pi"):
         try:
             credentials = json.loads((profile / "auth.json").read_text())
-            settings = json.loads((profile / "settings.json").read_text()) \
-                if (profile / "settings.json").is_file() else {}
-            provider = settings.get("defaultProvider")
-            model = settings.get("defaultModel")
-            # Use the configured model only: do not invent a provider or a subscription model.
+            provider: str | None
+            model: str | None
+            if model_ref:
+                provider, _, model = model_ref.partition("/")
+            else:
+                settings_path = profile / "settings.json"
+                settings = json.loads(settings_path.read_text()) if settings_path.is_file() else {}
+                provider = settings.get("defaultProvider")
+                model = settings.get("defaultModel")
             if not all(isinstance(v, str) and re.fullmatch(r"[\w./:-]{1,120}", v)
                        for v in (provider, model)):
                 continue
@@ -107,7 +113,8 @@ def quota_headroom(home: Path) -> dict[str, float]:
         return {}
 
 
-def discover(home: Path, *, explain_model: str | None = None,
+def discover(home: Path, *, explain_model: str | None = None, gguf_model: Path | None = None,
+             gguf_gpu_layers: int = 0, pi_model: str | None = None,
              timeout: float = 15.) -> list[dict[str, Any]]:
     quotas = quota_headroom(home)
     rows = []
@@ -119,10 +126,21 @@ def discover(home: Path, *, explain_model: str | None = None,
     for name in NAMES:
         row: dict[str, Any] = {"cli": name, "model": None, "quota": quotas.get(name),
                                "available": False}
-        exe = shutil.which("cursor-agent" if name == "cursor" else name) if name != "mlx" else None
+        binary = {"cursor": "cursor-agent", "gguf": "llama-server"}.get(name, name)
+        exe = shutil.which(binary) if name != "mlx" else None
         if name == "mlx":
             row.update(model=explain_model, available=bool(explain_model and
                        importlib.util.find_spec("mlx_lm")), reason="local model not configured/installed")
+        elif name == "gguf":
+            model_ok = gguf_model is not None and gguf_model.is_absolute() \
+                and gguf_model.suffix.lower() == ".gguf" and gguf_model.is_file()
+            if os.name != "posix":
+                row["reason"] = "GGUF process-tree deadline is not verified on this platform"
+            elif not model_ok or gguf_model is None or not exe:
+                row["reason"] = "local GGUF file or llama-server missing"
+            else:
+                row.update(available=True, exe=exe, model=gguf_model.name,
+                           model_path=str(gguf_model.resolve()), gpu_layers=gguf_gpu_layers)
         elif not exe:
             row["reason"] = "CLI not on PATH"
         elif name in unsupported:
@@ -131,7 +149,7 @@ def discover(home: Path, *, explain_model: str | None = None,
             row["reason"] = "Pi process-tree deadline cleanup is not verified on this platform"
         else:
             try:
-                row.update(_probe_pi(exe, home, max(.001, timeout / 2)))
+                row.update(_probe_pi(exe, home, max(.001, timeout / 2), model_ref=pi_model))
             except (OSError, subprocess.SubprocessError):
                 row["reason"] = "Pi isolation probe failed or timed out"
         rows.append(row)
@@ -141,7 +159,7 @@ def discover(home: Path, *, explain_model: str | None = None,
 def select(rows: list[dict[str, Any]], preferred: set[str], history: list[dict[str, Any]], *,
            mode: str = "auto", order: list[str] | None = None
            ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    order = order or list(NAMES[:-1])
+    order = order or [name for name in NAMES if name not in LOCAL]
     preferred = {_ALIASES.get(name, name) for name in preferred}
     recent = [row for row in history if row.get("kind") == "draft"][-100:]
     attempts = Counter(row["cli"] for row in recent)
@@ -154,7 +172,7 @@ def select(rows: list[dict[str, Any]], preferred: set[str], history: list[dict[s
             continue
         if row.get("quota") == 0:
             skipped.append({"cli": row["cli"], "reason": "known quota exhausted"})
-        elif row["cli"] not in order and row["cli"] != "mlx":
+        elif row["cli"] not in order and row["cli"] not in LOCAL:
             skipped.append({"cli": row["cli"], "reason": "not in manual order"})
         else:
             usable.append(dict(row))
@@ -163,12 +181,12 @@ def select(rows: list[dict[str, Any]], preferred: set[str], history: list[dict[s
         start = (order.index(previous) + 1) % len(order) if previous in order else 0
         order = order[start:] + order[:start]
     if mode == "auto":
-        usable.sort(key=lambda r: (r["cli"] == "mlx", r["cli"] not in preferred,
+        usable.sort(key=lambda r: (r["cli"] in LOCAL, r["cli"] not in preferred,
             -(r["quota"] if r.get("quota") is not None else -1),
             -successes[r["cli"]] / attempts[r["cli"]] if attempts[r["cli"]] else 0,
             NAMES.index(r["cli"])))
     else:
-        usable.sort(key=lambda r: (r["cli"] == "mlx", order.index(r["cli"])
+        usable.sort(key=lambda r: (r["cli"] in LOCAL, order.index(r["cli"])
                                   if r["cli"] in order else len(order)))
     for rank, row in enumerate(usable):
         row["reason"] = {"mode": mode, "rank": rank + 1, "preferred_harness": row["cli"] in preferred,
@@ -197,10 +215,17 @@ def invoke(adapter: dict[str, Any], prompt: str, *, timeout: float, budget_usd: 
 def _worker(request: Path, response: Path) -> None:
     value = json.loads(request.read_text())
     adapter, prompt = value["adapter"], value["prompt"]
-    if adapter["cli"] == "mlx":
-        from ..label.backends import MlxLetter
+    if adapter["cli"] in LOCAL:
         with _locked(Path(value["model_lock"]), blocking=False):
-            text = MlxLetter(value["explain_model"]).generate(prompt, max_tokens=1200)
+            if adapter["cli"] == "mlx":
+                from ..label.backends import MlxLetter
+                text = MlxLetter(value["explain_model"]).generate(prompt, max_tokens=1200)
+                fenced = re.fullmatch(r"```json[^\S\n]*\n(.*?)\n```", text.strip(), re.DOTALL)
+                if fenced:
+                    text = fenced.group(1)
+            else:
+                from .draft_gguf import generate
+                text = generate(adapter, prompt, request.parent)
         cost: float | None = 0.
     elif adapter["cli"] == "pi":
         with tempfile.TemporaryDirectory() as directory:

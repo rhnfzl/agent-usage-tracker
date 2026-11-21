@@ -97,6 +97,23 @@ def test_executable_report_matches_shared_scoring_without_changing_its_schema(tm
         "supported_passes": 0, "decisions_on_unknown": 0}
 
 
+def test_executable_reference_compares_each_saved_vote(tmp_path):
+    store, spec, job, _ = setup_reference(tmp_path)
+    [old_key] = store.keys("judgments")
+    old = store.get("judgments", old_key)
+    first = store.put("votes", {"model": "first", "model_rev": "v1"})
+    second = store.put("votes", {"model": "second", "model_rev": "v2"})
+    store.path("judgments", old_key).unlink()
+    store.put("judgments", {**old, "vote_ids": [first, second], "votes": ["fail", "pass"]})
+
+    report = validation.validate(store, spec, job, execute=True)
+    assert report["failure_recall"] == 0
+    rows = report["model_scores"]["completion_supported"]
+    assert [(row["model"], row["model_rev"], row["failure_recall"]) for row in rows] \
+        == [("first", "v1", 1), ("second", "v2", 0)]
+    assert not report["automation_qualified"]
+
+
 @pytest.mark.parametrize("pair", [("invalid", "pass"), ("pass", "invalid")])
 def test_shared_scoring_rejects_invalid_labels(pair):
     with pytest.raises(AutError, match="scoring"):

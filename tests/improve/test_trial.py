@@ -222,6 +222,28 @@ def test_command_acceptance_mutation_keeps_rejected_attempt_receipt(tmp_path):
     assert 'changed' in rows[0]['validation_error']
 
 
+def test_protected_trial_rejects_a_command_that_rewrites_its_fixture(tmp_path):
+    from agent_usage_tracker.improve.proposals import file_digest
+
+    roots = {name: tmp_path / name for name in ("baseline", "candidate")}
+    for root in roots.values():
+        root.mkdir()
+        (root / "setup").write_text("frozen")
+    oracle = tmp_path / "oracle.py"
+    oracle.write_text("from pathlib import Path\nPath('setup').write_text('changed')\n")
+    store = Store(tmp_path / "private")
+    spec = store.put("trial_specs", {"version": 1, "kind": "command_check",
+        "directories": {name: str(root) for name, root in roots.items()}, "repeats": 1,
+        "files": {name: {"setup": file_digest(root / "setup")} for name, root in roots.items()},
+        "cases": [{"id": "protected", "argv": [sys.executable, str(oracle)], "timeout_s": 2,
+                   "acceptance_files": {str(oracle): file_digest(oracle)}}]})
+    with pytest.raises(AutError, match="protected command acceptance changed"):
+        run_trial(store, spec, execute=True)
+    [row] = [store.get("trial_results", key) for key in store.keys("trial_results")]
+    assert not row["accepted"]
+    assert "trial input changed" in row["validation_error"]
+
+
 def test_protected_command_changed_after_prospective_study_is_rejected(tmp_path):
     from .test_studies import fixture
     from agent_usage_tracker.improve.proposals import file_digest

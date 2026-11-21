@@ -1,4 +1,5 @@
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -47,6 +48,39 @@ def test_create_prospective_immutable_and_missing_observations(tmp_path):
     store.put('trial_results', {'spec_id': spec['trial_spec_id']})
     with pytest.raises(AutError, match='prospective'):
         create(store, spec)
+
+
+def test_study_run_checks_frozen_candidate_and_uses_its_budget(tmp_path):
+    from agent_usage_tracker.improve.proposals import file_digest
+    from agent_usage_tracker.improve.studies import run
+
+    store, study = fixture(tmp_path)
+    spec = store.get("trial_specs", study["trial_spec_id"])
+    paths = {k: Path(v) / "setup" for k, v in spec["directories"].items()}
+    for condition, path in paths.items():
+        path.write_text(condition)
+    scope = tmp_path / "source"
+    scope.mkdir()
+    source = scope / "setup"
+    source.write_text("baseline")
+    proposal = store.get("proposals", study["proposal_id"])
+    proposal.update(scope=str(scope), before_sha256=file_digest(paths["baseline"]),
+                    after_sha256=file_digest(paths["candidate"]))
+    study["proposal_id"] = store.put("proposals", proposal)
+    acceptance = tmp_path / "check.py"
+    acceptance.write_text("from pathlib import Path\nassert Path('setup').read_text() == 'candidate'\n")
+    spec["files"] = {k: {"setup": file_digest(path)} for k, path in paths.items()}
+    spec["cases"][0].update(argv=[sys.executable, str(acceptance)],
+                            acceptance_files={str(acceptance): file_digest(acceptance)})
+    study["trial_spec_id"] = store.put("trial_specs", spec)
+    key = create(store, study)["study_id"]
+    assert run(store, key)["execution_required"]
+    assert not store.keys("trial_results")
+    assert run(store, key, execute=True)["trial"]["accepted"] == {"baseline": 0, "candidate": 1}
+    assert source.read_text() == "baseline"
+    paths["candidate"].write_text("changed")
+    with pytest.raises(AutError, match="candidate.*hash"):
+        run(store, key, execute=True)
 
 
 def test_copied_case_and_malformed_manifest_rejected(tmp_path):

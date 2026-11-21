@@ -351,13 +351,13 @@ and adoptions also block drafting. A stale proposal permits a new draft.
 Automatic selection prefers the group's harness. Ties use current quota headroom and the last
 100 draft attempts' success rates. Missing or stale quota stays unknown. Existing quota reports
 come from `~/.config/aut/observations.sqlite3`, opened read-only. Errors and timeouts advance to
-the next adapter. Invalid output gets one repair attempt. MLX always comes last, including manual
-`failover` and `round_robin` modes. Decisions and skip reasons are recorded privately.
+the next adapter. Invalid output gets one repair attempt. Local backends follow eligible remote
+backends in every mode. Decisions and skip reasons are recorded privately.
 
 Remote packets contain signals, counts, redacted review rationales and selected redacted file
 text. The user approved selected file text on 2026-11-21. The default excludes conversation
 events for every remote flavor and failover attempt. `--excerpts all` separately opts in to
-redacted events from at most three cases, clipped to 4,000 characters each. MLX includes these
+redacted events from at most three cases, clipped to 4,000 characters each. Local models include these
 events locally. Target paths are local mappings; the model receives `target_1` style aliases.
 The exact sent prompt is saved under `draft_packets`, and its digest is kept in the proposal.
 Redaction detects known patterns; it cannot identify every possible secret.
@@ -375,6 +375,11 @@ Optional settings are read without loading sink configuration:
 [improve]
 draft_targets = ["~/.config/example/*.toml"]
 draft_excerpts = "none"
+# Optional AUT-specific Pi model. Use an existing OAuth profile.
+# draft_pi_model = "provider/model"
+# Optional local llama.cpp drafter on macOS or Linux. Use an instruction-tuned GGUF already on disk.
+# draft_gguf = "/absolute/path/to/instruct.gguf"
+# draft_gguf_gpu_layers = 0
 ```
 
 Generated BEGIN/END blocks and lines with detected secrets are hidden. Returned `before` spans
@@ -393,9 +398,16 @@ The verified remote protocol is **Pi 1.5.0 on POSIX** with a configured model an
 OAuth credentials. It uses a temporary credential-only home and an empty working directory.
 Tools, MCP, extensions, skills, context files, templates, themes and session persistence are
 disabled explicitly. Only the chosen provider's credential is copied; the source is not refreshed
-or changed. Other Pi versions fail closed until their isolation is checked.
+or changed. Set `draft_pi_model` to use a different provider and model from Pi's default.
+Other Pi versions fail closed until their isolation is checked.
 Windows Pi discovery also fails closed: the existing subprocess runner cannot kill its complete
-process tree there. Local MLX remains a Mac option. No Windows remote deadline is claimed.
+process tree there. GGUF drafting also requires POSIX process cleanup. MLX requires Apple silicon.
+
+For local drafting without MLX, install `llama-server` from llama.cpp and set `draft_gguf`.
+AUT starts a tool-free server on a private Unix socket and stops it after the attempt.
+CPU is the default with zero GPU layers. A GPU-enabled llama.cpp build can offload layers
+with a positive `draft_gguf_gpu_layers` value. Actual CUDA acceleration requires an NVIDIA
+host and a CUDA-enabled build. AUT uses the local file and does not fetch weights during drafting.
 
 Installed Codex 0.171.0 has no verified zero-tools control. Cursor 2026.11.05 print mode retains
 tools. Claude 2.1.330 OAuth mode cannot prove absence of managed hooks; bare mode disables OAuth
@@ -404,7 +416,7 @@ filesystem sandbox is insufficient. No command silently runs these CLIs with too
 
 Pi OAuth cost is unknown, not zero. The report separates `known_spend_usd` and `unpriced_calls`.
 `--budget-usd` caps admission against reported dollar spend; it cannot cap an unpriced subscription
-call. Call counts and subprocess deadlines still apply. MLX uses the shared `replay-model` lock,
+call. Call counts and subprocess deadlines still apply. Both local backends use the shared `replay-model` lock,
 offline mode and a hard subprocess deadline. No MLX inference or remote model calls were used
 to validate this feature.
 
@@ -541,6 +553,12 @@ Trial environments exclude inherited secrets and use the condition's `src` direc
 Command checks do not establish an agent behaviour or productivity improvement.
 Those claims need controlled agent tasks, untouched evaluation cases, repeated trials, and fresh follow-up work.
 
+For a saved prospective study, use `aut improve study run --study STUDY_ID` to check its inputs.
+Add `--execute` to run the frozen trial within the study's time budget and report its decision.
+Keep the baseline and candidate in separate directories outside the original source directory.
+Both copies must match the proposal's recorded file hashes. Commands and acceptance files
+come from the trusted trial specification. The study records evidence without accepting or applying a proposal.
+
 ### Check a frozen search task
 
 Trusted Python acceptance commands can use `improve.search_check.check_search_stream`.
@@ -658,6 +676,8 @@ aut improve validate --spec-file /private/references.json --diagnosis DIAGNOSIS_
 Execution requires explicit opt-in because oracle commands are executable operator input.
 Reports separate detected failures, missed failures, false alarms, abstentions, and missing judgments.
 Abstaining on a known failure counts as a missed failure. Missing judgments prevent rate calculations.
+The report also scores available individual model votes by rubric and model revision.
+An absent vote counts as missing. Agreement between models does not establish the reference label.
 Synthetic reference results do not measure real-work accuracy or grant patch authority.
 The split label does not prove independence. Any suite used to tune prompts becomes development data.
 

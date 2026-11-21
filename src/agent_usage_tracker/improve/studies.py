@@ -4,12 +4,14 @@ from __future__ import annotations
 
 from collections import Counter
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from ..config import AutError
+from .proposals import file_digest
 from .store import Store, digest
 from .study_decision import measure, observed_experiment
-from .trial import _spec
+from .trial import _spec, run_trial
 from .validation import evidence_key
 
 
@@ -89,7 +91,6 @@ def _manifest(store: Store, value: dict[str, Any]) -> dict[str, Any]:
         raise AutError("improve: proposal must link discovery evidence")
     trial = _spec(store, value["trial_spec_id"])
     if trial["kind"] == "command_check":
-        from pathlib import Path
         from .trial import _acceptance_inputs
         for case in trial["cases"]:
             if case.get("acceptance_files"):
@@ -135,6 +136,41 @@ def create(store: Store, value: dict[str, Any]) -> dict[str, Any]:
                                  "created_at": datetime.now(timezone.utc).isoformat()})
     store.append("study_created", study_id=key)
     return {"study_id": key, "prospective": True}
+
+
+def run(store: Store, study_id: str, *, execute: bool = False) -> dict[str, Any]:
+    study = store.get("studies", study_id)
+    proposal = store.get("proposals", study["proposal_id"])
+    spec_id = study["trial_spec_id"]
+    trial = _spec(store, spec_id)
+    roots = {k: Path(v).resolve() for k, v in trial["directories"].items()}
+    scope = Path(proposal["scope"]).resolve()
+    baseline, candidate = roots["baseline"], roots["candidate"]
+    if (baseline.is_relative_to(candidate) or candidate.is_relative_to(baseline)
+            or any(root.is_relative_to(scope) or scope.is_relative_to(root)
+                   for root in roots.values())):
+        raise AutError("improve: study requires two isolated directories outside the source")
+    if not all(case.get("acceptance_files") for case in trial["cases"]):
+        raise AutError("improve: study requires frozen independent acceptance files")
+    relative = proposal["target"]
+    files = trial.get("files", {})
+    for condition, name in (("baseline", "before"), ("candidate", "after")):
+        root = roots[condition]
+        target = root / relative
+        expected = proposal[f"{name}_sha256"]
+        if (target.resolve() != target or not target.is_relative_to(root)
+                or files.get(condition, {}).get(relative) != expected
+                or not target.is_file() or file_digest(target) != expected):
+            raise AutError("improve: study baseline or candidate hash does not match the proposal")
+    if observed_experiment(store, spec_id, allow_resume=True):
+        raise AutError("improve: study cannot reuse a different trial's results")
+    result = {"study_id": study_id, "trial_spec_id": spec_id,
+              "execution_required": not execute, "budget_s": study["budget_s"]}
+    if execute:
+        result["trial"] = run_trial(store, spec_id, execute=True, budget_s=study["budget_s"])
+        result["decision"] = measure(store, spec_id, study["primary_metric"],
+                                     study["decision_policy"], proposal)
+    return result
 
 
 def references(store: Store, study: dict[str, Any]) -> dict[str, Any]:

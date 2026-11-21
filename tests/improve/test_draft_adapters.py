@@ -46,6 +46,64 @@ def test_windows_pi_unavailable_without_process_tree_deadline(tmp_path, monkeypa
     assert not pi["available"] and "deadline" in pi["reason"]
 
 
+def test_aut_can_select_pi_oauth_without_changing_pi_default(tmp_path, monkeypatch):
+    profile = tmp_path / "pi"
+    profile.mkdir()
+    settings = profile / "settings.json"
+    original = '{"defaultProvider":"local","defaultModel":"local-model"}'
+    settings.write_text(original)
+    (profile / "auth.json").write_text(json.dumps({"openai-codex": {
+        "type": "oauth", "access": "token", "refresh": "token", "expires": 9999999999999}}))
+    monkeypatch.setattr(adapters, "engine_homes", lambda *_: [profile])
+    monkeypatch.setattr(adapters.subprocess, "run", lambda argv, **kw:
+        adapters.subprocess.CompletedProcess(argv, 0,
+            "1.5.0\n" if argv[-1] == "--version" else " ".join(adapters.PI_FLAGS), ""))
+    assert not adapters._probe_pi("pi", tmp_path, 1)["available"]
+    result = adapters._probe_pi("pi", tmp_path, 1, model_ref="openai-codex/example")
+    assert result["available"] and result["model"] == "example"
+    assert settings.read_text() == original
+
+
+@pytest.mark.skipif(os.name != "posix", reason="owned subprocess group is POSIX-only")
+def test_gguf_uses_owned_offline_server_and_never_sends_tools(tmp_path, monkeypatch):
+    model = tmp_path / "test.gguf"
+    model.write_bytes(b"fixture")
+    script = tmp_path / "server.py"
+    script.write_text('''import http.server, json, socketserver, sys
+from pathlib import Path
+a = sys.argv[1:]
+def arg(k): return a[a.index(k) + 1]
+assert Path(arg("--host")).parent == Path.cwd() and arg("--gpu-layers") == "0"
+assert Path.cwd().stat().st_mode & 0o077 == 0
+assert "--offline" in a and "--no-webui" in a
+assert Path(arg("--model")).read_bytes() == b"fixture"
+class Handler(http.server.BaseHTTPRequestHandler):
+    def address_string(self): return "local"
+    def do_GET(self): self.reply({"status": "ok"})
+    def do_POST(self):
+        assert self.path == "/v1/chat/completions"
+        payload = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        assert "tools" not in payload and payload["messages"][-1]["content"] == "PACKET"
+        schema = payload["response_format"]["schema"]
+        assert set(schema["required"]) == set(schema["properties"]) and not schema["additionalProperties"]
+        self.reply({"choices": [{"message": {"content": "draft"}, "finish_reason": "stop"}]})
+    def reply(self, value):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(json.dumps(value).encode())
+socketserver.UnixStreamServer(arg("--host"), Handler).serve_forever()
+''')
+    monkeypatch.setenv("AUT_CONFIG", str(tmp_path / "config.toml"))
+    monkeypatch.setattr(adapters.shutil, "which", lambda name: sys.executable)
+    monkeypatch.setattr(adapters, "_probe_pi", lambda *a, **kw: {"available": False})
+    rows = adapters.discover(tmp_path, gguf_model=model)
+    [backend] = [row for row in rows if row["cli"] == "gguf"]
+    assert backend["available"]
+    assert adapters.select(rows, set(), [], order=["pi"])[0][-1]["cli"] == "gguf"
+    backend["prefix"] = [str(script)]
+    assert adapters.invoke(backend, "PACKET", timeout=8, budget_usd=1) == ("draft", 0.)
+
+
 def test_pi_protocol_empty_home_no_extensions_tools_context_and_ephemeral(tmp_path):
     auth = tmp_path / "auth.json"
     auth.write_text(json.dumps({"anthropic": {"type": "oauth", "access": "secret",
@@ -132,6 +190,24 @@ def test_local_worker_respects_shared_model_lock(tmp_path, monkeypatch):
     with _locked(lock):
         with pytest.raises(LockBusy):
             adapters._worker(request, tmp_path / "response.json")
+
+
+def test_mlx_worker_unwraps_single_json_fence(tmp_path, monkeypatch):
+    from agent_usage_tracker.label import backends
+
+    class Backend:
+        def __init__(self, model):
+            pass
+
+        def generate(self, *args, **kwargs):
+            return '```json\n{"target":"t1"}\n```'
+
+    monkeypatch.setattr(backends, "MlxLetter", Backend)
+    request, response = tmp_path / "request.json", tmp_path / "response.json"
+    request.write_text(json.dumps({"adapter": {"cli": "mlx"}, "prompt": "LOCAL",
+        "explain_model": "fake", "model_lock": str(tmp_path / "replay-model")}))
+    adapters._worker(request, response)
+    assert json.loads(response.read_text())["text"] == '{"target":"t1"}'
 
 
 @pytest.mark.skipif(os.environ.get("AUT_TEST_PI_PROTOCOL") != "1",

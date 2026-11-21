@@ -65,6 +65,24 @@ def _oracle_inputs(spec: dict[str, Any]) -> None:
             raise AutError("improve: reference oracle input changed")
 
 
+def _model_scores(store: Store, rows: list[dict[str, Any]]) -> dict[str, Any]:
+    results: dict[str, list[tuple[str, dict[tuple[str, str], str]]]] = {}
+    for row in rows:
+        votes: dict[tuple[str, str], str] = {}
+        if row["judgment_id"] is not None:
+            judgment = store.get("judgments", row["judgment_id"])
+            for key, label in zip(judgment.get("vote_ids", []), judgment.get("votes", []),
+                                  strict=True):
+                vote = store.get("votes", key)
+                identity = (vote["model"], vote["model_rev"])
+                votes[identity] = label if votes.get(identity, label) == label else "unknown"
+        results.setdefault(row["rubric"], []).append((row["expected"], votes))
+    return {rubric_id: [{"model": model, "model_rev": rev,
+            **score((expected, votes.get((model, rev))) for expected, votes in comparisons)}
+            for model, rev in sorted({identity for _, votes in comparisons for identity in votes})]
+            for rubric_id, comparisons in results.items()}
+
+
 def validate(store: Store, spec_id: str, diagnosis_id: str, *,
              execute: bool = False) -> dict[str, Any]:
     spec = store.get("reference_specs", spec_id)
@@ -152,6 +170,7 @@ def validate(store: Store, spec_id: str, diagnosis_id: str, *,
     report = {"spec_id": spec_id, "diagnosis_id": diagnosis_id, "oracle_id": oracle_id,
         "input_id": input_id,
         **score((row["expected"], row["observed"]) for row in rows),
+        "model_scores": _model_scores(store, rows),
         "split": spec["split"], "cases": rows,
         "scope": "executable references only; not real-work accuracy",
         "human_verified": False, "automation_qualified": False,

@@ -240,6 +240,13 @@ def _agent_run(store: Store, spec: dict[str, Any], case: dict[str, Any], conditi
                              and metrics is not None and error is None)}
 
 
+def _frozen_files(spec: dict[str, Any], condition: str, root: Path) -> None:
+    for relative, expected in spec.get("files", {}).get(condition, {}).items():
+        target = (root / relative).resolve()
+        if not target.is_relative_to(root) or not target.is_file() or file_digest(target) != expected:
+            raise AutError("improve: trial input changed; previous results are preserved")
+
+
 def run_trial(store: Store, spec_id: str, *, execute: bool = False,
               budget_s: int = 600) -> dict[str, Any]:
     spec = _spec(store, spec_id)
@@ -253,12 +260,10 @@ def run_trial(store: Store, spec_id: str, *, execute: bool = False,
     deadline = time.monotonic() + budget_s
     if execute:
         with _locked(store.root / "trial", blocking=False):
-            for condition, root_name in directories.items():
-                root = Path(root_name).resolve()
-                for relative, expected in spec.get("files", {}).get(condition, {}).items():
-                    target = (root / relative).resolve()
-                    if not target.is_relative_to(root) or file_digest(target) != expected:
-                        raise AutError("improve: trial input changed; previous results are preserved")
+            trial_roots = {condition: Path(name).resolve() for condition, name in directories.items()}
+            roots = list(trial_roots.values())
+            for condition, root in trial_roots.items():
+                _frozen_files(spec, condition, root)
             for repeat in range(spec["repeats"]):
                 for case in spec["cases"]:
                     order = ["baseline", "candidate"]
@@ -272,12 +277,8 @@ def run_trial(store: Store, spec_id: str, *, execute: bool = False,
                         remaining = deadline - time.monotonic()
                         if remaining <= 0:
                             break
-                        root = Path(directories[condition]).resolve()
-                        for relative, expected in spec.get("files", {}).get(condition, {}).items():
-                            target = (root / relative).resolve()
-                            if not target.is_relative_to(root) or file_digest(target) != expected:
-                                raise AutError("improve: trial input changed; prepare a new specification")
-                        roots = [Path(name).resolve() for name in directories.values()]
+                        root = trial_roots[condition]
+                        _frozen_files(spec, condition, root)
                         if spec["kind"] == "command_check":
                             _command_acceptance(case, roots, root)
                         outcome = (_agent_run(store, spec, case, condition, key, deadline)
@@ -287,6 +288,8 @@ def run_trial(store: Store, spec_id: str, *, execute: bool = False,
                         if spec["kind"] == "command_check" and "acceptance_files" in case:
                             try:
                                 _command_acceptance(case, roots, root)
+                                for name, template in trial_roots.items():
+                                    _frozen_files(spec, name, template)
                             except (AutError, OSError) as exc:
                                 validation_error = redact(str(exc))
                                 outcome.update(accepted=False, validation_error=validation_error)
