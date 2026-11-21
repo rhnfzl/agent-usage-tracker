@@ -57,6 +57,12 @@ path = "src/agent_usage_tracker/__init__.py"
 [tool.hatch.build.targets.wheel]
 packages = ["src/agent_usage_tracker"]
 
+[tool.hatch.build.targets.wheel.force-include]
+"packaging/launchd/dev.aut.scan.plist" = "agent_usage_tracker/setup_assets/dev.aut.scan.plist"
+"packaging/systemd/agent-usage-tracker.service" = "agent_usage_tracker/setup_assets/agent-usage-tracker.service"
+"packaging/systemd/agent-usage-tracker.timer" = "agent_usage_tracker/setup_assets/agent-usage-tracker.timer"
+"packaging/windows/register-task.ps1" = "agent_usage_tracker/setup_assets/register-task.ps1"
+
 # Listed, not "everything not gitignored": a local checkout holds .worktrees/, .runtime-releases/,
 # old venvs and agent folders that must never reach an upload. Tests read packaging/ and docs/.
 [tool.hatch.build.targets.sdist]

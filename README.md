@@ -63,6 +63,25 @@ It reads your current user's logs and writes usage rows to a local CSV.
 Cursor CLI contributes prompt rows, not token counts; choose a Cursor token source below for those.
 An unreadable source makes export exit nonzero, so a partial file cannot silently count as a complete export.
 
+### Read a local usage summary
+
+Use the summary to see recorded usage by agent, model, or project.
+It reads local logs without a database, a provider account, or a network connection.
+
+```bash
+aut summary
+aut summary --period week --group-by model
+aut summary --since 2026-06-01 --until 2026-07-01 --group-by project --json
+```
+
+The report uses the configured ledger time zone. The end date is exclusive.
+Source coverage describes what AUT can read. JSON uses `null` when no values are known for a count.
+The `unknown_events` field shows how many records lack each value.
+Keep the output private if it includes project names.
+
+Preview first-run settings with `aut setup`. Use `aut setup --apply` to create a starter
+configuration if you need one. The [first-run guide](docs/first-run.md) covers optional scheduled delivery.
+
 ### Keep history in your own database
 
 Install the PostgreSQL extra:
@@ -291,6 +310,8 @@ Read the [full privacy and network-call reference](docs/reference.md#privacy-mod
 | Start with | Purpose |
 |---|---|
 | `aut status` | Check configuration, progress, and backup age |
+| `aut setup` | Preview configuration, source checks, and delivery status |
+| `aut summary --period week` | See local usage, source coverage, and unknown counts |
 | `aut scan --dry-run` | Inspect parsed totals without sending rows |
 | `aut scan` | Deliver new usage and activity |
 | `aut export --out usage.csv` | Export local usage without a sink |

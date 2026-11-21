@@ -9,7 +9,9 @@
                         the same for activity rows (steers, commits, turns, ...); never usage
   aut status            show config + watermark state
   aut doctor --json     inspect source coverage without writing or connecting
+  aut setup             preview configuration and optional scan scheduling
   aut export [--out F]  write all usage as CSV (bulk load, offline bridge); never the watermark
+  aut summary [--json]  show local usage, source coverage and unknown values by date
   aut sync-prices [--out F]
                         refresh the API-equivalent model price map
   aut time add --start <local> --end <local> | --minutes N [--at <local end>] [--not-relevant]
@@ -62,7 +64,8 @@ import sys
 from datetime import date, datetime, timedelta
 from typing import Sequence
 
-from . import backup, cursor_run, git_days, inspector, manual_time, outcomes, pricing, review, scan
+from . import (backup, cursor_run, git_days, inspector, manual_time, outcomes, pricing, review,
+               scan, setup_cli, summary_cli)
 from .collectors import REGISTRY
 from .config import (ALL_AGENTS, LABEL_DAYS, LABEL_DECISION_TASKS, LABEL_TASK_NAMES, AutError,
                      Config, ledger_zone, load_config, config_path)
@@ -298,9 +301,9 @@ def cmd_publish_improve(cfg: Config, args: argparse.Namespace) -> None:
 
 
 _NO_CONFIG_COMMANDS = {"sync-prices": cmd_sync_prices, "cursor-run": cmd_cursor_run,
-                       "scan-job": cmd_scan_job}
+                       "scan-job": cmd_scan_job, "setup": setup_cli.run}
 _AGENT_COMMANDS = {"scan": cmd_scan, "backfill": cmd_backfill, "export": cmd_export,
-                   "status": cmd_status}
+                   "status": cmd_status, "summary": summary_cli.run}
 _COMMANDS = {"time": cmd_time_add, "outcomes": cmd_outcomes, "outcome": cmd_outcome,
              "inspect": cmd_inspect, "episodes": cmd_episodes, "label": cmd_label,
              "history-steers": cmd_history_steers, "backup": cmd_backup, "git-days": cmd_git_days,
@@ -311,7 +314,7 @@ _COMMANDS = {"time": cmd_time_add, "outcomes": cmd_outcomes, "outcome": cmd_outc
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="aut", description="passive coding-agent usage, activity, active-time and outcome tracker")
     agents_help = "comma-separated subset override (default: config)"
-    parser.add_argument("--agents", help=f"{agents_help}; for scan, backfill, export and status")
+    parser.add_argument("--agents", help=f"{agents_help}; for scan, backfill, export, status and summary")
     parser.add_argument('--git-defer-remotes-until', type=date.fromisoformat,
                         help='skip Git SSH sources before this ledger date; scan/git-days only')
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -319,6 +322,8 @@ def _build_parser() -> argparse.ArgumentParser:
     register(sub)
     from .observation_cli import register as register_observations
     register_observations(sub)
+    setup_cli.register(sub)
+    summary_cli.register(sub)
     sub.add_parser("scan-job", help="run the locked scheduled scan and retry unfinished daily jobs")
     sub.add_parser("retry-delivery", help="send deferred session/activity/time rows using pg_dsn")
     p_scan = sub.add_parser("scan", help="push new usage since the watermark")
