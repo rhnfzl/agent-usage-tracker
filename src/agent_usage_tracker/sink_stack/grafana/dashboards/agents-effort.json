@@ -20,7 +20,29 @@
     "list": []
   },
   "annotations": {
-    "list": []
+    "list": [
+      {
+        "datasource": {
+          "type": "grafana-postgresql-datasource",
+          "uid": "agents-timescaledb"
+        },
+        "enable": true,
+        "iconColor": "purple",
+        "name": "Adopted fixes",
+        "rawQuery": "SELECT adopted_at AS time, title AS text, kind || ',' || array_to_string(rubric_ids, ',') AS tags\nFROM agents.improve_adoption WHERE $__timeFilter(adopted_at) ORDER BY 1;",
+        "target": {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "agents-timescaledb"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT adopted_at AS time, title AS text, kind || ',' || array_to_string(rubric_ids, ',') AS tags\nFROM agents.improve_adoption WHERE $__timeFilter(adopted_at) ORDER BY 1;",
+          "refId": "Adoptions"
+        }
+      }
+    ]
   },
   "description": "Private: effort, outcomes, cost, coverage and the counting audit from the phase 5 views. Keep it on a private network; hours never leave this dashboard.",
   "panels": [
@@ -629,6 +651,148 @@
         "cellHeight": "sm"
       },
       "description": "Provisional direct agent-review counts only. Yes, no, uncertain (unknown), and not reviewed remain separate. This deliberately selected subset does not estimate population prevalence. These are not human-verified labels."
+    },
+    {
+      "id": 20,
+      "title": "Improvement loop (advisory)",
+      "type": "row",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 78
+      },
+      "panels": []
+    },
+    {
+      "id": 21,
+      "title": "Fail rate by rubric, weekly",
+      "type": "timeseries",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "agents-timescaledb"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 79
+      },
+      "description": "Model estimates from sampled cases, not a prevalence estimate. (unqualified) means fewer than 20 human-labelled fails or agreement below the rubric bar. Adoption markers show when a fix was adopted, not that it caused a change. Harnesses and triggers are separate series.",
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "agents-timescaledb"
+          },
+          "format": "time_series",
+          "rawSql": "SELECT date_trunc('week', day)::timestamp AS time,\n       rubric_id || ' v' || rubric_version || ' ' || harness || ' control' || CASE WHEN bool_and(qualified) THEN '' ELSE ' (unqualified)' END AS metric,\n       sum(failed)::float / NULLIF(sum(passed + failed), 0) AS value\nFROM agents.improve_score_latest\nWHERE trigger = 'control' AND day BETWEEN $__timeFrom()::date AND $__timeTo()::date\nGROUP BY 1, rubric_id, rubric_version, harness ORDER BY 1;",
+          "editorMode": "code"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "agents-timescaledb"
+          },
+          "format": "time_series",
+          "rawSql": "SELECT date_trunc('week', day)::timestamp AS time,\n       rubric_id || ' v' || rubric_version || ' ' || harness || ' error_result' || CASE WHEN bool_and(qualified) THEN '' ELSE ' (unqualified)' END AS metric,\n       sum(failed)::float / NULLIF(sum(passed + failed), 0) AS value\nFROM agents.improve_score_latest\nWHERE trigger = 'error_result' AND day BETWEEN $__timeFrom()::date AND $__timeTo()::date\nGROUP BY 1, rubric_id, rubric_version, harness ORDER BY 1;",
+          "editorMode": "code"
+        },
+        {
+          "refId": "C",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "agents-timescaledb"
+          },
+          "format": "time_series",
+          "rawSql": "SELECT date_trunc('week', day)::timestamp AS time,\n       rubric_id || ' v' || rubric_version || ' ' || harness || ' merge' || CASE WHEN bool_and(qualified) THEN '' ELSE ' (unqualified)' END AS metric,\n       sum(failed)::float / NULLIF(sum(passed + failed), 0) AS value\nFROM agents.improve_score_latest\nWHERE trigger = 'merge' AND day BETWEEN $__timeFrom()::date AND $__timeTo()::date\nGROUP BY 1, rubric_id, rubric_version, harness ORDER BY 1;",
+          "editorMode": "code"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 22,
+      "title": "Judged cases and unknown share, weekly",
+      "type": "timeseries",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "agents-timescaledb"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 79
+      },
+      "description": "Model estimates from sampled cases, not a prevalence estimate. (unqualified) means fewer than 20 human-labelled fails or agreement below the rubric bar. Adoption markers show when a fix was adopted, not that it caused a change. Harnesses and triggers are separate series.",
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "agents-timescaledb"
+          },
+          "format": "time_series",
+          "rawSql": "SELECT date_trunc('week', day)::timestamp AS time, rubric_id || ' v' || rubric_version || ' ' || harness || ' ' || trigger || ' judged' AS metric, sum(passed+failed+unknown) AS value\nFROM agents.improve_score_latest\nWHERE day BETWEEN $__timeFrom()::date AND $__timeTo()::date\nGROUP BY 1, rubric_id, rubric_version, harness, trigger ORDER BY 1;",
+          "editorMode": "code"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "agents-timescaledb"
+          },
+          "format": "time_series",
+          "rawSql": "SELECT date_trunc('week', day)::timestamp AS time, rubric_id || ' v' || rubric_version || ' ' || harness || ' ' || trigger || ' unknown share' AS metric, sum(unknown)::float / NULLIF(sum(passed+failed+unknown), 0) AS value\nFROM agents.improve_score_latest\nWHERE day BETWEEN $__timeFrom()::date AND $__timeTo()::date\nGROUP BY 1, rubric_id, rubric_version, harness, trigger ORDER BY 1;",
+          "editorMode": "code"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "custom": {
+            "drawStyle": "bars"
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": ".*unknown share.*"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percentunit"
+              },
+              {
+                "id": "min",
+                "value": 0
+              },
+              {
+                "id": "max",
+                "value": 1
+              },
+              {
+                "id": "custom.axisPlacement",
+                "value": "right"
+              }
+            ]
+          }
+        ]
+      }
     }
   ]
 }

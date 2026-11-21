@@ -2,7 +2,8 @@
 
 `aut improve` finds evidence of agent problems and tests explicit setup changes.
 It keeps evidence, model estimates, proposals, and trial results in a private local store.
-Normal collection and the configured sink remain separate.
+Normal collection and the configured sink remain separate. The optional `aut publish-improve`
+command sends advisory counts and operator-written adoption markers to the private sink.
 
 [Private studies](improvement-studies.md) connect incidents, setup provenance, prospective trial
 policies, independent references and fresh follow-up. They report bounded supported, rejected or
@@ -546,3 +547,46 @@ Point the operating-system timer at the returned `python` path with `-I -m agent
 Use the private store as its working directory. The worker no longer depends on a source-checkout path.
 Verify an installed run before changing the timer. Preserve the previous timer configuration for rollback.
 Local MLX inference still requires Apple silicon. Base commands need the existing cross-platform CI matrix before broader distribution.
+
+### Publish advisory scores and adoption markers
+
+You can compare sampled judge scores with the dates you adopt fixes in the private effort dashboard.
+A marker records adoption, and does not prove that a fix helped. All judges remain advisory.
+
+```bash
+aut publish-improve --dry-run --days 90
+aut publish-improve --days 90
+```
+
+The command needs `transport.pg_dsn` for delivery and the updated sink schema.
+It reads `AUT_IMPROVE_ROOT`, else `~/.local/share/aut/improve` (under `XDG_DATA_HOME` when set).
+It refuses a missing store or missing `.aut-improve` marker, and never changes the private store.
+Dry runs send no data or heartbeat and do not update the cache.
+Days must be between 1 and 366.
+
+Counts use the case's first timestamped event in the configured `ledger_timezone`, not the machine zone.
+Timestamps without a zone are treated as UTC. Cases without timestamps do not enter the series.
+The newest diagnosis wins for each case, rubric version and trigger.
+Stopped cycles use the diagnosis recorded in their progress report.
+Legacy judgments map to rubric version 1 for the original text, else version 0.
+Control, error-result and merge-trigger samples remain separate, as do harnesses.
+Incomplete evidence counts as unknown. The newest qualification record sets the qualified flag.
+Missing qualification means unqualified. Error samples do not estimate overall failure prevalence.
+
+Only daily counts, rubric identifiers and versions, harnesses, triggers and qualification flags leave the store.
+Adoption delivery includes the short adoption identifier, local noon on its date, human-written title, kind, rubric identifiers and PR number.
+Paths, case or session identifiers, commit SHAs, rationale, patches and transcripts stay private.
+Public text fields must be short, single-line, and contain no path separators or long hexadecimal strings.
+Unsafe metadata stops delivery before any score or adoption insert.
+
+The cache is `improve_publish_cache.json` beside the AUT state file (`AUT_STATE` overrides its location).
+It is scoped to the sink, private-store root and ledger zone. Only changed score rows are sent.
+Keys removed inside the requested window get one zero row; older history remains unchanged.
+The cache advances only after both writes succeed. Retries and a lost cache are harmless.
+Adoptions use insert-on-conflict, so the first delivered marker remains authoritative.
+The `improve_publish` heartbeat reports each delivery attempt through the existing collector-scan mechanism.
+
+To schedule delivery, set `AUT_IMPROVE_PUBLISH=1` in the existing scan-job environment after the sink schema is deployed.
+This adds one daily step after outcomes, with retries until it succeeds. No new timer is installed.
+Both the scan runtime and improve runtime must include the rubric and score modules.
+Merging this code enables no jobs and sends no data.

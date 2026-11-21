@@ -292,6 +292,11 @@ def cmd_delivery_retry(cfg: Config, args: argparse.Namespace) -> None:
     print(f"delivery queue: sent {replay_outbox(cfg)} rows")
 
 
+def cmd_publish_improve(cfg: Config, args: argparse.Namespace) -> None:
+    from .improve_publish import run_publish
+    print(json.dumps(run_publish(cfg, days=args.days, dry_run=args.dry_run)))
+
+
 _NO_CONFIG_COMMANDS = {"sync-prices": cmd_sync_prices, "cursor-run": cmd_cursor_run,
                        "scan-job": cmd_scan_job}
 _AGENT_COMMANDS = {"scan": cmd_scan, "backfill": cmd_backfill, "export": cmd_export,
@@ -299,7 +304,8 @@ _AGENT_COMMANDS = {"scan": cmd_scan, "backfill": cmd_backfill, "export": cmd_exp
 _COMMANDS = {"time": cmd_time_add, "outcomes": cmd_outcomes, "outcome": cmd_outcome,
              "inspect": cmd_inspect, "episodes": cmd_episodes, "label": cmd_label,
              "history-steers": cmd_history_steers, "backup": cmd_backup, "git-days": cmd_git_days,
-             "retry-delivery": cmd_delivery_retry, "doctor": cmd_doctor}
+             "retry-delivery": cmd_delivery_retry, "doctor": cmd_doctor,
+             "publish-improve": cmd_publish_improve}
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -353,6 +359,9 @@ def _build_parser() -> argparse.ArgumentParser:
     p_outs.add_argument("--fetch", action="store_true",
                         help="git fetch the clones and ask gh first (config: outcome_fetch)")
     p_outs.add_argument("--dry-run", action="store_true", help="count states, write nothing, no fetch or gh")
+    p_improve = sub.add_parser("publish-improve", help="send advisory counts and adopted-fix markers")
+    p_improve.add_argument("--dry-run", action="store_true", help="count changes, send nothing")
+    p_improve.add_argument("--days", type=int, default=90)
     p_hist = sub.add_parser("history-steers",
                             help="daily steer estimates for lost 2026 logs, from CLI history")
     p_hist.add_argument("--dry-run", action="store_true", help="count, write nothing")

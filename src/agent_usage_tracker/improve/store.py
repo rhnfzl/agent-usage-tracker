@@ -31,9 +31,16 @@ def digest(value: Any) -> str:
 
 
 class Store:
-    def __init__(self, root: Path) -> None:
+    def __init__(self, root: Path, *, read_only: bool = False) -> None:
         self.root = root.expanduser().resolve()
+        self.read_only = read_only
         marker = self.root / ".aut-improve"
+        if read_only:
+            if not self.root.is_dir() or not marker.is_file():
+                raise AutError(f"no improvement store at {self.root}")
+            if marker.read_text() != "1\n":
+                raise AutError("improve: unsupported private store version")
+            return
         if self.root.exists() and any(self.root.iterdir()) and not marker.is_file():
             raise AutError("improve: refusing a nonempty directory without its private marker")
         self.root.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -53,6 +60,8 @@ class Store:
         return path
 
     def put(self, kind: str, value: dict[str, Any]) -> str:
+        if self.read_only:
+            raise AutError("improve: store is read-only")
         try:
             if not isinstance(value, dict):
                 raise ValueError("record is not an object")
@@ -84,6 +93,8 @@ class Store:
         return sorted(p.stem for p in (self.root / kind).glob("*.json"))
 
     def append(self, kind: str, **attrs: Any) -> None:
+        if self.read_only:
+            raise AutError("improve: store is read-only")
         row = {"at": datetime.now(timezone.utc).isoformat(), "kind": kind, **attrs}
         with _locked(self.root / "journal"):
             fd = os.open(self.root / "events.jsonl", os.O_CREAT | os.O_APPEND | os.O_WRONLY, 0o600)

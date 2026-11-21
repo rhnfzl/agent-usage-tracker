@@ -23,6 +23,8 @@
 #                                            # connect (e.g. a LAN route when Tailscale is down)
 #   AUT_LABEL=1                              # run the nightly `aut label run` here (needs aut[label])
 #   AUT_LABEL_MODE=local                     # saved local estimates, separate from calibrated labels
+#   AUT_IMPROVE_PUBLISH=1                    # optional daily score/marker delivery after outcomes
+#   AUT_IMPROVE_ROOT=/private/aut/improve    # default: XDG data home/aut/improve
 #
 # The env file exists because launchd and systemd do not inherit your shell environment. Keep
 # secrets out of it: they belong in config.toml, which is already chmod 600.

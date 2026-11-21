@@ -124,6 +124,8 @@ def _run(conf: Path, log: TextIO) -> int:
         retry.unlink(missing_ok=True)
         today = date.today().isoformat()
         jobs = [("outcomes", ["outcomes"])]
+        if os.environ.get("AUT_IMPROVE_PUBLISH") == "1":
+            jobs.append(("publish-improve", ["publish-improve"]))
         if os.environ.get("AUT_LABEL") == "1":
             args = ["label", "run"]
             if os.environ.get("AUT_LABEL_MODE") == "local":
