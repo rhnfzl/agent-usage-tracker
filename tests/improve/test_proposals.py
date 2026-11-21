@@ -8,6 +8,17 @@ from agent_usage_tracker.improve.proposals import prepare, stage
 from agent_usage_tracker.improve.store import Store
 
 
+def test_model_draft_growth_limit_does_not_change_operator_authority(tmp_path):
+    target = tmp_path / "AGENTS.md"
+    target.write_text("old")
+    store = Store(tmp_path / "private")
+    case = store.put("cases", {"events": [{"id": "e"}]})
+    with pytest.raises(AutError, match="1200"):
+        prepare(store, case, tmp_path, target, "old", "x" * 1204,
+                authority="model_drafted_proposal")
+    assert prepare(store, case, tmp_path, target, "old", "x" * 1204)
+
+
 def test_drafting_is_read_only_and_staging_verifies_the_base(tmp_path):
     root = tmp_path / "source"
     root.mkdir()

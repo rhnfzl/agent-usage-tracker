@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Optional daily proposal drafting. Replace CHANGEME and RELEASE before operator installation.
+     Set PATH to include the chosen headless CLI and its runtime. Nothing installs this template. -->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>dev.aut.improve-draft</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/CHANGEME/.local/share/aut/improve-runtime/releases/RELEASE/venv/bin/python</string>
+    <string>-I</string><string>-m</string><string>agent_usage_tracker.cli</string>
+    <string>improve</string><string>--root</string><string>/Users/CHANGEME/.local/share/aut/improve</string>
+    <string>draft</string><string>--max-groups</string><string>1</string>
+    <string>--budget-usd</string><string>1</string><string>--excerpts</string><string>none</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>/Users/CHANGEME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    <key>PYTHONUNBUFFERED</key><string>1</string>
+    <key>HF_HUB_OFFLINE</key><string>1</string>
+  </dict>
+  <key>StartCalendarInterval</key>
+  <dict><key>Hour</key><integer>5</integer><key>Minute</key><integer>30</integer></dict>
+  <key>RunAtLoad</key><false/>
+  <key>ProcessType</key><string>Background</string>
+  <key>LowPriorityIO</key><true/>
+  <key>WorkingDirectory</key><string>/Users/CHANGEME/.local/share/aut/improve</string>
+  <key>StandardOutPath</key><string>/Users/CHANGEME/.local/share/aut/improve/draft.stdout.log</string>
+  <key>StandardErrorPath</key><string>/Users/CHANGEME/.local/share/aut/improve/draft.stderr.log</string>
+</dict>
+</plist>

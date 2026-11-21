@@ -57,6 +57,16 @@ def test_claude_call_is_headless_sessionless_and_sonnet(monkeypatch):
     assert "prompt" not in str(exc.value)
 
 
+def test_claude_system_and_budget_are_explicit_and_compatible(monkeypatch):
+    seen = []
+    monkeypatch.setattr(teach.shutil, "which", lambda _: "/bin/claude")
+    monkeypatch.setattr(teach.subprocess, "run", lambda argv, **kw:
+                        seen.append(argv) or _Claude('{"result":"{}","total_cost_usd":0.1}'))
+    assert teach.ask_claude("p", system="custom", budget_usd=.5) == ("{}", .1)
+    assert seen[0][seen[0].index("--system-prompt") + 1] == "custom"
+    assert seen[0][seen[0].index("--max-budget-usd") + 1] == "0.5"
+
+
 def _teachers(monkeypatch, local, ask):
     monkeypatch.setattr(teach, "make_backend", lambda *a: local)
     monkeypatch.setattr(teach, "ask_claude", ask)
