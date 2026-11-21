@@ -271,6 +271,11 @@ _VALUE_FLAGS = {
 }
 
 
+def _word(word: str) -> str:
+    # A family is built from command words; a quoted phrase or odd text must not become one.
+    return word if re.fullmatch(r"[A-Za-z0-9_.:+@-]{1,40}", word) else "other"
+
+
 def _skip_flags(words: list[str], tool: str) -> list[str]:
     values = _VALUE_FLAGS.get(tool, set())
     while words and words[0].startswith("-"):
@@ -297,14 +302,14 @@ def _family(words: list[str]) -> str:
     if not words:
         return ""
     first = re.sub(r"\.exe$", "", words[0].rsplit("/", 1)[-1], flags=re.IGNORECASE)
-    first = "python" if re.fullmatch(r"python[0-9.]*", first) else first
+    first = "python" if re.fullmatch(r"python[0-9.]*", first) else _word(first)
     rest = words[1:]
     if first in {"bash", "sh", "zsh"} and len(rest) > 1 and rest[0] in {"-c", "-lc"}:
         return command_family(rest[1], "Bash")
     if first == "python":
         for index, word in enumerate(rest):
             if word == "-m" and index + 1 < len(rest):
-                return f"python -m {rest[index + 1]}"
+                return f"python -m {_word(rest[index + 1])}"
             if not word.startswith("-"):
                 break
         return first
@@ -316,7 +321,7 @@ def _family(words: list[str]) -> str:
     if first in {"uv", "poetry"} and rest[0] == "run":    # uv run X is X's family under uv run
         after = _skip_flags(rest[1:], first)
         return f"{first} run {_family(after)}" if after else f"{first} run"
-    return f"{first} {rest[0]}"
+    return f"{first} {_word(rest[0])}"
 
 
 def _segments(command: str) -> list[list[str]]:

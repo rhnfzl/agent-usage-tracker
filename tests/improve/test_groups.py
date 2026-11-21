@@ -108,6 +108,17 @@ def test_a_judgment_older_than_the_window_is_excluded(store):
     assert report["groups"][0]["distinct_tasks"] == 1
 
 
+def test_a_future_dated_case_is_excluded(store):
+    judge(store, failing_case(store, "future", day=21))    # the day after TODAY
+    assert groups.refresh(store, today=TODAY)["groups"] == []
+
+
+def test_a_quoted_phrase_never_reaches_the_report(store):
+    judge(store, failing_case(store, command='git "Confidential client A"'))
+    text = json.dumps(groups.refresh(store, today=TODAY))
+    assert "Confidential" not in text and "git other" in text
+
+
 def test_only_the_newest_rubric_version_counts(store):
     case = failing_case(store)
     judge(store, case, version=1)

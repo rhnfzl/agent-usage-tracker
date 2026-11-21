@@ -307,6 +307,10 @@ def test_applies_checks_triggers_finals_test_commands_and_outputs():
     ("time -p uv run pytest", "Bash", "uv run pytest"),
     ("command git push", "Bash", "git push"),
     ("command -v git", "Bash", "command"),
+    # a quoted phrase is never part of a family
+    ('git "Confidential client A"', "Bash", "git other"),
+    ('python -m "a b"', "Bash", "python -m other"),
+    ('"my secret tool" --run', "Bash", "other"),
 ])
 def test_command_family(call_text, tool, family):
     assert rubric.command_family(call_text, tool) == family

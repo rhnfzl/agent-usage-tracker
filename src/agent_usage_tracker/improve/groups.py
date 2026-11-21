@@ -174,7 +174,7 @@ def refresh(store: Store, *, window_days: int = 14, threshold: int = 3,
             case_id = row["case_id"]
             case = cases[case_id] = cases.get(case_id) or store.get("cases", case_id)
             day = _work_day(case)
-            if day is None or day < start:
+            if day is None or not start <= day <= today:     # skewed clocks: no future days
                 continue
             snapshot = case["session_snapshot"]
             session = sessions[snapshot] = sessions.get(snapshot) or store.get("sessions", snapshot)
