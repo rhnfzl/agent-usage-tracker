@@ -25,6 +25,14 @@ def test_selection_harness_quota_success_failover_round_robin_mlx_last():
     assert [r["cli"] for r in ranked] == ["codex", "pi", "mlx"]
 
 
+def test_auto_prefers_cursor_for_native_cursor_cli_evidence():
+    rows = [{"cli": "pi", "available": True, "quota": .9},
+            {"cli": "cursor", "available": True, "quota": .2}]
+    ranked, _ = adapters.select(rows, {"cursor_cli"}, [])
+    assert [row["cli"] for row in ranked] == ["cursor", "pi"]
+    assert ranked[0]["reason"]["preferred_harness"]
+
+
 def test_discovery_fails_closed_for_unsupported_remote_flavors(tmp_path, monkeypatch):
     monkeypatch.setattr(adapters.shutil, "which", lambda name: "/fake/" + name)
     monkeypatch.setattr(adapters, "_probe_pi", lambda *a, **kw:

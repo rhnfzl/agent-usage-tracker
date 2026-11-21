@@ -86,7 +86,7 @@ def _context(events: list[dict[str, Any]], session: dict[str, Any],
                      else "<p>No repeated explicit file read was observed.</p>")
     if compactions:
         compaction_report = f"<p>{len(compactions):,} observed. {', '.join(compactions)}</p>"
-    elif session.get("agent") in {"claude_code", "codex"}:
+    elif session.get("agent") in {"claude_code", "codex", "pi", "cursor_cli"}:
         compaction_report = "<p>No explicit compaction was observed in this attempt.</p>"
     else:
         compaction_report = "<p>Compaction capture is unsupported for this evidence stream.</p>"

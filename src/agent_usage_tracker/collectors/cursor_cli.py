@@ -98,17 +98,17 @@ def prompt_ts(text: str, created: str | None) -> str | None:
 
 
 def _varint(b: bytes, i: int) -> tuple[int, int]:
-    r = s = 0
-    while True:
+    r = 0
+    for shift in range(0, 70, 7):
         c = b[i]                      # IndexError on a truncated blob
         i += 1
-        r |= (c & 0x7F) << s
-        s += 7
+        r |= (c & 0x7F) << shift
         if not c & 0x80:
             return r, i
+    raise ValueError("oversized protobuf varint")
 
 
-def _field1_ids(b: bytes) -> tuple[str, ...]:
+def _field1_ids(b: bytes, limit: int | None = None) -> tuple[str, ...]:
     """The 32-byte field-1 entries of a top-level protobuf message, in order."""
     out, i = [], 0
     while i < len(b):
@@ -126,6 +126,8 @@ def _field1_ids(b: bytes) -> tuple[str, ...]:
             n, i = _varint(b, i)
             if tag >> 3 == 1 and n == 32:
                 out.append(b[i:i + n].hex())
+                if limit is not None and len(out) >= limit and i + n <= len(b):
+                    break
             i += n
         else:
             raise ValueError(wt)

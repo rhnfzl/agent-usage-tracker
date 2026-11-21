@@ -19,6 +19,9 @@ PATTERNS = (
     # stays in the text untouched, so matching it too (cubic on a word run) would add nothing
     ("assignment", re.compile(r"(password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key)"
                               r"(\s*[=:]\s*)\S+", re.I), r"\1\2" + _REDACTED),
+    ("json_credential", re.compile(
+        r'((?:password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|authorization|cookie)'
+        r'"\s*:\s*)"(?:[^"\\]|\\.)*"', re.I), r'\1"' + _REDACTED + '"'),
     ("bearer", re.compile(r"\b(bearer\s+)\S+", re.I), r"\1" + _REDACTED),
     ("jwt", re.compile(r"\beyJ[\w-]+\.[\w-]+\.[\w-]+"), _REDACTED),
     ("sk_key", re.compile(r"\bsk-[\w-]{16,}"), _REDACTED),

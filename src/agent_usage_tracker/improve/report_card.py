@@ -90,7 +90,7 @@ def _coverage(store: Store, journal: list[dict[str, Any]], zone: tzinfo,
                 "automated_sources", "active_sources", "malformed_records")},
             "coverage_available": bool(saved),
             "open_issues": len(saved.get("issues", [])) if saved else None,
-            "usage_without_evidence": sorted(_enum(v, ("pi", "cursor", "cursor_api",
+            "usage_without_evidence": sorted(_enum(v, ("pi", "cursor", "cursor_api", "cursor_cli",
                 "codex", "claude_code", "t3")) for v in usage - evidence),
             "judgments": len(selected),
             "incomplete_evidence": sum(r.get("reason") == "incomplete_evidence" for r in selected)}
@@ -167,7 +167,8 @@ def build(store: Store, days: int = 28, today: date | None = None, *,
                                      for r in current + previous):
             continue
         rubric_rows.append({"rubric_id": _rubric_id(rid), "rubric_version": version,
-            "harness": _enum(harness, ("all", "codex", "claude_code", "t3", "pi", "cursor")),
+            "harness": _enum(harness, ("all", "codex", "claude_code", "t3", "pi", "cursor",
+                                        "cursor_cli")),
             "trigger": _enum(trigger, ("control", "error_result", "merge")),
             "current": windows[0], "previous": windows[1]})
     qualifications = []

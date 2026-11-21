@@ -7,6 +7,7 @@ import pytest
 
 from agent_usage_tracker import cli, improve_publish as publish, push
 from agent_usage_tracker.config import AutError, Config
+from agent_usage_tracker.improve.scores import daily
 from agent_usage_tracker.improve.store import Store
 
 
@@ -120,6 +121,7 @@ def test_boundary_rejects_unsafe_adoption_before_any_data_write(setup, field, va
 
 
 @pytest.mark.parametrize("field,value", [("harness", "/private"), ("trigger", "transcript"),
+    ("harness", "unrecognized_agent"),
     ("rubric_id", "a" * 64), ("failed", -1), ("passed", True), ("qualified", "yes")])
 def test_boundary_rejects_unsafe_scores(setup, field, value):
     cfg, store, row, sent, beats = setup
@@ -127,6 +129,22 @@ def test_boundary_rejects_unsafe_scores(setup, field, value):
     with pytest.raises(AutError):
         publish.run_publish(cfg)
     assert not sent
+
+
+@pytest.mark.parametrize("harness", ["pi", "cursor_cli"])
+def test_native_judgments_publish_only_aggregates(setup, monkeypatch, harness):
+    cfg, store, row, sent, _ = setup
+    monkeypatch.setattr(publish.scores, "daily", daily)
+    case_id = store.put("cases", {"agent": harness, "trigger": "control", "events": [
+        {"timestamp": f"{row['day']}T12:00:00+09:00", "text": "private evidence"}]})
+    store.put("judgments", {"job_id": "job", "case_id": case_id, "rubric": "avoidable_recovery",
+                            "verdict": "fail", "rubric_version": 1})
+    monkeypatch.setattr(cli, "load_config", lambda: cfg)
+    assert cli.main(["publish-improve"]) == 0
+    sql, rows = sent[0]
+    assert sql == publish.SCORE_SQL
+    assert len(rows) == 1
+    assert rows[0][:-1] == (row["day"], "avoidable_recovery", 1, harness, "control", 0, 1, 0, False)
 
 
 def test_missing_store_fails_closed_and_cli_is_registered(setup, monkeypatch):

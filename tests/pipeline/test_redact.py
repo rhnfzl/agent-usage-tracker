@@ -13,6 +13,7 @@ def test_redaction_each_pattern() -> None:
     samples = {
         "url_credentials": ("open https://" + "user:" + "hunter2@example.test/x", "hunter2"),
         "assignment": ("run with password=" + "S3cretValue", "S3cretValue"),
+        "json_credential": ('{"accessToken": "synthetic-credential"}', "synthetic-credential"),
         "jwt": ("token eyJ" + "hbGciOi.eyJ" + "zdWIiOi.c2lnbmF0dXJl here", "c2lnbmF0dXJl"),
         "sk_key": ("key sk-" + "proj-" + a24, a24),
         "github_pat": ("github" + "_pat_" + a24 + "xyz", a24),
@@ -57,3 +58,13 @@ def test_redaction_keeps_its_catches() -> None:
     assert clean_text("git+ssh://me:pw@host/x") == "git+ssh://[redacted]@host/x"
     assert clean_text("mail a.b+c@d-e.co.uk.") == "mail [redacted]."
     assert clean_text("a@b.com+x@d.org") == "[redacted][redacted]"
+
+
+def test_json_credential_redaction_leaves_other_values_intact() -> None:
+    import json
+
+    message = {"headers": {"Authorization": 'Basic "opaque"', "Cookie": "test-cookie"},
+               "body": {"apiKey": "short opaque value", "title": "keep"}}
+    assert json.loads(clean_text(json.dumps(message))) == {
+        "headers": {"Authorization": "[redacted]", "Cookie": "[redacted]"},
+        "body": {"apiKey": "[redacted]", "title": "keep"}}
