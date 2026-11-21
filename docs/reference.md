@@ -137,6 +137,7 @@ Files aut keeps on this machine:
 | Name | Reads | Sends | Default |
 |---|---|---|---|
 | `claude_code` | `~/.claude/projects/**` | usage, prompts, sessions, activity, links | on |
+| `t3` | `~/.t3/userdata/statev2.sqlite` | confirmed application prompts and completed runs after a configured cutover | opt-in |
 | `codex` | `~/.codex/sessions/**` | usage (with reasoning tokens), prompts, sessions, activity, links | on |
 | `pi` | `~/.pi/agent/sessions/**` | usage (with reasoning tokens), prompts, sessions, activity, links | on |
 | `cursor` | Cursor IDE `state.vscdb` (`cursor_db_path` overrides) | usage as a lower bound, prompts | on |
@@ -144,6 +145,18 @@ Files aut keeps on this machine:
 | `cursor_sdk` | the files matched by `cursor_sdk_manifests` | per-run usage | on, idle until the glob is set |
 | `cursor_api` | Cursor's dashboard API (network) | accurate usage for the IDE and the CLI | on, idle until `cursor_api = true` |
 | `activitywatch` | the local aw-server (`activitywatch_url`) | not-AFK window intervals with app, category and a redacted title | **off**: add it to `agents` |
+
+T3 activity collection requires an approved `t3_activity_since` timestamp in your local configuration:
+
+```toml
+t3_activity_since = "2026-11-15T00:00:00Z" # replace with your approved prospective cutover
+```
+
+Include `"t3"` beside your native collectors when `agents` is explicit.
+T3 uses confirmed web/mobile messages and strong native bindings to avoid mirrored prompts.
+Provider changes share one `t3:<app-thread-id>` session. Native logs remain the source of tokens and costs.
+T3 turns count completed app runs, which can contain several internal agent turns.
+Missing or ambiguous evidence reports degraded coverage. Existing history is not reconciled automatically.
 
 **Pick one Cursor token source.** `cursor`, `cursor_sdk` and `cursor_api` overlap, and more
 than one counts the same usage twice. `cursor_api` is the accurate one. To keep Cursor prompts
@@ -231,6 +244,7 @@ they belong in `config.toml`.
 | `AUT_TUNNEL_SPEC` | the `ssh -L` argument, e.g. `15432:10.0.0.5:5432`; required with `AUT_TUNNEL_HOST` |
 | `AUT_TUNNEL_FALLBACK_HOSTS` | space- or comma-separated `user@host` routes tried in order when `AUT_TUNNEL_HOST` does not connect, e.g. `root@192.168.1.150` (a LAN route when Tailscale is down); each must reach the same sink, since they share `AUT_TUNNEL_SPEC`; ignored without `AUT_TUNNEL_HOST` |
 | `AUT_LABEL` | `1` runs the nightly `aut label run` on this machine |
+| `AUT_IMPROVE_PUBLISH` | `1` publishes advisory scores and adoption markers after outcomes. [Deploy the sink schema and preview delivery](improvement.md#publish-advisory-scores-and-adoption-markers) first. |
 | `AUT_LABEL_MODE` | `local` uses saved provisional local recipes; the default uses calibrated-label configuration |
 
 With a tunnel, point `pg_dsn` at `localhost` and the local port.

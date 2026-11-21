@@ -5,6 +5,16 @@ you choose a database or send any data.
 
 ## Start with a local report
 
+With [uv](https://docs.astral.sh/uv/getting-started/installation/) installed, install the
+latest release to get the `aut` command:
+
+```sh
+uv tool install agent-usage-tracker
+```
+
+Install from `git+https://github.com/rhnfzl/agent-usage-tracker` when you need a change on
+`main` before the next release.
+
 ```sh
 aut setup
 aut demo
@@ -34,6 +44,77 @@ request and shows freshness, the reset time and any supported pace estimate.
 Use `aut improve inspect --case CASE_ID` to review the private context for a saved case.
 The view links text sizes, exact repeat reads and observed compactions to their frozen events.
 Captured text sizes use UTF-8 bytes and can be clipped. Actual model context tokens are unknown.
+
+## Export usage and compare models
+
+```sh
+aut --agents claude_code,codex,cursor_cli,pi export --out usage.csv
+aut summary --period week --group-by model
+aut summary --since 2026-06-01 --until 2026-07-01 --group-by project --json
+```
+
+Local export needs neither a config file nor a database. Cursor CLI contributes prompt rows. For Cursor
+token counts, choose one source from the [collector reference](reference.md#collectors).
+An unreadable source makes export exit nonzero. Check the exit code before treating a CSV as complete.
+
+Dates use the configured ledger time zone. The end date is exclusive. JSON reports unknown counts as
+`null` and lists records with missing values in `unknown_events`. Project summaries can contain names.
+
+`aut sync-prices` refreshes local API list rates. The summary shows the known estimated subtotal, the
+total estimate when coverage allows it, and any costs recorded in the logs.
+Use `aut summary --compare-prices MODEL_A MODEL_B` to price the same observed token mix at two rates.
+
+Use `aut statusline` for cached quota, reset times, and scan freshness. See the [quota guide](quota.md)
+for Claude Code statusline input and optional local notices.
+
+## Keep history in your own database
+
+Install the PostgreSQL extra:
+
+```bash
+uv tool install "agent-usage-tracker[postgres]"
+```
+
+Create `~/.config/agent-usage-tracker/config.toml` with your machine label and database connection:
+
+```toml
+machine = "laptop"
+agents = ["claude_code", "codex", "cursor_cli", "pi"]
+
+[transport]
+pg_dsn = "env:AUT_PG_DSN"
+```
+
+Set `AUT_PG_DSN` to your provisioned database connection.
+The database needs AUT's tables and views. The [sink stack](../src/agent_usage_tracker/sink_stack/README.md) provides them with one `docker compose up`;
+the [deploy runbook](../DEPLOY.md) describes the sink contract.
+Set `ledger_timezone` to the sink's `AUT_TZ`.
+On macOS and Linux, protect the configuration with `chmod 600`.
+On Windows, restrict its directory permissions to your account.
+
+```bash
+aut status
+aut scan --dry-run
+aut scan
+```
+
+The dry run parses logs and reports totals without sending rows.
+Real scans advance their watermark only after delivery succeeds.
+Repeated delivery is safe because the sink deduplicates event IDs.
+Native JSONL collection drains a finite file snapshot, including all capped chunks present when each file is admitted.
+Later appends, new files and replaced files wait for the next run.
+On POSIX, acknowledged closed Cursor CLI stores skip SQLite reads while database and WAL metadata stay unchanged.
+
+Webhook-only scans keep session, activity, and time rows in a private local delivery queue.
+`aut status` shows pending rows. After configuring PostgreSQL, scans replay them automatically;
+`aut retry-delivery` also retries the queue directly. Keep the state directory in your backups.
+
+For a full configuration, start from [`config.example.toml`](../config.example.toml).
+Put secrets in your local configuration or environment, never in this repository.
+Scheduled jobs do not inherit your shell environment; configure their secrets separately.
+
+See the [configuration reference](reference.md#configuration) for default paths. Keep the same
+`repo_key_salt` across machines when you want their repository identities to match. Back up that salt.
 
 ## Schedule delivery to your own sink
 
