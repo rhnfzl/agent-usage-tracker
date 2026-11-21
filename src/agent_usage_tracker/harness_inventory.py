@@ -57,8 +57,9 @@ def _has_command(dirs: list[Path], name: str) -> bool:
 
 
 def _newest(paths: list[Path]) -> tuple[bool, float | None, bool]:
-    """(any path exists, newest mtime, walk finished within bounds). Reads metadata only;
-    skips symlinks and `skills` trees, which skill-sync tools touch without any agent use."""
+    """(any path exists, newest file mtime, walk finished within bounds). Reads metadata only.
+    Only files date activity: a directory's mtime moves when a skill-sync tool adds `skills/`.
+    Skips symlinks and `skills` trees, which those tools touch without any agent use."""
     exists, newest, complete, budget = False, None, True, MAX_WALK_PER_ENTRY
     stack: list[tuple[str, int]] = []
     for path in paths:
@@ -69,9 +70,10 @@ def _newest(paths: list[Path]) -> tuple[bool, float | None, bool]:
         exists = True
         if stat.S_ISLNK(info.st_mode):
             continue
-        newest = max(newest or 0., info.st_mtime)
         if stat.S_ISDIR(info.st_mode):
             stack.append((str(path), 1))
+        else:
+            newest = max(newest or 0., info.st_mtime)
     while stack:
         directory, depth = stack.pop()
         try:
@@ -82,12 +84,16 @@ def _newest(paths: list[Path]) -> tuple[bool, float | None, bool]:
                     budget -= 1
                     if entry.is_symlink() or entry.name == "skills":
                         continue
-                    newest = max(newest or 0., entry.stat(follow_symlinks=False).st_mtime)
                     if entry.is_dir(follow_symlinks=False):
                         if depth < MAX_WALK_DEPTH:
                             stack.append((entry.path, depth + 1))
                         else:
                             complete = False
+                        continue
+                    try:
+                        newest = max(newest or 0., entry.stat(follow_symlinks=False).st_mtime)
+                    except OSError:     # gone mid-walk: keep walking the rest of the directory
+                        complete = False
         except OSError:
             complete = False
     return exists, newest, complete

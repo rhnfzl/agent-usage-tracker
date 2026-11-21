@@ -202,17 +202,24 @@ def test_a_walk_cut_by_its_budget_without_recent_files_is_unknown(roots, tmp_pat
 
 
 def test_skills_trees_never_make_a_harness_recent(roots, tmp_path):
-    touch(tmp_path / ".tool/skills/sync/SKILL.md", 0)
-    age(tmp_path / ".tool/skills/sync", 30)
-    age(tmp_path / ".tool/skills", 30)
+    touch(tmp_path / ".tool/history.json", 30)
     age(tmp_path / ".tool", 30)
-    assert only(harness_inventory.discover(tmp_path, entry(paths=["~/.tool"])))["activity"] != "recent"
+    # A skill sync creates skills/ now, which also moves the parent's mtime; it is left so.
+    touch(tmp_path / ".tool/skills/sync/SKILL.md", 0)
+    assert only(harness_inventory.discover(tmp_path, entry(paths=["~/.tool"])))["activity"] == "stale"
+
+
+def test_a_new_empty_directory_is_not_activity(roots, tmp_path):
+    touch(tmp_path / ".tool/history.json", 30)
+    age(tmp_path / ".tool", 30)
+    (tmp_path / ".tool/cache").mkdir()
+    assert only(harness_inventory.discover(tmp_path, entry(paths=["~/.tool"])))["activity"] == "stale"
 
 
 @pytest.mark.skipif(not hasattr(os, "symlink"), reason="symlinks unavailable")
 def test_a_symlinked_directory_is_not_followed(roots, tmp_path):
     touch(tmp_path / "elsewhere/new.json", 0)
-    (tmp_path / ".tool").mkdir()
+    touch(tmp_path / ".tool/old.json", 30)
     (tmp_path / ".tool/link").symlink_to(tmp_path / "elsewhere", target_is_directory=True)
     age(tmp_path / ".tool", 30)
     assert only(harness_inventory.discover(tmp_path, entry(paths=["~/.tool"])))["activity"] == "stale"
