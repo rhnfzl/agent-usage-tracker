@@ -83,7 +83,8 @@ def test_scan_rows_ok_and_error() -> None:
             assert "boom" in str(exc)
     assert len(calls) == 1, calls                       # ONE delivery, even though a collector raised
     rows = {r["collector"]: r for r in calls[0]}
-    assert set(rows) == {"good", "quiet", "bad"}, rows
+    assert set(rows) == {"good", "quiet", "bad", "coverage"}, rows
+    assert rows["coverage"]["status"] == "ok"           # first report: today's issues are the baseline
     good, quiet, bad = rows["good"], rows["quiet"], rows["bad"]
     assert good["status"] == "ok" and good["error"] is None
     assert good["events"] == 3 and good["human"] == 1   # the no-ts record is not counted
@@ -228,7 +229,7 @@ def test_a_failed_state_save_still_sends_the_heartbeat() -> None:
         with pytest.raises(OSError, match="disk full"):
             scan.run_scan(_cfg(pg_dsn="postgresql://x"), ["good"], dry_run=False)
     assert [(r["collector"], r["status"], r["error"]) for r in calls[0]] == [
-        ("good", "error", "OSError")]
+        ("good", "error", "OSError"), ("coverage", "ok", None)]
 
 
 def test_a_failed_state_save_does_not_replace_the_pass_own_failure(capsys) -> None:

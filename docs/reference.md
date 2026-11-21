@@ -226,6 +226,15 @@ collector could not read its source (an expired Cursor token, a stopped aw-serve
 `aut label run` write their own rows (collector `outcomes` and `label`). A heartbeat that
 fails to send prints a warning and never fails the scan.
 
+Each real scan also sends one `coverage` row. It is `degraded` for 24 hours after a new
+actionable coverage warning appears (`harness_active_unread`, `discovery_limited`,
+`source_payload_missing`, `parser_loss` or `source_unreadable`), then it returns to `ok`.
+Its `error` names the new issues with fixed phrases and source ids only, never a path, for example
+`new: hermes harness active, no AUT reader`. The first scan after an upgrade records the
+current issues as known without an alert. An issue that is gone for 7 days is forgotten, so it
+alerts again if it comes back. The state lives under `alerts` in `coverage.json`. A `degraded`
+row pages only with a watchdog rule for it; the existing rule pages only on `error` rows.
+
 ## Privacy model
 
 **What leaves the machine** (only to the sink you configure):

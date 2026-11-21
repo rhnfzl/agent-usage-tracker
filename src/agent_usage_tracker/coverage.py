@@ -11,7 +11,7 @@ from pathlib import Path
 import re
 import sqlite3
 import stat
-from typing import Any
+from typing import Any, Final
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .config import Config
@@ -532,6 +532,55 @@ def build_report(cfg: Config, *, now: datetime | None = None) -> dict[str, Any]:
             "session_links": session_links, "session_links_omitted": len(registry.links) - len(session_links),
             "publications": publications, "delivery": delivery, "issues": issues,
             "catalog": harnesses, "harness_inventory": inventory}
+
+
+ALERT_HOURS = 24
+ALERT_FORGET_DAYS = 7
+# degraded pages only with the homelab `agent coverage` rule; "error" pages through the
+# existing rule after 3 scans.
+ALERT_STATUS: Final = "degraded"
+_ALERT_PHRASES = {
+    "harness_active_unread": "%s harness active, no AUT reader",
+    "discovery_limited": "%s discovery limited",
+    "source_payload_missing": "%s payloads missing",
+    "parser_loss": "%s parser loss",
+    "source_unreadable": "%s source unreadable",
+}
+
+
+def alert_state(report: dict[str, Any], previous: dict[str, Any],
+                now: datetime) -> tuple[dict[str, dict[str, str]], str | None]:
+    """Carry per-issue alert state and return it with the text of the issues that are new.
+    An actionable warning alerts for ALERT_HOURS after it first appears, then it is known.
+    A key absent for ALERT_FORGET_DAYS is forgotten, so flapping issues do not page again.
+    The text holds fixed phrases and source ids only, never paths."""
+    prior = previous.get("alerts")
+    baseline = not isinstance(prior, dict)      # first report after upgrade: today's issues are known
+    prior = prior if isinstance(prior, dict) else {}
+    forget = timedelta(days=ALERT_FORGET_DAYS)
+
+    def live(entry: object) -> dict[str, Any] | None:
+        last = _stamp(entry.get("last_seen")) if isinstance(entry, dict) else None
+        return entry if isinstance(entry, dict) and last and now - last < forget else None
+
+    current = sorted({f"{i['code']}:{i['source_id']}" for i in report.get("issues", [])
+                      if isinstance(i, dict) and i.get("code") in _ALERT_PHRASES
+                      and i.get("severity") != "info" and isinstance(i.get("source_id"), str)})
+    alerts = {key: entry for key, entry in prior.items() if key not in current and live(entry)}
+    start = now - timedelta(hours=ALERT_HOURS) if baseline else now
+    for key in current:
+        entry = live(prior.get(key))
+        first = _stamp(entry.get("first_seen")) if entry else None
+        alerts[key] = {"first_seen": (first or start).isoformat(), "last_seen": now.isoformat()}
+    new = [key for key in current
+           if now - (_stamp(alerts[key]["first_seen"]) or now) < timedelta(hours=ALERT_HOURS)]
+    if not new:
+        return alerts, None
+    phrases = []
+    for key in new:
+        code, _, source = key.partition(":")
+        phrases.append(_ALERT_PHRASES[code] % source.removeprefix("collector:"))
+    return alerts, ("new: " + "; ".join(phrases))[:300]
 
 
 def save_report(report: dict[str, Any]) -> bool:
