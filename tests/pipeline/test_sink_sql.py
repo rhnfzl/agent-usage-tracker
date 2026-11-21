@@ -526,7 +526,7 @@ def test_refresh_deletes_claude_code_relogs_and_keeps_other_duplicates(dsn):
     old = T0 - timedelta(days=60)      # plain history in another chunk
     push.insert_pg(dsn, [usage(f"old{i}", old + timedelta(seconds=i), "claude_code", 1)
                          for i in range(400)]
-                   + [usage("relog", T0, "claude_code", 10), usage("relog", later, "claude_code", 12),
+                   + [usage("relog", T0 + timedelta(microseconds=654321), "claude_code", 10), usage("relog", later, "claude_code", 12),
                       usage("odd", T0, "codex", 5), usage("odd", later, "codex", 5)])
     job = (SINK_STACK / "sql" / "refresh.sql").read_text(encoding="utf-8").splitlines()
     with connect(dsn) as conn:
