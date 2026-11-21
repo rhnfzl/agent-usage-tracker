@@ -11,6 +11,7 @@ roles on that server if they are missing, and drops the ones it created at the e
 from __future__ import annotations
 
 import ipaddress
+import json
 import os
 import shutil
 import subprocess  # nosec B404 # fixed argv, the shipped apply script
@@ -22,7 +23,7 @@ from zoneinfo import ZoneInfo
 import pytest
 
 import agent_usage_tracker
-from agent_usage_tracker import episode_store, git_days, inspector, outcomes, push
+from agent_usage_tracker import episode_store, git_days, improve_publish, inspector, outcomes, push
 from agent_usage_tracker.config import DEFAULT_LEDGER_TZ, AutError, Config
 from agent_usage_tracker.event import (ActivityEvent, EventSession, TimeInterval,
                                        UsageEvent)
@@ -569,3 +570,36 @@ def test_refresh_deletes_claude_code_relogs_and_keeps_other_duplicates(dsn):
                             "WHERE event_id LIKE 'old%'").fetchone()[0] == 400
     # the re-log keeps the copy usage_event_dedup keeps; a Codex duplicate stays for the audit
     assert rows == [("odd", 5), ("odd", 5), ("relog", 12)]
+
+
+def test_improve_publish_sql_retries_latest_zeros_grants_and_dashboard(dsn):
+    from psycopg.errors import InsufficientPrivilege
+    reapplied = subprocess.run(["sh", str(SINK_STACK / "apply.sh")], env=_psql_env(dsn),
+                               capture_output=True, text=True)
+    assert reapplied.returncode == 0, reapplied.stderr[-4000:]
+    row = ("2026-11-20", "avoidable_recovery", 1, "codex", "control", 1, 2, 3, False, T0)
+    adoption = ("0123456789abcdef", T0, "Use the CI test entrypoint", "instruction",
+                ["avoidable_recovery"], 53)
+    with connect(dsn) as conn:
+        conn.execute("SET ROLE agents_writer")
+        for _ in range(2):
+            conn.execute(improve_publish.SCORE_SQL, row)
+            conn.execute(improve_publish.ADOPT_SQL, adoption)
+        conn.execute(improve_publish.SCORE_SQL, (*row[:5], 0, 0, 0, False, T0 + timedelta(seconds=1)))
+        conn.execute("RESET ROLE")
+        conn.execute("SET ROLE agents_ro")
+        assert conn.execute("SELECT passed, failed, unknown FROM agents.improve_score_latest "
+                            "WHERE rubric_id = 'avoidable_recovery'").fetchall() == [(0, 0, 0)]
+        assert conn.execute("SELECT count(*) FROM agents.improve_adoption").fetchone() == (1,)
+        for sql in ("SELECT * FROM agents.improve_score_daily",
+                    "INSERT INTO agents.improve_adoption(adoption_id) VALUES ('forbidden')"):
+            with pytest.raises(InsufficientPrivilege), conn.transaction():
+                conn.execute(sql)
+        dashboard = json.loads((SINK_STACK / "grafana/dashboards/agents-effort.json").read_text())
+        queries = [t["rawSql"] for p in dashboard["panels"][-2:] for t in p["targets"]]
+        queries += [dashboard["annotations"]["list"][-1]["target"]["rawSql"]]
+        for sql in queries:
+            sql = sql.replace("$__timeFrom()", "'2026-01-01'::timestamptz")
+            sql = sql.replace("$__timeTo()", "'2027-01-01'::timestamptz")
+            sql = sql.replace("$__timeFilter(adopted_at)", "adopted_at >= '2026-01-01'")
+            conn.execute(sql).fetchall()

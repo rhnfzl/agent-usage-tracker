@@ -241,6 +241,8 @@ Update the installed package before copying a new wrapper; the wrapper calls `au
 The scheduler prevents overlapping runs and records daily success only after each step completes.
 Failed or unfinished daily steps retry after the next successful scan.
 Local scheduled labels require `AUT_LABEL=1` and `AUT_LABEL_MODE=local` in `scan.env`, plus saved recipes.
+`AUT_IMPROVE_PUBLISH=1` adds daily advisory score and adoption-marker delivery after outcomes.
+Deploy the updated sink schema first. Preview with `aut publish-improve --dry-run`.
 An interrupted historical replay resumes when you invoke its saved job again; preparing a job does not install a scheduler.
 
 Follow the [timer setup](packaging/README.md) and [wrapper reference](docs/reference.md#scheduling).
