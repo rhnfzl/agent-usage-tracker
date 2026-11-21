@@ -24,6 +24,11 @@ uses local logs and leaves delivery off. The [config example](../config.example.
 optional sources and transport settings. The demo uses sample logs in a temporary directory.
 It needs no provider account, database or previous setup.
 
+The overview opens a private loopback page. Choose a date range and group by agent, model
+or project. It shows when usage was last seen and whether scan evidence is fresh. If an
+improvement store exists, the page links to its private report card. Use
+`aut overview --no-browser` to get the local URL and Ctrl-C to close the page.
+
 ## Schedule delivery to your own sink
 
 Set the transport in your local config. The scheduled job needs access to any environment
@@ -40,6 +45,9 @@ as soon as the scheduler loads it. It uses launchd on macOS, a systemd user time
 and a scheduled task for the current interactive user on Windows. It keeps existing config and
 refuses to replace a schedule created outside guided setup. On macOS the scheduled logs are
 under `~/Library/Logs`. Linux uses the user journal and Windows uses Task Scheduler history.
+
+On Windows, setup uses a process-local execution policy for the packaged script. Group Policy
+can still block it. Use Task Scheduler to run `aut scan` if your administrator permits it.
 
 The guided timer uses the default AUT config and state paths. For a custom setup, an existing
 manual timer, or a system without a supported user scheduler, see

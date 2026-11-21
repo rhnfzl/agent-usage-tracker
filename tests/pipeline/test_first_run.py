@@ -149,12 +149,12 @@ def test_windows_uses_packaged_task_script_without_force(home, monkeypatch):
     monkeypatch.setattr(setup_schedule.shutil, "which", lambda name: f"/bin/{name}")
 
     def powershell(argv, **kwargs):
-        assert argv[1:4] == ("-NoProfile", "-NonInteractive", "-File")
-        script = Path(argv[4]).read_text()
+        assert argv[1:6] == ("-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File")
+        script = Path(argv[6]).read_text()
         assert "-Force" not in script
         assert "Managed by aut setup" in script
-        assert argv[5:8] == ("-Mode", "install", "-Managed")
-        assert argv[8:] == ("-AutExecutable", str(home / "bin/aut.exe"))
+        assert argv[7:10] == ("-Mode", "install", "-Managed")
+        assert argv[10:] == ("-AutExecutable", str(home / "bin/aut.exe"))
         return subprocess.CompletedProcess(argv, 0, "installed\n", "")
 
     monkeypatch.setattr(setup_schedule.subprocess, "run", powershell)
@@ -166,3 +166,35 @@ def test_unsupported_platform_guides_manual_use(home, capsys, monkeypatch):
     setup("--schedule")
     assert setup_schedule.MANUAL in capsys.readouterr().out
     assert not list(home.iterdir())
+
+
+def test_systemd_partial_install_can_retry_or_uninstall(home, monkeypatch):
+    monkeypatch.setattr(setup_schedule, "sys", SimpleNamespace(platform="linux"))
+    monkeypatch.setattr(setup_schedule.shutil, "which", lambda name: f"/bin/{name}")
+    units = home / ".config/systemd/user"
+    service = units / "agent-usage-tracker.service"
+    timer = units / "agent-usage-tracker.timer"
+    attempt = 0
+
+    def systemctl(argv, **kwargs):
+        nonlocal attempt
+        action = argv[2]
+        if action == "show":
+            return subprocess.CompletedProcess(argv, 1, "LoadState=not-found\n", "")
+        if action == "enable":
+            attempt += 1
+            if attempt == 1:
+                return subprocess.CompletedProcess(argv, 1, "", "startup failed")
+        if action == "stop" or action == "disable" and "--now" in argv:
+            return subprocess.CompletedProcess(argv, 1, "", "unit not loaded")
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(setup_schedule.subprocess, "run", systemctl)
+    with pytest.raises(AutError, match="startup failed"):
+        setup_schedule.change("install", home / "first/aut")
+    first_service = service.read_bytes()
+    assert setup_schedule.change("install", home / "second/aut") == "installed"
+    assert service.read_bytes() == first_service
+    assert timer.exists()
+    assert setup_schedule.change("uninstall", None) == "removed"
+    assert not list(units.iterdir())

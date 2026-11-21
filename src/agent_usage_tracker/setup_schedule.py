@@ -103,6 +103,7 @@ def _systemd(executable: str, action: str, aut: Path | None) -> str:
     if action == "uninstall" and not (has_service or has_timer):
         return "absent"
     cmd = (executable, "--user")
+    loaded: set[Path] = set()
     for path, owned in ((service, has_service), (timer, has_timer)):
         result = _run(*cmd, "show", "--property=LoadState,FragmentPath", path.name)
         info = dict(line.split("=", 1) for line in result.stdout.splitlines() if "=" in line)
@@ -111,10 +112,12 @@ def _systemd(executable: str, action: str, aut: Path | None) -> str:
         _check(result)
         if not owned or info.get("FragmentPath") != str(path):
             raise AutError(f"aut setup: existing systemd unit was kept: {path.name}")
+        loaded.add(path)
     if action == "uninstall":
         if has_timer:
-            _check(_run(*cmd, "disable", "--now", timer.name))
-        if has_service:
+            stop_timer = ("--now",) if timer in loaded else ()
+            _check(_run(*cmd, "disable", *stop_timer, timer.name))
+        if service in loaded:
             _check(_run(*cmd, "stop", service.name))
         if has_timer:
             timer.unlink()
@@ -122,7 +125,9 @@ def _systemd(executable: str, action: str, aut: Path | None) -> str:
             service.unlink()
         _check(_run(*cmd, "daemon-reload"))
         return "removed"
-    if has_service and has_timer and not _run(*cmd, "is-active", "--quiet", timer.name).returncode:
+    if service in loaded and timer in loaded and not _run(
+        *cmd, "is-active", "--quiet", timer.name
+    ).returncode:
         return "already_installed"
     if not has_service:
         template = _template(service.name).read_text(encoding="utf-8")
@@ -150,8 +155,8 @@ def change(action: str, aut: Path | None) -> str:
         if sys.platform == "linux":
             return _systemd(executable, action, aut)
         with as_file(_template("register-task.ps1")) as script:
-            argv = [executable, "-NoProfile", "-NonInteractive", "-File", str(script),
-                    "-Mode", action, "-Managed"]
+            argv = [executable, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+                    "-File", str(script), "-Mode", action, "-Managed"]
             if aut is not None:
                 argv.extend(("-AutExecutable", str(aut)))
             result = _run(*argv)
