@@ -82,17 +82,17 @@ def _newest(paths: list[Path]) -> tuple[bool, float | None, bool]:
                     if budget <= 0:
                         return exists, newest, False
                     budget -= 1
-                    if entry.is_symlink() or entry.name == "skills":
-                        continue
-                    if entry.is_dir(follow_symlinks=False):
-                        if depth < MAX_WALK_DEPTH:
-                            stack.append((entry.path, depth + 1))
-                        else:
-                            complete = False
-                        continue
                     try:
+                        if entry.is_symlink() or entry.name == "skills":
+                            continue
+                        if entry.is_dir(follow_symlinks=False):
+                            if depth < MAX_WALK_DEPTH:
+                                stack.append((entry.path, depth + 1))
+                            else:
+                                complete = False
+                            continue
                         newest = max(newest or 0., entry.stat(follow_symlinks=False).st_mtime)
-                    except OSError:     # gone mid-walk: keep walking the rest of the directory
+                    except OSError:     # gone or unreadable mid-walk: keep walking the directory
                         complete = False
         except OSError:
             complete = False

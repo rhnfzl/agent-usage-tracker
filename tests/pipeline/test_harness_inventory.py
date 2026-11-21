@@ -267,3 +267,42 @@ def test_path_walk_never_opens_files_or_serializes_paths(roots, tmp_path, monkey
     report = harness_inventory.discover(tmp_path, entry(paths=["~/.tool"]))
     assert only(report)["activity"] == "recent"
     assert str(tmp_path) not in json.dumps(report) and "private-name" not in json.dumps(report)
+
+
+def test_an_entry_metadata_error_does_not_stop_the_rest_of_the_directory(tmp_path, monkeypatch):
+    root = tmp_path / "data"
+    root.mkdir()
+    (root / "a-broken").write_text("x")
+    (root / "b-file").write_text("x")
+    os.utime(root / "b-file", (1_700_000_000, 1_700_000_000))
+    real = os.scandir
+
+    class Broken:
+        def __init__(self, entry):
+            self._entry = entry
+            self.name, self.path = entry.name, entry.path
+
+        def is_symlink(self):
+            return self._entry.is_symlink()
+
+        def is_dir(self, **kw):
+            if self.name == "a-broken":
+                raise PermissionError("denied")
+            return self._entry.is_dir(**kw)
+
+        def stat(self, **kw):
+            return self._entry.stat(**kw)
+
+    class Listing:
+        def __init__(self, path):
+            self._it = real(path)
+
+        def __enter__(self):
+            return sorted((Broken(e) for e in self._it), key=lambda e: e.name)
+
+        def __exit__(self, *exc):
+            self._it.close()
+
+    monkeypatch.setattr(harness_inventory.os, "scandir", Listing)
+    exists, newest, complete = harness_inventory._newest([root])
+    assert exists and newest == 1_700_000_000 and not complete
