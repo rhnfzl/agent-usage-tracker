@@ -41,7 +41,8 @@ def _score(row: dict[str, Any]) -> None:
         raise AutError("publish-improve: unexpected score fields")
     _text(row["rubric_id"], identifier=True)
     day = date.fromisoformat(row["day"])
-    if day.isoformat() != row["day"] or row["harness"] not in {"codex", "claude_code", "t3"} \
+    if day.isoformat() != row["day"] \
+            or row["harness"] not in {"codex", "claude_code", "t3", "pi", "cursor_cli"} \
             or row["trigger"] not in {"control", "error_result", "merge"} \
             or any(type(row[k]) is not int or not 0 <= row[k] <= 2147483647
                    for k in ("rubric_version", "passed", "failed", "unknown")) \
