@@ -5,13 +5,14 @@ from __future__ import annotations
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
+import time
 from typing import Any
 
 from ..config import AutError
 from .proposals import file_digest
 from .store import Store, digest
 from .study_decision import measure, observed_experiment
-from .trial import _spec, run_trial
+from .trial import _frozen_files, _spec, pinned_command_entrypoint, run_trial
 from .validation import evidence_key
 
 
@@ -140,6 +141,7 @@ def create(store: Store, value: dict[str, Any]) -> dict[str, Any]:
 
 def run(store: Store, study_id: str, *, execute: bool = False) -> dict[str, Any]:
     study = store.get("studies", study_id)
+    deadline = time.monotonic() + study["budget_s"]
     proposal = store.get("proposals", study["proposal_id"])
     spec_id = study["trial_spec_id"]
     trial = _spec(store, spec_id)
@@ -152,6 +154,9 @@ def run(store: Store, study_id: str, *, execute: bool = False) -> dict[str, Any]
         raise AutError("improve: study requires two isolated directories outside the source")
     if not all(case.get("acceptance_files") for case in trial["cases"]):
         raise AutError("improve: study requires frozen independent acceptance files")
+    if trial["kind"] == "command_check" and not all(
+            pinned_command_entrypoint(case) for case in trial["cases"]):
+        raise AutError("improve: study requires a pinned acceptance entrypoint")
     relative = proposal["target"]
     files = trial.get("files", {})
     for condition, name in (("baseline", "before"), ("candidate", "after")):
@@ -162,12 +167,14 @@ def run(store: Store, study_id: str, *, execute: bool = False) -> dict[str, Any]
                 or files.get(condition, {}).get(relative) != expected
                 or not target.is_file() or file_digest(target) != expected):
             raise AutError("improve: study baseline or candidate hash does not match the proposal")
+        _frozen_files(trial, condition, root)
     if observed_experiment(store, spec_id, allow_resume=True):
         raise AutError("improve: study cannot reuse a different trial's results")
     result = {"study_id": study_id, "trial_spec_id": spec_id,
               "execution_required": not execute, "budget_s": study["budget_s"]}
     if execute:
-        result["trial"] = run_trial(store, spec_id, execute=True, budget_s=study["budget_s"])
+        result["trial"] = run_trial(store, spec_id, execute=True, budget_s=study["budget_s"],
+                                    deadline=deadline)
         result["decision"] = measure(store, spec_id, study["primary_metric"],
                                      study["decision_policy"], proposal)
     return result

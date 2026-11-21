@@ -244,6 +244,30 @@ def test_protected_trial_rejects_a_command_that_rewrites_its_fixture(tmp_path):
     assert "trial input changed" in row["validation_error"]
 
 
+def test_trial_does_not_launch_after_fixture_hashing_spends_its_budget(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from agent_usage_tracker.improve import trial
+
+    baseline, candidate = tmp_path / "baseline", tmp_path / "candidate"
+    baseline.mkdir()
+    candidate.mkdir()
+    store = Store(tmp_path / "private")
+    spec = store.put("trial_specs", {"version": 1, "kind": "command_check",
+        "directories": {"baseline": str(baseline), "candidate": str(candidate)}, "repeats": 1,
+        "cases": [{"id": "bounded", "argv": [sys.executable, "-c", "pass"], "timeout_s": 1}]})
+    clock = SimpleNamespace(now=0, reads=0)
+
+    def hash_files(*args):
+        clock.reads += 1
+        if clock.reads == 3:
+            clock.now = 2
+
+    monkeypatch.setattr(trial, "time", SimpleNamespace(monotonic=lambda: clock.now))
+    monkeypatch.setattr(trial, "_frozen_files", hash_files)
+    monkeypatch.setattr(trial, "command", lambda *a, **kw: pytest.fail("started after deadline"))
+    assert run_trial(store, spec, execute=True, budget_s=1)["executed"] == 0
+
+
 def test_protected_command_changed_after_prospective_study_is_rejected(tmp_path):
     from .test_studies import fixture
     from agent_usage_tracker.improve.proposals import file_digest

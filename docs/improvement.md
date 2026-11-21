@@ -557,7 +557,11 @@ For a saved prospective study, use `aut improve study run --study STUDY_ID` to c
 Add `--execute` to run the frozen trial within the study's time budget and report its decision.
 Keep the baseline and candidate in separate directories outside the original source directory.
 Both copies must match the proposal's recorded file hashes. Commands and acceptance files
-come from the trusted trial specification. The study records evidence without accepting or applying a proposal.
+come from the trusted trial specification. For command checks, use independent copies without
+hard links or symlinks for the pinned files. The check must execute a pinned acceptance file
+directly or pass it as a script to the current Python interpreter. The runner removes the
+candidate's Python import path from protected checks. The study records evidence without
+accepting or applying a proposal.
 
 ### Check a frozen search task
 

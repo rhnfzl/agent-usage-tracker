@@ -8,6 +8,7 @@ from typing import Any, cast
 from pathlib import Path
 
 from .store import Store, digest
+from .trial import pinned_command_entrypoint
 
 
 def experiment_identity(store: Store, spec_id: str) -> str:
@@ -84,7 +85,9 @@ def measure(store: Store, spec_id: str, metric: str, policy: dict[str, Any],
     protected = bool(all(spec.get("files", {}).get(condition, {}).get(proposal["target"])
                      == proposal[f"{name}_sha256"]
                      for condition, name in (("baseline", "before"), ("candidate", "after")))
-                     and all(case.get("acceptance_files") for case in spec["cases"]))
+                     and all(case.get("acceptance_files") and (
+                         spec["kind"] != "command_check" or pinned_command_entrypoint(case))
+                         for case in spec["cases"]))
     delta = sum(deltas) / len(deltas) if deltas and not missing else None
     improvement = (delta if policy["direction"] == "increase" else -delta) \
         if delta is not None else None

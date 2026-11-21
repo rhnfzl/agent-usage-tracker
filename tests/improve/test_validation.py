@@ -114,6 +114,30 @@ def test_executable_reference_compares_each_saved_vote(tmp_path):
     assert not report["automation_qualified"]
 
 
+def test_reference_reports_saved_vote_even_if_the_next_model_never_runs(tmp_path):
+    from agent_usage_tracker.improve import judge, rubric
+
+    store, spec, previous, _ = setup_reference(tmp_path)
+    [case] = store.get("diagnoses", previous)["cases"]
+    item = next(r for r in rubric.load() if r.id == "completion_supported")
+    first = {"id": "model-a", "revision": "v1", "protocol": "test"}
+    other = {"id": "model-b", "revision": "v1", "protocol": "test"}
+    policy = {"version": judge.VERSION, "cases": [case], "models": ["a", "b"],
+              "rubrics": {item.id: rubric.snapshot(store, item)},
+              "model_identity": {"a": first, "b": other}}
+    evaluation = judge.policy_evaluation_key(policy, case, item.id)
+    policy["evaluation_keys"] = {case: {item.id: evaluation}}
+    job = store.put("diagnoses", policy)
+    store.put("votes", {"evaluation_key": digest({"decision": evaluation, "model": first}),
+        "model": "model-a", "model_rev": "v1", "case_id": case, "rubric": item.id,
+        "distribution": {"pass": 0., "fail": 1., "unknown": 0.}})
+    report = validation.validate(store, spec, job, execute=True)
+    assert report["counts"]["missing"] == 1
+    available, missing = report["model_scores"][item.id]
+    assert available["counts"]["detected_failures"] == 1
+    assert missing["counts"]["missing"] == 1 and missing["failure_recall"] is None
+
+
 @pytest.mark.parametrize("pair", [("invalid", "pass"), ("pass", "invalid")])
 def test_shared_scoring_rejects_invalid_labels(pair):
     with pytest.raises(AutError, match="scoring"):
