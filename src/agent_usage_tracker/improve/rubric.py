@@ -338,6 +338,12 @@ def _segments(command: str) -> list[list[str]]:
     return segments
 
 
+def tool_name(tool: str) -> str:
+    """A tool's name, with MCP tools `mcp__server__tool` shortened to `mcp:server`."""
+    parts = tool.split("__")
+    return f"mcp:{parts[1]}" if len(parts) > 2 and parts[0] == "mcp" else tool
+
+
 def command_family(call_text: str, tool: str) -> str:
     """A short stable name for what a call ran, such as `git push` or `python -m pytest`.
     Leading `cd ...`, `source ...`, `VAR=...`, `env`, `npx`, `timeout`, `time`, `command` and
@@ -346,8 +352,7 @@ def command_family(call_text: str, tool: str) -> str:
     shortened to `mcp:server`."""
     command = _shell_text(call_text, tool)
     if command is None:
-        parts = tool.split("__")
-        return f"mcp:{parts[1]}" if len(parts) > 2 and parts[0] == "mcp" else tool
+        return tool_name(tool)
     for words in _segments(command):
         if words and words[0] not in {"cd", "pushd", "source", "."}:
             family = _family(words)
