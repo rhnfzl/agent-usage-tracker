@@ -90,6 +90,10 @@ The [first-run guide](docs/first-run.md) covers optional scheduled delivery.
 estimated subtotal from the full estimate and from costs recorded in source logs.
 Use `aut summary --compare-prices MODEL_A MODEL_B` to apply two rates to the same observed token mix.
 
+Use `aut statusline` to check cached quota, reset times, and scan freshness.
+The [quota guide](docs/quota.md) shows how to feed Claude Code statusline input into AUT
+and enable local quota notices.
+
 ### Keep history in your own database
 
 Install the PostgreSQL extra:
@@ -323,6 +327,7 @@ Read the [full privacy and network-call reference](docs/reference.md#privacy-mod
 | `aut demo` | Try the local summary on synthetic agent logs |
 | `aut summary --period week` | See local usage, source coverage, and unknown counts |
 | `aut overview` | Open a private page with usage, source health, and available evidence |
+| `aut statusline` | Check cached quota, reset times, and scan freshness |
 | `aut scan --dry-run` | Inspect parsed totals without sending rows |
 | `aut scan` | Deliver new usage and activity |
 | `aut export --out usage.csv` | Export local usage without a sink |

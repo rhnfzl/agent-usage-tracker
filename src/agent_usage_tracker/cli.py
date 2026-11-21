@@ -14,6 +14,8 @@
   aut overview          open a private local usage and source health page
   aut export [--out F]  write all usage as CSV (bulk load, offline bridge); never the watermark
   aut summary [--json]  show local usage, source coverage and unknown values by date
+  aut quota             capture and inspect local quota observations
+  aut statusline        read cached quota and scan status
   aut sync-prices [--out F] [--sink]
                         refresh the API-equivalent model price map
   aut time add --start <local> --end <local> | --minutes N [--at <local end>] [--not-relevant]
@@ -67,7 +69,7 @@ from datetime import date, datetime, timedelta
 from typing import Sequence
 
 from . import (backup, cursor_run, demo_cli, git_days, inspector, manual_time, outcomes, pricing_cli,
-               review, scan, setup_cli, summary_cli)
+               quota_cli, review, scan, setup_cli, summary_cli)
 from .collectors import REGISTRY
 from .config import (ALL_AGENTS, LABEL_DAYS, LABEL_DECISION_TASKS, LABEL_TASK_NAMES, AutError,
                      Config, ledger_zone, load_config)
@@ -296,7 +298,8 @@ def cmd_publish_improve(cfg: Config, args: argparse.Namespace) -> None:
 
 
 _NO_CONFIG_COMMANDS = {"sync-prices": pricing_cli.run, "cursor-run": cmd_cursor_run,
-                       "scan-job": cmd_scan_job, "setup": setup_cli.run, "demo": demo_cli.run}
+                       "scan-job": cmd_scan_job, "setup": setup_cli.run, "demo": demo_cli.run,
+                       "quota": quota_cli.run, "statusline": quota_cli.run_statusline}
 _AGENT_COMMANDS = {"scan": cmd_scan, "backfill": cmd_backfill, "export": cmd_export,
                    "status": cmd_status, "summary": summary_cli.run}
 _COMMANDS = {"time": cmd_time_add, "outcomes": cmd_outcomes, "outcome": cmd_outcome,
@@ -323,6 +326,7 @@ def _build_parser() -> argparse.ArgumentParser:
     demo_cli.register(sub)
     summary_cli.register(sub)
     pricing_cli.register(sub)
+    quota_cli.register(sub)
     sub.add_parser("scan-job", help="run the locked scheduled scan and retry unfinished daily jobs")
     sub.add_parser("retry-delivery", help="send deferred session/activity/time rows using pg_dsn")
     p_scan = sub.add_parser("scan", help="push new usage since the watermark")

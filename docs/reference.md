@@ -21,6 +21,10 @@ other command refuses it.
 | `aut demo [--group-by GROUP] [--json]` | run the usage summary on synthetic logs | |
 | `aut summary [--period PERIOD] [--group-by GROUP] [--json]` | show local usage with source coverage and price gaps. `--since` and `--until` select an explicit ledger date range | local logs |
 | `aut overview [--period PERIOD] [--group-by GROUP] [--no-browser]` | open local usage, source health and available private evidence on a token-protected loopback page | local logs |
+| `aut statusline [--json]` | read bounded local quota and scan caches without collecting again | |
+| `aut quota capture --scope UUID` | record the quota fields in a Claude Code statusline payload on stdin | a local statusline payload |
+| `aut quota check [--notify] [--quiet-hours HH:MM-HH:MM]` | read quota freshness, reset and pace, or explicitly add new notices to the private inbox | cached quota observations |
+| `aut quota inbox` | read notices from the private local inbox | |
 | `aut backup [--check]` | an encrypted, deduplicated restic snapshot of the logs, config, label files and `repo_key.salt` ([docs/new-laptop.md](new-laptop.md)), then the retention (`restic forget`: 14 daily, 8 weekly, 12 monthly; `--prune` once a week). Skips with exit 0 while another run holds the lock, on battery below 20%, or when the repository is unreachable. `--check` runs `restic check` and sends nothing | `[backup]` in `config.toml`, `restic` on `PATH` |
 | `aut export [--out FILE]` | write all usage rows as CSV (stdout by default), deduplicated, columns in sink order for `COPY`. Exits 1 if a collector that feeds the CSV could not fully read a source, so the CSV is partial (`activitywatch` has no usage rows, so it never does); `backfill --sessions-only`/`--activity-only` do the same for the collectors with those rows | |
 | `aut sync-prices [--out FILE] [--sink]` | refresh the local API-equivalent price map. The optional source URL flags accept HTTP(S). `--sink` also loads the packaged sink price table | network. Sink loading also needs the PostgreSQL extra and `AUT_PRICE_PG_DSN` |
