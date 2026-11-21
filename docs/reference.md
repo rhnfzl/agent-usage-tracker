@@ -213,6 +213,7 @@ they belong in `config.toml`.
 | `AUT_BIN` | path to `aut` (default `~/.local/bin/aut`) |
 | `AUT_TUNNEL_HOST` | `user@host` for `ssh -L`; unset means no tunnel |
 | `AUT_TUNNEL_SPEC` | the `ssh -L` argument, e.g. `15432:10.0.0.5:5432`; required with `AUT_TUNNEL_HOST` |
+| `AUT_TUNNEL_FALLBACK_HOSTS` | space- or comma-separated `user@host` routes tried in order when `AUT_TUNNEL_HOST` does not connect, e.g. `root@192.168.1.150` (a LAN route when Tailscale is down); each must reach the same sink, since they share `AUT_TUNNEL_SPEC`; ignored without `AUT_TUNNEL_HOST` |
 | `AUT_LABEL` | `1` runs the nightly `aut label run` on this machine |
 | `AUT_LABEL_MODE` | `local` uses saved provisional local recipes; the default uses calibrated-label configuration |
 
@@ -224,6 +225,17 @@ collector could not read its source (an expired Cursor token, a stopped aw-serve
 `error` on a sink whose CHECK has no `degraded`. `aut outcomes` and
 `aut label run` write their own rows (collector `outcomes` and `label`). A heartbeat that
 fails to send prints a warning and never fails the scan.
+
+Each real scan also sends one `coverage` row. It is `degraded` for 24 hours after a new
+actionable coverage warning appears (`harness_active_unread`, `discovery_limited`,
+`source_payload_missing`, `parser_loss` or `source_unreadable`), then it returns to `ok`.
+Its `error` names the new issues with fixed phrases and source ids only, never a path, for example
+`new: hermes harness active, no AUT reader`. The first scan after an upgrade records the
+current issues as known without an alert. An issue that is gone for 7 days is forgotten, so it
+alerts again if it comes back. The state lives under `alerts` in `coverage.json`. Overlapping
+scans merge it under the report lock; a scan whose assessment is older than the saved one
+sends no row, and the row's `finished_at` is its assessment time. A `degraded`
+row pages only with a watchdog rule for it; the existing rule pages only on `error` rows.
 
 ## Privacy model
 
@@ -343,7 +355,9 @@ goes ahead, and libpq may fall back to plaintext. Add `sslmode=require` to the D
 link such as Tailscale, `sslmode=disable` says that is intended and silences it.
 
 **The tunnel.** `AUT_TUNNEL_HOST` without `AUT_TUNNEL_SPEC` makes the wrapper refuse to scan
-(exit 2, logged in `scan.log`). An unreachable host returns a nonzero exit code and arms
+(exit 2, logged in `scan.log`), as does a host or fallback that starts with `-`. Fallback hosts
+are tried in order with a 5 s connect timeout, and `scan.log` names the route that delivered
+(`tunnel up via primary` or `via fallback N`). Every route unreachable returns a nonzero exit code and arms
 `retry-pending`. On macOS the retry job tries again. On systemd the nonzero exit triggers
 `Restart=on-failure`. Only the wrapper opens the tunnel:
 before running `aut outcomes`, `aut inspect` or another `pg_dsn` command by hand, open it

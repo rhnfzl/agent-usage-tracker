@@ -134,6 +134,30 @@ def test_incomplete_cases_abstain_before_model_inference(tmp_path, monkeypatch):
     assert result["verdicts"]["unknown"] == 2
 
 
+def test_report_counts_the_cases_the_judge_may_vote_on(tmp_path, monkeypatch):
+    from agent_usage_tracker.improve import judge
+
+    monkeypatch.setattr(judge, "config_path", lambda: tmp_path / "config/config.toml")
+    monkeypatch.setattr(judge, "memory_guard", lambda: None)
+
+    class Backend:
+        model_id = "test"
+        model_rev = "one"
+
+        def distribution(self, request):
+            return {"pass": .99, "fail": .005, "unknown": .005}
+
+    store = Store(tmp_path / "private")
+    sids = [store.put("sessions", {"agent": "codex", "session_id": name, "origin": "interactive",
+        "coverage": {"complete": True}, "events": [
+            {"id": "p", "kind": "prompt", "text": "Check " + name, "call_id": ""},
+            {"id": "a", "kind": "reply", "text": "Checked", "call_id": "", "truncated": clipped}]})
+        for name, clipped in (("whole", False), ("clipped", True))]
+    audit = store.put("audits", {"session_ids": sids})
+    result = judge.diagnose(store, audit, models=("one",), backend_for=lambda name: Backend())
+    assert result["evidence"] == {"cases": 2, "eligible": 1}
+
+
 def test_complete_attempt_is_not_invalidated_by_unrelated_clipped_history(tmp_path):
     store = Store(tmp_path / "private")
     events = [

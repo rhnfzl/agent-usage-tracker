@@ -70,3 +70,12 @@ def test_diagnostics_outside_a_scan_do_not_leak_into_the_next_scan():
         diagnostics.observe_client({"untrusted": "not a label"})
     assert not observed.clients
     assert not observed.skipped
+
+
+def test_codex_desktop_and_typescript_sdk_are_named_clients():
+    from agent_usage_tracker import diagnostics
+
+    with diagnostics.capture() as observed:
+        diagnostics.observe_client("Codex Desktop")
+        diagnostics.observe_client("sdk-ts")
+    assert observed.clients == {"codex desktop", "sdk-ts"}

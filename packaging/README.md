@@ -132,6 +132,12 @@ up and only tears down one it opened itself, so it is safe to run alongside an i
 session. An unreachable host arms the retry marker and returns nonzero.
 launchd watches the marker; systemd retries the failed job.
 
+If the same sink is also reachable by a second route, such as its LAN address when Tailscale is
+down, add `AUT_TUNNEL_FALLBACK_HOSTS=root@192.168.1.150` (space- or comma-separated). Each
+fallback is tried in order with the same `AUT_TUNNEL_SPEC`, so it must resolve the spec's remote
+host the same way. ssh runs with `BatchMode=yes`, so ssh to each fallback once by hand first to
+record its host key. `scan.log` says which route delivered.
+
 ### Commit outcomes once a day
 
 Update AUT before installing the wrapper; it calls `aut scan-job`.

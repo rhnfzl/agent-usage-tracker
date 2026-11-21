@@ -100,6 +100,8 @@ New model calls need enough remaining time for their expected duration.
 Each model and operation starts with an allowance of half the original diagnosis budget.
 Later calls reserve twice the longest observed duration for that model and operation during this run.
 AUT checks admission again after acquiring shared resources. A deferred call does not spend a call count.
+A case too large for the time left stays pending, and AUT still assesses later cases that fit.
+The run stops when the time or the call count is spent.
 Cached votes, judgments, and reviews remain usable without a new inference allowance.
 Rejected explanatory reviews still contribute their measured duration before a repair attempt.
 This estimate does not guarantee preemption of an unusually slow native call.
@@ -109,6 +111,8 @@ Matching checkpoints record `unfinished_call` before an admitted model operation
 It names the model revision, case, criterion and operation without a durable result.
 It does not prove native execution started. Saving a vote or review attempt clears it.
 A killed worker retains the descriptor so its failed operation can be inspected.
+A model load is checkpointed the same way, with `phase: load` and `first_call_at`, and its
+`model_call` row is written before any inference, so a deadline during either keeps both.
 
 After stopping a command, process reaping and output-reader cleanup share one second.
 Incomplete cleanup returns a failure with `cleanup_timeout` and the owned `pid`.
@@ -301,6 +305,26 @@ The command returns their identifiers without printing captured trace text.
 An interrupted or budget-limited cycle resumes its frozen audit before collecting another batch.
 The process writes `last_cycle.json` and refreshes `inbox.html`.
 It does not apply proposals, execute trial commands, or upload evidence.
+
+A pending frozen audit is reused while its own `--days` and `--limit` match the run.
+Changing `--budget-s` or `--max-calls` keeps it. Changing days or limit builds a new audit.
+
+To keep the audit out of the judge's budget, freeze it in a separate step first:
+
+```bash
+aut improve audit --cycle --days 7 --limit 30 --budget-s 1500
+```
+
+It returns `frozen`, `kept` (a matching audit is already pending), `busy`, `budget`, or
+`superseded` (a cycle finished while it built, so it queues nothing).
+Only `budget` exits 1, and it leaves the pending audit unchanged.
+`--cycle` takes no `--project`. Plain `aut improve audit` is unchanged and writes no pending audit.
+`packaging/launchd/dev.aut.improve-audit.plist` is a template that runs this step at 03:50.
+
+When that step did not run, `aut improve run --audit-budget-s 600` builds the audit under its
+own 600-second cap and then gives the judge its full `--budget-s`. The outer timeout grows by the
+same amount only on those nights. The default 0 keeps the audit inside the run's budget.
+The worker report adds `worker_started_at` and `audit_s` (0 when the audit was reused).
 
 Schedule the command with an existing operating-system timer.
 Use an absolute executable and explicit private store path.

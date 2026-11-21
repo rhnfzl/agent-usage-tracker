@@ -181,6 +181,10 @@ class MlxLetter(LetterBackend):
                 raise _load_failed(self.model_id, exc) from exc
         return self._m
 
+    def load(self) -> None:
+        """Load the weights now, so a caller can time the load apart from the first inference."""
+        self._load()
+
     def peak_memory_mb(self) -> float:
         import mlx.core as mx
 
@@ -397,6 +401,7 @@ class MlxPplx(Decider):
                     w.update({"model." + k: v for k, v in mx.load(str(f)).items()
                               if k.startswith("language_model.")})
                 model.load_weights(list(model.sanitize(w).items()), strict=True)
+                mx.eval(model.parameters())     # mx.load is lazy: page the weights in during load
                 model.eval()
                 readout = next(iter(mx.load(str(path / "readout.safetensors")).values()))
                 self._m = (model, AutoTokenizer.from_pretrained(str(path)),

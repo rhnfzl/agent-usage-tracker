@@ -177,8 +177,78 @@ def test_delayed_older_report_cannot_clear_newer_warning(world):
     before = coverage.report_path().read_bytes()
     older = {"version": 1, "generated_at": (now - timedelta(minutes=1)).isoformat(),
              "issues": []}
-    assert coverage.save_report(older) is False
+    assert coverage.save_report(older) is None
     assert coverage.report_path().read_bytes() == before
+
+
+def assessed(monkeypatch, *, at, issues, during=None):
+    """Run the scan's coverage step with a fixed assessment; `during` runs inside its build."""
+    from agent_usage_tracker import coverage
+
+    def build(cfg):
+        if during:
+            during()
+        return {"version": 1, "generated_at": at.isoformat(), "issues": issues}
+
+    monkeypatch.setattr(coverage, "build_report", build)
+    monkeypatch.setattr(coverage, "save_scan_observations", lambda rows: None)
+    from agent_usage_tracker.config import load_config
+    return scan._record_coverage(load_config(), [])
+
+
+def test_an_older_overlapping_scan_publishes_no_coverage_row(world, monkeypatch):
+    from datetime import datetime, timedelta, timezone
+    from agent_usage_tracker import coverage
+
+    now = datetime.now(timezone.utc)
+    assert assessed(monkeypatch, at=now - timedelta(minutes=2), issues=[])["status"] == "ok"
+    newer = assessed(monkeypatch, at=now, issues=[MISSING])
+    assert newer["collector"] == "coverage" and newer["status"] == "degraded"
+    assert newer["finished_at"] == now
+    saved = coverage.report_path().read_bytes()
+    assert assessed(monkeypatch, at=now - timedelta(minutes=1), issues=[]) is None
+    assert coverage.report_path().read_bytes() == saved
+    assert list(json.loads(saved)["alerts"]) == ["source_payload_missing:collector:cursor"]
+
+
+def test_alert_state_merges_with_a_report_saved_during_the_build(world, monkeypatch):
+    from datetime import datetime, timedelta, timezone
+    from agent_usage_tracker import coverage
+
+    now = datetime.now(timezone.utc)
+    coverage.report_path().parent.mkdir(parents=True, exist_ok=True)
+    coverage.report_path().write_text(json.dumps(       # written before alerts existed
+        {"version": 1, "generated_at": (now - timedelta(hours=2)).isoformat(), "issues": []}))
+    # Another scan saves the baseline while this one builds, so this scan's issue is new.
+    row = assessed(monkeypatch, at=now, issues=[MISSING], during=lambda: assessed(
+        monkeypatch, at=now - timedelta(hours=1), issues=[]))
+    assert row["status"] == "degraded" and row["error"] == "new: cursor payloads missing"
+
+
+def test_a_damaged_previous_report_does_not_hide_a_new_issue(world, monkeypatch):
+    from datetime import datetime, timezone
+    from agent_usage_tracker import coverage
+
+    coverage.report_path().parent.mkdir(parents=True, exist_ok=True)
+    coverage.report_path().write_text("{not json")
+    row = assessed(monkeypatch, at=datetime.now(timezone.utc), issues=[MISSING])
+    assert row["status"] == "degraded"
+
+
+def test_heartbeat_goes_out_when_the_coverage_step_raises(world, monkeypatch):
+    from agent_usage_tracker import push
+
+    delivered = []
+    monkeypatch.setattr(scan, "make_sender", lambda cfg: [].extend)
+    monkeypatch.setattr(push, "send_scan_rows", lambda dsn, rows: delivered.extend(rows))
+
+    def broken(cfg, observations):
+        raise RuntimeError("fixture coverage failure")
+
+    monkeypatch.setattr(scan, "_record_coverage", broken)
+    with pytest.raises(RuntimeError, match="fixture coverage failure"):
+        cli.main(["--agents", "claude_code", "scan"])
+    assert [row["collector"] for row in delivered] == ["claude_code"]
 
 
 
@@ -192,6 +262,7 @@ def test_doctor_exposes_bundle_candidates_without_claiming_active_work(world, mo
     (applications / "Unrelated private name.app").mkdir()
     monkeypatch.setattr(harness_inventory, "application_dirs", lambda _home: [
         applications])
+    monkeypatch.setattr(harness_inventory, "command_dirs", lambda _home: [])
     report = coverage.build_report(load_config())
     observed = report["harness_inventory"]["observations"]
     assert observed[0]["harness_id"] == "rex"
@@ -311,3 +382,145 @@ def test_delivery_identity_uses_consistent_metadata_calls(world, monkeypatch):
 
     monkeypatch.setattr(coverage.os, "fstat", descriptor_metadata)
     assert coverage._delivery() == {"status": "available", "pending": {"activity": 1}}
+
+
+@pytest.fixture
+def inventory_home(world, monkeypatch):
+    from agent_usage_tracker import harness_inventory
+    from agent_usage_tracker.config import load_config
+
+    monkeypatch.setattr(harness_inventory.sys, "platform", "darwin")
+    applications = world / "Applications"
+    applications.mkdir(exist_ok=True)
+    monkeypatch.setattr(harness_inventory, "application_dirs", lambda _home: [applications])
+    monkeypatch.setattr(harness_inventory, "command_dirs", lambda _home: [])
+    return load_config()
+
+
+def harness_issues(cfg, agents=None):
+    from dataclasses import replace
+
+    from agent_usage_tracker import coverage
+
+    report = coverage.build_report(replace(cfg, agents=agents) if agents else cfg)
+    return {(i["code"], i["source_id"]): i["severity"] for i in report["issues"]
+            if i["code"].startswith("harness_") and i["code"] != "harness_inventory_limited"}
+
+
+def test_reader_qualified_t3_code_raises_no_harness_issue(inventory_home, world):
+    from dataclasses import replace
+
+    (world / "Applications" / "T3 Code.app").mkdir()
+    cutover = replace(inventory_home, t3_activity_since="2026-11-01T00:00:00+00:00")
+    issues = harness_issues(cutover, agents=("t3",))
+    assert not [key for key in issues if key[1] == "t3-code"]
+    assert ("harness_route_unverified", "t3-code") in harness_issues(cutover, agents=("codex",))
+
+
+@pytest.mark.parametrize("cutover, issue", [
+    ("2026-11-01T00:00:00+00:00", None), (None, "harness_active_unread")])
+def test_recent_t3_use_is_read_only_with_its_cutover(inventory_home, cutover, issue):
+    from dataclasses import replace
+
+    db = inventory_home.home / ".t3/userdata/state.sqlite"
+    db.parent.mkdir(parents=True, exist_ok=True)
+    db.write_text("")
+    issues = harness_issues(replace(inventory_home, t3_activity_since=cutover), agents=("t3",))
+    assert {code for code, source in issues if source == "t3-code"} == ({issue} - {None})
+
+
+def test_recent_unread_harness_is_a_warning_and_a_recent_wrapper_is_info(inventory_home):
+    for path in (".hermes/sessions/new.json", "Library/Application Support/rex/servers/s.db"):
+        target = inventory_home.home / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("")
+    issues = harness_issues(inventory_home, agents=("claude_code", "codex"))
+    assert issues[("harness_active_unread", "hermes")] == "warning"
+    assert issues[("harness_unattributed", "rex")] == "info"
+
+
+def scan_with_issues(monkeypatch, extra):
+    """Run a real scan with extra coverage issues and return the delivered coverage row."""
+    from agent_usage_tracker import coverage, push
+
+    delivered = []
+    monkeypatch.setattr(scan, "make_sender", lambda cfg: [].extend)
+    monkeypatch.setattr(push, "send_scan_rows", lambda dsn, rows: delivered.extend(rows))
+    real = coverage.build_report
+
+    def with_issues(cfg):
+        report = real(cfg)
+        report["issues"] = report["issues"] + extra
+        return report
+
+    monkeypatch.setattr(coverage, "build_report", with_issues)
+    assert cli.main(["--agents", "claude_code", "scan"]) == 0
+    return [row for row in delivered if row["collector"] == "coverage"]
+
+
+MISSING = {"code": "source_payload_missing", "source_id": "collector:cursor", "severity": "warning"}
+
+
+def test_coverage_row_seeds_a_baseline_then_alerts_on_a_new_issue(world, monkeypatch):
+    from agent_usage_tracker import coverage
+
+    [first] = scan_with_issues(monkeypatch, [])
+    assert first["status"] == "ok" and first["error"] is None and first["events"] == 0
+    assert "alerts" in json.loads(coverage.report_path().read_text())
+    [second] = scan_with_issues(monkeypatch, [MISSING])
+    assert second["status"] == "degraded"
+    assert second["error"] == "new: cursor payloads missing"
+    assert str(world) not in second["error"]
+
+
+def test_info_and_non_actionable_issues_never_alert(world, monkeypatch):
+    scan_with_issues(monkeypatch, [])
+    [row] = scan_with_issues(monkeypatch, [
+        {**MISSING, "severity": "info"},
+        {"code": "collector_failed", "source_id": "collector:codex", "severity": "warning"}])
+    assert row["status"] == "ok"
+
+
+def test_scan_dry_run_sends_no_coverage_row(world, monkeypatch):
+    from agent_usage_tracker import push
+
+    monkeypatch.setattr(push, "send_scan_rows", lambda *a: pytest.fail("a dry run sent a row"))
+    assert cli.main(["scan", "--dry-run"]) == 0
+
+
+def test_alert_state_ages_out_and_forgets_after_a_week():
+    from datetime import datetime, timedelta, timezone
+    from agent_usage_tracker.coverage import alert_state
+
+    now = datetime(2026, 11, 21, tzinfo=timezone.utc)
+    report = {"issues": [MISSING]}
+    alerts, text = alert_state(report, {}, now)            # baseline: known at once
+    assert text is None
+    alerts, text = alert_state({"issues": []}, {"alerts": {}}, now)
+    alerts, text = alert_state(report, {"alerts": alerts}, now)
+    assert text == "new: cursor payloads missing"
+    later = now + timedelta(hours=25)
+    alerts, text = alert_state(report, {"alerts": alerts}, later)
+    assert text is None                                      # known after 24 h
+    gone, text = alert_state({"issues": []}, {"alerts": alerts}, later)
+    assert text is None and gone                             # absent: kept for a week
+    assert alert_state(report, {"alerts": gone}, later + timedelta(days=3))[1] is None
+    # A scan gap alone never re-alerts a present issue; a week of absence forgets it.
+    assert alert_state(report, {"alerts": alerts}, later + timedelta(days=10))[1] is None
+    forgotten, _ = alert_state({"issues": []}, {"alerts": gone}, later + timedelta(days=7))
+    assert forgotten == {}
+    assert alert_state(report, {"alerts": forgotten}, later + timedelta(days=8))[1] == \
+        "new: cursor payloads missing"
+
+
+def test_a_warning_that_returns_after_a_week_of_observed_absence_alerts_again():
+    from datetime import datetime, timedelta, timezone
+    from agent_usage_tracker.coverage import alert_state
+
+    day0 = datetime(2026, 11, 21, tzinfo=timezone.utc)
+    alerts, text = alert_state({"issues": [MISSING]}, {}, day0)        # baseline: known
+    assert text is None
+    alerts, text = alert_state({"issues": []}, {"alerts": alerts}, day0 + timedelta(days=1))
+    assert text is None and alerts                                    # absent, still retained
+    alerts, text = alert_state({"issues": [MISSING]}, {"alerts": alerts}, day0 + timedelta(days=9))
+    assert text == "new: cursor payloads missing"

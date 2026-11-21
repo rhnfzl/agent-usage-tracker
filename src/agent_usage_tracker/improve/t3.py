@@ -19,6 +19,8 @@ from .evidence import TEXT_LIMIT, VERSION, _text
 
 MAX_ROWS = 20000
 HUMAN_SOURCES = {"web", "mobile"}
+# Item states after which T3 will add no output.
+TERMINAL = {"completed", "failed", "error", "interrupted", "cancelled"}
 
 
 def _hash(value: Any) -> str:
@@ -201,15 +203,24 @@ def _thread(db: sqlite3.Connection, path: Path, thread: str, cwd: str, since: fl
                 body = ({'file': value.get('fileName'), 'diff': value.get('diffStr')}
                         if kind == 'file_change' else value.get('input', ''))
                 emit('call', body, item, at, key, provider, call=call_id, tool=name)
-                if kind in {'file_change', 'error'} or 'output' in value:
+                item_state = value.get('status')
+                if kind in {'file_change', 'error'} or 'output' in value or item_state in TERMINAL:
+                    # T3 omits the output key when a finished command printed nothing.
                     output = (value.get('failure') if kind == 'error' else
-                              'File change reported ' + str(value.get('status'))
-                              if kind == 'file_change' else value['output'])
-                    failed = value.get('status') in {'failed', 'error'}
+                              'File change reported ' + str(item_state)
+                              if kind == 'file_change' else value.get('output', ''))
+                    failed = item_state in {'failed', 'error'}
                     if isinstance(output, dict):
                         failed = failed or output.get('isError') is True
+                    if kind in {'file_change', 'error'} or 'output' in value:
+                        result = result_status(_text(output), failed)
+                    elif type(value.get('exitCode')) is int:
+                        result = result_status({'exit_code': value['exitCode']}, failed)
+                    else:
+                        result = ('error' if failed else
+                                  'success' if item_state == 'completed' else 'unknown')
                     emit('result', output, item, end, key, provider, call=call_id,
-                         status=result_status(_text(output), failed))
+                         status=result)
             elif kind == 'assistant_message':
                 emit('reply', value.get('text', ''), item, end, key, provider)
                 if value.get('streaming'):

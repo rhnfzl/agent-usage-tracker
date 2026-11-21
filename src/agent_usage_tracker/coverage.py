@@ -11,7 +11,7 @@ from pathlib import Path
 import re
 import sqlite3
 import stat
-from typing import Any
+from typing import Any, Final
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .config import Config
@@ -504,11 +504,24 @@ def build_report(cfg: Config, *, now: datetime | None = None) -> dict[str, Any]:
         harnesses = []
         _issue(issues, "catalog_unavailable", "catalog", "info")
     from .harness_inventory import discover
-    inventory = discover(cfg.home, harnesses)
+    agents = frozenset(cfg.agents)
+    # The t3 collector refuses to read without its cutover, so it qualifies nothing until set.
+    readers = agents if cfg.t3_activity_since else agents - {"t3"}
+    inventory = discover(cfg.home, harnesses, readers=readers)
     if inventory["status"] == "limited":
         _issue(issues, "harness_inventory_limited", "inventory", "info")
+    wraps = {entry.get("id"): entry.get("wraps") for entry in harnesses}
     for candidate in inventory["observations"]:
-        _issue(issues, "harness_route_unverified", candidate["harness_id"], "info")
+        harness = candidate["harness_id"]
+        if candidate["reader_qualified"]:
+            continue
+        if candidate["activity"] != "recent":
+            _issue(issues, "harness_route_unverified", harness, "info")
+        elif isinstance(wraps.get(harness), list) and agents & set(wraps[harness]):
+            # It drives native CLIs whose logs AUT reads: the work is counted, only not attributed.
+            _issue(issues, "harness_unattributed", harness, "info")
+        else:
+            _issue(issues, "harness_active_unread", harness)
     return {"version": 1, "generated_at": now.isoformat(), "completeness": "unknown",
             "thresholds": {"collector_evidence_hours": FRESH_HOURS,
                            "publication_verification_hours": FRESH_HOURS},
@@ -523,18 +536,80 @@ def build_report(cfg: Config, *, now: datetime | None = None) -> dict[str, Any]:
             "catalog": harnesses, "harness_inventory": inventory}
 
 
-def save_report(report: dict[str, Any]) -> bool:
-    """Keep the latest private assessment and identify changes to the current issue set."""
+ALERT_HOURS = 24
+ALERT_FORGET_DAYS = 7
+# degraded pages only with the homelab `agent coverage` rule; "error" pages through the
+# existing rule after 3 scans.
+ALERT_STATUS: Final = "degraded"
+_ALERT_PHRASES = {
+    "harness_active_unread": "%s harness active, no AUT reader",
+    "discovery_limited": "%s discovery limited",
+    "source_payload_missing": "%s payloads missing",
+    "parser_loss": "%s parser loss",
+    "source_unreadable": "%s source unreadable",
+}
+
+
+def alert_state(report: dict[str, Any], previous: dict[str, Any], now: datetime, *,
+                previous_status: str = "available") -> tuple[dict[str, dict[str, str]], str | None]:
+    """Carry per-issue alert state and return it with the text of the issues that are new.
+    An actionable warning alerts for ALERT_HOURS after it first appears, then it is known.
+    A key absent for ALERT_FORGET_DAYS is forgotten, so flapping issues do not page again.
+    The text holds fixed phrases and source ids only, never paths."""
+    prior = previous.get("alerts")
+    # The first report after an install or upgrade knows today's issues. A damaged previous file
+    # is not a first report, so its issues still alert.
+    baseline = not isinstance(prior, dict) and previous_status in {"available", "missing"}
+    prior = prior if isinstance(prior, dict) else {}
+    forget = timedelta(days=ALERT_FORGET_DAYS)
+
+    def live(entry: object) -> dict[str, Any] | None:
+        last = _stamp(entry.get("last_seen")) if isinstance(entry, dict) else None
+        return entry if isinstance(entry, dict) and last and now - last < forget else None
+
+    current = sorted({f"{i['code']}:{i['source_id']}" for i in report.get("issues", [])
+                      if isinstance(i, dict) and i.get("code") in _ALERT_PHRASES
+                      and i.get("severity") != "info" and isinstance(i.get("source_id"), str)})
+    # An absent key keeps its entry for a week, marked with when it went away.
+    alerts = {key: {**entry, "absent_since": entry.get("absent_since") or now.isoformat()}
+              for key, entry in prior.items() if key not in current and live(entry)}
+    start = now - timedelta(hours=ALERT_HOURS) if baseline else now
+    for key in current:
+        # A key the last report still showed keeps its first sighting across a scan gap.
+        # One the last report showed absent starts again once its retained entry has expired.
+        entry = prior.get(key)
+        if isinstance(entry, dict) and entry.get("absent_since") and not live(entry):
+            entry = None
+        first = _stamp(entry.get("first_seen")) if isinstance(entry, dict) else None
+        alerts[key] = {"first_seen": (first or start).isoformat(), "last_seen": now.isoformat()}
+    new = [key for key in current
+           if now - (_stamp(alerts[key]["first_seen"]) or now) < timedelta(hours=ALERT_HOURS)]
+    if not new:
+        return alerts, None
+    phrases = []
+    for key in new:
+        code, _, source = key.partition(":")
+        phrases.append(_ALERT_PHRASES[code] % source.removeprefix("collector:"))
+    return alerts, ("new: " + "; ".join(phrases))[:300]
+
+
+def save_report(report: dict[str, Any]) -> tuple[bool, str | None] | None:
+    """Merge alert state from the previous assessment and keep this one, both under the report
+    lock, so overlapping scans cannot lose each other's alerts. Returns (issue set changed,
+    new-alert text), or None when a newer assessment is already saved."""
     signature = hashlib.sha256(json.dumps(sorted(
         (str(i.get("code", "")), str(i.get("source_id", "")), str(i.get("severity", "")))
         for i in report.get("issues", []) if isinstance(i, dict))).encode()).hexdigest()
     path = report_path()
     with _locked(path):
-        _, previous = _read_json(path)
+        status, previous = _read_json(path)
         previous_at = _stamp(previous.get("generated_at"))
         incoming_at = _stamp(report.get("generated_at"))
         if (previous_at and previous_at <= datetime.now(timezone.utc)
                 and (incoming_at is None or previous_at > incoming_at)):
-            return False
+            return None
+        report["alerts"], alert = alert_state(report, previous,
+                                              incoming_at or datetime.now(timezone.utc),
+                                              previous_status=status)
         atomic_write_text(path, json.dumps({**report, "issue_signature": signature}, sort_keys=True))
-    return previous.get("issue_signature") != signature
+    return previous.get("issue_signature") != signature, alert
