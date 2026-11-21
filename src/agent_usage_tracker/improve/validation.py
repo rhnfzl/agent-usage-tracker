@@ -12,7 +12,7 @@ from typing import Any, Iterable
 
 from ..config import AutError
 from . import rubric
-from .judge import LABELS, evaluation_key, evaluator
+from .judge import LABELS, policy_evaluation_key
 from .proposals import file_digest
 from .store import Store, digest
 from .trial import command
@@ -137,8 +137,7 @@ def validate(store: Store, spec_id: str, diagnosis_id: str, *,
                  if (value := store.get("judgments", key))}
     rows = []
     for ref in references:
-        key = evaluation_key(evaluator(policy, ref["rubric"]), cases[ref["evidence_sha256"]],
-                             ref["rubric"])
+        key = policy_evaluation_key(policy, cases[ref["evidence_sha256"]], ref["rubric"])
         key = policy.get("evaluation_keys", {}).get(cases[ref["evidence_sha256"]], {}).get(
             ref["rubric"], key)
         if key not in judgments:

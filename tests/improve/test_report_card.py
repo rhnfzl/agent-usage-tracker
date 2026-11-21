@@ -146,6 +146,27 @@ def test_fresh_qualification_after_queued_grading_and_write_footprint(tmp_path, 
                after["events.jsonl"][len(before["events.jsonl"]):].splitlines())
 
 
+def test_original_job_bound_judgments_remain_historical_in_report(tmp_path):
+    store = Store(tmp_path / "store")
+    events = [{"id": "p", "kind": "prompt", "text": "Check the example",
+               "timestamp": "2026-11-21T10:00:00Z"},
+              {"id": "a", "kind": "reply", "text": "Checked the example"}]
+    key = label_case(store, "original", agent="codex", events=events)
+    policy = {"version": 1, "cases": [key], "audit_id": "a", "models": ["fixture"],
+              "rubrics": {RUBRIC.id: ["Historic question", "Historic definition"]},
+              "explain_model": None, "explain_revision": None, "minimum_raw_score": .7}
+    job = store.put("diagnoses", policy)
+    identity = store.put("judgments", {"case_id": key, "rubric": RUBRIC.id,
+        "job_id": job, "verdict": "pass",
+        "evaluation_key": digest({"job": job, "case": key, "rubric": RUBRIC.id})})
+    original = store.get("judgments", identity)
+    result = json.loads(card.write(store, format="json"))
+    assert any(r["rubric_id"] == RUBRIC.id and r["rubric_version"] == 0
+               for r in result["rubrics"])
+    assert not any(r["qualified"] for r in result["qualifications"])
+    assert store.get("judgments", identity) == original
+
+
 @pytest.mark.parametrize("format", ["md", "html", "json"])
 def test_cli_formats_always_write_private_files(tmp_path, capsys, format):
     root = tmp_path / format

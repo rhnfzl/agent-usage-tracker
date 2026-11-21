@@ -267,7 +267,9 @@ counts, even without a version bump. Each judgment records `rubric_version`, `ru
 `rubric_snapshot`. Judgments made before markdown rubrics have none of these. Their diagnosis
 policy holds the old rubric text, and `rubric.legacy_version` maps it to version 1 when it equals
 the text the v1 files were moved from, else 0. Validation of an older diagnosis uses its old
-identity, so its result does not change. Because the rubric identity changed, the first night
+identity, so its result does not change. Readers also retain the original version-1 job-bound
+keys, without rewriting saved judgments or treating version-0 history as a current qualification.
+Because the rubric identity changed, the first night
 or two after the update re-vote the pending audit's cases once: under a tight call budget the
 blocking re-votes alone can fill the first night, and the next night finishes from the saved
 votes. Older judgments outside the pending audit are re-voted once, when a later audit picks
