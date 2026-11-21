@@ -142,3 +142,17 @@ def test_a_decision_rewrites_the_page_and_groups_show_their_status(store, tmp_pa
                      "--reason", "wrong layer"]) == 0
     page = (store.root / "inbox.html").read_text(encoding="utf-8")
     assert "Drafted fix" not in page and "<td>rejected on " in page
+
+
+def test_one_broken_proposal_does_not_hide_the_others(tmp_path, monkeypatch):
+    monkeypatch.setattr(groups, "repository", lambda path: None)
+    store = Store(tmp_path / "private")
+    good = _proposal(store, tmp_path, "Good one", cause="<i>c</i>", expected_effect="<u>e</u>",
+                     rollback="<s>r</s>")
+    broken = store.put("proposals", {"case_id": "0" * 64, "scope": "/x", "target": "y"})
+    inbox.write(store, [])
+    page = (store.root / "inbox.html").read_text(encoding="utf-8")
+    assert "Good one" in page and f"Proposal <code>{broken[:8]}</code> could not be read" in page
+    assert good[:8] in page
+    assert all(tag not in page for tag in ("<i>c", "<u>e", "<s>r"))
+    assert "&lt;i&gt;c&lt;/i&gt;" in page

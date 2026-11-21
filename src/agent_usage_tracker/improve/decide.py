@@ -12,16 +12,18 @@ import shutil
 import stat
 import subprocess  # nosec B404 # fixed git argv through git_argv, no shell
 import sys
+import tempfile
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from ..config import AutError
 from ..git_safe import git_argv, git_env
+from ..label.core import data_dir
 from ..state import _locked
 from .groups import _journal
 from .proposals import file_digest, prepare, stage
-from .store import Store, digest, repository
+from .store import Store, repository
 
 KINDS = ("instruction", "skill", "config", "code")
 _PAST = {"accept": "accepted", "reject": "rejected", "stale": "marked stale"}
@@ -30,6 +32,13 @@ _CORE = {"version", "case_id", "scope", "target", "before_sha256", "after_sha256
          "after", "diff", "span", "authority", "state"}
 _MANAGED = re.compile(r"<!-- BEGIN\b.*?-->.*?<!-- END\b.*?-->", re.S)
 NOTICE = "The title and date are sent to the sink by publish-improve; targets and commit stay private."
+
+
+def command(store: Store) -> str:
+    """`aut improve`, plus --root (shell-quoted) when the store is not the default."""
+    if store.root == (data_dir() / "improve").resolve():
+        return "aut improve"
+    return f"aut improve --root {shlex.quote(str(store.root))}"
 
 
 def resolve(store: Store, prefix: str) -> str:
@@ -85,13 +94,18 @@ def managed_spans(text: str) -> list[tuple[int, int]]:
 
 
 def group_status(store: Store) -> dict[str, str]:
-    """Group key to adopted, proposed or "rejected on <day>"; groups not listed are open."""
+    """Group key to adopted, proposed, accepted (waiting for its merge) or "rejected on <day>";
+    groups not listed are open."""
     latest = decisions(store)
     status: dict[str, str] = {}
+    accepted = set()
     for key in store.keys("proposals"):
         group, decision = store.get("proposals", key).get("group_key"), latest.get(key)
         if group and decision and decision["action"] == "reject":
             status[group] = max(status.get(group, ""), f"rejected on {decision['decided_at'][:10]}")
+        elif group and decision and decision["action"] == "accept":
+            accepted.add(group)
+    status |= dict.fromkeys(accepted, "accepted")
     for key in open_proposals(store):
         if group := store.get("proposals", key).get("group_key"):
             status[group] = "proposed"
@@ -101,25 +115,39 @@ def group_status(store: Store) -> dict[str, str]:
     return status
 
 
+def _chain(latest: dict[str, dict[str, Any]], proposal_id: str) -> list[str]:
+    """This proposal and every proposal that superseded it, oldest first."""
+    chain = [proposal_id]
+    while (latest.get(chain[-1]) or {}).get("superseded_by"):
+        chain.append(latest[chain[-1]]["superseded_by"])
+        if chain[-1] in chain[:-1]:
+            raise AutError("improve: proposal supersede chain loops")
+    return chain
+
+
 def _follow(latest: dict[str, dict[str, Any]], proposal_id: str) -> str:
     """A superseded proposal stands for the proposal that replaced it."""
-    seen = {proposal_id}
-    while (latest.get(proposal_id) or {}).get("superseded_by"):
-        proposal_id = latest[proposal_id]["superseded_by"]
-        if proposal_id in seen:
-            raise AutError("improve: proposal supersede chain loops")
-        seen.add(proposal_id)
-    return proposal_id
+    return _chain(latest, proposal_id)[-1]
 
 
-def _settled(latest: dict[str, dict[str, Any]], proposal_id: str,
+def _journaled(store: Store, kind: str, field: str, key: str, **attrs: Any) -> None:
+    """Add the journal row a crash between a record write and its journal row left out."""
+    if not any(row.get("kind") == kind and row.get(field) == key for row in _journal(store)):
+        store.append(kind, **{field: key}, **attrs)
+
+
+def _settled(store: Store, latest: dict[str, dict[str, Any]], proposal_id: str,
              action: str) -> dict[str, Any] | None:
     decision = latest.get(proposal_id)
     if decision is None:
         return None
+    if decision["action"] == "stale" and action == "reject":
+        return None     # a stale proposal can still be rejected, which blocks its group
     done = f"{_PAST[decision['action']]} on {decision['decided_at'][:10]}"
     if decision["action"] != action:
         raise AutError(f"improve: proposal {proposal_id[:8]} was already {done}")
+    _journaled(store, "decision", "decision_id", decision["decision_id"],
+               proposal_id=proposal_id, action=action)
     return {"status": "unchanged", "proposal_id": proposal_id,
             "decision_id": decision["decision_id"], "message": f"Already {done}; nothing changed."}
 
@@ -134,10 +162,12 @@ def _record(store: Store, proposal_id: str, proposal: dict[str, Any], action: st
     return key
 
 
-def _git(path: Path, sub: str, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
-    try:
+def _git(path: Path, sub: str, *args: str, check: bool = True,
+         env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+    try:    # literal pathspecs: a target named rules[1].md must not also match rules1.md
         result = subprocess.run(git_argv(str(path), sub, *args),  # nosec B603
-                                capture_output=True, text=True, timeout=60, env=git_env())
+                                capture_output=True, text=True, timeout=60,
+                                env=git_env() | {"GIT_LITERAL_PATHSPECS": "1"} | (env or {}))
     except (OSError, subprocess.SubprocessError) as exc:
         raise AutError(f"improve: git {sub} did not run in the candidate") from exc
     if check and result.returncode:
@@ -147,25 +177,35 @@ def _git(path: Path, sub: str, *args: str, check: bool = True) -> subprocess.Com
 
 
 def _commit(proposal_id: str, proposal: dict[str, Any], candidate: Path) -> str | None:
-    """Commit the staged file on aut/improve-<id8> inside the candidate clone. None when the
-    candidate is not its own repository: a worktree of the source shares its refs."""
-    top = _git(candidate, "rev-parse", "--show-toplevel", check=False)
-    if (top.returncode or Path(top.stdout.strip()).resolve() != candidate.resolve()
-            or repository(candidate) in {None, repository(Path(proposal["scope"]))}):
+    """Commit the staged file on aut/improve-<id8> inside the candidate, with plumbing only, so
+    no checkout, hook or clean filter runs. None unless the candidate's git dir is its own
+    `.git`: a worktree writes its refs into another repository."""
+    own = str((candidate / ".git").resolve())
+    gitdir = _git(candidate, "rev-parse", "--absolute-git-dir", check=False)
+    if gitdir.returncode or str(Path(gitdir.stdout.strip()).resolve()) != own \
+            or repository(candidate) != own:
         return None
-    branch, marker = f"aut/improve-{proposal_id[:8]}", f"Proposal: {proposal_id}"
-    if _git(candidate, "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}",
-            check=False).returncode == 0:
-        if marker in _git(candidate, "log", "-1", "--format=%B", branch).stdout:
-            return _git(candidate, "rev-parse", branch).stdout.strip()   # a retried accept
-        _git(candidate, "switch", "--quiet", branch)
-    else:
-        _git(candidate, "switch", "--quiet", "-c", branch)
-    title = (str(proposal.get("title") or f"Update {proposal['target']}").splitlines() or [""])[0]
-    _git(candidate, "add", "--", proposal["target"])
-    _git(candidate, "commit", "--quiet", "--no-gpg-sign", "-m", title[:120], "-m", marker,
-         "--", proposal["target"])
-    return _git(candidate, "rev-parse", "HEAD").stdout.strip()
+    target = proposal["target"]
+    ref, marker = f"refs/heads/aut/improve-{proposal_id[:8]}", f"Proposal: {proposal_id}"
+    if _git(candidate, "rev-parse", "--verify", "--quiet", ref, check=False).returncode == 0:
+        if marker in _git(candidate, "cat-file", "commit", ref).stdout:
+            return _git(candidate, "rev-parse", ref).stdout.strip()   # a retried accept
+        raise AutError(f"improve: the candidate already has {ref} for other work")
+    listed = _git(candidate, "ls-tree", "HEAD", "--", target).stdout.split()
+    mode = listed[0] if listed and listed[0] in {"100644", "100755"} else "100644"
+    blob = _git(candidate, "hash-object", "-w", "--no-filters", "--",
+                str(candidate / target)).stdout.strip()
+    with tempfile.TemporaryDirectory() as scratch:     # a private index; the candidate's stays
+        index = {"GIT_INDEX_FILE": str(Path(scratch) / "index")}
+        _git(candidate, "read-tree", "HEAD", env=index)
+        _git(candidate, "update-index", "--add", "--cacheinfo", f"{mode},{blob},{target}",
+             env=index)
+        tree = _git(candidate, "write-tree", env=index).stdout.strip()
+    title = (str(proposal.get("title") or f"Update {target}").splitlines() or [""])[0]
+    commit = _git(candidate, "commit-tree", "--no-gpg-sign", tree, "-p", "HEAD",
+                  "-m", title[:120], "-m", marker).stdout.strip()
+    _git(candidate, "update-ref", ref, commit, "")    # "" creates only, never moves a branch
+    return commit
 
 
 def _reprepare(store: Store, proposal_id: str, proposal: dict[str, Any],
@@ -194,7 +234,7 @@ def _next_steps(store: Store, proposal_id: str, proposal: dict[str, Any],
                 candidate: Path | None, commit: str | None) -> list[str]:
     scope = Path(proposal["scope"])
     target = scope / proposal["target"]
-    adopt = f"after the merge: aut improve adopt {proposal_id} --commit <sha> [--pr N]"
+    adopt = f"after the merge: {command(store)} adopt {proposal_id} --commit <sha> [--pr N]"
     if commit and candidate:
         branch = f"aut/improve-{proposal_id[:8]}"
         return [f"git -C {shlex.quote(str(scope))} fetch {shlex.quote(str(candidate))} {branch}",
@@ -214,7 +254,7 @@ def accept(store: Store, proposal_id: str, note: str | None = None) -> dict[str,
     with _locked(store.root / "decide"):
         latest = decisions(store)
         proposal_id = _follow(latest, proposal_id)
-        if done := _settled(latest, proposal_id, "accept"):
+        if done := _settled(store, latest, proposal_id, "accept"):
             return done
         proposal = store.get("proposals", proposal_id)
         source = Path(proposal["scope"]) / proposal["target"]
@@ -222,8 +262,10 @@ def accept(store: Store, proposal_id: str, note: str | None = None) -> dict[str,
         superseded = None
         try:
             unchanged = file_digest(source) == proposal["before_sha256"]
-        except OSError:
+        except FileNotFoundError:
             unchanged = False
+        except OSError as exc:      # a passing lock or permission problem must not mark it stale
+            raise AutError("improve: the proposal target cannot be read now; try again") from exc
         if not unchanged:
             new_id = _reprepare(store, proposal_id, proposal, source)
             if new_id is None:
@@ -231,6 +273,13 @@ def accept(store: Store, proposal_id: str, note: str | None = None) -> dict[str,
                 return {"status": "stale", "proposal_id": proposal_id, "decision_id": key,
                         "message": "improve: target changed: the next draft run may redraft "
                                    "this group"}
+            if new_id in latest:    # made before a crash and already decided on its own
+                _record(store, proposal_id, proposal, "stale", superseded_by=new_id,
+                        reason="target changed outside the span; superseded")
+                newest = _follow(latest, new_id)
+                if done := _settled(store, latest, newest, "accept"):    # raises after a reject
+                    return done
+                raise AutError(f"improve: superseded by {newest[:8]}; accept that id")
             if candidate:   # the old candidate holds the old content, so stage beside it
                 candidate = store.root / "candidates" / new_id
                 stage(store, new_id, candidate)
@@ -270,17 +319,18 @@ def _remove_candidate(store: Store, proposal_id: str) -> bool:
 
 def reject(store: Store, proposal_id: str, reason: str) -> dict[str, Any]:
     text = _text(reason, 500, "reason")
-    if not text:
+    if not text or not any(c.isalnum() for c in text):    # the page's placeholder is "…"
         raise AutError("improve: a reject needs a reason")
     with _locked(store.root / "decide"):
         latest = decisions(store)
-        proposal_id = _follow(latest, proposal_id)
-        result = _settled(latest, proposal_id, "reject")
+        chain = _chain(latest, proposal_id)
+        proposal_id = chain[-1]
+        result = _settled(store, latest, proposal_id, "reject")
         if result is None:
             proposal = store.get("proposals", proposal_id)
             key = _record(store, proposal_id, proposal, "reject", reason=text)
             result = {"status": "rejected", "proposal_id": proposal_id, "decision_id": key}
-        result["candidate_removed"] = _remove_candidate(store, proposal_id)
+        result["candidate_removed"] = any([_remove_candidate(store, key) for key in chain])
     return result
 
 
@@ -305,6 +355,8 @@ def adopt(store: Store, proposal_id: str | None = None, *, commit: str,
             if (latest.get(proposal_id) or {}).get("action") != "accept":
                 raise AutError("improve: accept the proposal before adopting it")
             proposal = store.get("proposals", proposal_id)
+        if proposal.get("authority", "operator_scoped_proposal") != "operator_scoped_proposal":
+            proposal = proposal | {"title": None}   # a drafted title is model text: a human writes it
         title = _text(title or proposal.get("title"), 120, "title")
         if not title or any(ord(c) < 32 or ord(c) == 127 for c in title):
             raise AutError("improve: adopt needs a one-line --title")
@@ -330,9 +382,13 @@ def adopt(store: Store, proposal_id: str | None = None, *, commit: str,
                  "commit": commit, "pr": pr, "rubric_ids": sorted(set(rubric_ids)),
                  "proposal_id": proposal_id, "group_key": proposal.get("group_key"),
                  "note": _text(note, 500, "note"), "benefit_claim": False}
-        existed = store.path("adoptions", digest(value)).exists()
+        same = ("proposal_id", "commit") if proposal_id else ("title", "commit")
+        for key in store.keys("adoptions"):     # again on a later day is still the same adoption
+            old = store.get("adoptions", key)
+            if all(old.get(name) == value[name] for name in same):
+                _journaled(store, "adoption", "adoption_id", key, proposal_id=old["proposal_id"])
+                return {"status": "unchanged", "adoption_id": key, "adopted_at": old["adopted_at"],
+                        "notice": NOTICE}
         key = store.put("adoptions", value)
-        if not existed:
-            store.append("adoption", adoption_id=key, proposal_id=proposal_id)
-    return {"status": "unchanged" if existed else "adopted", "adoption_id": key,
-            "adopted_at": day, "notice": NOTICE}
+        store.append("adoption", adoption_id=key, proposal_id=proposal_id)
+    return {"status": "adopted", "adoption_id": key, "adopted_at": day, "notice": NOTICE}

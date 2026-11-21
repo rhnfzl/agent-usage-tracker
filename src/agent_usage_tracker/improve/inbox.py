@@ -6,11 +6,9 @@ from __future__ import annotations
 import html
 import json
 import re
-import shlex
 from typing import Any
 
 from ..config import AutError
-from ..label.core import data_dir
 from ..state import _locked, atomic_write_text
 from . import decide, groups
 from .case_view import write_case_view
@@ -21,17 +19,10 @@ TOP_PROPOSALS = 20
 TOP_ADOPTIONS = 5
 
 
-def _command(store: Store) -> str:
-    """`aut improve`, plus --root (shell-quoted) when the page's store is not the default."""
-    if store.root == (data_dir() / "improve").resolve():
-        return "aut improve"
-    return f"aut improve --root {shlex.quote(str(store.root))}"
-
-
 def _case_link(store: Store, case_id: str) -> str:
     try:
         write_case_view(store, case_id)     # written first, so the link works
-    except (AutError, OSError):
+    except Exception:   # an old or broken case keeps its id, without a link
         return f"<code>{html.escape(case_id[:12])}</code>"
     return (f"<a href='case_views/{html.escape(case_id)}.html'>"
             f"<code>{html.escape(case_id[:12])}</code></a>")
@@ -58,7 +49,7 @@ def _proposal(store: Store, key: str, report: dict[str, Any]) -> str:
     facts.append(("Staged", str(staged) if staged else "not staged"))
     evidence = value.get("evidence")
     cases = (evidence.get("case_ids") if isinstance(evidence, dict) else None) or [value["case_id"]]
-    command = _command(store)
+    command = decide.command(store)
     return (f"<article><h3><code>{short}</code> "
             f"{html.escape(str(value.get('title') or 'Operator proposal'))}</h3><dl>"
             + "".join(f"<dt>{name}</dt><dd>{html.escape(str(text))}</dd>"
@@ -67,6 +58,13 @@ def _proposal(store: Store, key: str, report: dict[str, Any]) -> str:
             + "</dd></dl><pre>" + html.escape(value["diff"]) + "</pre>"
             f"<pre><code>{html.escape(command)} inbox accept {short}\n"
             f"{html.escape(command)} inbox reject {short} --reason \"…\"</code></pre></article>")
+
+
+def _safe_proposal(store: Store, key: str, report: dict[str, Any]) -> str:
+    try:    # one bad record must not hide the other proposals
+        return _proposal(store, key, report)
+    except Exception:
+        return f"<p>Proposal <code>{html.escape(key[:8])}</code> could not be read.</p>"
 
 
 def _proposals(store: Store) -> str:
@@ -82,7 +80,8 @@ def _proposals(store: Store) -> str:
             report = {}
         more = (f"<p>{len(keys) - TOP_PROPOSALS} more: <code>aut improve inbox list</code></p>"
                 if len(keys) > TOP_PROPOSALS else "")
-        return head + "".join(_proposal(store, key, report) for key in keys[:TOP_PROPOSALS]) + more
+        return head + "".join(_safe_proposal(store, key, report)
+                              for key in keys[:TOP_PROPOSALS]) + more
     except Exception:
         return head + "<p>The proposals could not be read.</p>"
 
