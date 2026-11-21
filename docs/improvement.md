@@ -21,7 +21,7 @@ Set `AUT_IMPROVE_ROOT`, or pass `aut improve --root /private/path ...`.
 Use a new empty directory. Existing stores require their `.aut-improve` version marker.
 Files are private, and the store's `.gitignore` excludes all contents. Never force-add them to Git.
 
-The adapters read Claude Code and Codex logs and T3 Code's local
+The adapters read Claude Code, Codex and Pi logs, Cursor CLI chat stores, and T3 Code's local
 `~/.t3/userdata/statev2.sqlite` projections. T3 is read in a read-only SQLite transaction,
 including committed WAL records. Requests explicitly created by a user in the web or mobile
 client qualify as human work. Provider-imported history, agent messages and unknown origins
@@ -48,10 +48,15 @@ Unknown sources retain the full evidence checks.
 The audit filters event timestamps, matches calls to results, and records source hashes.
 `--project /path/to/repo` restricts an audit to a readable repository and its worktrees.
 
-Each source read uses at most 16 MiB. Large sources retain their first metadata record and a
+Each source read uses at most 16 MiB. Large JSONL sources retain their first metadata record and a
 line-aligned recent window. Source byte ranges and omitted prefixes remain explicit.
 Unknown fork ordinals cannot establish whether tail records are copied history, so those tails
 remain excluded. A complete observed attempt can be reviewed even when its whole session is incomplete.
+Pi uses its recorded stop reason, omits copied parent entries, and keeps branches with uncertain
+order ineligible. Cursor CLI reads the latest root and its linked blobs in one read-only transaction.
+It excludes registered automated chats and subagent chats. A later request can close an earlier
+request with a final observed reply. The trailing request and roots with missing evidence remain
+ineligible. Cursor CLI groups events by the request timestamp and does not infer missing workspace paths.
 Captured events are redacted and limited to 6,000 characters.
 Coverage exposes incomplete lines, clipped events, missing results, and copied history.
 Codex stores some replies both as native messages with structured memory citations and as
@@ -72,7 +77,7 @@ aut improve inspect --case CASE_ID
 
 This writes a private HTML view under the local store and prints its path and counts.
 The view shows the matching captured attempt, including context omitted from the model input.
-It links the original local trace and frozen snapshot, with line or byte references for each event.
+It links the original local trace and frozen snapshot, with line, byte or database record references.
 Trace text stays in the private view, outside command output and the configured sink.
 Missing and clipped evidence stays visible. Inspection does not make a judgment eligible or verified.
 The original link opens the current file; the displayed evidence remains the immutable saved snapshot.
