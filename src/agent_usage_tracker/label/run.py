@@ -288,7 +288,8 @@ def run_label(cfg: Config, tasks: list[str] | None = None, since: datetime | Non
         k = (task if choice.backend == "encoder" else None, choice.backend,
              choice.model_id or cfg.label_model, choice.model_rev)
         if k not in loaded:
-            loaded[k] = make_backend(task, choice, cfg.label_model, cfg.label_llama_server)
+            loaded[k] = make_backend(task, choice, cfg.label_model, cfg.label_llama_server,
+                                     cfg.ledger_timezone)
         return loaded[k]
 
     backend_for = backend_for or default_backend
@@ -305,7 +306,7 @@ def run_label(cfg: Config, tasks: list[str] | None = None, since: datetime | Non
         try:
             for name in names:
                 choice = Choice() if local_estimates else load_choice(
-                    name, TASKS[name].ver if name in TASKS else None)
+                    name, *((TASKS[name].ver, cfg.ledger_timezone) if name in TASKS else ()))
                 report[name], stopped = _label_one(run, name, since, now, choice,
                                                    backend_for)
                 beat.events += report[name]["rows"] + report[name]["notes"]

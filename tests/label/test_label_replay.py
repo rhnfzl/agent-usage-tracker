@@ -11,12 +11,11 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta, timezone
 
 import pytest
-from zoneinfo import ZoneInfo
 
 from agent_usage_tracker import cli, state
 from agent_usage_tracker.config import AutError
 from agent_usage_tracker.label import local, replay, run, tasks
-from label_helpers import FakeSource, _cfg, _claude_log, _steer, _win
+from label_helpers import FakeSource, _cfg, machine_in, _claude_log, _steer, _win
 from test_label_local import recipe
 
 NOW = datetime(2026, 11, 7, 12, tzinfo=timezone.utc)
@@ -324,15 +323,11 @@ def test_a_job_made_under_another_ledger_zone_refuses(context, monkeypatch):
     (directory / "manifest.json").write_text(json.dumps(manifest))
     (directory / "progress.json").write_text(json.dumps(
         {"manifest_sha256": replay._digest(manifest), "next": 0}))
-    tokyo = ZoneInfo("Asia/Tokyo")
-    monkeypatch.setattr(replay, "_machine_midnight",
-                        lambda d: datetime(d.year, d.month, d.day, tzinfo=tokyo))
+    machine_in(monkeypatch, "Asia/Tokyo")
     with pytest.raises(AutError, match="ledger_timezone"):
         replay.resume(context["cfg"], p["job_id"])
     # a machine in the ledger zone drew the same days, so the job goes on
-    amsterdam = ZoneInfo(context["cfg"].ledger_timezone)
-    monkeypatch.setattr(replay, "_machine_midnight",
-                        lambda d: datetime(d.year, d.month, d.day, tzinfo=amsterdam))
+    machine_in(monkeypatch, context["cfg"].ledger_timezone)
     assert apply(context, p["job_id"])["complete"]
 
 

@@ -25,7 +25,7 @@ from agent_usage_tracker.label import bakeoff
 from agent_usage_tracker.label import core
 from agent_usage_tracker.label import evalset
 from agent_usage_tracker.label import tasks
-from label_helpers import BASE, FIXED, LABELS, LEDGER, Oracle, TASK, TODAY, WORD, _cfg, _env, _gold
+from label_helpers import BASE, FIXED, LABELS, LEDGER, Oracle, TASK, TODAY, WORD, ZONE, _cfg, _env, _gold
 
 
 @pytest.fixture
@@ -161,7 +161,7 @@ def test_scores_are_saved_without_text_and_reused(tmp_path, monkeypatch, no_sink
         o5 = Oracle()
         rec = bakeoff.run_eval(cfg, TASK, src=src, now=BASE, backends=[o5])[0]
         assert o5.calls == 2 * len(open_units) and rec["prompt_ver"].endswith("p3")
-        keys = set(bakeoff.newest(TASK))
+        keys = set(bakeoff.newest(TASK, ZONE))
         assert keys == {("fake/oracle", "r1", "steer_intent@2/p2"),
                         ("fake/oracle", "r2", "steer_intent@2/p2"),
                         ("fake/oracle", "r1", "steer_intent@2/p3")}
@@ -186,7 +186,7 @@ def test_final_test_days_reach_only_eval_final(tmp_path, capsys, no_sink):
         # changing every final gold answer changes nothing the bake-off reports
         for u in sealed:
             evalset.append_jsonl(evalset.eval_path(TASK, "gold"), {
-                "unit_id": u, "gold": "other", "labeller": "human", "date": "d", "task_ver": 2})
+                "unit_id": u, "gold": "other", "labeller": "human", "date": "d", "task_ver": 2, "ledger_timezone": ZONE})
         assert bakeoff.run_eval(cfg, TASK, src=src, now=BASE, backends=[Oracle()])[0] == rec
         # eval, the table and choose never open the final file: a broken one cannot matter
         evalset.eval_path(TASK, "final").mkdir(parents=True)
@@ -209,7 +209,7 @@ def test_final_test_days_reach_only_eval_final(tmp_path, capsys, no_sink):
         bakeoff.run_final(cfg, TASK, "fake/oracle", src=src, now=BASE, backend=Spy())
         assert not seen and "has seen the final test set 1 times" in capsys.readouterr().err
         # and it never changed what the bake-off holds
-        assert bakeoff.newest(TASK)[("fake/oracle", "r1", "steer_intent@2/p2")]["n"] == rec["n"]
+        assert bakeoff.newest(TASK, ZONE)[("fake/oracle", "r1", "steer_intent@2/p2")]["n"] == rec["n"]
 
 
 def test_recall_floor_fails_a_model_and_is_never_relaxed(tmp_path):
@@ -275,11 +275,12 @@ def test_calibration_is_kept_only_when_it_helps(tmp_path):
     assert rec["per_label"]["relevant"]["recall_default"] == 0.0
     # what won is saved, and the nightly decision applies it
     with _env(tmp_path / "c"):
-        evalset.append_jsonl(evalset.eval_path("aw_title_relevance", "eval"), {"ts": "t", **rec})
+        evalset.append_jsonl(evalset.eval_path("aw_title_relevance", "eval"),
+                             {"ts": "t", "ledger_timezone": ZONE, **rec})
         cfg = _cfg(tmp_path)
         win = bakeoff.choose(cfg, "aw_title_relevance", "fake/table")
         assert win["platt"] == rec["platt"]
-        c = core.load_choice("aw_title_relevance")
+        c = core.load_choice("aw_title_relevance", tasks.TASKS["aw_title_relevance"].ver, ZONE)
         req = tasks.TASKS["aw_title_relevance"].request("aw_title", "k", FIXED, {})
         res = core.decide(req, {"relevant": 0.4, "not_relevant": 0.6}, c, "m", "r")
         assert res.chosen == "relevant" and not res.below_tau and res.prob > 0.9
@@ -335,7 +336,7 @@ def test_report_numbers_speed_and_memory(tmp_path, monkeypatch, no_sink):
 
 
 def _row(model, f1=0.9, s=1.0, mb=100.0, rev="r1", **v):
-    return {"ts": "t", "task": TASK, "task_ver": 2, "backend": "mlx_letter", "model_id": model,
+    return {"ts": "t", "task": TASK, "task_ver": 2, "ledger_timezone": ZONE, "backend": "mlx_letter", "model_id": model,
             "model_rev": rev, "prompt_ver": "steer_intent@2/p1", "calib_ver": "c",
             "calibration": "none", "temperature": 1.0, "platt": None, "n": 100,
             "macro_f1_tuned": f1, "macro_f1_default": 0.5,
@@ -355,7 +356,7 @@ def test_pareto_table_and_choose(tmp_path, capsys):
     assert bakeoff.pareto([small, _row("m/null", 0.8, 5.0, None)]) == [
         small, _row("m/null", 0.8, 5.0, None)]
     failing = _row("m/fail", 0.99, 0.1, 10.0, recall_at_tau=0.2)
-    old = {"task_ver": 2, "model_id": "m/old", "model_rev": "r", "prompt_ver": "p", "per_label": {},
+    old = {"task_ver": 2, "ledger_timezone": ZONE, "model_id": "m/old", "model_rev": "r", "prompt_ver": "p", "per_label": {},
            "macro_f1": 1.0, "n_held": 9, "coverage": 1.0, "size_mb": 1}       # before the folds
     with _env(tmp_path):
         for r in (old, big, fast, small, beaten, failing):
@@ -377,7 +378,7 @@ def test_pareto_table_and_choose(tmp_path, capsys):
         # two revisions keep their own rows, and the newest is what a model name means
         evalset.append_jsonl(evalset.eval_path(TASK, "eval"), _row("m/big", 0.9, rev="r2"))
         evalset.append_jsonl(evalset.eval_path(TASK, "eval"), _row("m/fast", 0.8, 0.5, 900.0))
-        assert {k[1] for k in bakeoff.newest(TASK) if k[0] == "m/big"} == {"r1", "r2"}
+        assert {k[1] for k in bakeoff.newest(TASK, ZONE) if k[0] == "m/big"} == {"r1", "r2"}
         assert bakeoff.choose(cfg, TASK, "m/big")["model_rev"] == "r2"
         # a short name finds the model's repo, and the table and the advice show the short name
         evalset.append_jsonl(evalset.eval_path(TASK, "eval"),
@@ -405,14 +406,14 @@ def test_share_error_is_reweighted_to_natural_frequency(tmp_path):
         # silver says 9 of 10 units are `stop`, gold oversampled the rare label 1:1
         for i in range(10):
             evalset.append_jsonl(evalset.eval_path(TASK, "silver"), {
-                "unit_id": f"p{i}", "teacher": "t", "task_ver": 2, "date": "d",
+                "unit_id": f"p{i}", "teacher": "t", "task_ver": 2, "ledger_timezone": ZONE, "date": "d",
                 "dist": {"stop": 0.9, "framing": 0.1} if i < 9 else {"framing": 0.9,
                                                                      "stop": 0.1}})
         for u, d in (("g1", "stop"), ("g2", "framing")):
             evalset.append_jsonl(evalset.eval_path(TASK, "silver"), {
-                "unit_id": u, "teacher": "t", "task_ver": 2, "date": "d",
+                "unit_id": u, "teacher": "t", "task_ver": 2, "ledger_timezone": ZONE, "date": "d",
                 "dist": {d: 0.9}})
-        w = bakeoff.weights(TASK, ["g1", "g2", "g3"])
+        w = bakeoff.weights(TASK, ["g1", "g2", "g3"], ZONE)
         # population stop 10 : framing 2; gold 1 : 1 (g3 has no silver: weight 1)
         assert abs(w["g1"] / w["g2"] - 5) < 1e-9 and w["g3"] == 1.0
 
@@ -434,7 +435,7 @@ def test_train_encoder_and_backend(tmp_path):
         # silver of a final test day or an eval day never trains it
         for u in set(reqs) - fit:
             evalset.append_jsonl(evalset.eval_path(TASK, "silver"), {
-                "unit_id": u, "teacher": "t", "task_ver": 2, "date": "d", "dist": {"stop": 1.0}})
+                "unit_id": u, "teacher": "t", "task_ver": 2, "ledger_timezone": ZONE, "date": "d", "dist": {"stop": 1.0}})
         assert bakeoff.train_encoder(cfg, TASK, src=src, now=BASE)["trained_on"] == len(fit)
         # eval calibrates the encoder only on the gold it never trained on
         rec = bakeoff.evaluate(TASK, backends.Encoder(TASK), [
@@ -446,6 +447,7 @@ def test_train_encoder_and_backend(tmp_path):
             bakeoff._Item(reqs[u], "stop", 1.0) for u in fit], 0.9, 0.6, TODAY, tz=LEDGER) is None
         raw = backends.encoder_path(TASK).read_text()
         assert WORD not in raw and json.loads(raw)["labels"] == LABELS
+        assert json.loads(raw)["ledger_timezone"] == ZONE
         assert all(k.isdigit() for k in json.loads(raw)["w"])     # weights keyed by bucket ids
         enc = backends.make_backend(TASK, core.Choice(backend="encoder"), "unused")
         req = next(iter(reqs.values()))
@@ -563,7 +565,7 @@ def test_choose_reads_only_the_newest_record_of_a_model(tmp_path, monkeypatch):
         assert bakeoff.choose(_cfg(tmp_path), TASK, "m")["temperature"] == 2.0
         # and a bad newest record is what the recommendation judges
         evalset.append_jsonl(evalset.eval_path(TASK, "eval"), _row("m", recall_at_tau=0.1))
-        assert bakeoff.recommend(list(bakeoff.newest(TASK).values()), _cfg(tmp_path)) is None
+        assert bakeoff.recommend(list(bakeoff.newest(TASK, ZONE).values()), _cfg(tmp_path)) is None
 
 
 def test_macro_f1_averages_the_labels_that_occur():
@@ -601,7 +603,7 @@ def test_gold_units_say_how_many_fell_out_of_the_window(tmp_path, capsys):
     with _env(tmp_path):
         cfg, src, reqs = _gold(tmp_path, ["stop", "framing"])
         evalset.append_jsonl(evalset.eval_path(TASK, "gold"), {
-            "unit_id": "gone", "gold": "stop", "task_ver": tasks.TASKS[TASK].ver})
+            "unit_id": "gone", "gold": "stop", "task_ver": tasks.TASKS[TASK].ver, "ledger_timezone": ZONE})
         pairs = bakeoff._gold_units(cfg, TASK, 90, src, TODAY)
         assert {r.unit_id for r, _g in pairs} == set(reqs)
         assert "1 gold units are outside the 90-day window" in capsys.readouterr().err

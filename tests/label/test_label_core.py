@@ -23,7 +23,7 @@ import pytest
 from agent_usage_tracker.label import backends
 from agent_usage_tracker.label import core
 from agent_usage_tracker.label import tasks
-from label_helpers import ById, NOW, SECRET
+from label_helpers import ZONE, ById, NOW, SECRET
 
 
 class FixedLetters(backends.LetterBackend):
@@ -144,6 +144,25 @@ def test_choice_file_and_backend_slots(tmp_path, monkeypatch):
     assert type(b) is backends.MlxLetter and b.model_id == backends.MODELS["gemma-4-31b"].repo
     with pytest.raises(backends.BackendUnavailable):
         backends.Encoder("steer_intent").distribution(_req())
+
+
+def test_a_choice_or_encoder_from_another_ledger_zone_is_not_used(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("AUT_CONFIG", str(tmp_path / "config.toml"))
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    ver = f"steer_intent@2/p{core.PROMPT_VER}"
+    (tmp_path / "label.json").write_text(json.dumps({"tasks": {"steer_intent": {
+        "tau": {"stop": 0.7}, "prompt_ver": ver, "ledger_timezone": "Asia/Tokyo"}}}))
+    assert core.load_choice("steer_intent", 2, "Asia/Tokyo").tau == {"stop": 0.7}
+    assert core.load_choice("steer_intent", 2, ZONE) == core.Choice()
+    assert "another ledger_timezone" in capsys.readouterr().err
+    backends.encoder_path("steer_intent").parent.mkdir(parents=True)
+    backends.encoder_path("steer_intent").write_text(json.dumps({
+        "task": "steer_intent", "task_ver": 2, "ledger_timezone": "Asia/Tokyo",
+        "labels": ["stop"], "w": {}}))
+    assert backends.Encoder("steer_intent", zone="Asia/Tokyo").distribution(_req())
+    with pytest.raises(backends.BackendUnavailable, match="another ledger_timezone"):
+        backends.make_backend("steer_intent", core.Choice(backend="encoder"), "x",
+                              zone=ZONE).distribution(_req())
 
 
 def test_a_bad_platt_in_label_json_runs_uncalibrated(tmp_path, monkeypatch, capsys):

@@ -28,7 +28,7 @@ from pathlib import Path
 from types import FrameType
 from typing import IO, Any, Callable
 
-from ..config import AutError
+from ..config import AutError, record_zone_ok
 from ..net import HTTP_ERRORS, NoRedirect
 from .core import LETTERS, Backend, Choice, Request, data_dir, letter_distribution, softmax
 
@@ -662,8 +662,10 @@ class Encoder:
     Until one is trained, choosing it fails loudly instead of guessing."""
     backend = "encoder"
 
-    def __init__(self, task: str, model_id: str | None = None, model_rev: str | None = None):
-        self.task, self.model_id = task, model_id or f"encoder/{task}"
+    def __init__(self, task: str, model_id: str | None = None, model_rev: str | None = None,
+                 zone: str | None = None):
+        """zone: the ledger zone a trained model must belong to (config.record_zone_ok)."""
+        self.task, self.model_id, self.zone = task, model_id or f"encoder/{task}", zone
         self._m: dict[str, Any] | None = None
         p = encoder_path(task)
         try:
@@ -703,6 +705,10 @@ class Encoder:
         if m.get("task_ver") != req.task_ver:
             raise BackendUnavailable(f"label: the {self.task} encoder is for another task "
                                      "version; run `aut label train-encoder` again")
+        if self.zone is not None and not record_zone_ok(m, self.zone):
+            raise BackendUnavailable(f"label: the {self.task} encoder was trained on days in "
+                                     f"another ledger_timezone than {self.zone}; run "
+                                     "`aut label train-encoder` again")
         w, labels = m["w"], m["labels"]
         z = [0.0] * len(labels)
         for f in features(req.facts):
@@ -719,11 +725,11 @@ _MLX: dict[str, type[MlxLetter]] = {"mlx_elephant": MlxElephant, "mlx_card": Mlx
 
 
 def make_backend(task: str, choice: Choice, default_model: str,
-                 llama_server: str = "llama-server") -> Backend:
+                 llama_server: str = "llama-server", zone: str | None = None) -> Backend:
     """Any backend from what label.json holds (or a config's label_model). The table decides how a
     known model runs; any other name is an MLX letter repo."""
     if choice.backend == "encoder":
-        return Encoder(task, choice.model_id, choice.model_rev)
+        return Encoder(task, choice.model_id, choice.model_rev, zone)
     name = choice.model_id or default_model
     m = find_model(name)
     if m is None:

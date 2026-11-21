@@ -229,6 +229,8 @@ same job with `--apply`; progress advances only after each batch is delivered. T
 is 600 seconds, with a maximum of 3600. An incomplete result reports `remaining` and
 `complete: false`; repeat the saved job to continue. Nightly watermarks are untouched.
 A job records its `ledger_timezone`. It refuses to continue under another zone; prepare a new job.
+A job saved before the zone was recorded goes on only when the machine's zone has the ledger
+zone's UTC offsets over its range, a day either side.
 The budget stops new scoring work. An active model call or sink delivery can finish after it.
 `partial_local_text` counts eligible episode units with some missing steer text. Counts cover
 supported local source units, not all historical work. Replies and context can also be absent.

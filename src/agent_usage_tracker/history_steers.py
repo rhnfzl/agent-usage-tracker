@@ -19,7 +19,7 @@ from pathlib import Path
 
 from .collectors.claude_code import _is_injected
 from .collectors.codex import is_scheduled_automation
-from .config import Config, ledger_zone
+from .config import AutError, Config, ledger_zone
 from .event import ActivityEvent, make_event_id
 from .push import send_activity_rows
 from .sink import check_ledger_zone, connect
@@ -64,6 +64,20 @@ def counted_days(dsn: str, zone: str) -> set[tuple[str, date]]:
     return {(a, d) for a, d in rows}
 
 
+def foreign_estimates(dsn: str, zone: str) -> int:
+    """Estimate rows not at noon in `zone`: written under another zone. Their event ids name the
+    same days, so a rerun would add rows beside them rather than replace them."""
+    with connect(dsn) as conn:
+        row = conn.execute("SELECT count(*) FROM agents.activity_event WHERE kind = 'steer_estimate' "
+                           "AND (ts AT TIME ZONE %s)::time <> '12:00'", (zone,)).fetchone()
+    return int(row[0]) if row else 0
+
+
+def drop_foreign_sql(zone: str) -> str:
+    return ("DELETE FROM agents.activity_event WHERE kind = 'steer_estimate' "
+            f"AND (ts AT TIME ZONE '{zone}')::time <> '12:00';")
+
+
 def estimates(cfg: Config, counted: set[tuple[str, date]]) -> list[ActivityEvent]:
     rows, tz = [], ledger_zone(cfg)
     for agent, (rel, text_key, time_key, per_second, first, last) in SOURCES.items():
@@ -82,6 +96,11 @@ def estimates(cfg: Config, counted: set[tuple[str, date]]) -> list[ActivityEvent
 def run(cfg: Config, dry_run: bool) -> Counter[str]:
     dsn = cfg.require_pg("history-steers")
     check_ledger_zone(dsn, cfg.ledger_timezone)
+    if n := foreign_estimates(dsn, cfg.ledger_timezone):
+        raise AutError(f"history-steers: {n} steer_estimate rows were written under another zone "
+                       f"(not noon in ledger_timezone {cfg.ledger_timezone}); a rerun would count "
+                       f"their days twice. Remove them, then run again: "
+                       f"{drop_foreign_sql(cfg.ledger_timezone)}")
     rows = estimates(cfg, counted_days(dsn, cfg.ledger_timezone))
     if not dry_run:
         send_activity_rows(dsn, rows)

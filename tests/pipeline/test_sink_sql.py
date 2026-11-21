@@ -17,6 +17,7 @@ import subprocess  # nosec B404 # fixed argv, the shipped apply script
 import uuid
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -182,6 +183,27 @@ def test_insert_only_writer_defers_corrections_until_column_grant(dsn):
             conn.execute(f'DROP OWNED BY "{role}"')
             conn.execute(f'DROP ROLE "{role}"')
             conn.commit()
+
+
+def test_estimates_from_another_zone_are_found_and_the_named_delete_removes_only_them(dsn):
+    from agent_usage_tracker import history_steers as hs
+    zone = ZoneInfo(DEFAULT_LEDGER_TZ)
+    noon = datetime(2026, 4, 8, 12, tzinfo=zone)               # written in the ledger zone
+    other = datetime(2026, 4, 9, 12, tzinfo=timezone.utc)       # written on a UTC machine
+    rows = [ActivityEvent(event_id=f"est-{t.date()}", ts=t.isoformat(), agent="codex",
+                          kind="steer_estimate", session_id=None, turn_id=None,
+                          attrs={"count": 1, "source": "history"}, machine="t") for t in (noon, other)]
+    push.send_activity_rows(dsn, rows[:1])
+    assert hs.foreign_estimates(dsn, DEFAULT_LEDGER_TZ) == 0
+    push.send_activity_rows(dsn, rows[1:])
+    assert hs.foreign_estimates(dsn, DEFAULT_LEDGER_TZ) == 1
+    with connect(dsn) as conn:
+        conn.execute(hs.drop_foreign_sql(DEFAULT_LEDGER_TZ))
+        left = conn.execute("SELECT event_id FROM agents.activity_event "
+                            "WHERE kind = 'steer_estimate'").fetchall()
+        conn.execute("DELETE FROM agents.activity_event WHERE kind = 'steer_estimate'")
+        conn.commit()
+    assert left == [("est-2026-04-08",)]
 
 
 def test_scan_rows_insert_once(dsn):

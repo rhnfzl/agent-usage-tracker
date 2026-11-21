@@ -30,6 +30,7 @@ def test_only_typed_inputs_inside_the_gap_count(tmp_path, monkeypatch):
     monkeypatch.setattr(hs, "send_activity_rows", lambda dsn, rows: sent.extend(rows))
     monkeypatch.setattr(hs, "counted_days", lambda dsn, zone: {("codex", date(2026, 7, 6))})
     monkeypatch.setattr(hs, "check_ledger_zone", lambda dsn, zone: None)
+    monkeypatch.setattr(hs, "foreign_estimates", lambda dsn, zone: 0)
     claude = [{"display": t, "timestamp": _ms("2026-04-08T10:00")} for t in
               ("fix it", "/clear", "!ls", "   ", "<task-notification>x", "again")]
     claude += [{"display": "edge", "timestamp": _ms(d)} for d in
@@ -63,6 +64,20 @@ def test_days_and_row_times_follow_the_ledger_zone(tmp_path):
            ("2026-04-07T23:30+00:00", "2026-04-08T00:30+00:00", "2026-04-08T09:00+00:00")])
     rows = hs.estimates(_cfg(tmp_path, ledger_timezone="Asia/Tokyo"), set())
     assert [(r.ts, r.attrs["count"]) for r in rows] == [("2026-04-08T12:00:00+09:00", 3)]
+
+
+@pytest.mark.parametrize("dry_run", [True, False])
+def test_rows_from_another_zone_stop_a_run_and_name_the_delete(tmp_path, monkeypatch, dry_run):
+    sent, asked = [], []
+    monkeypatch.setattr(hs, "send_activity_rows", lambda dsn, rows: sent.extend(rows))
+    monkeypatch.setattr(hs, "check_ledger_zone", lambda dsn, zone: None)
+    monkeypatch.setattr(hs, "counted_days", lambda dsn, zone: set())
+    monkeypatch.setattr(hs, "foreign_estimates", lambda dsn, zone: asked.append(zone) or 2)
+    with pytest.raises(AutError, match="2 steer_estimate rows were written under another zone") as e:
+        hs.run(_cfg(tmp_path, ledger_timezone="Asia/Tokyo"), dry_run=dry_run)
+    assert asked == ["Asia/Tokyo"] and not sent
+    assert str(e.value).endswith("DELETE FROM agents.activity_event WHERE kind = 'steer_estimate' "
+                                 "AND (ts AT TIME ZONE 'Asia/Tokyo')::time <> '12:00';")
 
 
 def test_a_missing_file_is_no_rows(tmp_path):

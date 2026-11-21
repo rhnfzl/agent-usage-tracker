@@ -26,7 +26,7 @@ from dataclasses import asdict
 from datetime import date, datetime, timezone, tzinfo
 from typing import Any, Iterable, NamedTuple, Sequence
 
-from ..config import LABEL_DAYS, AutError, Config, ledger_zone
+from ..config import LABEL_DAYS, AutError, Config, ledger_zone, record_zone_ok
 from ..event import ActivityEvent, make_event_id
 from ..push import send_activity_rows
 from ..state import atomic_write_text
@@ -86,12 +86,12 @@ def ece(tops: list[tuple[float, bool]], bins: int = 10) -> float | None:
                for b in by.values()) / len(tops)
 
 
-def weights(task: str, golds: list[str]) -> dict[str, float]:
+def weights(task: str, golds: list[str], zone: str) -> dict[str, float]:
     """unit_id -> weight that re-weights the stratified gold sample to natural frequency: the
     share of its silver stratum among every silver unit over its share among the gold units.
     shortcut: the silver sample stands in for the population (teach samples by day and unit
     type, not by label); upgrade by counting nightly rows once a task runs nightly."""
-    silver = silver_by_unit(task)
+    silver = silver_by_unit(task, zone)
     pop = Counter(stratum(t) for t in silver.values())
     sample = Counter(stratum(silver.get(u)) for u in golds)
     tp, ts = sum(pop.values()), len(golds)
@@ -305,7 +305,7 @@ def _gold_units(cfg: Config, task: str, days: int, src: Source | None,
                 today: date | None = None) -> list[tuple[Request, str]]:
     """(request, gold) for every gold unit still in the window, final test days included: each
     caller takes its side of evalset.final_test."""
-    gold = gold_latest(task)
+    gold = gold_latest(task, cfg.ledger_timezone)
     reqs = window_units(cfg, task, days, src, today)
     found = [u for u in gold if u in reqs]
     if len(found) < len(gold):
@@ -336,7 +336,7 @@ def default_backends(cfg: Config, task: str) -> list[Backend]:
             continue
         out.append(b)
     if encoder_path(task).exists():
-        out.append(Encoder(task))
+        out.append(Encoder(task, zone=cfg.ledger_timezone))
     return out
 
 
@@ -344,12 +344,13 @@ def _key(rec: dict[str, Any]) -> tuple[Any, ...]:
     return rec.get("model_id"), rec.get("model_rev"), rec.get("prompt_ver")
 
 
-def newest(task: str) -> dict[tuple[Any, ...], dict[str, Any]]:
-    """The newest record per model, revision and prompt of the current task version, the most
-    recent one last. Records from before the five folds have no Brier and do not count."""
+def newest(task: str, zone: str) -> dict[tuple[Any, ...], dict[str, Any]]:
+    """The newest record per model, revision and prompt of the current task version and ledger
+    zone, the most recent one last. Records from before the five folds have no Brier and do not
+    count."""
     out: dict[tuple[Any, ...], dict[str, Any]] = {}
     for r in read_jsonl(eval_path(task, "eval")):
-        if r.get("task_ver") == TASKS[task].ver and "brier" in r:
+        if r.get("task_ver") == TASKS[task].ver and record_zone_ok(r, zone) and "brier" in r:
             out.pop(_key(r), None)
             out[_key(r)] = r
     return out
@@ -365,9 +366,9 @@ def run_eval(cfg: Config, task: str, days: int = LABEL_DAYS, *, src: Source | No
         raise AutError(f"label eval: no gold labels for {task} in the last {days} days outside "
                        "the final test days (label some with `aut label review`)")
     _warn_thin(task, [g for _q, g in pool], "the tuning gold")
-    w = weights(task, [r.unit_id for r, _g in pool])
+    w = weights(task, [r.unit_id for r, _g in pool], cfg.ledger_timezone)
     items = [_Item(r, g, w[r.unit_id]) for r, g in pool]
-    before, recs = newest(task), []
+    before, recs = newest(task, cfg.ledger_timezone), []
     for b in backends if backends is not None else default_backends(cfg, task):
         try:
             getattr(b, "prepare", lambda: None)()
@@ -382,7 +383,8 @@ def run_eval(cfg: Config, task: str, days: int = LABEL_DAYS, *, src: Source | No
             print(f"aut: label eval: {b.model_id} has no gold outside its training days; left out",
                   file=sys.stderr)
             continue
-        append_jsonl(eval_path(task, "eval"), {"ts": now.isoformat(), **rec})
+        append_jsonl(eval_path(task, "eval"), {"ts": now.isoformat(),
+                                               "ledger_timezone": cfg.ledger_timezone, **rec})
         if cfg.pg_dsn:
             send_activity_rows(cfg.pg_dsn, [ActivityEvent(
                 event_id=make_event_id("eval", json.dumps(rec, sort_keys=True)),
@@ -398,7 +400,7 @@ def run_final(cfg: Config, task: str, model: str, days: int = LABEL_DAYS, *,
     """Score one model's saved calibration and tau on the final test days. Nothing fits here, and
     only this function reads those days; the result goes to its own file, which nothing reads."""
     now = now or datetime.now(timezone.utc)
-    rec = _saved_result(task, model)
+    rec = _saved_result(task, model, cfg.ledger_timezone)
     tz = ledger_zone(cfg)
     pairs = [(r, g) for r, g in _gold_units(cfg, task, days, src, now.astimezone(tz).date())
              if final_test(r, tz)]
@@ -417,7 +419,7 @@ def run_final(cfg: Config, task: str, model: str, days: int = LABEL_DAYS, *,
               "if you changed anything because of it, it no longer tests that", file=sys.stderr)
     b = backend or make_backend(task, Choice(backend=rec["backend"], model_id=rec["model_id"],
                                              model_rev=rec["model_rev"]), cfg.label_model,
-                                cfg.label_llama_server)
+                                cfg.label_llama_server, cfg.ledger_timezone)
     try:
         getattr(b, "prepare", lambda: None)()
         saved, _speed = _score(b, reqs)
@@ -428,6 +430,7 @@ def run_final(cfg: Config, task: str, model: str, days: int = LABEL_DAYS, *,
     tau = {k: v["tau"] for k, v in rec["per_label"].items()}
     dists = [calibrate(r, rec["temperature"], rec.get("platt")) for r in raws]
     res = {"ts": now.isoformat(), "task": task, "task_ver": rec["task_ver"],
+           "ledger_timezone": cfg.ledger_timezone,
            "backend": rec["backend"], "model_id": rec["model_id"], "model_rev": rec["model_rev"],
            "prompt_ver": rec["prompt_ver"], "calib_ver": rec["calib_ver"],
            **_report(raws, dists, [_decide(d, tau) for d in dists], golds, labels)}
@@ -490,7 +493,7 @@ def recommend(rows: list[dict[str, Any]], cfg: Config) -> dict[str, Any] | None:
 def table(cfg: Config, task: str) -> list[str]:
     """Quality, speed and memory per model. `*` on the Pareto frontier of the models that pass,
     `!` fails a floor or the bar. Numbers are out of fold; none comes from the final test days."""
-    rows = sorted(newest(task).values(), key=lambda r: -(r.get("macro_f1_tuned") or 0))
+    rows = sorted(newest(task, cfg.ledger_timezone).values(), key=lambda r: -(r.get("macro_f1_tuned") or 0))
     front = pareto([r for r in rows if not _fails(r, cfg)])
     lines = [f"label eval {task}: floors precision {cfg.label_precision}, recall "
              f"{cfg.label_recall}, coverage {cfg.label_coverage}",
@@ -527,14 +530,14 @@ def details(recs: list[dict[str, Any]]) -> list[str]:
     return out
 
 
-def _saved_result(task: str, model: str) -> dict[str, Any]:
+def _saved_result(task: str, model: str, zone: str) -> dict[str, Any]:
     """The newest record of a model id (or a short name from backends.MODELS)."""
     known = find_model(model)
     repo = known.repo if known else model
-    match = [r for r in newest(task).values() if r["model_id"] == repo]
+    match = [r for r in newest(task, zone).values() if r["model_id"] == repo]
     if not match:
         raise AutError(f"label: no eval record of {model} for {task}; run `aut label eval` "
-                       f"first. Known: {sorted({r['model_id'] for r in newest(task).values()})}")
+                       f"first. Known: {sorted({r['model_id'] for r in newest(task, zone).values()})}")
     return match[-1]
 
 
@@ -542,7 +545,7 @@ def choose(cfg: Config, task: str, model: str | None = None) -> dict[str, Any] |
     """With a model: write its saved result into label.json; other tasks untouched. Without one:
     print the table and a recommendation, and write nothing."""
     if model is None:
-        rows = list(newest(task).values())
+        rows = list(newest(task, cfg.ledger_timezone).values())
         if not rows:
             raise AutError(f"label choose: no eval record for {task}; run `aut label eval` first")
         rec = recommend(rows, cfg)
@@ -552,7 +555,7 @@ def choose(cfg: Config, task: str, model: str | None = None) -> dict[str, Any] |
               "recommended: none, no model passes the floors. They stay as they are: label more "
               "gold, or try other models.")
         return None
-    win = _saved_result(task, model)
+    win = _saved_result(task, model, cfg.ledger_timezone)
     fails = _fails(win, cfg)
     if fails:
         print(f"aut: warning: {win['model_id']} fails the floors for {task}: {', '.join(fails)}. "
@@ -567,6 +570,7 @@ def choose(cfg: Config, task: str, model: str | None = None) -> dict[str, Any] |
         "backend": win["backend"], "model_id": win["model_id"], "model_rev": win["model_rev"],
         "temperature": win["temperature"], "platt": win.get("platt"),
         "calib_ver": win["calib_ver"], "prompt_ver": win["prompt_ver"],
+        "ledger_timezone": cfg.ledger_timezone,
         "tau": {k: v["tau"] for k, v in win["per_label"].items() if v["tau"] is not None}}
     atomic_write_text(p, json.dumps(obj, indent=2, sort_keys=True))
     return obj["tasks"][task]
@@ -628,7 +632,7 @@ def train_encoder(cfg: Config, task: str, days: int = LABEL_DAYS, *, src: Source
     tz = ledger_zone(cfg)
     today = (now or datetime.now(timezone.utc)).astimezone(tz).date()
     reqs = window_units(cfg, task, days, src, today)
-    gold, silver = gold_latest(task), silver_by_unit(task)
+    gold, silver = gold_latest(task, cfg.ledger_timezone), silver_by_unit(task, cfg.ledger_timezone)
     open_days = {u: r for u, r in reqs.items() if not final_test(r, tz)}
     train = {u: r for u, r in open_days.items() if in_encoder_train_split(r, tz)}
     test = {u for u in gold if u in open_days and u not in train}
@@ -638,9 +642,10 @@ def train_encoder(cfg: Config, task: str, days: int = LABEL_DAYS, *, src: Source
     w = _fit(data, len(labels))
     # atomic: a crash mid-write must not leave a corrupt encoder that the nightly run then loads
     atomic_write_text(encoder_path(task), json.dumps(
-        {"task": task, "task_ver": TASKS[task].ver, "labels": labels,
+        {"task": task, "task_ver": TASKS[task].ver, "ledger_timezone": cfg.ledger_timezone,
+         "labels": labels,
          "w": {str(f): [round(x, 5) for x in r] for f, r in w.items()}}))
-    enc = Encoder(task)
+    enc = Encoder(task, zone=cfg.ledger_timezone)
     pairs = [(top_label(enc.distribution(reqs[u])), gold[u]) for u in sorted(test)]
     return {"model_id": enc.model_id, "model_rev": enc.model_rev, "trained_on": len(data),
             "held_out": len(pairs),

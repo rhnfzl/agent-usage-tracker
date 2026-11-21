@@ -11,9 +11,9 @@ import pytest
 from agent_usage_tracker.config import AutError
 from agent_usage_tracker.label import evalset
 from agent_usage_tracker.label import tasks
-from label_helpers import BASE, FIXED, LEDGER, TASK
+from label_helpers import BASE, FIXED, LEDGER, TASK, ZONE
 from agent_usage_tracker.label import core
-from label_helpers import FakeSource, _cfg, _env
+from label_helpers import FakeSource, _cfg, _env, machine_in
 
 
 FOLDS_OF_FIXED_DAYS = [3, 3, 0, 3, 2, 0, 3, 3]
@@ -87,29 +87,48 @@ def test_gold_latest_takes_the_last_answer_of_this_version(tmp_path):
     ver = tasks.TASKS[TASK].ver
     with _env(tmp_path):
         p = evalset.eval_path(TASK, "gold")
-        for row in ({"unit_id": "u1", "gold": "stop", "task_ver": ver},
-                    {"unit_id": "u1", "gold": "framing", "task_ver": ver},
-                    {"unit_id": "u2", "gold": "stop", "task_ver": ver + 1},
-                    {"unit_id": "u3", "gold": "not-a-label", "task_ver": ver}):
+        for row in ({"unit_id": "u1", "gold": "stop", "task_ver": ver, "ledger_timezone": ZONE},
+                    {"unit_id": "u1", "gold": "framing", "task_ver": ver, "ledger_timezone": ZONE},
+                    {"unit_id": "u2", "gold": "stop", "task_ver": ver + 1, "ledger_timezone": ZONE},
+                    {"unit_id": "u3", "gold": "not-a-label", "task_ver": ver, "ledger_timezone": ZONE}):
             evalset.append_jsonl(p, row)
-        assert evalset.gold_latest(TASK) == {"u1": "framing"}
+        assert evalset.gold_latest(TASK, ZONE) == {"u1": "framing"}
 
 
 def test_silver_by_unit_groups_teachers_of_this_version(tmp_path):
     ver = tasks.TASKS[TASK].ver
     with _env(tmp_path):
         p = evalset.eval_path(TASK, "silver")
-        for row in ({"unit_id": "u", "teacher": "x", "task_ver": ver, "dist": {"stop": 1.0}},
-                    {"unit_id": "u", "teacher": "y", "task_ver": ver, "dist": {"framing": 1.0}},
-                    {"unit_id": "v", "teacher": "x", "task_ver": ver + 1, "dist": {"stop": 1.0}},
-                    {"unit_id": "w", "teacher": "x", "task_ver": ver, "dist": "junk"}):
+        for row in ({"unit_id": "u", "teacher": "x", "task_ver": ver, "ledger_timezone": ZONE, "dist": {"stop": 1.0}},
+                    {"unit_id": "u", "teacher": "y", "task_ver": ver, "ledger_timezone": ZONE, "dist": {"framing": 1.0}},
+                    {"unit_id": "v", "teacher": "x", "task_ver": ver + 1, "ledger_timezone": ZONE, "dist": {"stop": 1.0}},
+                    {"unit_id": "w", "teacher": "x", "task_ver": ver, "ledger_timezone": ZONE, "dist": "junk"}):
             evalset.append_jsonl(p, row)
-        assert evalset.silver_by_unit(TASK) == {"u": {"x": {"stop": 1.0}, "y": {"framing": 1.0}}}
+        assert evalset.silver_by_unit(TASK, ZONE) == {"u": {"x": {"stop": 1.0}, "y": {"framing": 1.0}}}
 
 
 def test_stratum_ignores_a_teacher_without_an_answer():
     assert evalset.stratum({}) == "unlabelled" and evalset.stratum({"x": {}}) == "unlabelled"
     assert evalset.stratum({"x": {}, "y": {"a": 1.0}}) == "a"
+
+
+def test_gold_and_silver_count_only_under_their_ledger_zone(tmp_path, monkeypatch):
+    ver = tasks.TASKS[TASK].ver
+    with _env(tmp_path):
+        for unit, zone in (("old", None), ("tokyo", "Asia/Tokyo"), ("here", ZONE)):
+            stamp = {"ledger_timezone": zone} if zone else {}
+            evalset.append_jsonl(evalset.eval_path(TASK, "gold"),
+                                 {"unit_id": unit, "gold": "stop", "task_ver": ver, **stamp})
+            evalset.append_jsonl(evalset.eval_path(TASK, "silver"), {
+                "unit_id": unit, "teacher": "t", "task_ver": ver, "dist": {"stop": 1.0}, **stamp})
+        # a record from before the zone was saved counted days in the machine zone
+        machine_in(monkeypatch, ZONE)
+        assert set(evalset.gold_latest(TASK, ZONE)) == set(evalset.silver_by_unit(TASK, ZONE)) \
+            == {"old", "here"}
+        machine_in(monkeypatch, "UTC")
+        assert set(evalset.gold_latest(TASK, ZONE)) == set(evalset.silver_by_unit(TASK, ZONE)) \
+            == {"here"}
+        assert set(evalset.gold_latest(TASK, "Asia/Tokyo")) == {"tokyo"}
 
 
 def test_unit_day_is_the_ledger_day_of_the_unit():

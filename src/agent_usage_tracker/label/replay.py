@@ -8,11 +8,11 @@ import re
 import time
 import uuid
 from dataclasses import asdict
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from ..config import AutError, Config, ledger_zone
+from ..config import AutError, Config, ledger_zone, machine_zone_agrees
 from ..push import send_activity_rows
 from ..repo_keys import RepoKeys
 from ..state import LockBusy, _locked, atomic_write_text
@@ -130,20 +130,13 @@ def resume(cfg: Config, job_id: str, *, apply: bool = False, budget_s: int = 600
         raise AutError("label replay: this job is already running") from exc
 
 
-def _machine_midnight(d: date) -> datetime:
-    return datetime(d.year, d.month, d.day).astimezone()
-
-
 def _machine_days_match(manifest: dict[str, Any], cfg: Config) -> bool:
-    """A job saved before its zone was recorded counted days in the machine's zone. It may go on
-    when that zone puts every midnight of the job's range where the ledger zone does."""
-    tz, d = ledger_zone(cfg), date.fromisoformat(manifest["since"])
-    until = date.fromisoformat(manifest["until"])
-    while d <= until:
-        if _machine_midnight(d) != local_midnight(d, tz):
-            return False
-        d = date.fromordinal(d.toordinal() + 1)
-    return True
+    """A job saved before its zone was recorded counted days and hours in the machine's zone. It
+    may go on when that zone agrees with the ledger zone over the job's range, a day either side."""
+    since, until = (datetime.fromisoformat(manifest[k]).replace(tzinfo=timezone.utc)
+                    for k in ("since", "until"))
+    return machine_zone_agrees(ledger_zone(cfg), since - timedelta(days=1),
+                               until + timedelta(days=1))
 
 
 def _resume(cfg: Config, job_id: str, directory: Path, apply: bool, budget_s: int,

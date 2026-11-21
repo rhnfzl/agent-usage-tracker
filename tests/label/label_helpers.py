@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import functools
 import json
 import re
 from datetime import datetime, timedelta, timezone
@@ -11,6 +12,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
+from agent_usage_tracker import config
 from agent_usage_tracker.config import DEFAULT_LEDGER_TZ, Config
 from agent_usage_tracker.event import make_event_id
 from agent_usage_tracker.label import backends
@@ -21,6 +23,14 @@ SALT = "test-salt-for-labels-0123456789abcdef"
 NOW = datetime(2026, 11, 3, 3, 0, tzinfo=timezone.utc)
 DAY1 = NOW - timedelta(days=1)          # inside yesterday in every zone tests run in
 SECRET = "SECRET-PROMPT acme-corp merger"
+
+
+def machine_in(m: pytest.MonkeyPatch, zone: str) -> None:
+    """Pretend the machine's zone is `zone` (only config.machine_zone_agrees reads it)."""
+    m.setattr(config, "_machine_offset", lambda t: datetime.fromtimestamp(t, ZoneInfo(zone)).utcoffset())
+    # a fresh cache, which the monkeypatch drops again: no faked answer outlives the test
+    m.setattr(config, "_machine_agrees_since_2024",
+              functools.cache(config._machine_agrees_since_2024.__wrapped__))
 
 
 def _cfg(home: Path, **kw) -> Config:
@@ -109,7 +119,8 @@ WORD = "zanzibarquill"
 
 # Fixed noon in the default ledger zone: the folds hash a unit's ledger day, so a moving clock
 # would change the split and every number that follows from it. Every run below gets this clock.
-LEDGER = ZoneInfo(DEFAULT_LEDGER_TZ)
+ZONE = DEFAULT_LEDGER_TZ                # what eval records made under _cfg's zone carry
+LEDGER = ZoneInfo(ZONE)
 BASE = datetime(2026, 6, 15, 12, tzinfo=LEDGER)
 
 
@@ -153,5 +164,5 @@ def _gold(tmp: Path, golds: list[str]):
     for u, r in reqs.items():
         evalset.append_jsonl(evalset.eval_path(TASK, "gold"), {
             "unit_id": u, "gold": r.facts["text"].split()[0], "labeller": "human", "date": "d",
-            "task_ver": 2})
+            "task_ver": 2, "ledger_timezone": ZONE})
     return cfg, src, reqs

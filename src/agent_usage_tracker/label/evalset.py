@@ -22,7 +22,7 @@ from datetime import date, datetime, timedelta, tzinfo
 from pathlib import Path
 from typing import Any, Callable, TypeVar
 
-from ..config import LABEL_DAYS, AutError, Config, ledger_zone
+from ..config import LABEL_DAYS, AutError, Config, ledger_zone, record_zone_ok
 from ..state import atomic_write_text, parse_record
 from .core import Request, data_dir, local_midnight, top_label
 from .tasks import TASKS, Source, units
@@ -72,18 +72,20 @@ def write_jsonl(p: Path, rows: list[dict[str, Any]]) -> None:
     atomic_write_text(p, "".join(json.dumps(r, sort_keys=True) + "\n" for r in rows))
 
 
-def gold_latest(task: str) -> dict[str, str]:
-    """unit_id -> gold label of the current task version; a later answer for a unit wins."""
+def gold_latest(task: str, zone: str) -> dict[str, str]:
+    """unit_id -> gold label of the current task version and ledger zone (config.record_zone_ok);
+    a later answer for a unit wins."""
     ver, ids = TASKS[task].ver, {c for c, _d in TASKS[task].candidates}
     return {r["unit_id"]: r["gold"] for r in read_jsonl(eval_path(task, "gold"))
-            if r.get("task_ver") == ver and r.get("gold") in ids}
+            if r.get("task_ver") == ver and record_zone_ok(r, zone) and r.get("gold") in ids}
 
 
-def silver_by_unit(task: str) -> dict[str, dict[str, dict[str, float]]]:
-    """unit_id -> {teacher: dist} of the current task version."""
+def silver_by_unit(task: str, zone: str) -> dict[str, dict[str, dict[str, float]]]:
+    """unit_id -> {teacher: dist} of the current task version and ledger zone."""
     out: dict[str, dict[str, Any]] = defaultdict(dict)
     for r in read_jsonl(eval_path(task, "silver")):
-        if r.get("task_ver") == TASKS[task].ver and isinstance(r.get("dist"), dict):
+        if r.get("task_ver") == TASKS[task].ver and record_zone_ok(r, zone) \
+                and isinstance(r.get("dist"), dict):
             out[r["unit_id"]][r["teacher"]] = r["dist"]
     return dict(out)
 
