@@ -236,13 +236,16 @@ def test_freeze_cycle_audit_queues_nothing_when_a_cycle_finishes_during_the_buil
         tmp_path, monkeypatch):
     from agent_usage_tracker.improve import schedule
 
+    from agent_usage_tracker.state import atomic_write_text
+
     store = Store(tmp_path / "private")
-    write_pending(store, {"audit": None})
-    fresh = frozen_audit(store)
     finished = {"policy_id": "reviewer", "audit": None}
+    write_pending(store, finished)          # last night's completed cycle
+    fresh = frozen_audit(store)
 
     def build(*args, **kwargs):
-        write_pending(store, finished)      # the reviewer completes its cycle meanwhile
+        # Tonight's reviewer completes meanwhile and writes the very same bytes.
+        atomic_write_text(store.root / "pending_cycle.json", json.dumps(finished))
         return fresh
 
     monkeypatch.setattr(schedule, "audit", build)
