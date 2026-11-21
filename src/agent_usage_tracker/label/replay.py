@@ -130,6 +130,22 @@ def resume(cfg: Config, job_id: str, *, apply: bool = False, budget_s: int = 600
         raise AutError("label replay: this job is already running") from exc
 
 
+def _machine_midnight(d: date) -> datetime:
+    return datetime(d.year, d.month, d.day).astimezone()
+
+
+def _machine_days_match(manifest: dict[str, Any], cfg: Config) -> bool:
+    """A job saved before its zone was recorded counted days in the machine's zone. It may go on
+    when that zone puts every midnight of the job's range where the ledger zone does."""
+    tz, d = ledger_zone(cfg), date.fromisoformat(manifest["since"])
+    until = date.fromisoformat(manifest["until"])
+    while d <= until:
+        if _machine_midnight(d) != local_midnight(d, tz):
+            return False
+        d = date.fromordinal(d.toordinal() + 1)
+    return True
+
+
 def _resume(cfg: Config, job_id: str, directory: Path, apply: bool, budget_s: int,
             backend_for: Callable[[str, dict[str, Any], str, Config], LocalBackend] | None,
             ) -> dict[str, Any]:
@@ -142,7 +158,8 @@ def _resume(cfg: Config, job_id: str, directory: Path, apply: bool, budget_s: in
         raise AutError("label replay: job snapshot or cursor changed; refusing to continue")
     if manifest["machine"] != cfg.machine or manifest["identity"] != _identity(cfg):
         raise AutError("label replay: machine identity or repository salt changed")
-    if manifest.get("ledger_timezone") != cfg.ledger_timezone:   # a job from before it was saved: unknown
+    saved = manifest.get("ledger_timezone")
+    if saved != cfg.ledger_timezone and not (saved is None and _machine_days_match(manifest, cfg)):
         raise AutError(f"label replay: the job's days are in ledger_timezone "
                        f"{manifest.get('ledger_timezone') or 'unknown'}, not {cfg.ledger_timezone}; "
                        "prepare a new job")

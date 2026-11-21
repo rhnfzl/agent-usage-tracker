@@ -11,6 +11,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta, timezone
 
 import pytest
+from zoneinfo import ZoneInfo
 
 from agent_usage_tracker import cli, state
 from agent_usage_tracker.config import AutError
@@ -310,21 +311,29 @@ def test_unrelated_policy_change_does_not_invalidate_resume(context):
     assert context["sent"][0].attrs["policy_id"] == "a" * 64
 
 
-def test_a_job_made_under_another_ledger_zone_refuses(context):
+def test_a_job_made_under_another_ledger_zone_refuses(context, monkeypatch):
     p = prepare(context)
     with pytest.raises(AutError, match="ledger_timezone"):
         apply({**context, "cfg": replace(context["cfg"], ledger_timezone="Asia/Tokyo")},
               p["job_id"])
     assert not context["sent"] and not context["loads"]
-    # a job saved before the zone was recorded has an unknown zone
+    # a job saved before the zone was recorded counted days in the machine zone
     directory = context["root"] / p["job_id"]
     manifest = json.loads((directory / "manifest.json").read_text())
     del manifest["ledger_timezone"]
     (directory / "manifest.json").write_text(json.dumps(manifest))
     (directory / "progress.json").write_text(json.dumps(
         {"manifest_sha256": replay._digest(manifest), "next": 0}))
+    tokyo = ZoneInfo("Asia/Tokyo")
+    monkeypatch.setattr(replay, "_machine_midnight",
+                        lambda d: datetime(d.year, d.month, d.day, tzinfo=tokyo))
     with pytest.raises(AutError, match="ledger_timezone"):
         replay.resume(context["cfg"], p["job_id"])
+    # a machine in the ledger zone drew the same days, so the job goes on
+    amsterdam = ZoneInfo(context["cfg"].ledger_timezone)
+    monkeypatch.setattr(replay, "_machine_midnight",
+                        lambda d: datetime(d.year, d.month, d.day, tzinfo=amsterdam))
+    assert apply(context, p["job_id"])["complete"]
 
 
 def test_current_task_change_and_manifest_tampering_fail_closed(context):
