@@ -154,7 +154,8 @@ Invalid reviews retain their bounded, redacted responses in private `review_atte
 One schema repair is allowed. Both attempts count against the model-call and time budgets.
 They are not human labels or calibrated accuracy measurements.
 Ask a human only when evidence cannot settle a required fact, authority, or preference.
-The private `inbox.html` shows escaped review text and case identifiers.
+The private `inbox.html` shows escaped review text and case identifiers, and the top 10
+failure groups (next section).
 
 ## Rubrics
 
@@ -241,6 +242,44 @@ fails the run. The scheduled worker releases its pending audit at the first
 checkpoint where blocking work is complete, so a slow non-blocking rubric never holds the next
 audit, even if the run is cut off later. When the run ends it writes the released state once
 more, so an `audit --cycle` that started during the non-blocking work returns `superseded`.
+
+## Group recurring failures
+
+```bash
+aut improve groups --days 14 --threshold 3
+```
+
+This reads the stored judgments and runs no model. It groups judgments whose case falls in the
+last `--days` local work days (the date of the case's first timestamped event) and that are
+`fail`, or `unknown` with at least one model voting `fail` at the rubric threshold (a split
+vote). Only the newest judgment per case and rubric counts: the highest `rubric_version`, then
+the one the latest diagnosis listed.
+
+The group key is a digest of five signals:
+
+| Signal | From |
+|---|---|
+| `rubric` | the judgment |
+| `cause` | the evidence review's cause, else `unreviewed` |
+| `tool` | the call answered by the anchor result: the first result the review cites, else the case's last error result. MCP tools show as `mcp:server` |
+| `error_class` | the anchor's text, lower-cased, with paths, long hex runs, numbers and quoted strings removed, matched against a fixed table (`command_not_found`, `no_such_file`, `missing_module`, `permission_denied`, `timeout`, `unknown_tool`, `shell_glob`, `push_rejected`, `conflict`, `syntax_error`, `test_failure`, `nonzero_exit`). The whole text is matched, because Claude Code and Codex print `Exit code 1` first. No match gives `other:` and 8 hex of a digest of the first line |
+| `command_family` | the anchor call's command, as for rubric `requires` (for example `git push`, `python -m pytest`, `pytest`) |
+
+The project is left out of the key, so the same failure in three repositories is one group;
+`projects` counts its tasks per repository. `distinct_tasks` counts distinct sessions (the
+same identity studies use), so one long session counts once. A group is `recurring` at
+`--threshold` tasks or more. `audit_incidents` counts the newest scheduled audit's error results
+with the same tool, error class and command family, including results no case sampled.
+Groups sort by recurring, then tasks, then last work day.
+
+Each run saves a private `group_reports` record and journals `groups`; the command prints the
+report as JSON. A record holds ids, signal names and counts only, never evidence text. A tool or
+command name that is long or has unusual characters becomes `other`. Records that cannot be
+read are counted as `skipped`.
+
+`aut improve run` refreshes the groups after its worker exits, outside the judge's budget and
+on every outcome. A grouping failure journals `groups_error` with the error type and never
+fails the cycle or the inbox.
 
 ## Prepare a scoped change
 
@@ -391,7 +430,7 @@ Matching worker checkpoints remain available when the outer deadline kills the w
 Results from an earlier worker or another policy cannot count as the current result.
 The command returns their identifiers without printing captured trace text.
 An interrupted or budget-limited cycle resumes its frozen audit before collecting another batch.
-The process writes `last_cycle.json` and refreshes `inbox.html`.
+The process writes `last_cycle.json`, refreshes the failure groups and then `inbox.html`.
 It does not apply proposals, execute trial commands, or upload evidence.
 
 A pending frozen audit is reused while its own `--days` and `--limit` match the run.
