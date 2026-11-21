@@ -2,7 +2,6 @@
 
 import json
 import re
-import shutil
 import subprocess
 from dataclasses import replace
 
@@ -137,7 +136,7 @@ def test_redacted_clipped_patch_and_pr_numbers(repo, tmp_path):
 def test_missing_repo_and_relative_cwd_do_not_read_aut_checkout(repo, tmp_path):
     store = Store(tmp_path / "private")
     key = captured(store, repo, git(repo, "rev-parse", "HEAD"))
-    shutil.rmtree(repo)
+    repo.rename(tmp_path / "unavailable-repo")
     assert outputs.attach(store, key) is None
     assert outputs.attach(store, captured(store, ".", "abc1234")) is None
     assert store.keys("case_outputs") == []
@@ -314,7 +313,7 @@ def test_deleted_repo_is_explicit_and_saved_merge_evidence_still_works(repo, tmp
     key = captured(store, repo, git(repo, "rev-parse", "HEAD"))
     outputs.attach(store, key)
     judge.update_queue(store, add=[key], name="merge_queue")
-    shutil.rmtree(repo)
+    repo.rename(tmp_path / "unavailable-repo")
     audit = store.put("audits", {"session_ids": []})
     report = judge.diagnose(store, audit, models=("fixture",), backend_for=lambda _: Backend([]))
     assert report["outputs_skipped"] == 1 and report["calls"] == 1
@@ -326,7 +325,7 @@ def test_refresh_deleted_repo_keeps_previous_snapshot_and_records_skip(repo, tmp
     git(repo, "checkout", "-qb", "feature")
     key = captured(store, repo, commit(repo, "open\n"))
     before = outputs.attach(store, key)
-    shutil.rmtree(repo)
+    repo.rename(tmp_path / "unavailable-repo")
     assert outputs.refresh(store) == []
     assert outputs.latest(store)[key][0] == before
     rows = [json.loads(line) for line in (store.root / "events.jsonl").read_text().splitlines()]
