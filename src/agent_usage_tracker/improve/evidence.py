@@ -32,6 +32,19 @@ def _text(value: object) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True)
 
 
+def trace_event(agent: str, session: str, kind: str, identity: str, value: object,
+                timestamp: object, *, call: object = "", tool: object = "",
+                status: str = "unknown") -> dict[str, Any]:
+    raw = _text(value)
+    signature = hashlib.sha256(json.dumps({"text": raw, "status": status,
+        "tool": str(tool or "")}, sort_keys=True).encode()).hexdigest()
+    cleaned = redact(raw)
+    return {"id": hashlib.sha256(f"{agent}|{session}|{kind}|{identity}".encode()).hexdigest()[:32],
+            "kind": kind, "timestamp": timestamp, "text": cleaned[:TEXT_LIMIT],
+            "truncated": len(cleaned) > TEXT_LIMIT, "source_sha256": signature,
+            "call_id": str(call or ""), "tool": str(tool or ""), "status": status}
+
+
 def _codex_message_text(item: dict[str, Any]) -> str:
     text = _text(item.get("content", item.get("text", "")))
     citation = item.get("memory_citation")
@@ -97,7 +110,7 @@ def read_session(path: Path, agent: str, max_bytes: int = BYTE_LIMIT,
                  since_epoch: float | None = None,
                  imports: dict[str, datetime] | None = None, *,
                  exclude_automated: bool = False, recent: bool = False) -> dict[str, Any] | None:
-    if agent not in {"claude_code", "codex"} or max_bytes < 1:
+    if agent not in {"claude_code", "codex", "pi"} or max_bytes < 1:
         raise ValueError("choose a supported trace source and a positive byte limit")
     events: list[dict[str, Any]] = []
     seen: dict[tuple[str, str], str] = {}
@@ -112,6 +125,8 @@ def read_session(path: Path, agent: str, max_bytes: int = BYTE_LIMIT,
     observation: dict[str, int] = {}
     prefix_omitted = False
     unknown_copy_boundary = False
+    pi_previous: str | None = None
+    pi_fork_time: datetime | None = None
 
     def in_window(record: dict[str, Any]) -> bool:
         if since_epoch is None:
@@ -129,24 +144,18 @@ def read_session(path: Path, agent: str, max_bytes: int = BYTE_LIMIT,
              call: object = "", tool: object = "", status: str = "unknown",
              key: object = "") -> None:
         nonlocal last_closed
-        raw = _text(value)
         identity = str(call or key or line)
-        signature = hashlib.sha256(json.dumps({"text": raw, "status": status,
-            "tool": str(tool or "")}, sort_keys=True).encode()).hexdigest()
+        event = trace_event(agent, session, kind, identity, value, record.get("timestamp"),
+                            call=call, tool=tool, status=status)
+        signature = event["source_sha256"]
         previous = seen.get((kind, identity))
         if previous:
             counts["duplicate_records" if previous == signature else "conflicting_records"] += 1
             return
         seen[kind, identity] = signature
-        cleaned = redact(raw)
-        clipped = len(cleaned) > TEXT_LIMIT
-        counts["truncated_events"] += clipped
-        eid = hashlib.sha256(f"{agent}|{session}|{kind}|{identity}".encode()).hexdigest()[:32]
-        events.append({"id": eid, "kind": kind, "line": line if line > 0 else None,
-                       "byte_offset": -line if line < 0 else None,
-                       "timestamp": record.get("timestamp"), "text": cleaned[:TEXT_LIMIT],
-                       "truncated": clipped, "source_sha256": signature,
-                       "call_id": str(call or ""), "tool": str(tool or ""), "status": status})
+        counts["truncated_events"] += event["truncated"]
+        events.append({**event, "line": line if line > 0 else None,
+                       "byte_offset": -line if line < 0 else None})
         if kind in {"call", "prompt"}:
             last_closed = False
 
@@ -180,6 +189,59 @@ def read_session(path: Path, agent: str, max_bytes: int = BYTE_LIMIT,
             counts["malformed_records"] += 1
             continue
         kind = record.get("type")
+        if agent == "pi":
+            if line == 1:
+                if kind != "session" or not isinstance(record.get("id"), str):
+                    counts["source_incomplete"] = 1
+                    continue
+                session = record["id"]
+                cwd = str(record.get("cwd") or "")
+                if record.get("parentSession"):
+                    pi_fork_time = parse_ts(record.get("timestamp"))
+                    if pi_fork_time is None or pi_fork_time.tzinfo is None:
+                        counts["source_incomplete"] = 1
+                        break
+                continue
+            if pi_fork_time is not None:
+                stamp = parse_ts(record.get("timestamp"))
+                if stamp is None or stamp.tzinfo is None:
+                    counts["source_incomplete"] = 1
+                    continue
+                if stamp <= pi_fork_time:
+                    counts["copied_records"] += 1
+                    continue
+            if isinstance(entry := record.get("id"), str):
+                if pi_previous is not None and record.get("parentId") != pi_previous:
+                    counts["source_incomplete"] = 1
+                pi_previous = entry
+            if kind not in {"message", "compaction"} or not in_window(record):
+                continue
+            if kind == "compaction":
+                emit("compaction", "context was compacted", line, record, key=entry)
+                continue
+            message = dict_or_empty(record.get("message"))
+            role, content = message.get("role"), message.get("content", "")
+            model = message.get("model") or model
+            if role == "user":
+                emit("prompt", content, line, record, key=entry)
+            elif role == "toolResult":
+                emit("result", content, line, record, call=message.get("toolCallId"),
+                     tool=message.get("toolName"),
+                     status=result_status(_text(content), message.get("isError")))
+            elif role == "assistant":
+                for index, block in enumerate(content if isinstance(content, list) else []):
+                    if not isinstance(block, dict):
+                        continue
+                    if block.get("type") == "toolCall":
+                        emit("call", block.get("arguments", {}), line, record,
+                             call=block.get("id"), tool=block.get("name"), key=f"{entry}:{index}")
+                    elif block.get("type") == "text":
+                        emit("reply", block.get("text", ""), line, record, key=f"{entry}:{index}")
+                if message.get("stopReason") in {"stop", "aborted", "error", "length"}:
+                    last_closed = message["stopReason"] == "stop"
+                    emit("boundary", "turn_complete" if last_closed else "turn_aborted",
+                         line, record, key=entry)
+            continue
         if agent == "codex":
             payload = dict_or_empty(record.get("payload"))
             if line == 1 and kind == "session_meta":
@@ -314,7 +376,7 @@ def read_session(path: Path, agent: str, max_bytes: int = BYTE_LIMIT,
     coverage["complete"] = last_closed and not any(coverage.get(k) for k in (
         "unmatched_calls", "orphan_results", "partial_tail", "byte_cap_reached",
         "truncated_events", "malformed_records", "conflicting_records", "missing_timestamps",
-        "unknown_copy_boundary"))
+        "unknown_copy_boundary", "source_incomplete"))
     return {"version": VERSION, "agent": agent, "session_id": session, "cwd": cwd,
             "origin": origin, "model": model, "events": events, "coverage": coverage,
             "source": {"path": str(path), "sha256": digest.hexdigest(), "bytes": used,

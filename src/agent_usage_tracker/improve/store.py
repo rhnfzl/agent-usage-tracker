@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import re
+import sqlite3
 import subprocess
 import time
 from collections import Counter
@@ -13,13 +14,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from ..collectors import claude_code, codex
+from ..collectors import claude_code, codex, cursor_cli, pi
 from ..config import AutError
 from ..event import CollectorUnavailable
 from ..git_safe import git_argv, git_env
 from ..state import _locked, atomic_write_text
 from .evidence import read_session
-from . import t3
+from . import cursor_evidence, t3
 
 
 def canonical(value: Any) -> str:
@@ -115,12 +116,14 @@ def repository(path: Path) -> str | None:
 
 
 def _source_session(path: Path, agent: str, budget: int) -> str | None:
+    if agent == "cursor_cli":
+        return path.parent.name
     try:
         with path.open("rb") as stream:
             record = json.loads(stream.readline(min(budget, 65536)))
         meta = record.get("payload", {}) if agent == "codex" else record
         session = (meta.get("id") or meta.get("session_id")) if agent == "codex" \
-            else meta.get("sessionId", path.stem)
+            else meta.get("id" if agent == "pi" else "sessionId", path.stem)
         return session if isinstance(session, str) else None
     except (OSError, ValueError, AttributeError):
         return None
@@ -135,8 +138,10 @@ def audit(store: Store, home: Path, *, days: int = 7, limit: int = 40,
     since = since_epoch if since_epoch is not None else now - days * 86400
     files: list[tuple[float, str, Path]] = []
     counts: Counter[str] = Counter()
-    for agent, discover in (("claude_code", claude_code.main_session_files),
-                            ("codex", codex.session_files)):
+    native_sources = (("claude_code", claude_code.main_session_files),
+                      ("codex", codex.session_files), ("pi", pi.session_files),
+                      ("cursor_cli", cursor_cli.chat_stores))
+    for agent, discover in native_sources:
         try:
             discovered = discover(home)
         except (OSError, CollectorUnavailable):
@@ -146,6 +151,8 @@ def audit(store: Store, home: Path, *, days: int = 7, limit: int = 40,
             path = Path(name)
             try:
                 stamp = path.stat().st_mtime
+                if agent == "cursor_cli":
+                    stamp = max(stamp, cursor_cli._mtime(str(path)))
                 if stamp >= since:
                     if stamp > now - idle_s:
                         counts["active_sources"] += 1
@@ -179,10 +186,15 @@ def audit(store: Store, home: Path, *, days: int = 7, limit: int = 40,
                 continue
             supplement_reads += 1
         try:
-            evidence = candidate if isinstance(candidate, dict) else read_session(
-                candidate, agent, max_bytes=max_bytes, since_epoch=since,
-                imports=imports, exclude_automated=True, recent=True)
-        except (OSError, ValueError, TypeError, OverflowError):
+            evidence: dict[str, Any] | None
+            if isinstance(candidate, dict):
+                evidence = candidate
+            elif agent == "cursor_cli":
+                evidence = cursor_evidence.read(candidate, since, max_bytes)
+            else:
+                evidence = read_session(candidate, agent, max_bytes=max_bytes, since_epoch=since,
+                                        imports=imports, exclude_automated=True, recent=True)
+        except (OSError, ValueError, TypeError, OverflowError, sqlite3.DatabaseError, AutError):
             counts["unreadable_sources"] += 1
             continue
         if evidence is None:
@@ -247,7 +259,7 @@ def audit(store: Store, home: Path, *, days: int = 7, limit: int = 40,
                 "ambiguous_session_ids": ambiguous, "coverage": dict(counts),
                 "project": str(project.resolve()) if project else None,
                 "source_policy": {"days": days, "limit": limit, "max_bytes": max_bytes,
-                                  "idle_s": idle_s, "agents": ["t3", "claude_code", "codex"],
+                                  "idle_s": idle_s, "agents": ["t3", *(name for name, _ in native_sources)],
                                   "additional_native_reads": 2 * limit,
                                   "preference": "T3 app thread before native provider mirrors"}}
     key = store.put("audits", manifest)
