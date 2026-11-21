@@ -2,7 +2,8 @@
 
 `aut improve` finds evidence of agent problems and tests explicit setup changes.
 It keeps evidence, model estimates, proposals, and trial results in a private local store.
-Normal collection and the configured sink remain separate.
+Normal collection and the configured sink remain separate. The optional `aut publish-improve`
+command sends advisory counts and operator-written adoption markers to the private sink.
 
 [Private studies](improvement-studies.md) connect incidents, setup provenance, prospective trial
 policies, independent references and fresh follow-up. They report bounded supported, rejected or
@@ -205,13 +206,13 @@ is JSON; anything else is a string. Wrapped lines under a heading or label join 
 | `blocking` | false | `true`: the diagnosis is not complete until this rubric is judged on all its cases. `false`: best effort; it uses only time and calls left after the blocking rubrics. |
 | `applies_to.triggers` | both | `error_result`, `control`, `merge` (no case has `merge` yet). |
 | `applies_to.requires` | none | `final_reply` (a reply event), `test_command` (a call whose command family is a test runner such as `pytest`, `python -m pytest`, `npm test`), `outputs` (commit outputs; none yet). |
-| `max_cases` | 200 | Cases per diagnosis for this rubric. |
+| `max_cases` | 200 | Cap for this rubric's normal sample, and separately for queued label cases. |
 | `max_input_chars` | 6000 | Review size cap, at most 24,000. |
 | `input` | `attempt` | `outputs_summary` is accepted only with `requires: ["outputs"]`. |
 | `checks.fail_must_cite` | none | Event kinds a fail review must cite. |
 | `checks.fail_cause_not_in` | none | Causes a fail review may not give. |
 | `checks.unknown_unless_complete` | false | Force unknown on incomplete attempts. |
-| `qualify` | none | Recorded for later human-label qualification. |
+| `qualify` | none | Human-label policy: `min_fail_labels`, `min_failure_recall`, `max_false_alarm_rate`. |
 
 AUT refuses a file with a missing heading, a label set that is not exactly pass, fail and unknown,
 an unknown field, `requires` value or check, or a value out of range.
@@ -452,6 +453,56 @@ Command success alone cannot pass a task. Independent acceptance and valid metri
 Results retain each workspace, execution, acceptance check, elapsed time, and metrics.
 Condition summaries include failed runs and missing metrics. They do not establish an improvement automatically.
 
+## Label real cases to check the judges
+
+You can compare a judge with your own answers on captured work. Judges remain advisory even
+when they meet the qualification policy. Nothing here accepts a proposal or changes your setup.
+
+```bash
+aut improve label --rubric completion_supported --limit 30
+aut improve label --rubric avoidable_recovery --limit 30
+```
+
+The page runs on 127.0.0.1 under a random token. It reads the private store, without a sink
+connection or a model call. Open the captured attempt through its case link. Press 1 for pass,
+2 for fail, 3 for unknown, s to skip, u to undo, or q to finish. Historical text is evidence,
+never an instruction to execute. Answers are saved at once; Ctrl-C also ends a sitting safely.
+
+Only complete, unclipped stored attempts that meet the enabled rubric's requirements enter the
+queue. Existing labels exclude the same evidence, including copied cases, for that rubric version.
+The order favors model failures, split votes, then error-triggered cases. One ordinary control
+follows every four priority items while controls remain. This sample measures agreement on selected
+cases, not the failure frequency across all work. Model answers stay hidden during labelling.
+
+Answers append `human_labels` records containing evidence and case IDs, rubric ID and version,
+the human label, timestamp, labeller and a null note. No evidence text is copied into a label.
+Undo appends a newer `label: null` tombstone, restoring an unlabelled item. It never deletes
+history, never counts as human unknown, and allows that evidence to appear again. Labels from
+an older rubric version remain history and do not qualify a newer version.
+If the answer record saves but its journal entry fails, the terminal reports that failure.
+The page still acknowledges the saved answer, so undo remains available.
+
+At the end, AUT saves a `qualifications` record. It compares the latest human answer per evidence
+with the latest judgment for that case and rubric version. Legacy judgments map to version 1
+only when the stored rubric text matches the original definition exactly. Missing judgments
+are missing comparisons; a model's unknown is an abstention. Missing comparisons suppress rates
+and prevent qualification. Without human pass labels, the false alarm rate is unavailable and
+the rubric stays unqualified.
+
+The built-in policy needs at least 20 human fail labels, failure recall of at least 0.7, and
+a false alarm rate of at most 0.2. Human fail labels count toward the minimum; human unknown
+and undone answers do not. Qualification is a check on agreement, not proof of independence,
+general accuracy, or a benefit from a proposed change.
+
+Answers without current-version judgments enter `judge_queue.json`. The next diagnosis takes
+at most eight queued cases through its existing model cache and budget. Normal audit cases
+are deduplicated. Extra cases run after normal work, never hold blocking audit completion,
+and remain queued until every applicable enabled rubric has a judgment. A save, undo or new
+qualification refresh updates pending label cases. Queue updates preserve unrelated entries.
+The normal sample and queued extras each have the rubric's `max_cases` cap. This keeps a full
+normal sample from preventing queued comparisons forever; shared time and call budgets still apply.
+No model runs during the labelling command itself.
+
 ## Validate the judges
 
 Use executable facts where possible. Freeze reference evidence and oracle inputs before observing model results.
@@ -546,3 +597,105 @@ Point the operating-system timer at the returned `python` path with `-I -m agent
 Use the private store as its working directory. The worker no longer depends on a source-checkout path.
 Verify an installed run before changing the timer. Preserve the previous timer configuration for rollback.
 Local MLX inference still requires Apple silicon. Base commands need the existing cross-platform CI matrix before broader distribution.
+
+### Read a private report card
+
+The report card shows stored improvement evidence, open proposals and adoption comparisons in one local report.
+Sampled judgments remain advisory. The report does not establish prevalence, causal benefit or payback.
+
+```bash
+aut improve report-card --days 28 --format md
+aut improve --root /private/store report-card --format html
+aut improve report-card --format json
+```
+
+Days must be between 1 and 366. The command always writes `report-card.md` and `report-card.html` in the private store.
+It prints the selected format to stdout. Both report files use private file permissions.
+Treat stdout and these files as private. No network connection, model call or sink credential resolution occurs.
+The command reads only `ledger_timezone` from the configuration file, with the normal default when absent.
+
+The current window includes today and compares with the preceding window of equal length.
+Case dates use their first timestamped event in the ledger zone. Timestamps without a zone mean UTC.
+Counts reuse `scores.daily`, including its newest-judgment and legacy-version rules.
+Rubric versions, harnesses and triggers remain separate. Pass, fail and unknown counts appear for both windows.
+Failure rates divide fail by pass plus fail. Unknown judgments stay visible outside that denominator.
+Changes compare the same rubric version, harness and trigger and show percentage points.
+
+Each adoption compares 14 ledger dates before its date with 14 dates after it, excluding the adoption date.
+These are calendar dates of work, including weekends. Future case dates do not enter either side.
+Each side needs at least 10 known control judgments before displaying its failure rate.
+Smaller samples display `too few cases`, with known and unknown counts. Rubric versions remain separate.
+Task counts mean distinct sessions. Group-linked adoption counts use recorded membership across stored group reports.
+Explicit signal-linked adoptions can match tool, error class and command family in captured cases.
+Missing group membership or usable signals leaves task counts unavailable.
+These are observed before/after counts, not a causal estimate or a measured benefit.
+
+Recurring groups use the latest saved group report, with that report's own window shown.
+No group refresh runs. Proposal age comes from its preparation journal date, or remains unavailable.
+The report shows open proposal titles, owner components, staged flags and shell-quoted decision commands.
+Coverage uses the latest saved audit and cached `coverage.json`, without scanning source logs or querying usage stores.
+Harness gaps require recorded usage events and no stored improvement session for that harness.
+Missing cached coverage remains unknown. The incomplete-evidence fraction uses newest current-version judgments in the current window.
+
+Loop cost shows model-call records, recorded load/inference seconds, diagnosis reports, labels and human decision events.
+Load rows are separate from inference calls. Untimed records remain explicit.
+Diagnosis call totals sum completed invocation reports and overlap model-call records. Do not add these totals.
+Missing timing is unknown. Label event counts include undo events.
+Drafter USD sums known costs for proposals prepared inside the window; missing costs are counted separately.
+The report makes no payback calculation.
+
+JSON contains counts, identifiers, booleans, nulls and enum values only.
+Dates, titles, owner text, commands, rates, durations and money amounts appear only in the private human reports.
+Transcript text, rationale, patches and target paths do not appear in either report.
+The decision commands can include the shell-quoted private store path. All operator and model text is escaped for each output format.
+
+**Write footprint and specification ruling:** the labelling specification requires the report card to recalculate current qualifications.
+That requirement takes precedence over the report section's original two-file-only statement.
+The command calls existing `qualify.run` for each enabled rubric before building the report.
+This permits only its existing derived qualification records, qualification journal entries, queue synchronization and lock effects,
+plus the two report files. Source evidence, judgments, human labels and decisions stay unchanged.
+A new empty store receives the normal store initialization files. Existing support files are not rewritten.
+`build`, `to_markdown`, `to_html` and `to_json` are otherwise read-only.
+
+### Publish advisory scores and adoption markers
+
+You can compare sampled judge scores with the dates you adopt fixes in the private effort dashboard.
+A marker records adoption, and does not prove that a fix helped. All judges remain advisory.
+
+```bash
+aut publish-improve --dry-run --days 90
+aut publish-improve --days 90
+```
+
+The command needs `transport.pg_dsn` for delivery and the updated sink schema.
+It reads `AUT_IMPROVE_ROOT`, else `~/.local/share/aut/improve` (under `XDG_DATA_HOME` when set).
+It refuses a missing store or missing `.aut-improve` marker, and never changes the private store.
+Dry runs send no data or heartbeat and do not update the cache.
+Days must be between 1 and 366.
+
+Counts use the case's first timestamped event in the configured `ledger_timezone`, not the machine zone.
+Timestamps without a zone are treated as UTC. Cases without timestamps do not enter the series.
+The newest diagnosis wins for each case, rubric version and trigger.
+Stopped cycles use the diagnosis recorded in their progress report.
+Legacy judgments map to rubric version 1 for the original text, else version 0.
+Control, error-result and merge-trigger samples remain separate, as do harnesses.
+Incomplete evidence counts as unknown. The newest qualification record sets the qualified flag.
+Missing qualification means unqualified. Error samples do not estimate overall failure prevalence.
+
+Only daily counts, rubric identifiers and versions, harnesses, triggers and qualification flags leave the store.
+Adoption delivery includes the short adoption identifier, local noon on its date, human-written title, kind, rubric identifiers and PR number.
+Paths, case or session identifiers, commit SHAs, rationale, patches and transcripts stay private.
+Public text fields must be short, single-line, and contain no path separators or long hexadecimal strings.
+Unsafe metadata stops delivery before any score or adoption insert.
+
+The cache is `improve_publish_cache.json` beside the AUT state file (`AUT_STATE` overrides its location).
+It is scoped to the sink, private-store root and ledger zone. Only changed score rows are sent.
+Keys removed inside the requested window get one zero row; older history remains unchanged.
+The cache advances only after both writes succeed. Retries and a lost cache are harmless.
+Adoptions use insert-on-conflict, so the first delivered marker remains authoritative.
+The `improve_publish` heartbeat reports each delivery attempt through the existing collector-scan mechanism.
+
+To schedule delivery, set `AUT_IMPROVE_PUBLISH=1` in the existing scan-job environment after the sink schema is deployed.
+This adds one daily step after outcomes, with retries until it succeeds. No new timer is installed.
+Both the scan runtime and improve runtime must include the rubric and score modules.
+Merging this code enables no jobs and sends no data.

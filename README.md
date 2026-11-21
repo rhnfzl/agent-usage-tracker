@@ -221,11 +221,14 @@ Native desktop receipts use `aut improve desktop`; command success does not esta
 ```bash
 aut improve audit --days 7 --limit 30
 aut improve status
+aut improve report-card --days 28 --format md
 ```
 
 Local judging uses cached models through the existing label extra.
 Bounded reviews preserve completed judgments and resume unfinished work within the configured budget.
 `aut improve inspect --case CASE_ID` writes a private view of a captured attempt and its source references.
+
+`aut improve label --rubric completion_supported` opens a private human review page to check an advisory judge against captured cases.
 Missing or clipped evidence stays explicit; inspection does not upgrade a judgment.
 Read the [private improvement guide](docs/improvement.md) before judging, staging changes, or executing trials.
 The guide covers executable judge references, independent agent-task acceptance, and stable wheel installations.
@@ -241,6 +244,8 @@ Update the installed package before copying a new wrapper; the wrapper calls `au
 The scheduler prevents overlapping runs and records daily success only after each step completes.
 Failed or unfinished daily steps retry after the next successful scan.
 Local scheduled labels require `AUT_LABEL=1` and `AUT_LABEL_MODE=local` in `scan.env`, plus saved recipes.
+`AUT_IMPROVE_PUBLISH=1` adds daily advisory score and adoption-marker delivery after outcomes.
+Deploy the updated sink schema first. Preview with `aut publish-improve --dry-run`.
 An interrupted historical replay resumes when you invoke its saved job again; preparing a job does not install a scheduler.
 
 Follow the [timer setup](packaging/README.md) and [wrapper reference](docs/reference.md#scheduling).

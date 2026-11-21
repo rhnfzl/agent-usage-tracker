@@ -1184,3 +1184,34 @@ CREATE TABLE IF NOT EXISTS agents.git_commit_day (
 -- Existing rows came only from successful complete scans.
 ALTER TABLE agents.git_commit_day
     ADD COLUMN IF NOT EXISTS complete boolean NOT NULL DEFAULT true;
+
+-- Advisory verdict counts on the ledger day the work happened. Aggregates only, no case,
+-- session, repo, text or machine. Insert-only; the latest push wins for each daily key.
+CREATE TABLE IF NOT EXISTS agents.improve_score_daily (
+    day             date        NOT NULL,
+    rubric_id       text        NOT NULL,
+    rubric_version  integer     NOT NULL CHECK (rubric_version >= 0),
+    harness         text        NOT NULL,
+    trigger         text        NOT NULL CHECK (trigger IN ('error_result', 'control', 'merge')),
+    passed          integer     NOT NULL CHECK (passed >= 0),
+    failed          integer     NOT NULL CHECK (failed >= 0),
+    unknown         integer     NOT NULL CHECK (unknown >= 0),
+    qualified       boolean     NOT NULL DEFAULT false,
+    pushed_at       timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (day, rubric_id, rubric_version, harness, trigger, pushed_at)
+);
+CREATE OR REPLACE VIEW agents.improve_score_latest AS
+SELECT DISTINCT ON (day, rubric_id, rubric_version, harness, trigger)
+       day, rubric_id, rubric_version, harness, trigger, passed, failed, unknown, qualified
+FROM agents.improve_score_daily
+ORDER BY day, rubric_id, rubric_version, harness, trigger, pushed_at DESC;
+
+-- Operator-written adoption markers show when a fix was adopted, without claiming benefit.
+CREATE TABLE IF NOT EXISTS agents.improve_adoption (
+    adoption_id  text        PRIMARY KEY,
+    adopted_at   timestamptz NOT NULL,
+    title        text        NOT NULL CHECK (length(title) BETWEEN 1 AND 120),
+    kind         text        NOT NULL CHECK (kind IN ('instruction', 'skill', 'config', 'code')),
+    rubric_ids   text[]      NOT NULL DEFAULT '{}',
+    pr           integer
+);
