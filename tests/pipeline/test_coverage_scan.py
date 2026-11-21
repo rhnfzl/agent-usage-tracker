@@ -511,3 +511,16 @@ def test_alert_state_ages_out_and_forgets_after_a_week():
     assert forgotten == {}
     assert alert_state(report, {"alerts": forgotten}, later + timedelta(days=8))[1] == \
         "new: cursor payloads missing"
+
+
+def test_a_warning_that_returns_after_a_week_of_observed_absence_alerts_again():
+    from datetime import datetime, timedelta, timezone
+    from agent_usage_tracker.coverage import alert_state
+
+    day0 = datetime(2026, 11, 21, tzinfo=timezone.utc)
+    alerts, text = alert_state({"issues": [MISSING]}, {}, day0)        # baseline: known
+    assert text is None
+    alerts, text = alert_state({"issues": []}, {"alerts": alerts}, day0 + timedelta(days=1))
+    assert text is None and alerts                                    # absent, still retained
+    alerts, text = alert_state({"issues": [MISSING]}, {"alerts": alerts}, day0 + timedelta(days=9))
+    assert text == "new: cursor payloads missing"

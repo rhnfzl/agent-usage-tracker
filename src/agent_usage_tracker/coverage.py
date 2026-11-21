@@ -570,11 +570,16 @@ def alert_state(report: dict[str, Any], previous: dict[str, Any], now: datetime,
     current = sorted({f"{i['code']}:{i['source_id']}" for i in report.get("issues", [])
                       if isinstance(i, dict) and i.get("code") in _ALERT_PHRASES
                       and i.get("severity") != "info" and isinstance(i.get("source_id"), str)})
-    alerts = {key: entry for key, entry in prior.items() if key not in current and live(entry)}
+    # An absent key keeps its entry for a week, marked with when it went away.
+    alerts = {key: {**entry, "absent_since": entry.get("absent_since") or now.isoformat()}
+              for key, entry in prior.items() if key not in current and live(entry)}
     start = now - timedelta(hours=ALERT_HOURS) if baseline else now
     for key in current:
-        # A present key keeps its first sighting even after a gap in scans; only absence forgets it.
+        # A key the last report still showed keeps its first sighting across a scan gap.
+        # One the last report showed absent starts again once its retained entry has expired.
         entry = prior.get(key)
+        if isinstance(entry, dict) and entry.get("absent_since") and not live(entry):
+            entry = None
         first = _stamp(entry.get("first_seen")) if isinstance(entry, dict) else None
         alerts[key] = {"first_seen": (first or start).isoformat(), "last_seen": now.isoformat()}
     new = [key for key in current
