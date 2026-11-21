@@ -504,11 +504,22 @@ def build_report(cfg: Config, *, now: datetime | None = None) -> dict[str, Any]:
         harnesses = []
         _issue(issues, "catalog_unavailable", "catalog", "info")
     from .harness_inventory import discover
-    inventory = discover(cfg.home, harnesses)
+    agents = frozenset(cfg.agents)
+    inventory = discover(cfg.home, harnesses, readers=agents)
     if inventory["status"] == "limited":
         _issue(issues, "harness_inventory_limited", "inventory", "info")
+    wraps = {entry.get("id"): entry.get("wraps") for entry in harnesses}
     for candidate in inventory["observations"]:
-        _issue(issues, "harness_route_unverified", candidate["harness_id"], "info")
+        harness = candidate["harness_id"]
+        if candidate["reader_qualified"]:
+            continue
+        if candidate["activity"] != "recent":
+            _issue(issues, "harness_route_unverified", harness, "info")
+        elif isinstance(wraps.get(harness), list) and agents & set(wraps[harness]):
+            # It drives native CLIs whose logs AUT reads: the work is counted, only not attributed.
+            _issue(issues, "harness_unattributed", harness, "info")
+        else:
+            _issue(issues, "harness_active_unread", harness)
     return {"version": 1, "generated_at": now.isoformat(), "completeness": "unknown",
             "thresholds": {"collector_evidence_hours": FRESH_HOURS,
                            "publication_verification_hours": FRESH_HOURS},

@@ -96,7 +96,15 @@
         "https://raw.githubusercontent.com/pingdotgg/t3code/main/docs/internals/overview.md"
       ],
       "runtime_verified": false,
-      "parser_coverage": "not_qualified_by_catalog"
+      "parser_coverage": "not_qualified_by_catalog",
+      "detect": {
+        "paths": [
+          "~/.t3/userdata"
+        ]
+      },
+      "read_by": [
+        "t3"
+      ]
     },
     {
       "id": "emdash",
@@ -221,7 +229,13 @@
         "https://code.claude.com/docs/en/sessions"
       ],
       "runtime_verified": false,
-      "parser_coverage": "not_qualified_by_catalog"
+      "parser_coverage": "not_qualified_by_catalog",
+      "detect": {
+        "paths": [
+          "~/Library/Application Support/Claude/claude-code-sessions",
+          "~/Library/Application Support/Claude/local-agent-mode-sessions"
+        ]
+      }
     },
     {
       "id": "capy",
@@ -294,7 +308,15 @@
         "https://developers.openai.com/codex/app-server"
       ],
       "runtime_verified": false,
-      "parser_coverage": "not_qualified_by_catalog"
+      "parser_coverage": "not_qualified_by_catalog",
+      "detect": {
+        "paths": [
+          "~/Library/Application Support/Codex"
+        ]
+      },
+      "read_by": [
+        "codex"
+      ]
     },
     {
       "id": "conductor",
@@ -323,7 +345,12 @@
         "https://opencode.ai/docs/troubleshooting/"
       ],
       "runtime_verified": false,
-      "parser_coverage": "not_qualified_by_catalog"
+      "parser_coverage": "not_qualified_by_catalog",
+      "detect": {
+        "commands": [
+          "opencode"
+        ]
+      }
     },
     {
       "id": "gemini-cli",
@@ -338,7 +365,12 @@
         "https://github.com/google-gemini/gemini-cli"
       ],
       "runtime_verified": false,
-      "parser_coverage": "not_qualified_by_catalog"
+      "parser_coverage": "not_qualified_by_catalog",
+      "detect": {
+        "commands": [
+          "gemini"
+        ]
+      }
     },
     {
       "id": "pi",
@@ -355,7 +387,18 @@
         "https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/session-format.md"
       ],
       "runtime_verified": false,
-      "parser_coverage": "not_qualified_by_catalog"
+      "parser_coverage": "not_qualified_by_catalog",
+      "detect": {
+        "paths": [
+          "~/.pi/agent/sessions"
+        ],
+        "commands": [
+          "pi"
+        ]
+      },
+      "read_by": [
+        "pi"
+      ]
     },
     {
       "id": "cline",
@@ -391,7 +434,16 @@
         "https://www.superlogical.com/rex/docs/build/program-status"
       ],
       "runtime_verified": false,
-      "parser_coverage": "not_qualified_by_catalog"
+      "parser_coverage": "not_qualified_by_catalog",
+      "detect": {
+        "paths": [
+          "~/Library/Application Support/rex/servers"
+        ]
+      },
+      "wraps": [
+        "claude_code",
+        "codex"
+      ]
     },
     {
       "id": "zed",
@@ -405,7 +457,15 @@
         "https://zed.dev/docs/ai/agents"
       ],
       "runtime_verified": false,
-      "parser_coverage": "not_qualified_by_catalog"
+      "parser_coverage": "not_qualified_by_catalog",
+      "detect": {
+        "paths": [
+          "~/Library/Application Support/Zed/threads"
+        ],
+        "commands": [
+          "zed"
+        ]
+      }
     },
     {
       "id": "vs-code-copilot",
@@ -434,6 +494,95 @@
       ],
       "runtime_verified": false,
       "parser_coverage": "not_qualified_by_catalog"
+    },
+    {
+      "id": "herdr",
+      "name": "Herdr",
+      "engine": "Agent pane manager that runs native agent CLIs such as Claude Code and Codex.",
+      "evidence_route": "Native engine records underneath; its own agent-detection status and server log are local metadata only.",
+      "research_date": "2026-11-20",
+      "route_status": "observed_locally",
+      "primary_urls": [],
+      "runtime_verified": false,
+      "parser_coverage": "not_qualified_by_catalog",
+      "detect": {
+        "paths": [
+          "~/.local/state/herdr",
+          "~/.config/herdr"
+        ],
+        "commands": [
+          "herdr"
+        ]
+      },
+      "wraps": [
+        "claude_code",
+        "codex"
+      ]
+    },
+    {
+      "id": "supacode",
+      "name": "Supacode",
+      "engine": "Worktree and terminal wrapper that runs native agent CLIs such as Claude Code and Codex.",
+      "evidence_route": "Native engine records underneath; local agents, repos and routes configuration. Its config is rewritten at launch, so recent activity there is weak evidence.",
+      "research_date": "2026-11-20",
+      "route_status": "observed_locally",
+      "primary_urls": [],
+      "runtime_verified": false,
+      "parser_coverage": "not_qualified_by_catalog",
+      "detect": {
+        "paths": [
+          "~/.config/supacode"
+        ],
+        "commands": [
+          "supacode"
+        ]
+      },
+      "wraps": [
+        "claude_code",
+        "codex"
+      ]
+    },
+    {
+      "id": "claude-squad",
+      "name": "claude-squad",
+      "engine": "tmux wrapper over native agent CLIs such as Claude Code.",
+      "evidence_route": "Native engine records underneath; no data directory was observed locally.",
+      "research_date": "2026-11-20",
+      "route_status": "observed_locally",
+      "primary_urls": [],
+      "runtime_verified": false,
+      "parser_coverage": "not_qualified_by_catalog",
+      "detect": {
+        "paths": [
+          "~/.claude-squad",
+          "~/.config/claude-squad"
+        ],
+        "commands": [
+          "claude-squad"
+        ]
+      },
+      "wraps": [
+        "claude_code"
+      ]
+    },
+    {
+      "id": "hermes",
+      "name": "Hermes agent",
+      "engine": "General agent with its own model calls and a messaging gateway.",
+      "evidence_route": "Own session store and state database in a format AUT does not read; gateway logs are not session activity.",
+      "research_date": "2026-11-20",
+      "route_status": "observed_locally",
+      "primary_urls": [],
+      "runtime_verified": false,
+      "parser_coverage": "not_qualified_by_catalog",
+      "detect": {
+        "paths": [
+          "~/.hermes/sessions"
+        ],
+        "commands": [
+          "hermes"
+        ]
+      }
     }
   ]
 }

@@ -192,6 +192,7 @@ def test_doctor_exposes_bundle_candidates_without_claiming_active_work(world, mo
     (applications / "Unrelated private name.app").mkdir()
     monkeypatch.setattr(harness_inventory, "application_dirs", lambda _home: [
         applications])
+    monkeypatch.setattr(harness_inventory, "command_dirs", lambda _home: [])
     report = coverage.build_report(load_config())
     observed = report["harness_inventory"]["observations"]
     assert observed[0]["harness_id"] == "rex"
@@ -311,3 +312,44 @@ def test_delivery_identity_uses_consistent_metadata_calls(world, monkeypatch):
 
     monkeypatch.setattr(coverage.os, "fstat", descriptor_metadata)
     assert coverage._delivery() == {"status": "available", "pending": {"activity": 1}}
+
+
+@pytest.fixture
+def inventory_home(world, monkeypatch):
+    from agent_usage_tracker import harness_inventory
+    from agent_usage_tracker.config import load_config
+
+    monkeypatch.setattr(harness_inventory.sys, "platform", "darwin")
+    applications = world / "Applications"
+    applications.mkdir(exist_ok=True)
+    monkeypatch.setattr(harness_inventory, "application_dirs", lambda _home: [applications])
+    monkeypatch.setattr(harness_inventory, "command_dirs", lambda _home: [])
+    return load_config()
+
+
+def harness_issues(cfg, agents=None):
+    from dataclasses import replace
+
+    from agent_usage_tracker import coverage
+
+    report = coverage.build_report(replace(cfg, agents=agents) if agents else cfg)
+    return {(i["code"], i["source_id"]): i["severity"] for i in report["issues"]
+            if i["code"].startswith("harness_") and i["code"] != "harness_inventory_limited"}
+
+
+def test_reader_qualified_t3_code_raises_no_harness_issue(inventory_home, world):
+    (world / "Applications" / "T3 Code.app").mkdir()
+    issues = harness_issues(inventory_home, agents=("t3",))
+    assert not [key for key in issues if key[1] == "t3-code"]
+    assert ("harness_route_unverified", "t3-code") in harness_issues(inventory_home,
+                                                                    agents=("codex",))
+
+
+def test_recent_unread_harness_is_a_warning_and_a_recent_wrapper_is_info(inventory_home):
+    for path in (".hermes/sessions/new.json", "Library/Application Support/rex/servers/s.db"):
+        target = inventory_home.home / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("")
+    issues = harness_issues(inventory_home, agents=("claude_code", "codex"))
+    assert issues[("harness_active_unread", "hermes")] == "warning"
+    assert issues[("harness_unattributed", "rex")] == "info"

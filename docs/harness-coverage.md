@@ -42,11 +42,28 @@ A root inspected within its quota can be available while its contents remain inc
 Roots that the total budget cannot reach stay unknown. Skipped symlinks and traversal limits remain explicit.
 Receipt freshness uses a 12-hour threshold, exposed in the report.
 
-The catalog describes documented routes for 25 tools. It does not enable collectors.
+The catalog describes routes for 29 tools. It does not enable collectors.
 Every entry remains unqualified by that catalog.
-On macOS, bounded app-folder name matches appear as candidates with unknown activity.
+On macOS, bounded app-folder name matches appear as candidates.
 Doctor does not read app contents or retain unmatched app names.
 Other platforms retain native-source and explicit-registry checks; app inventory remains unknown.
+
+A catalog entry can add three optional fields, so a new harness is one data entry:
+
+- `detect.paths`: up to 8 activity paths such as session stores, each starting with `~/` and
+  without `..`. Doctor walks them for metadata only: at most 256 entries per harness and 4 levels,
+  no symlinks, no `skills` directories, and no file is opened.
+- `detect.commands`: up to 4 bare command names, checked in `~/.local/bin`, `/opt/homebrew/bin`,
+  `/usr/local/bin` and `PATH`.
+- `read_by`: collectors that already read this harness's work. When one is configured, the
+  harness raises no issue and its paths are not walked.
+- `wraps`: native CLIs the harness drives. Their work is counted but not attributed to it.
+
+Activity is `recent` when the newest modification time is within 7 days, `stale` when it is
+older and the walk finished, and `unknown` otherwise. Only the date is kept, never a path.
+A recent harness that no configured collector reads raises `harness_active_unread` (warning).
+A recent harness that wraps a configured collector raises `harness_unattributed` (info).
+Other candidates raise `harness_route_unverified` (info).
 
 ## Register a profile or another harness
 
