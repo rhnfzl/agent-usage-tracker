@@ -37,7 +37,7 @@ def put_case(store, stamp, name, trigger="control", verdict="fail", version=1, *
 
 
 def snapshot(store):
-    return {str(p.relative_to(store.root)): p.read_bytes() for p in store.root.rglob("*")
+    return {p.relative_to(store.root).as_posix(): p.read_bytes() for p in store.root.rglob("*")
             if p.is_file()}
 
 
