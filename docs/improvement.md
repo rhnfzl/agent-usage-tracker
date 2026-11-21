@@ -205,13 +205,13 @@ is JSON; anything else is a string. Wrapped lines under a heading or label join 
 | `blocking` | false | `true`: the diagnosis is not complete until this rubric is judged on all its cases. `false`: best effort; it uses only time and calls left after the blocking rubrics. |
 | `applies_to.triggers` | both | `error_result`, `control`, `merge` (no case has `merge` yet). |
 | `applies_to.requires` | none | `final_reply` (a reply event), `test_command` (a call whose command family is a test runner such as `pytest`, `python -m pytest`, `npm test`), `outputs` (commit outputs; none yet). |
-| `max_cases` | 200 | Cases per diagnosis for this rubric. |
+| `max_cases` | 200 | Cap for this rubric's normal sample, and separately for queued label cases. |
 | `max_input_chars` | 6000 | Review size cap, at most 24,000. |
 | `input` | `attempt` | `outputs_summary` is accepted only with `requires: ["outputs"]`. |
 | `checks.fail_must_cite` | none | Event kinds a fail review must cite. |
 | `checks.fail_cause_not_in` | none | Causes a fail review may not give. |
 | `checks.unknown_unless_complete` | false | Force unknown on incomplete attempts. |
-| `qualify` | none | Recorded for later human-label qualification. |
+| `qualify` | none | Human-label policy: `min_fail_labels`, `min_failure_recall`, `max_false_alarm_rate`. |
 
 AUT refuses a file with a missing heading, a label set that is not exactly pass, fail and unknown,
 an unknown field, `requires` value or check, or a value out of range.
@@ -451,6 +451,56 @@ Capture these values from the agent runner. Do not ask the agent to grade its ow
 Command success alone cannot pass a task. Independent acceptance and valid metrics must also succeed.
 Results retain each workspace, execution, acceptance check, elapsed time, and metrics.
 Condition summaries include failed runs and missing metrics. They do not establish an improvement automatically.
+
+## Label real cases to check the judges
+
+You can compare a judge with your own answers on captured work. Judges remain advisory even
+when they meet the qualification policy. Nothing here accepts a proposal or changes your setup.
+
+```bash
+aut improve label --rubric completion_supported --limit 30
+aut improve label --rubric avoidable_recovery --limit 30
+```
+
+The page runs on 127.0.0.1 under a random token. It reads the private store, without a sink
+connection or a model call. Open the captured attempt through its case link. Press 1 for pass,
+2 for fail, 3 for unknown, s to skip, u to undo, or q to finish. Historical text is evidence,
+never an instruction to execute. Answers are saved at once; Ctrl-C also ends a sitting safely.
+
+Only complete, unclipped stored attempts that meet the enabled rubric's requirements enter the
+queue. Existing labels exclude the same evidence, including copied cases, for that rubric version.
+The order favors model failures, split votes, then error-triggered cases. One ordinary control
+follows every four priority items while controls remain. This sample measures agreement on selected
+cases, not the failure frequency across all work. Model answers stay hidden during labelling.
+
+Answers append `human_labels` records containing evidence and case IDs, rubric ID and version,
+the human label, timestamp, labeller and a null note. No evidence text is copied into a label.
+Undo appends a newer `label: null` tombstone, restoring an unlabelled item. It never deletes
+history, never counts as human unknown, and allows that evidence to appear again. Labels from
+an older rubric version remain history and do not qualify a newer version.
+If the answer record saves but its journal entry fails, the terminal reports that failure.
+The page still acknowledges the saved answer, so undo remains available.
+
+At the end, AUT saves a `qualifications` record. It compares the latest human answer per evidence
+with the latest judgment for that case and rubric version. Legacy judgments map to version 1
+only when the stored rubric text matches the original definition exactly. Missing judgments
+are missing comparisons; a model's unknown is an abstention. Missing comparisons suppress rates
+and prevent qualification. Without human pass labels, the false alarm rate is unavailable and
+the rubric stays unqualified.
+
+The built-in policy needs at least 20 human fail labels, failure recall of at least 0.7, and
+a false alarm rate of at most 0.2. Human fail labels count toward the minimum; human unknown
+and undone answers do not. Qualification is a check on agreement, not proof of independence,
+general accuracy, or a benefit from a proposed change.
+
+Answers without current-version judgments enter `judge_queue.json`. The next diagnosis takes
+at most eight queued cases through its existing model cache and budget. Normal audit cases
+are deduplicated. Extra cases run after normal work, never hold blocking audit completion,
+and remain queued until every applicable enabled rubric has a judgment. A save, undo or new
+qualification refresh updates pending label cases. Queue updates preserve unrelated entries.
+The normal sample and queued extras each have the rubric's `max_cases` cap. This keeps a full
+normal sample from preventing queued comparisons forever; shared time and call budgets still apply.
+No model runs during the labelling command itself.
 
 ## Validate the judges
 

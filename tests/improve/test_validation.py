@@ -51,6 +51,21 @@ def test_abstaining_on_a_failure_is_not_counted_as_detection(tmp_path):
     assert not report["automation_qualified"]
 
 
+def test_executable_report_matches_shared_scoring_without_changing_its_schema(tmp_path):
+    store, spec, job, _ = setup_reference(tmp_path, verdict="fail")
+    report = validation.validate(store, spec, job, execute=True)
+    assert {key: report[key] for key in validation.score([])} == validation.score([("fail", "fail")])
+    assert report["counts"] == {"reference_fail": 1, "abstentions": 0,
+        "detected_failures": 1, "missed_failures": 0, "false_alarms": 0,
+        "supported_passes": 0, "decisions_on_unknown": 0}
+
+
+@pytest.mark.parametrize("pair", [("invalid", "pass"), ("pass", "invalid")])
+def test_shared_scoring_rejects_invalid_labels(pair):
+    with pytest.raises(AutError, match="scoring"):
+        validation.score([pair])
+
+
 def test_oracle_and_evidence_must_match_the_frozen_reference(tmp_path):
     store, spec, job, oracle = setup_reference(tmp_path, verdict="fail")
     report = validation.validate(store, spec, job, execute=True)

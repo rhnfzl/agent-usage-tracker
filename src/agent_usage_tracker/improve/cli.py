@@ -64,6 +64,9 @@ def register(sub: Any) -> None:
     reference.add_argument("--spec-file", type=Path, required=True)
     reference.add_argument("--diagnosis", required=True)
     reference.add_argument("--execute", action="store_true", help="execute the trusted reference oracle")
+    labelling = actions.add_parser("label", help="check advisory judges with private human labels")
+    labelling.add_argument("--rubric", required=True)
+    labelling.add_argument("--limit", type=int, default=30)
     desktop = actions.add_parser("desktop", help="import private native-app command evidence")
     desktop.add_argument("--trace", type=Path, required=True, help="raw trace file or segment directory")
     desktop.add_argument("--responses", type=Path, help="local response companion JSONL")
@@ -146,6 +149,9 @@ def run(args: argparse.Namespace) -> None:
     elif args.improve_cmd == "groups":
         from .groups import refresh
         result = refresh(store, window_days=args.days, threshold=args.threshold)
+    elif args.improve_cmd == "label":
+        from .qualify import review
+        result = review(store, args.rubric, limit=args.limit)
     elif args.improve_cmd in {"inbox", "adopt"}:
         result = _decide(store, args)
     elif args.improve_cmd == "inspect":

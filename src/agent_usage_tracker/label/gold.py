@@ -14,6 +14,7 @@ from __future__ import annotations
 import html
 import json
 from collections import Counter
+from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from typing import Any, Callable
 
@@ -42,6 +43,17 @@ _JS = """document.addEventListener('keydown', e => {
   if (b) { e.preventDefault(); b.click(); } });"""
 
 
+@dataclass
+class ReviewSpec:
+    """A local review caller supplies ordered units, existing labels and durable saves."""
+
+    candidates: tuple[tuple[str, str], ...]
+    floor: int
+    gold: dict[str, str]
+    save: Callable[[str, str | None], None]
+    case_view: Callable[[str], bytes | None]
+
+
 def _facts(facts: dict[str, Any]) -> str:
     e = html.escape
     parts = ["<dl>"]
@@ -56,18 +68,18 @@ def _facts(facts: dict[str, Any]) -> str:
     return "".join(parts) + "</dl>"
 
 
-def _progress(task: str, gold: dict[str, str]) -> str:
-    floor, target = FLOORS[task]
+def _progress(task: str, gold: dict[str, str], spec: ReviewSpec | None = None) -> str:
+    floor, target = (spec.floor, spec.floor) if spec else FLOORS[task]
     n = Counter(gold.values())
     rows = "".join(f"<tr><td>{html.escape(c)}</td><td>{n[c]} / {floor}</td>"
                    f"<td class=mut>{'floor reached' if n[c] >= floor else ''}</td></tr>"
-                   for c, _d in TASKS[task].candidates)
+                   for c, _d in (spec.candidates if spec else TASKS[task].candidates))
     return (f"<details><summary>Gold per label (floor {floor}, target {target})</summary>"
             f"<table>{rows}</table></details>")
 
 
 def render(task: str, token: str, item: Request | None, gold: dict[str, Any], last: dict[str, Any] | None,
-           left: int, counts: Counter[str]) -> str:
+           left: int, counts: Counter[str], spec: ReviewSpec | None = None) -> str:
     e = html.escape
     head = (local_page.head("Gold labels", "52rem", _CSS) + f"<h1>{e(task)}</h1>"
             "<p class=mut>Private page on this machine only. Only your answer (a label and the "
@@ -86,6 +98,9 @@ def render(task: str, token: str, item: Request | None, gold: dict[str, Any], la
         parts.append(f'<input type=hidden name=u value="{e(item.unit_id)}">'
                      f"<p><b>{e(item.question)}</b> <span class=mut>({e(item.unit)})</span></p>"
                      + _facts(item.facts))
+        if spec:
+            parts.append(f'<p><a href="/{e(token)}/case/{e(item.unit_id)}" '
+                         'target="_blank" rel="noreferrer">Open the captured attempt</a></p>')
         for i, c in enumerate(item.candidates):
             k = _KEYS[i] if i < len(_KEYS) else ""
             parts.append(f'<button name=a value="{e(c["id"])}" data-key="{k}">{k}. '
@@ -93,7 +108,7 @@ def render(task: str, token: str, item: Request | None, gold: dict[str, Any], la
     parts.append('<div class=row><button name=a value=":skip" data-key="s">s skip</button>'
                  '<button name=a value=":undo" data-key="u">u undo</button>'
                  '<button name=a value=":quit" data-key="q">q done</button></div></form>')
-    parts.append(_progress(task, gold) + f"<script>{_JS}</script></body></html>")
+    parts.append(_progress(task, gold, spec) + f"<script>{_JS}</script></body></html>")
     return "".join(parts)
 
 
@@ -116,16 +131,20 @@ def _drop_last(task: str, unit_id: str) -> None:
 class _Sitting:
     """One sitting of the gold page: the queue, the position in it, and what can be undone."""
 
-    def __init__(self, task: str, reqs: dict[str, Request], today: date | None, zone: str) -> None:
+    def __init__(self, task: str, reqs: dict[str, Request], today: date | None, zone: str,
+                 spec: ReviewSpec | None = None) -> None:
         self.task, self.zone = task, zone
-        self.silver, self.gold = silver_by_unit(task, zone), gold_latest(task, zone)
-        self.queue = stratified([r for u, r in reqs.items() if u not in self.gold],
-                                lambda r: stratum(self.silver.get(r.unit_id)), seed=task)
+        self.spec = spec
+        self.silver = {} if spec else silver_by_unit(task, zone)
+        self.gold = dict(spec.gold) if spec else gold_latest(task, zone)
+        pending = [r for u, r in reqs.items() if u not in self.gold]
+        self.queue = pending if spec else stratified(
+            pending, lambda r: stratum(self.silver.get(r.unit_id)), seed=task)
         self.pos = 0
         self.hist: list[tuple[str, str]] = []
         self.last: dict[str, Any] | None = None
         self.counts: Counter[str] = Counter(answered=0, skipped=0)
-        self.ids = {c for c, _d in TASKS[task].candidates}
+        self.ids = {c for c, _d in (spec.candidates if spec else TASKS[task].candidates)}
         self.day = (today or date.today()).isoformat()
 
     def _item(self) -> Request | None:
@@ -133,21 +152,29 @@ class _Sitting:
 
     def page(self, token: str) -> bytes:
         return render(self.task, token, self._item(), self.gold, self.last,
-                      len(self.queue) - self.pos, self.counts).encode()
+                      len(self.queue) - self.pos, self.counts, self.spec).encode()
 
     def _undo(self) -> None:
-        kind, uid = self.hist.pop()
+        kind, uid = self.hist[-1]
+        if kind == "gold":
+            if self.spec:
+                self.spec.save(uid, None)
+            else:
+                _drop_last(self.task, uid)
+        self.hist.pop()
         self.pos -= 1
         self.last = None
         if kind == "gold":
-            _drop_last(self.task, uid)
             self.gold.pop(uid, None)
             self.counts["answered"] -= 1
         else:
             self.counts["skipped"] -= 1
 
     def _answer(self, u: str, a: str) -> None:
-        append_jsonl(eval_path(self.task, "gold"), {"unit_id": u, "gold": a, "labeller": LABELLER,
+        if self.spec:
+            self.spec.save(u, a)
+        else:
+            append_jsonl(eval_path(self.task, "gold"), {"unit_id": u, "gold": a, "labeller": LABELLER,
                                                     "date": self.day,
                                                     "task_ver": TASKS[self.task].ver,
                                                     "ledger_timezone": self.zone})
@@ -178,18 +205,25 @@ class _Sitting:
 
 def serve(task: str, reqs: dict[str, Request], *, open_browser: bool = True,
           on_ready: Callable[[str], None] | None = None, today: date | None = None,
-          zone: str) -> Counter[str]:
+          zone: str, spec: ReviewSpec | None = None) -> Counter[str]:
     """Serve the page until q (or Ctrl-C). Returns {answered, skipped} of this sitting; answers
     are saved under ledger zone `zone`."""
     token = local_page.new_token()
-    sitting = _Sitting(task, reqs, today, zone)
+    sitting = _Sitting(task, reqs, today, zone, spec)
+
+    def on_get(tail: str) -> bytes | None:
+        if tail == "":
+            return sitting.page(token)
+        if spec and tail.startswith("/case/") and tail[6:] in reqs:
+            return spec.case_view(tail[6:])
+        return None
 
     def on_post(form: dict[str, Any]) -> bytes | None:
         if sitting.act(form):
             return f"<p>Saved {sitting.counts['answered']} answers. You can close this tab.</p>".encode()
         return None
 
-    local_page.serve(token, lambda tail: sitting.page(token) if tail == "" else None, on_post,
+    local_page.serve(token, on_get, on_post,
                      "gold page at {url} (q on the page, or Ctrl-C, to stop; answers are already "
                      "saved)", open_browser=open_browser, on_ready=on_ready)
     return sitting.counts
