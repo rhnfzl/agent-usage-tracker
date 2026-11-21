@@ -29,9 +29,8 @@ from contextlib import nullcontext
 from datetime import date, datetime, timedelta, timezone, tzinfo
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Iterable
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from .config import AutError, Config
+from .config import AutError, Config, ledger_zone
 from .git_safe import HARDENED_ENV, git_argv
 from .git_day_cache import Snapshot, Status, load_cache, merge_sources
 from .push import JobBeat, job_heartbeat, redacted_error
@@ -327,16 +326,6 @@ def load_stored(dsn: str) -> dict[date, tuple[int, bool]]:
                 conn.execute("SELECT day, commits, complete FROM agents.git_commits_daily").fetchall()}
 
 
-def _ledger_zone(cfg: Config) -> tzinfo:
-    """The ledger's day, as in the sink's views."""
-    try:
-        return ZoneInfo(cfg.ledger_timezone)
-    except (ZoneInfoNotFoundError, ValueError):
-        raise AutError(f"git-days: ledger_timezone {cfg.ledger_timezone!r} is unknown here: check "
-                       "the name, or install the time zone database (the system tzdata package, "
-                       "or pip install tzdata)") from None
-
-
 def run(cfg: Config, *, dry_run: bool, allow_lower: bool = False, now: datetime | None = None,
         tz: tzinfo | None = None, local_only: bool = False,
         defer_remotes_until: date | None = None) -> dict[str, Any]:
@@ -348,7 +337,7 @@ def run(cfg: Config, *, dry_run: bool, allow_lower: bool = False, now: datetime 
         dsn = None if dry_run else cfg.require_pg("git-days")
         if dsn:
             check_ledger_zone(dsn, cfg.ledger_timezone)
-        tz = tz or _ledger_zone(cfg)
+        tz = tz or ledger_zone(cfg)
         deferred = local_only or (defer_remotes_until is not None
                                   and now.astimezone(tz).date() < defer_remotes_until)
         cache_path = state_path().with_name('git-days-sources.json')
@@ -481,7 +470,7 @@ def run_if_due(cfg: Config, now: datetime | None = None, *,
         state = load_state()
         wm = collector_wm(state, NAME)
         deferred = (defer_remotes_until is not None
-                    and now.astimezone(_ledger_zone(cfg)).date() < defer_remotes_until)
+                    and now.astimezone(ledger_zone(cfg)).date() < defer_remotes_until)
         new_remote_reader = (wm.get("partial_pending") is True and bool(cfg.git_days_remotes)
                              and not deferred
                              and wm.get("remote_scan_version") != _REMOTE_SCAN_VERSION)

@@ -7,10 +7,11 @@ import json
 import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pytest
 
-from agent_usage_tracker.config import Config
+from agent_usage_tracker.config import DEFAULT_LEDGER_TZ, Config
 from agent_usage_tracker.event import make_event_id
 from agent_usage_tracker.label import backends
 from agent_usage_tracker.label import evalset
@@ -106,9 +107,10 @@ LABELS = [c for c, _d in tasks.TASKS[TASK].candidates]
 WORD = "zanzibarquill"
 
 
-# Fixed local noon: the folds hash a unit's local day, so a moving clock would change the split
-# and every number that follows from it. Every run below gets this clock.
-BASE = datetime(2026, 6, 15, 12).astimezone()
+# Fixed noon in the default ledger zone: the folds hash a unit's ledger day, so a moving clock
+# would change the split and every number that follows from it. Every run below gets this clock.
+LEDGER = ZoneInfo(DEFAULT_LEDGER_TZ)
+BASE = datetime(2026, 6, 15, 12, tzinfo=LEDGER)
 
 
 TODAY = BASE.date()

@@ -10,12 +10,12 @@ from __future__ import annotations
 
 from collections import Counter, defaultdict
 from dataclasses import dataclass, replace
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone, tzinfo
 from typing import Any, Callable
 
 from ..collectors import activitywatch as aw
 from ..collectors import claude_code, codex
-from ..config import AutError, Config
+from ..config import AutError, Config, ledger_zone
 from ..cursor_run import automated_sessions
 from ..episode_store import Episode, load_since
 from ..event import CollectorUnavailable, make_event_id
@@ -388,7 +388,8 @@ def _steer_units(task: Task, src: Source, since: datetime, until: datetime | Non
     return out
 
 
-def _aw_blocks(task: Task, wins: list[dict[str, Any]], steer_ts: list[datetime]) -> list[Request]:
+def _aw_blocks(task: Task, wins: list[dict[str, Any]], steer_ts: list[datetime],
+               tz: tzinfo) -> list[Request]:
     """Contiguous same-category window time of AW_BLOCK_MIN_S or more with no steer inside.
     shortcut: 'no steer inside' stands in for 'overlaps no steer interval'; upgrade by reading
     agents.steer_interval once the writer may."""
@@ -410,7 +411,7 @@ def _aw_blocks(task: Task, wins: list[dict[str, Any]], steer_ts: list[datetime])
         out.append(task.request("aw_block", make_event_id("aw_block", s.isoformat(),
                                                           e.isoformat()), s, {
             "category": b[0]["category"], "apps": list(dict.fromkeys(w["app"] for w in b)),
-            "minutes": round(secs / 60), "titles": titles, "hour": s.astimezone().hour}))
+            "minutes": round(secs / 60), "titles": titles, "hour": s.astimezone(tz).hour}))
     return out
 
 
@@ -420,11 +421,11 @@ def _context_steers(src: Source, steers: list[dict[str, Any]]) -> list[dict[str,
 
 
 def _episode_days(mine: list[dict[str, Any]], acts: list[dict[str, Any]], of_session: dict[str, list[Episode]],
-                  day_of: set[date]) -> dict[tuple[str, date], dict[str, Any]]:
-    """(episode, local day) -> its steers, sessions and activity rows that day."""
+                  day_of: set[date], tz: tzinfo) -> dict[tuple[str, date], dict[str, Any]]:
+    """(episode, ledger day) -> its steers, sessions and activity rows that day."""
     days: dict[tuple[str, date], dict[str, Any]] = {}
     for r in mine:
-        d = r["ts"].astimezone().date()
+        d = r["ts"].astimezone(tz).date()
         if d not in day_of:
             continue
         for ep in of_session.get(r["session_id"], ()):
@@ -434,7 +435,7 @@ def _episode_days(mine: list[dict[str, Any]], acts: list[dict[str, Any]], of_ses
             u["steers"].append(r)
             u["sessions"].add(r["session_id"])
     for a in acts:
-        d = a["ts"].astimezone().date()
+        d = a["ts"].astimezone(tz).date()
         for ep in of_session.get(a["session_id"], ()):
             if ep["first_ts"] <= a["ts"] <= ep["last_ts"] and (ep["id"], d) in days:
                 days[(ep["id"], d)]["acts"].append(a)
@@ -477,12 +478,13 @@ def _category_units(task: Task, src: Source, since: datetime, until: datetime | 
             of_session[m["session_id"]].append(episode)
     sids = sorted(context_sessions & set(of_session))
     acts = src.activity(sids, since, until) if sids else []
-    day_of = set(local_days(since, until))
-    days = _episode_days(mine, acts, of_session, day_of)
+    tz = ledger_zone(src.cfg)
+    day_of = set(local_days(since, until, tz))
+    days = _episode_days(mine, acts, of_session, day_of, tz)
     by_id = {episode["id"]: episode for episode in eps}
     out = []
     for (ep, d), u in days.items():
-        cutoff = min(until, local_midnight(d + timedelta(days=1)),
+        cutoff = min(until, local_midnight(d + timedelta(days=1), tz),
                      by_id[ep]["last_ts"] + timedelta(microseconds=1))
         reply = src.replies(u["steers"], cutoff)
         u["steers"] = src.ordered_steers(u["steers"], cutoff)
@@ -501,7 +503,7 @@ def _category_units(task: Task, src: Source, since: datetime, until: datetime | 
         return [replace(r, facts={k: r.facts[k] for k in
                 ("first_steer", "last_steers", "last_agent_reply")}) for r in out]
     wins = src.windows(since, until)
-    out += _aw_blocks(task, wins, [r["ts"] for r in steers])
+    out += _aw_blocks(task, wins, [r["ts"] for r in steers], tz)
     return out
 
 

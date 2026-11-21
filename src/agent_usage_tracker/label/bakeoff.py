@@ -23,10 +23,10 @@ import sys
 import time
 from collections import Counter
 from dataclasses import asdict
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timezone, tzinfo
 from typing import Any, Iterable, NamedTuple, Sequence
 
-from ..config import LABEL_DAYS, AutError, Config
+from ..config import LABEL_DAYS, AutError, Config, ledger_zone
 from ..event import ActivityEvent, make_event_id
 from ..push import send_activity_rows
 from ..state import atomic_write_text
@@ -224,13 +224,14 @@ def _fit_calibration(kind: str, raws: list[Dist], golds: list[str], yes: str) ->
 
 
 def evaluate(task: str, backend: Backend, items: Sequence[_Item], precision: float, recall: float,
-             today: date, prev: dict[str, Any] | None = None) -> dict[str, Any] | None:
+             today: date, prev: dict[str, Any] | None = None, *,
+             tz: tzinfo) -> dict[str, Any] | None:
     """Items never come from a final test day. The eval record of one backend (numbers), out of
     fold; None when nothing is left to report on."""
     labels = [c for c, _d in TASKS[task].candidates]
     # the encoder's training days never calibrate it
     items = [it for it in items
-             if not (isinstance(backend, Encoder) and in_encoder_train_split(it.req))]
+             if not (isinstance(backend, Encoder) and in_encoder_train_split(it.req, tz))]
     if not items:
         return None
     reqs = [it.req for it in items]
@@ -238,7 +239,7 @@ def evaluate(task: str, backend: Backend, items: Sequence[_Item], precision: flo
     w = [it.weight for it in items]
     saved, speed = _score(backend, reqs, prev)
     raws = [{lab: saved[r.unit_id].get(lab, 0.0) for lab in labels} for r in reqs]
-    folds = [fold(r) for r in reqs]
+    folds = [fold(r, tz) for r in reqs]
     every = range(len(reqs))
     split = [([i for i in every if folds[i] != k], [i for i in every if folds[i] == k])
              for k in range(FOLDS)]
@@ -357,8 +358,9 @@ def newest(task: str) -> dict[tuple[Any, ...], dict[str, Any]]:
 def run_eval(cfg: Config, task: str, days: int = LABEL_DAYS, *, src: Source | None = None,
              backends: list[Backend] | None = None, now: datetime | None = None) -> list[dict[str, Any]]:
     now = now or datetime.now(timezone.utc)
-    today = now.astimezone().date()
-    pool = [(r, g) for r, g in _gold_units(cfg, task, days, src, today) if not final_test(r)]
+    tz = ledger_zone(cfg)
+    today = now.astimezone(tz).date()
+    pool = [(r, g) for r, g in _gold_units(cfg, task, days, src, today) if not final_test(r, tz)]
     if not pool:
         raise AutError(f"label eval: no gold labels for {task} in the last {days} days outside "
                        "the final test days (label some with `aut label review`)")
@@ -370,7 +372,7 @@ def run_eval(cfg: Config, task: str, days: int = LABEL_DAYS, *, src: Source | No
         try:
             getattr(b, "prepare", lambda: None)()
             rec = evaluate(task, b, items, cfg.label_precision, cfg.label_recall, today,
-                           before.get((b.model_id, b.model_rev, items[0].req.prompt_ver)))
+                           before.get((b.model_id, b.model_rev, items[0].req.prompt_ver)), tz=tz)
         except BackendUnavailable as exc:   # one model that cannot run here: the others still run
             print(f"aut: label eval: {b.model_id} left out: {exc}", file=sys.stderr)
             continue
@@ -397,8 +399,9 @@ def run_final(cfg: Config, task: str, model: str, days: int = LABEL_DAYS, *,
     only this function reads those days; the result goes to its own file, which nothing reads."""
     now = now or datetime.now(timezone.utc)
     rec = _saved_result(task, model)
-    pairs = [(r, g) for r, g in _gold_units(cfg, task, days, src, now.astimezone().date())
-             if final_test(r)]
+    tz = ledger_zone(cfg)
+    pairs = [(r, g) for r, g in _gold_units(cfg, task, days, src, now.astimezone(tz).date())
+             if final_test(r, tz)]
     if not pairs:
         raise AutError(f"label eval --final: no gold labels for {task} on the final test days "
                        "yet (label more days with `aut label review`)")
@@ -622,11 +625,12 @@ def train_encoder(cfg: Config, task: str, days: int = LABEL_DAYS, *, src: Source
     days (in_encoder_train_split), never on a final test day nor on a day eval calibrates it with;
     report accuracy and macro-F1 on the gold of those other days."""
     labels = [c for c, _d in TASKS[task].candidates]
-    today = (now or datetime.now(timezone.utc)).astimezone().date()
+    tz = ledger_zone(cfg)
+    today = (now or datetime.now(timezone.utc)).astimezone(tz).date()
     reqs = window_units(cfg, task, days, src, today)
     gold, silver = gold_latest(task), silver_by_unit(task)
-    open_days = {u: r for u, r in reqs.items() if not final_test(r)}
-    train = {u: r for u, r in open_days.items() if in_encoder_train_split(r)}
+    open_days = {u: r for u, r in reqs.items() if not final_test(r, tz)}
+    train = {u: r for u, r in open_days.items() if in_encoder_train_split(r, tz)}
     test = {u for u in gold if u in open_days and u not in train}
     data = _training_data(gold, silver, train, labels)
     if not data:

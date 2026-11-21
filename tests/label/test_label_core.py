@@ -15,7 +15,8 @@ import json
 import math
 import sys
 import types
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -176,8 +177,9 @@ def _two_options(**kw) -> core.Request:
 
 
 def test_local_midnight_is_an_aware_start_of_that_day():
-    m = core.local_midnight(date(2026, 3, 29))
-    assert m.tzinfo is not None and (m.year, m.month, m.day, m.hour, m.minute) == (2026, 3, 29, 0, 0)
+    m = core.local_midnight(date(2026, 3, 29), ZoneInfo("Europe/Amsterdam"))
+    assert (m.year, m.month, m.day, m.hour, m.minute) == (2026, 3, 29, 0, 0)
+    assert m.utcoffset() == timedelta(hours=1)     # the ledger zone's, on its spring-forward day
 
 
 def test_label_paths_follow_the_environment(tmp_path, monkeypatch):

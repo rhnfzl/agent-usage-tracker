@@ -59,13 +59,13 @@ import argparse
 import json
 import os
 import sys
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from typing import Sequence
 
 from . import backup, cursor_run, git_days, inspector, manual_time, outcomes, pricing, review, scan
 from .collectors import REGISTRY
 from .config import (ALL_AGENTS, LABEL_DAYS, LABEL_DECISION_TASKS, LABEL_TASK_NAMES, AutError,
-                     Config, load_config, config_path)
+                     Config, ledger_zone, load_config, config_path)
 from .push import is_operational_failure, outbox_status, redacted_error, replay_outbox, webhook_url_allowed
 from .state import collector_wm, load_state
 
@@ -192,13 +192,14 @@ def _label_run(cfg: Config, args: argparse.Namespace) -> None:
     """run | backfill: label new units, or one task over the last N days."""
     from .label import run as label_run
     from .label.core import local_midnight
+    tz = ledger_zone(cfg)
     tasks: list[str] | None
     if args.label_cmd == "backfill":
-        since = date.today() - timedelta(days=args.days)
+        since = datetime.now(tz).date() - timedelta(days=args.days)
         tasks, dry = [args.task], False
     else:
         since, tasks, dry = args.since, [args.task] if args.task else None, args.dry_run
-    report = label_run.run_label(cfg, tasks, local_midnight(since) if since else None,
+    report = label_run.run_label(cfg, tasks, local_midnight(since, tz) if since else None,
                                  dry_run=dry, local_estimates=getattr(args, "local_estimates", False))
     label_run.print_report(report, dry_run=dry)
     failed = [name for name, c in report.items()
@@ -385,7 +386,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p_lrun = lab_sub.add_parser("run", help="label new units since the watermark")
     p_lrun.add_argument("--task", choices=LABEL_TASK_NAMES, help="one task (default: label_tasks)")
     p_lrun.add_argument("--since", type=date.fromisoformat,
-                        help="local YYYY-MM-DD to start from instead of the watermark")
+                        help="ledger YYYY-MM-DD to start from instead of the watermark")
     p_lrun.add_argument("--dry-run", action="store_true", help="score and count, write nothing")
     p_lrun.add_argument("--local-estimates", action="store_true",
                        help="apply saved local decision recipes as separate provisional estimates")
@@ -394,8 +395,8 @@ def _build_parser() -> argparse.ArgumentParser:
     p_lback.add_argument("--days", type=int, required=True)
     p_replay = lab_sub.add_parser("replay", help="preview or resume a private historical local job")
     p_replay.add_argument("--task", choices=("steer_intent", "work_category", "soft_outcome", "writing_activity"))
-    p_replay.add_argument("--since", type=date.fromisoformat, help="first local date, inclusive")
-    p_replay.add_argument("--until", type=date.fromisoformat, help="last local date, exclusive")
+    p_replay.add_argument("--since", type=date.fromisoformat, help="first ledger date, inclusive")
+    p_replay.add_argument("--until", type=date.fromisoformat, help="last ledger date, exclusive")
     p_replay.add_argument("--job", help="saved private job ID instead of a new range")
     p_replay.add_argument("--apply", action="store_true", help="score and deliver the saved job")
     p_replay.add_argument("--budget-s", type=int, default=600, help="1 to 3600 seconds per resume")

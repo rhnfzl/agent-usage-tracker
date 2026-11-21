@@ -25,7 +25,7 @@ from agent_usage_tracker.label import bakeoff
 from agent_usage_tracker.label import core
 from agent_usage_tracker.label import evalset
 from agent_usage_tracker.label import tasks
-from label_helpers import BASE, FIXED, LABELS, Oracle, TASK, TODAY, WORD, _cfg, _env, _gold
+from label_helpers import BASE, FIXED, LABELS, LEDGER, Oracle, TASK, TODAY, WORD, _cfg, _env, _gold
 
 
 @pytest.fixture
@@ -61,7 +61,7 @@ def _items(n_days=60, per_day=3, task=TASK, unit="steer"):
     for i in range(n_days * per_day * 2):
         g = labels[i % len(labels)]
         req = t.request(unit, f"{g}#{i}", FIXED - timedelta(days=i // per_day), {})
-        if not evalset.final_test(req):
+        if not evalset.final_test(req, LEDGER):
             out.append(bakeoff._Item(req, g, 1.0))
     return out[:n_days * per_day]
 
@@ -76,7 +76,7 @@ def _sure(p=0.9, labels=LABELS):
 
 def _rec(tmp_path, b, items=None, precision=0.9, recall=0.6, task=TASK):
     with _env(tmp_path):
-        return bakeoff.evaluate(task, b, items or _items(), precision, recall, TODAY)
+        return bakeoff.evaluate(task, b, items or _items(), precision, recall, TODAY, tz=LEDGER)
 
 
 def test_eval_record_choose_and_event(tmp_path, monkeypatch):
@@ -88,7 +88,7 @@ def test_eval_record_choose_and_event(tmp_path, monkeypatch):
         recs = bakeoff.run_eval(cfg, TASK, src=src, now=BASE,
                                 backends=[Oracle(size_mb=4000), Oracle("stop", size_mb=10)])
         good, bad = recs
-        final = sum(evalset.final_test(q) for q in reqs.values())
+        final = sum(evalset.final_test(q, LEDGER) for q in reqs.values())
         assert 0 < final and good["n"] == len(golds) - final == good["n_cal"] == good["n_held"]
         assert sum(good["folds"].values()) == good["n"] and len(good["folds"]) == evalset.FOLDS
         assert good["macro_f1"] == good["macro_f1_tuned"] == 1.0 and good["kappa"] == 1.0
@@ -133,7 +133,7 @@ def test_scores_are_saved_without_text_and_reused(tmp_path, monkeypatch, no_sink
         cfg, src, reqs = _gold(tmp_path, golds)
         o = Oracle()
         first = bakeoff.run_eval(cfg, TASK, src=src, now=BASE, backends=[o])[0]
-        open_units = [u for u, q in reqs.items() if not evalset.final_test(q)]
+        open_units = [u for u, q in reqs.items() if not evalset.final_test(q, LEDGER)]
         assert o.calls == 2 * len(open_units)                       # two candidate orders per unit
         files = list((evalset.eval_path(TASK, "eval").parent / "scores").iterdir())
         assert len(files) == 1 and files[0].name.startswith(f"{TASK}.fake-oracle.")
@@ -171,7 +171,7 @@ def test_final_test_days_reach_only_eval_final(tmp_path, capsys, no_sink):
     golds = LABELS * 20
     with _env(tmp_path):
         cfg, src, reqs = _gold(tmp_path, golds)
-        sealed = {u for u, q in reqs.items() if evalset.final_test(q)}
+        sealed = {u for u, q in reqs.items() if evalset.final_test(q, LEDGER)}
         assert sealed
         with pytest.raises(AutError, match="no eval record"):
             bakeoff.run_final(cfg, TASK, "fake/oracle", src=src, now=BASE, backend=Oracle())
@@ -319,7 +319,7 @@ def test_report_numbers_speed_and_memory(tmp_path, monkeypatch, no_sink):
     plain = _rec(tmp_path / "p", Table(_sure()))
     assert plain["peak_mb"] is None and plain["size_mb"] is None
     with _env(tmp_path):
-        again = bakeoff.evaluate(TASK, Timed(_sure()), _items(), 0.9, 0.6, TODAY, prev=rec)
+        again = bakeoff.evaluate(TASK, Timed(_sure()), _items(), 0.9, 0.6, TODAY, prev=rec, tz=LEDGER)
     assert again["load_s"] == 10.0 and again["peak_mb"] == 1234
     assert again["n_timed"] == rec["n_timed"]
     # at the default threshold next to the tuned one: a model sure at 0.4 is right but under 0.5
@@ -427,8 +427,8 @@ def test_train_encoder_and_backend(tmp_path):
         # each steer also carries its neighbour's text, so a small fit is not perfect
         assert (r["trained_on"], r["held_out"]) == (30, 28)
         assert (r["accuracy"], r["macro_f1"]) == (0.9286, 0.928)
-        sealed = {u for u, q in reqs.items() if evalset.final_test(q)}
-        fit = {u for u, q in reqs.items() if u not in sealed and evalset.in_encoder_train_split(q)}
+        sealed = {u for u, q in reqs.items() if evalset.final_test(q, LEDGER)}
+        fit = {u for u, q in reqs.items() if u not in sealed and evalset.in_encoder_train_split(q, LEDGER)}
         assert sealed and 0 < len(fit) < len(reqs) - len(sealed) and r["trained_on"] == len(fit)
         assert r["held_out"] == len(reqs) - len(sealed) - len(fit)
         # silver of a final test day or an eval day never trains it
@@ -439,11 +439,11 @@ def test_train_encoder_and_backend(tmp_path):
         # eval calibrates the encoder only on the gold it never trained on
         rec = bakeoff.evaluate(TASK, backends.Encoder(TASK), [
             bakeoff._Item(q, q.facts["text"].split()[0], 1.0)
-            for u, q in reqs.items() if u not in sealed], 0.9, 0.6, TODAY)
+            for u, q in reqs.items() if u not in sealed], 0.9, 0.6, TODAY, tz=LEDGER)
         assert rec["n"] == rec["n_cal"] == len(reqs) - len(sealed) - len(fit)
         assert rec["backend"] == "encoder"
         assert bakeoff.evaluate(TASK, backends.Encoder(TASK), [
-            bakeoff._Item(reqs[u], "stop", 1.0) for u in fit], 0.9, 0.6, TODAY) is None
+            bakeoff._Item(reqs[u], "stop", 1.0) for u in fit], 0.9, 0.6, TODAY, tz=LEDGER) is None
         raw = backends.encoder_path(TASK).read_text()
         assert WORD not in raw and json.loads(raw)["labels"] == LABELS
         assert all(k.isdigit() for k in json.loads(raw)["w"])     # weights keyed by bucket ids

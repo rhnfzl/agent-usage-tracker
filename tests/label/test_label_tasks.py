@@ -7,14 +7,15 @@ local text is not labelled.
 from __future__ import annotations
 
 import json
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 from agent_usage_tracker.event import make_event_id
 from agent_usage_tracker.label import core
 from agent_usage_tracker import config
 from agent_usage_tracker.label import run
 from agent_usage_tracker.label import tasks
-from label_helpers import DAY1, FakeSource, NOW, _cfg, _claude_log, _steer, _win
+from label_helpers import LEDGER, DAY1, FakeSource, NOW, _cfg, _claude_log, _steer, _win
 
 
 def test_equal_timestamp_prompt_order_keeps_mature_coverage_stable(tmp_path, monkeypatch):
@@ -117,17 +118,36 @@ def test_work_category_units(tmp_path):
                  "attrs": {"by_tool": {"shell": 9}, "tool_errors": 4}})
     cfg = _cfg(tmp_path)
     reqs = tasks.units("work_category", FakeSource(cfg, steers, eps, acts, wins),
-                       run.local_midnight(DAY1.astimezone().date()), run.local_midnight(
-                           NOW.astimezone().date()))
+                       run.local_midnight(DAY1.astimezone(LEDGER).date(), LEDGER), run.local_midnight(
+                           NOW.astimezone(LEDGER).date(), LEDGER))
     by = {r.unit: r for r in reqs}
     assert set(by) == {"episode_day", "aw_block"} and len(reqs) == 2
     st = by["episode_day"].facts
     assert st["first_steer"] == "plan the export" and st["last_steers"] == ["now write it"]
     assert st["tool_calls_by_tool"] == {"Edit": 3, "Bash": 1} and st["commits"] == 1
     assert st["steers"] == 2 and st["sessions"] == 1 and st["tool_errors"] == 1
-    assert by["episode_day"].unit_id == f"e1:{t0.astimezone().date().isoformat()}"
+    assert by["episode_day"].unit_id == f"e1:{t0.astimezone(LEDGER).date().isoformat()}"
     # the 7-minute Slack block counts; the one with a steer inside and the 2-minute one do not
     assert by["aw_block"].facts["minutes"] == 7 and by["aw_block"].facts["apps"] == ["Slack"]
+
+
+def test_episode_days_and_block_hours_follow_the_ledger_zone(tmp_path):
+    # one Tokyo day, which UTC and Los Angeles both split in two
+    tokyo = ZoneInfo("Asia/Tokyo")
+    times = [datetime(2026, 11, 1, 23, 30, tzinfo=timezone.utc),
+             datetime(2026, 11, 2, 0, 30, tzinfo=timezone.utc),
+             datetime(2026, 11, 2, 9, 0, tzinfo=timezone.utc)]
+    _claude_log(tmp_path, "s1", [(f"u{i}", f"step {i}") for i in range(3)])
+    steers = [_steer(f"u{i}", "s1", t) for i, t in enumerate(times)]
+    eps = [{"id": "e1", "first_ts": times[0], "last_ts": times[-1], "members": [_member("s1")]}]
+    wins = [_win(datetime(2026, 11, 2, 10, tzinfo=timezone.utc), 6)]
+    src = FakeSource(_cfg(tmp_path, ledger_timezone="Asia/Tokyo"), steers, eps, wins=wins)
+    since = datetime(2026, 11, 2, tzinfo=tokyo)
+    reqs = tasks.units("work_category", src, since, since + timedelta(days=1))
+    assert sorted(r.unit for r in reqs) == ["aw_block", "episode_day"]
+    by = {r.unit: r for r in reqs}
+    assert by["episode_day"].unit_id == "e1:2026-11-02" and by["episode_day"].facts["steers"] == 3
+    assert by["aw_block"].facts["hour"] == 19
 
 
 def test_soft_outcome_only_no_code(tmp_path):
@@ -172,9 +192,9 @@ def test_work_category_bounds_shared_session_prompts_activity_and_reply(tmp_path
         return {row["event_id"]: ("", "later unrelated reply") for row in rows}
 
     monkeypatch.setattr(src, "replies", replies)
-    local_day = t0.astimezone().date()
-    reqs = tasks.units("work_category", src, run.local_midnight(local_day),
-                       run.local_midnight(local_day + timedelta(days=1)))
+    local_day = t0.astimezone(LEDGER).date()
+    reqs = tasks.units("work_category", src, run.local_midnight(local_day, LEDGER),
+                       run.local_midnight(local_day + timedelta(days=1), LEDGER))
     assert len(reqs) == 2
     assert [r.facts["first_steer"] for r in reqs] == ["plan the export", "fix the crash"]
     assert [r.facts["steers"] for r in reqs] == [1, 1]
@@ -183,8 +203,8 @@ def test_work_category_bounds_shared_session_prompts_activity_and_reply(tmp_path
 
 
 def test_work_category_reply_stops_at_local_midnight_and_inclusive_episode_end(tmp_path):
-    next_day = DAY1.astimezone().date() + timedelta(days=1)
-    midnight = run.local_midnight(next_day)
+    next_day = DAY1.astimezone(LEDGER).date() + timedelta(days=1)
+    midnight = run.local_midnight(next_day, LEDGER)
     first, second, end = (midnight + timedelta(minutes=m) for m in (-2, 2, 5))
     _claude_log(tmp_path, "s1", [])
     log = tmp_path / ".claude/projects/-p/s1.jsonl"
@@ -201,8 +221,8 @@ def test_work_category_reply_stops_at_local_midnight_and_inclusive_episode_end(t
     src = FakeSource(_cfg(tmp_path), [_steer("u1", "s1", first), _steer("u2", "s1", second)],
                      [{"id": "e", "first_ts": first, "last_ts": end,
                        "members": [_member("s1")]}])
-    reqs = tasks.units("work_category", src, run.local_midnight(next_day - timedelta(days=1)),
-                       run.local_midnight(next_day + timedelta(days=1)))
+    reqs = tasks.units("work_category", src, run.local_midnight(next_day - timedelta(days=1), LEDGER),
+                       run.local_midnight(next_day + timedelta(days=1), LEDGER))
     assert [r.facts["last_agent_reply"] for r in reqs] == ["first day reply", "episode end reply"]
 
 

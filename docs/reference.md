@@ -30,7 +30,7 @@ other command refuses it.
 | `aut label run --local-estimates [--task T]` | classify eligible local inputs with a saved provisional recipe | `label` extra, `pg_dsn`, `label-local.json`, cached model weights |
 | `aut label import-baseline FILE [--apply]` | preview or append a validated provisional historical baseline; no model calls | `pg_dsn`, private baseline bundle |
 | `aut cursor-run --model MODEL --workspace DIR < prompt.txt` | register an automated chat before its first scripted Cursor prompt; preserves JSON output | installed `cursor-agent`, signed-in account; may spend account credits |
-| `aut label replay --task T --since D --until D` | freeze redacted inputs for an explicit local date range and preview counts; no scoring or sink writes | saved local recipe, logs, `pg_dsn` |
+| `aut label replay --task T --since D --until D` | freeze redacted inputs for an explicit ledger date range (`ledger_timezone`) and preview counts; no scoring or sink writes. A saved job refuses another zone | saved local recipe, logs, `pg_dsn` |
 | `aut label replay --job ID [--apply] [--budget-s N]` | preview or resume the private job; `--apply` scores local models and delivers batches, with separate progress | same, plus local model runtime |
 | `aut history-steers [--dry-run]` | historical daily steer estimates from CLI history files (rows of kind `steer_estimate`, a count and no text) | `pg_dsn` |
 | `aut git-days [--dry-run] [--local-only] [--allow-lower]` | commits per ledger day (`ledger_timezone`) from `since` through yesterday. Read-only local and SSH scans, with no fetch. A private salted identity cache combines available sources without duplicate commits. Partial reads preserve earlier counts and omit unknown zeros. Same-count coverage upgrades publish. `--local-only` skips SSH; the global `--git-defer-remotes-until YYYY-MM-DD` flag skips SSH before that date for `scan` or `git-days`. Only fresh complete scans of every source permit `--allow-lower` and reset the cache. Dry runs print year totals without writes. Enabled scans run daily, with incomplete-source retries after 6 h | `[git_days]`, `pg_dsn`, updated completeness column/view in [DEPLOY.md](../DEPLOY.md) |
@@ -86,7 +86,7 @@ matter:
 | `cursor_sdk_manifests` | unset | glob of Cursor SDK run `manifest.json` files |
 | `cursor_db_path` | found per OS | path to Cursor's `state.vscdb` |
 | `home` | the running user's home | the home directory the collectors read |
-| `ledger_timezone` | `Europe/Amsterdam` | the sink's `AUT_TZ`. `git-days` counts days in it; `history-steers` uses it to find days already counted. Both stop when it differs from the zone a `sink_stack` sink records |
+| `ledger_timezone` | `Europe/Amsterdam` | the sink's `AUT_TZ`, and what a day is: `git-days`, `history-steers` and the `label` commands count days in it. `git-days` and `history-steers` stop when it differs from the zone a `sink_stack` sink records |
 | `activitywatch_*` | see the example | URL, title retention (`0` keeps titles), titles on or off, deny lists, work title patterns, categories |
 | `outcome_repo_roots` | `["~/projects"]` | where `aut outcomes` looks for clones (6 levels deep) |
 | `outcome_fetch` | `false` | fetch and ask `gh` before scoring. Turn it on where the nightly job runs, or squash-merged PRs count as abandoned |

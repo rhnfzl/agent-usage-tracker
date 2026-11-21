@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from datetime import date, datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -14,7 +15,9 @@ from label_helpers import _cfg
 
 
 def _ms(d: str) -> int:
-    return int(datetime.fromisoformat(d).timestamp() * 1000)
+    """A naive time is in the default ledger zone, whatever the machine's TZ."""
+    t = datetime.fromisoformat(d)
+    return int((t if t.tzinfo else t.replace(tzinfo=ZoneInfo("Europe/Amsterdam"))).timestamp() * 1000)
 
 
 def _write(p: Path, rows: list[dict]) -> None:
@@ -54,9 +57,17 @@ def test_only_typed_inputs_inside_the_gap_count(tmp_path, monkeypatch):
     assert hs.estimates(cfg, set())[0].event_id == sent[0].event_id   # a rerun is a no-op at the sink
 
 
+def test_days_and_row_times_follow_the_ledger_zone(tmp_path):
+    # one Tokyo day, which UTC and Los Angeles both split in two
+    _write(tmp_path / ".claude/history.jsonl", [{"display": "go", "timestamp": _ms(d)} for d in
+           ("2026-04-07T23:30+00:00", "2026-04-08T00:30+00:00", "2026-04-08T09:00+00:00")])
+    rows = hs.estimates(_cfg(tmp_path, ledger_timezone="Asia/Tokyo"), set())
+    assert [(r.ts, r.attrs["count"]) for r in rows] == [("2026-04-08T12:00:00+09:00", 3)]
+
+
 def test_a_missing_file_is_no_rows(tmp_path):
     assert not hs.daily_counts(tmp_path / "none.jsonl", "text", "ts", 1, date(2026, 1, 1),
-                               date(2026, 12, 31))
+                               date(2026, 12, 31), ZoneInfo("UTC"))
 
 
 def test_event_ids_stay_what_the_sink_already_holds(tmp_path):

@@ -14,6 +14,7 @@ import tomllib
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .state import warn_if_group_readable
 
@@ -42,6 +43,16 @@ AW_CATEGORIES = ("editor", "terminal", "agent", "dev", "browser", "comms", "docs
 
 class AutError(Exception):
     """An error for the operator: main prints the message and exits 1, with no traceback."""
+
+
+def ledger_zone(cfg: Config) -> ZoneInfo:
+    """The zone of a ledger day, as in the sink's views (ledger_timezone)."""
+    try:
+        return ZoneInfo(cfg.ledger_timezone)
+    except (ZoneInfoNotFoundError, ValueError):
+        raise AutError(f"ledger_timezone {cfg.ledger_timezone!r} is unknown here: check "
+                       "the name, or install the time zone database (the system tzdata package, "
+                       "or pip install tzdata)") from None
 
 
 def config_path() -> Path:

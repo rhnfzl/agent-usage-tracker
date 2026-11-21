@@ -18,11 +18,11 @@ import os
 import random
 import re
 from collections import defaultdict
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, tzinfo
 from pathlib import Path
 from typing import Any, Callable, TypeVar
 
-from ..config import LABEL_DAYS, AutError, Config
+from ..config import LABEL_DAYS, AutError, Config, ledger_zone
 from ..state import atomic_write_text, parse_record
 from .core import Request, data_dir, local_midnight, top_label
 from .tasks import TASKS, Source, units
@@ -110,45 +110,46 @@ def stratified(items: list[T], key: Callable[[T], object], seed: str) -> list[T]
             if x is not None]
 
 
-def unit_day(req: Request) -> date:
-    return datetime.fromisoformat(req.ts).astimezone().date()
+def unit_day(req: Request, tz: tzinfo) -> date:
+    return datetime.fromisoformat(req.ts).astimezone(tz).date()
 
 
 def _hash(key: str) -> int:
     return int(hashlib.sha256(key.encode()).hexdigest(), 16)
 
 
-def _group(req: Request) -> str:
-    """What must stay together in a split: the unit's local day. A title's ts is its first sight
+def _group(req: Request, tz: tzinfo) -> str:
+    """What must stay together in a split: the unit's ledger day. A title's ts is its first sight
     inside the window read, which moves, so a title is its own group."""
-    return req.unit_id if req.unit == "aw_title" else unit_day(req).isoformat()
+    return req.unit_id if req.unit == "aw_title" else unit_day(req, tz).isoformat()
 
 
-def final_test(req: Request) -> bool:
+def final_test(req: Request, tz: tzinfo) -> bool:
     """The stable part of the days only `aut label eval --final` reads: no fold, tau, temperature,
     encoder fit or choice sees them."""
-    return _hash("final|" + _group(req)) % 100 < FINAL_PCT
+    return _hash("final|" + _group(req, tz)) % 100 < FINAL_PCT
 
 
-def fold(req: Request) -> int:
+def fold(req: Request, tz: tzinfo) -> int:
     """The unit's fold, the same for every model and across runs. shortcut: whole days hash to a
     fold, so folds are not stratified by label and a rare label can sit in few folds; upgrade by
     assigning days to folds by their gold label mix once gold is large enough to care."""
-    return _hash("fold|" + _group(req)) % FOLDS
+    return _hash("fold|" + _group(req, tz)) % FOLDS
 
 
-def in_encoder_train_split(req: Request) -> bool:
+def in_encoder_train_split(req: Request, tz: tzinfo) -> bool:
     """The half of the days the encoder trains on; the other half fits its temperature and tau in
     eval, so they are never fitted on the encoder's own training data."""
-    return _hash("encoder|" + _group(req)) % 2 == 1
+    return _hash("encoder|" + _group(req, tz)) % 2 == 1
 
 
 def window_units(cfg: Config, task: str, days: int = LABEL_DAYS, src: Source | None = None,
                  today: date | None = None) -> dict[str, Request]:
-    """unit_id -> request for the task's units over the last `days` whole local days."""
+    """unit_id -> request for the task's units over the last `days` whole ledger days."""
     if src is None:
         cfg.require_pg("label (it reads the steer and episode rows)")
-    today = today or date.today()
-    reqs = units(task, src or Source(cfg), local_midnight(today - timedelta(days=days)),
-                 local_midnight(today))
+    tz = ledger_zone(cfg)
+    today = today or datetime.now(tz).date()
+    reqs = units(task, src or Source(cfg), local_midnight(today - timedelta(days=days), tz),
+                 local_midnight(today, tz))
     return {r.unit_id: r for r in reqs}

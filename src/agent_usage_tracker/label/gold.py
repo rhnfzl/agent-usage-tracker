@@ -18,7 +18,7 @@ from datetime import date, datetime, timezone
 from typing import Any, Callable
 
 from .. import local_page
-from ..config import LABEL_DAYS, Config
+from ..config import LABEL_DAYS, Config, ledger_zone
 from .core import Request, top_label
 from .evalset import (FLOORS, append_jsonl, eval_path, gold_latest, read_jsonl,
                       silver_by_unit, stratified, stratum, window_units, write_jsonl)
@@ -196,7 +196,7 @@ def run_gold_review(cfg: Config, task: str | None, days: int = LABEL_DAYS, *, sr
                     on_ready: Callable[[str], None] | None = None,
                     now: datetime | None = None) -> dict[str, Any]:
     task = task or next((t for t in cfg.label_tasks if t in TASKS), "steer_intent")
-    today = (now or datetime.now(timezone.utc)).astimezone().date()
+    today = (now or datetime.now(timezone.utc)).astimezone(ledger_zone(cfg)).date()
     counts = serve(task, window_units(cfg, task, days, src, today), open_browser=open_browser,
                    on_ready=on_ready, today=today)
     n = Counter(gold_latest(task).values())

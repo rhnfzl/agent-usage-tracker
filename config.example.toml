@@ -10,8 +10,8 @@
 machine = "laptop"
 
 # What a "day" is in the sink's views: the IANA zone the sink was installed with (its AUT_TZ).
-# Default: Europe/Amsterdam. git-days counts days in it; history-steers uses it to find days
-# already counted. Both stop when it differs from the zone a sink_stack sink records.
+# Default: Europe/Amsterdam. git-days, history-steers and the label commands count days in it.
+# git-days and history-steers stop when it differs from the zone a sink_stack sink records.
 # ledger_timezone = "Europe/Berlin"
 
 # Which agents to collect. Omit to collect every collector except the opt-in activitywatch.

@@ -9,15 +9,15 @@ from datetime import datetime, timedelta
 import pytest
 
 from agent_usage_tracker.label import run, tasks
-from label_helpers import ById, FakeSource, _cfg, _claude_log, _env, _steer
+from label_helpers import LEDGER, ById, FakeSource, _cfg, _claude_log, _env, _steer
 from test_label import sink  # noqa: F401  (fixture)
 
-NOW = datetime(2026, 11, 3, 10, 0).astimezone()          # the Mac is back, a month later
+NOW = datetime(2026, 11, 3, 10, 0, tzinfo=LEDGER)        # the Mac is back, a month later
 GAP = NOW - timedelta(days=20)                          # a day inside the gap
 
 
 def _midnight(t: datetime) -> datetime:
-    return run.local_midnight(t.astimezone().date())
+    return run.local_midnight(t.astimezone(LEDGER).date(), LEDGER)
 
 
 def _member(sid: str) -> dict:
@@ -34,14 +34,15 @@ def _gap_day(tmp_path):
 
 def test_day_window_stops_at_the_rebuilt_episodes():
     wm = {"work_category": _midnight(NOW - timedelta(days=31)).isoformat()}
-    start, until = run._day_window("work_category", wm, None, NOW, ready=NOW - timedelta(days=31))
+    start, until = run._day_window("work_category", wm, None, NOW, ready=NOW - timedelta(days=31),
+                                   tz=LEDGER)
     assert until == start                               # nothing past the last rebuilt day
-    _s, until = run._day_window("work_category", wm, None, NOW, ready=NOW)
+    _s, until = run._day_window("work_category", wm, None, NOW, ready=NOW, tz=LEDGER)
     assert until == _midnight(NOW)
-    _s, until = run._day_window("work_category", wm, None, NOW, ready=None)
+    _s, until = run._day_window("work_category", wm, None, NOW, ready=None, tz=LEDGER)
     assert until == start                              # no rebuild: preserve the pending days
     # titles come from this machine's aw-server, not from the episodes: never held back
-    assert run._window("aw_title_relevance", wm, None, NOW, ready=GAP)[1] == _midnight(NOW)
+    assert run._window("aw_title_relevance", wm, None, NOW, ready=GAP, tz=LEDGER)[1] == _midnight(NOW)
 
 
 @pytest.mark.parametrize("ready", [None, NOW - timedelta(days=31)])
@@ -66,7 +67,7 @@ def test_gap_days_are_labelled_after_the_rebuild_not_before(tmp_path, sink, read
                             now=NOW + timedelta(days=1))
         assert rep["work_category"]["rows"] == 1
         assert [e.attrs["unit_id"] for b in sink.rows for e in b] == \
-            [f"e1:{GAP.astimezone().date().isoformat()}"]
+            [f"e1:{GAP.astimezone(LEDGER).date().isoformat()}"]
 
 
 def test_episodes_ready_uses_one_database_snapshot(tmp_path, monkeypatch):

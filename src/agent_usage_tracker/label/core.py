@@ -14,7 +14,7 @@ import math
 import os
 import sys
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone, tzinfo
 from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator, Protocol, runtime_checkable
 
@@ -26,13 +26,14 @@ LETTERS = "ABCDEFGHIJ"
 TAU_FLOOR = 0.5
 
 
-def local_midnight(d: date) -> datetime:
-    return datetime(d.year, d.month, d.day).astimezone()
+def local_midnight(d: date, tz: tzinfo) -> datetime:
+    """The start of ledger day d (tz: config.ledger_zone)."""
+    return datetime(d.year, d.month, d.day, tzinfo=tz)
 
 
-def local_days(since: datetime, until: datetime) -> Iterator[date]:
-    """The local dates from `since`'s up to, not including, `until`'s."""
-    d, end = since.astimezone().date(), until.astimezone().date()
+def local_days(since: datetime, until: datetime, tz: tzinfo) -> Iterator[date]:
+    """The ledger dates (tz) from `since`'s up to, not including, `until`'s."""
+    d, end = since.astimezone(tz).date(), until.astimezone(tz).date()
     while d < end:
         yield d
         d += timedelta(days=1)

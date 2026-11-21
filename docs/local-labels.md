@@ -180,7 +180,8 @@ Outcome inputs stay inside their own episode's time bounds. Local estimates skip
 prompts or a missing attributable final reply, reporting these as unclassified rather than
 using a reply to an earlier input. Replay previews report `incomplete_outcome_context` separately.
 Work-category prompts and activity also stay inside their own episode. Final replies stop at
-the earlier of the episode end or local midnight, so shared sessions cannot mix separate work days.
+the earlier of the episode end or midnight in `ledger_timezone`, so shared sessions cannot mix
+separate work days.
 Native Codex prompt order resolves tied timestamps within one session. Conflicting replies
 from simultaneous sessions do not supply an attributable final reply.
 The draft `writing_task()` and `bounded_outcome_task()` are not registered. They define explicit
@@ -213,7 +214,8 @@ For scheduled estimates, set `AUT_LABEL=1` and `AUT_LABEL_MODE=local` in `scan.e
 ### Historical local replay
 
 `aut label replay` prepares historical labels without resetting daily collection. First choose
-one task and explicit local dates. The end date is exclusive and cannot include an unfinished day:
+one task and explicit dates in `ledger_timezone`. The end date is exclusive and cannot include an
+unfinished day:
 
 ```bash
 aut label replay --task steer_intent --since 2026-10-01 --until 2026-10-08
@@ -226,6 +228,7 @@ excluded because this machine lacks their text. It runs no model and sends no ro
 same job with `--apply`; progress advances only after each batch is delivered. The default budget
 is 600 seconds, with a maximum of 3600. An incomplete result reports `remaining` and
 `complete: false`; repeat the saved job to continue. Nightly watermarks are untouched.
+A job records its `ledger_timezone`. It refuses to continue under another zone; prepare a new job.
 The budget stops new scoring work. An active model call or sink delivery can finish after it.
 `partial_local_text` counts eligible episode units with some missing steer text. Counts cover
 supported local source units, not all historical work. Replies and context can also be absent.

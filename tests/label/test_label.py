@@ -27,7 +27,7 @@ from agent_usage_tracker.collectors import activitywatch as aw
 from agent_usage_tracker.config import LABEL_DAYS, AutError
 from agent_usage_tracker.label import backends, core, run, tasks
 from agent_usage_tracker.label import bakeoff, gold, teach
-from label_helpers import ById, DAY1, FakeSource, NOW, TASK, _cfg, _claude_log, _env, _steer, _win
+from label_helpers import LEDGER, ById, DAY1, FakeSource, NOW, TASK, _cfg, _claude_log, _env, _steer, _win
 
 REPO = Path(__file__).resolve().parents[2]
 
@@ -232,7 +232,7 @@ def test_notes_prompt_counts_only(tmp_path, sink):
         rep = run.run_label(cfg, ["daily_note"], src=FakeSource(cfg, episodes=eps, labels=labels),
                             backend_for=lambda t, c: b, now=NOW)
     assert rep["daily_note"]["notes"] == 1 and sink.notes[0][1] == "A quiet day."
-    assert sink.notes[0][0] == DAY1.astimezone().date()
+    assert sink.notes[0][0] == DAY1.astimezone(LEDGER).date()
     p = b.prompts[0]
     assert "steer_intent: correction 1" in p and "steer_intent: stop 1" in p and "commits 3" in p
     assert run._note_prompt(DAY1.date(), labels[3:] + labels[2:3], []) == \
@@ -455,7 +455,7 @@ def test_cli_wiring(tmp_path, monkeypatch):
 
 def test_a_recent_task_says_since_does_not_apply(capsys):
     now = datetime(2026, 11, 3, tzinfo=timezone.utc)
-    start, until = run._window("soft_outcome", {}, now - timedelta(days=90), now)
+    start, until = run._window("soft_outcome", {}, now - timedelta(days=90), now, tz=timezone.utc)
     assert start == now - timedelta(days=14) and until is None
     assert "do not apply" in capsys.readouterr().err
 
