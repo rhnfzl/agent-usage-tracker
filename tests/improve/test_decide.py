@@ -378,7 +378,8 @@ def test_a_crash_before_the_journal_row_is_repaired_on_retry(store, tmp_path):
 def test_the_adopt_step_keeps_a_custom_store(store, tmp_path):
     _, key = proposal(store, tmp_path)
     steps = decide.accept(store, key)["next"]
-    assert f"aut improve --root {store.root} adopt {key}" in steps[-1]
+    assert "--root" in decide.command(store)
+    assert f"{decide.command(store)} adopt {key}" in steps[-1]
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="symlinks need extra rights on Windows")
