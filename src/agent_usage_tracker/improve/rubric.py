@@ -257,6 +257,8 @@ def _shell_text(text: str, tool: str) -> str | None:
 # Flags whose next word is their value, so that word is never read as the subcommand.
 _VALUE_FLAGS = {
     "env": {"-u", "--unset", "-C", "--chdir"},
+    "time": {"-f", "--format", "-o", "--output"},
+    "timeout": {"-s", "--signal", "-k", "--kill-after"},
     "git": {"-C", "-c", "--git-dir", "--work-tree", "--namespace"},
     "gh": {"-R", "--repo"},
     "npm": {"-C", "--prefix", "-w", "--workspace", "--userconfig", "--cache", "--registry",
@@ -289,8 +291,9 @@ def _family(words: list[str]) -> str:
         if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", head) or head in {"npx", "rtk"}:
             # A Claude Code hook rewrites `git status` to `rtk git status`; `rtk proxy`, `err`,
             # `test` and `summary` run the command that follows them.
-            words = words[2:] if head == "rtk" and words[1:2] and words[1] in {
-                "proxy", "err", "test", "summary"} else words[1:]
+            words = _skip_flags(words[1:], head)
+            if head == "rtk" and words[:1] and words[0] in {"proxy", "err", "test", "summary"}:
+                words = words[1:]
         elif head in {"env", "time"}:
             words = _skip_flags(words[1:], head)
         elif head == "command" and words[1:2] not in (["-v"], ["-V"]):

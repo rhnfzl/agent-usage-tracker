@@ -307,6 +307,9 @@ def test_applies_checks_triggers_finals_test_commands_and_outputs():
     ("time -p uv run pytest", "Bash", "uv run pytest"),
     ("command git push", "Bash", "git push"),
     ("command -v git", "Bash", "command"),
+    ("time -f %e pytest", "Bash", "pytest"),
+    ("timeout -s KILL 10 pytest", "Bash", "pytest"),
+    ("rtk -v git status", "Bash", "git status"),
     # a quoted phrase is never part of a family
     ('git "Confidential client A"', "Bash", "git other"),
     ('python -m "a b"', "Bash", "python -m other"),
@@ -528,7 +531,7 @@ def test_cached_blocking_work_publishes_complete_before_the_first_extra_call(tmp
     assert seen[1]["complete"] and seen[1]["optional_finished"] == 0
     # low memory before an extra rubric skips the extras; the finished night stays finished
     assert report["complete"] and report["reason"] == "optional_error"
-    assert report["optional_skipped"] == {"rubric": "verbosity", "error": "AutError"}
+    assert report["optional_skipped"] == [{"rubric": "verbosity", "error": "AutError"}]
     assert "diagnosis" in journal_kinds(store)
 
 
@@ -542,8 +545,10 @@ def test_a_bad_extra_rubric_vote_does_not_fail_the_night(tmp_path, monkeypatch):
             return super().distribution(request)
 
     report = judge.diagnose(store, audit, models=("test",), backend_for=lambda _: Broken([]))
-    assert report["complete"] and (report["finished"], report["optional_finished"]) == (2, 0)
-    assert report["optional_skipped"]["rubric"] == "verbosity"
+    # the bad vote skips only its case: redundant_tests is still judged after it
+    assert report["complete"] and (report["finished"], report["optional_finished"]) == (2, 1)
+    assert report["optional_skipped"] == [{"rubric": "verbosity", "error": "AutError"}]
+    assert report["reason"] == "optional_error"
     assert "unfinished_call" not in report
     assert "diagnosis" in journal_kinds(store)
 
