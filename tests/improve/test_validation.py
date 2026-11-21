@@ -40,6 +40,29 @@ def test_reference_preview_never_executes_oracle(tmp_path, monkeypatch):
     assert validation.validate(store, spec, job)["execution_required"]
 
 
+@pytest.mark.parametrize("trigger", ["control", "merge"])
+def test_reference_uses_frozen_output_identity_with_legacy_fallback(tmp_path, trigger):
+    from agent_usage_tracker.improve import judge, rubric
+
+    store, spec, old_job, _ = setup_reference(tmp_path, verdict="unknown")
+    assert validation.validate(store, spec, old_job, execute=True)["counts"]["abstentions"] == 1
+    case_id = store.get("diagnoses", old_job)["cases"][0]
+    item = next(r for r in rubric.load() if r.id == "completion_supported")
+    policy = {"version": judge.VERSION, "cases": [case_id],
+              "rubrics": {item.id: rubric.snapshot(store, item)}}
+    evaluator = judge.evaluator(policy, item.id)
+    key = judge.evaluation_key(evaluator, case_id, item.id, "a" * 64, trigger=trigger)
+    policy["evaluation_keys"] = {case_id: {item.id: key}}
+    assert judge.evaluator(policy, item.id) == evaluator
+    job = store.put("diagnoses", policy)
+    identity = store.put("judgments", {"evaluation_key": key, "case_id": case_id,
+                        "rubric": item.id, "verdict": "fail", "outputs_id": "a" * 64,
+                        "trigger": trigger})
+    report = validation.validate(store, spec, job, execute=True)
+    assert report["counts"]["detected_failures"] == 1
+    assert report["cases"][0]["judgment_id"] == identity
+
+
 def test_abstaining_on_a_failure_is_not_counted_as_detection(tmp_path):
     store, spec, job, _ = setup_reference(tmp_path)
     report = validation.validate(store, spec, job, execute=True)

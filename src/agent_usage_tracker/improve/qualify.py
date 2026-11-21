@@ -6,6 +6,7 @@ import math
 import re
 import sys
 from collections import deque
+from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -13,7 +14,7 @@ from typing import Any, Callable
 from ..config import AutError
 from ..label import gold
 from ..state import _locked
-from . import judge, rubric as rubrics
+from . import judge, outputs, rubric as rubrics
 from .case_view import write_case_view
 from .groups import _flagged, _journal
 from .rubric import LABELS, Rubric
@@ -54,7 +55,7 @@ def labels(store: Store, rubric: Rubric) -> dict[str, dict[str, Any]]:
     for key in store.keys("human_labels"):
         row = store.get("human_labels", key)
         try:
-            if set(row) != {"evidence_sha256", "case_id", "rubric_id", "rubric_version",
+            if set(row) - {"outputs_id"} != {"evidence_sha256", "case_id", "rubric_id", "rubric_version",
                             "label", "labeller", "labelled_at", "note"} \
                     or not _id(row["case_id"]) or not _id(row["evidence_sha256"]) \
                     or not isinstance(row["rubric_id"], str) \
@@ -65,7 +66,16 @@ def labels(store: Store, rubric: Rubric) -> dict[str, dict[str, Any]]:
                     and (not isinstance(row["note"], str) or len(row["note"]) > 500):
                 raise ValueError
             stamp = datetime.fromisoformat(row["labelled_at"])
-            if stamp.tzinfo is None or evidence_key(store.get("cases", row["case_id"])) \
+            case = store.get("cases", row["case_id"])
+            output_id = row.get("outputs_id")
+            if output_id is not None:
+                if not _id(output_id) or outputs.latest(store).get(row["case_id"]) is None:
+                    raise ValueError
+                attached = store.get("case_outputs", output_id)
+                if (attached["case_id"], attached["session_snapshot"]) != \
+                        (row["case_id"], case["session_snapshot"]):
+                    raise ValueError
+            if stamp.tzinfo is None or evidence_key(case, output_id) \
                     != row["evidence_sha256"]:
                 raise ValueError
         except (KeyError, TypeError, ValueError) as exc:
@@ -75,7 +85,10 @@ def labels(store: Store, rubric: Rubric) -> dict[str, dict[str, Any]]:
         slot = row["evidence_sha256"]
         if slot not in newest or (stamp, key) > newest[slot][:2]:
             newest[slot] = stamp, key, row
-    return {key: row for key, (_, _, row) in newest.items() if row["label"] is not None}
+    current = outputs.latest(store) if "outputs" in rubric.requires else {}
+    return {key: row for key, (_, _, row) in newest.items() if row["label"] is not None
+            and ("outputs" not in rubric.requires or row.get("outputs_id") ==
+                 current.get(row["case_id"], (None,))[0])}
 
 
 def judgments(store: Store, rubric: Rubric) -> list[dict[str, Any]]:
@@ -91,9 +104,14 @@ def judgments(store: Store, rubric: Rubric) -> list[dict[str, Any]]:
             if not _id(row["case_id"]) or row["verdict"] not in LABELS:
                 raise ValueError
             policy = store.get("diagnoses", row["job_id"])
+            if row.get("outputs_id") is not None:
+                attached = store.get("case_outputs", row["outputs_id"])
+                if attached["case_id"] != row["case_id"]:
+                    raise ValueError
             if row["case_id"] not in policy["cases"] or row["evaluation_key"] != \
                     judge.evaluation_key(judge.evaluator(policy, rubric.id), row["case_id"],
-                                         rubric.id):
+                                         rubric.id, row.get("outputs_id"),
+                                         trigger=row.get("trigger")):
                 raise ValueError
             if "rubric_snapshot" in row:
                 snapshot = store.get("rubric_snapshots", row["rubric_snapshot"])
@@ -116,12 +134,14 @@ def judgments(store: Store, rubric: Rubric) -> list[dict[str, Any]]:
 
 def _cases(store: Store, rubric: Rubric) -> dict[str, dict[str, Any]]:
     found = {}
+    attached = outputs.latest(store) if "outputs" in rubric.requires else {}
     for key in store.keys("cases"):
         case = store.get("cases", key)
-        if rubric.input == "attempt" and judge._eligible(case) \
-                and rubrics.applies(rubric, case, None):
+        output = attached.get(key)
+        candidate = judge._input_case({**case, "case_id": key}, rubric, output)
+        if judge._eligible(candidate) and rubrics.applies(rubric, case, output[1] if output else None):
             store.get("sessions", case["session_snapshot"])
-            found[key] = {**case, "case_id": key}
+            found[key] = candidate
     return found
 
 
@@ -139,7 +159,7 @@ def queue(store: Store, rubric: Rubric) -> list[dict[str, Any]]:
     unique = []
     seen = set(labelled)
     for case in cases:
-        key = evidence_key(case)
+        key = evidence_key(store.get("cases", case["case_id"]), case.get("outputs_id"))
         if key not in seen:
             unique.append(case)
             seen.add(key)
@@ -172,19 +192,26 @@ def _sync_queue_locked(store: Store, answer: dict[str, Any] | None = None) -> No
             if answer["label"] is not None:
                 rows[answer["evidence_sha256"]] = answer
             owned.add(answer["case_id"])
-        graded = {row["case_id"] for row in judgments(store, rubric)}
+        graded = {(row["case_id"], row.get("outputs_id")) for row in judgments(store, rubric)}
         owned.update(row["case_id"] for row in rows.values())
-        pending.update(row["case_id"] for row in rows.values() if row["case_id"] not in graded)
+        pending.update(row["case_id"] for row in rows.values()
+                       if (row["case_id"], row.get("outputs_id")) not in graded)
     # Tombstones can retire an entry only when no other current label still needs that case.
     owned.update(store.get("human_labels", key)["case_id"] for key in store.keys("human_labels"))
     judge.update_queue(store, add=pending, remove=owned - pending)
 
 
-def save(store: Store, rubric: Rubric, case_id: str, label: str | None) -> str:
+def save(store: Store, rubric: Rubric, case_id: str, label: str | None, *,
+         outputs_id: str | None = None) -> str:
     """Append one human answer, or a tombstone when undo restores an unlabelled item."""
-    if label is not None and label not in LABELS or case_id not in _cases(store, rubric):
-        raise AutError("improve: answer needs an eligible case and a rubric label")
-    with _locked(store.root / "human_labels"):
+    with (_locked(store.root / "outputs") if "outputs" in rubric.requires else nullcontext()), \
+            _locked(store.root / "human_labels"):
+        candidate = _cases(store, rubric).get(case_id)
+        if label is not None and label not in LABELS or candidate is None:
+            raise AutError("improve: answer needs an eligible case and a rubric label")
+        if outputs_id is not None and candidate.get("outputs_id") != outputs_id:
+            raise AutError("improve: output evidence changed; reopen the label page")
+        outputs_id = candidate.get("outputs_id")
         labels(store, rubric)  # refuse invalid history before extending it
         case = store.get("cases", case_id)
         stamp = datetime.fromisoformat(_now())
@@ -192,9 +219,11 @@ def save(store: Store, rubric: Rubric, case_id: str, label: str | None) -> str:
                     for key in store.keys("human_labels")]
         if previous:
             stamp = max(stamp, max(previous) + timedelta(microseconds=1))
-        row = {"evidence_sha256": evidence_key(case), "case_id": case_id,
+        row = {"evidence_sha256": evidence_key(case, outputs_id), "case_id": case_id,
                "rubric_id": rubric.id, "rubric_version": rubric.version, "label": label,
                "labeller": "human", "labelled_at": stamp.isoformat(), "note": None}
+        if outputs_id:
+            row["outputs_id"] = outputs_id
         # Queue failure must leave the answer unsaved, so the page can retry or undo safely.
         _sync_queue_locked(store, row)
         key = store.put("human_labels", row)
@@ -211,8 +240,8 @@ def run(store: Store, rubric_id: str) -> dict[str, Any]:
     rubric = _rubric(rubric_id)
     _sync_queue(store)
     human = labels(store, rubric)
-    newest = {row["case_id"]: row for row in judgments(store, rubric)}
-    pairs = [(row["label"], newest.get(row["case_id"], {}).get("verdict"))
+    newest = {(row["case_id"], row.get("outputs_id")): row for row in judgments(store, rubric)}
+    pairs = [(row["label"], newest.get((row["case_id"], row.get("outputs_id")), {}).get("verdict"))
              for row in human.values()]
     result = score(pairs)
     counts = result["counts"]
@@ -246,7 +275,8 @@ def review(store: Store, rubric_id: str, *, limit: int = 30, open_browser: bool 
         return Path(write_case_view(store, case_id)["path"]).read_bytes()
 
     def save_answer(case_id: str, label: str | None) -> None:
-        save(store, rubric, case_id, label)
+        save(store, rubric, case_id, label, outputs_id=next(
+            case.get("outputs_id") for case in cases if case["case_id"] == case_id))
 
     spec = gold.ReviewSpec(tuple(rubric.labels.items()), rubric.qualify["min_fail_labels"],
                            {row["case_id"]: row["label"]

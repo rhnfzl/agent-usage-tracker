@@ -159,13 +159,56 @@ The private `inbox.html` shows open proposals with copy-ready accept and reject 
 top 10 failure groups with their status (next section), the last cycle's judgments with
 escaped review text, rubric version, trigger and case identifiers, and the last 5 adopted fixes.
 
+## Case outputs
+
+Judges can compare a committed change with the captured request and final reply.
+This adds private local evidence without changing the case or requiring the sink.
+
+AUT finds commit SHAs only in matched results of real `git commit` calls within that attempt.
+Dry runs do not count. It reads up to eight commits from the captured session's absolute working
+directory. Each Git read has a five-second limit and a 64 KiB output limit. Each attachment gets
+at most ten seconds, and diagnosis allows thirty seconds total within its existing time budget.
+Missing repositories and exhausted attachment budgets increment `outputs_skipped`; normal blocking
+judgments continue. Partial reads mark the output truncated and preserve a private warning.
+
+Append-only `case_outputs` records contain seven-character SHAs, counts, redacted diff statistics
+(800 characters), a redacted patch (1,500 characters), truncation status, PR numbers from matched
+`gh pr create` results, and check timestamps. An unchanged attachment reuses its saved record.
+Requests pass this text as `facts.untrusted_outputs`, which is evidence, never instructions.
+Output rubric cache keys include the attachment identity. Clipped patches or missing prompt/reply
+produce unknown without model calls. Oversized output requests also produce unknown with
+`review_skipped: review_input_limit`.
+
+States reflect local Git refs only: `merged` means reachable from the remote default ref,
+`reverted` means a revert message on that ref names the commit, `open` means a local branch
+contains it, and `unreachable` means none of those refs contains the object. AUT does not fetch
+or call a provider API. Stale refs can delay detection. Squash merges can remain open until
+branch deletion, then appear unreachable. These states do not measure rework, fourteen-day
+survival, or causal benefit.
+
+After the worker, the parent refreshes open outputs checked within thirty days, with a thirty-second
+total cap. Missing repositories leave the prior snapshot intact and add an `outputs_skipped`
+journal row. State changes enter the bounded `merge_queue.json`, including changes first noticed
+during attachment. Each diagnosis admits at most four merge cases after its normal and label
+work. Each rubric has a separate capped merge sample. These cases use the same model cache,
+locks and call/time budgets as labelled extras, and cannot hold normal completion open.
+Only rubrics accepting `merge` run on this path. Their judgments record `trigger: merge` and
+the output identity, while the original case keeps its trigger. This key remains distinct from
+the original judgment, even when both use the same output snapshot. Completed comparisons leave
+the queue under a lock. Concurrent additions and newer snapshots remain queued.
+
+Human output labels use the same prompt, final reply and output facts as the judge.
+Each label records its output snapshot, and qualification compares it only with judgments for
+that snapshot. A newer snapshot makes the case available for another label. A page opened before
+that change refuses a stale save. Older labels remain private history. Label thresholds, scoring
+and advisory authority stay unchanged. Existing labels without outputs keep their original identity.
+
 ## Rubrics
 
 Each criterion is a markdown file. Built-ins ship in
 `src/agent_usage_tracker/improve/rubrics/`: `avoidable_recovery` and `completion_supported`
 (blocking, moved from code with their exact text), and `verbosity`, `redundant_tests` and
-`code_quality` (non-blocking). `code_quality` needs commit outputs, which no case has yet, so it
-never runs.
+`code_quality` (non-blocking). `code_quality` runs only when the attempt has local commit outputs.
 
 Your own files go in `rubrics/` next to the config file
 (`~/.config/agent-usage-tracker/rubrics/*.md`). A file with the same `id` replaces the built-in, and keeps the built-in's `blocking` unless the
@@ -204,11 +247,11 @@ is JSON; anything else is a string. Wrapped lines under a heading or label join 
 | `threshold` | 0.7 | Minimum model probability for a pass or fail vote, above 0.5 and at most 1. |
 | `priority` | 100 | Lower runs first. |
 | `blocking` | false | `true`: the diagnosis is not complete until this rubric is judged on all its cases. `false`: best effort; it uses only time and calls left after the blocking rubrics. |
-| `applies_to.triggers` | both | `error_result`, `control`, `merge` (no case has `merge` yet). |
-| `applies_to.requires` | none | `final_reply` (a reply event), `test_command` (a call whose command family is a test runner such as `pytest`, `python -m pytest`, `npm test`), `outputs` (commit outputs; none yet). |
-| `max_cases` | 200 | Cap for this rubric's normal sample, and separately for queued label cases. |
+| `applies_to.triggers` | both | `error_result`, `control`, `merge` (a queued local commit-state change). |
+| `applies_to.requires` | none | `final_reply` (a reply event), `test_command` (a call whose command family is a test runner such as `pytest`, `python -m pytest`, `npm test`), `outputs` (a local commit diff). |
+| `max_cases` | 200 | Cap for each sample: normal cases, queued label cases, and queued merge cases. |
 | `max_input_chars` | 6000 | Review size cap, at most 24,000. |
-| `input` | `attempt` | `outputs_summary` is accepted only with `requires: ["outputs"]`. |
+| `input` | `attempt` | `outputs_summary` uses the captured prompt, final reply and outputs; it requires `outputs`. |
 | `checks.fail_must_cite` | none | Event kinds a fail review must cite. |
 | `checks.fail_cause_not_in` | none | Causes a fail review may not give. |
 | `checks.unknown_unless_complete` | false | Force unknown on incomplete attempts. |
