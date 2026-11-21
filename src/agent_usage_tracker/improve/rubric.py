@@ -6,7 +6,7 @@ import hashlib
 import json
 import re
 import shlex
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -72,8 +72,13 @@ def _names(value: Any, field: str, allowed: set[str] | tuple[str, ...]) -> froze
     return frozenset(value)
 
 
+def _normal(text: str) -> str:
+    """Line ends and a leading byte-order mark (as some Windows editors write) do not count."""
+    return text.removeprefix("\ufeff").replace("\r\n", "\n")
+
+
 def _split(text: str) -> tuple[dict[str, Any], str]:
-    text = text.replace("\r\n", "\n")
+    text = _normal(text)
     head, sep, body = text[4:].partition("\n---\n") if text.startswith("---\n") else ("", "", "")
     if not sep:
         raise AutError("improve: rubric needs a --- frontmatter block")
@@ -86,7 +91,11 @@ def _split(text: str) -> tuple[dict[str, Any], str]:
             raise AutError("improve: rubric frontmatter lines must be unique key: value pairs")
         if key not in FIELDS:
             raise _bad(f"field {key!r}")
-        if value[:1] in {"[", "{"} or value[:1].isdigit() or value in {"true", "false"}:
+        if re.fullmatch(r"-?\d+", value):
+            meta[key] = int(value)
+        elif re.fullmatch(r"-?(\d+\.\d*|\.\d+)", value):
+            meta[key] = float(value)
+        elif value[:1] in {"[", "{"} or value[:1].isdigit() or value in {"true", "false"}:
             try:
                 meta[key] = json.loads(value)
             except ValueError:
@@ -163,7 +172,8 @@ def parse(text: str, source: str) -> Rubric:
             or not isinstance(checks.get("unknown_unless_complete", False), bool):
         raise _bad("checks")
     kind = meta.get("input", "attempt")
-    if kind not in INPUTS or kind == "outputs_summary" and "outputs" not in requires:
+    if not isinstance(kind, str) or kind not in INPUTS \
+            or kind == "outputs_summary" and "outputs" not in requires:
         raise _bad("input")
     qualify = meta.get("qualify", {})
     blocking = meta.get("blocking", False)
@@ -171,7 +181,7 @@ def parse(text: str, source: str) -> Rubric:
         raise _bad("qualify or blocking")
     return Rubric(
         id=meta["id"], version=_int(meta.get("version"), "version", 1, 10**6),
-        sha256=hashlib.sha256(text.replace("\r\n", "\n").encode()).hexdigest(),
+        sha256=hashlib.sha256(_normal(text).encode()).hexdigest(),
         question=question, definition=definition, labels=_labels(sections["Labels"]),
         threshold=threshold, priority=_int(meta.get("priority", 100), "priority", -10**6, 10**6),
         blocking=blocking, triggers=triggers, requires=requires, input=kind,
@@ -185,8 +195,9 @@ def _files(folder: Path) -> list[Path]:
 
 
 def load(user_dir: Path | None = None) -> list[Rubric]:
-    """Enabled rubrics sorted by (priority, id). A user file replaces the built-in with its id;
-    a user file with `enabled: false` and only an `id` switches that rubric off."""
+    """Enabled rubrics sorted by (priority, id). A user file replaces the built-in with its id
+    and keeps the built-in's `blocking` unless it sets its own; a user file with
+    `enabled: false` and only an `id` switches that rubric off."""
     found: dict[str, Rubric | None] = {}
     for source, folder in (("builtin", BUILTIN_DIR), ("user", user_dir)):
         seen: set[str] = set()
@@ -199,6 +210,9 @@ def load(user_dir: Path | None = None) -> list[Rubric]:
                 rubric = parse(text, source) if meta.get("enabled", True) else None
             except (OSError, UnicodeDecodeError, AutError) as exc:
                 raise AutError(f"improve: rubric file {path.name}: {exc}") from None
+            base = found.get(meta["id"])
+            if rubric and base and "blocking" not in meta:
+                rubric = replace(rubric, blocking=base.blocking)
             if meta["id"] in seen:
                 raise AutError(f"improve: two {source} rubric files share id {meta['id']}")
             seen.add(meta["id"])
@@ -242,49 +256,77 @@ def _shell_text(text: str, tool: str) -> str | None:
 
 def _family(words: list[str]) -> str:
     while words and (re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", words[0])
-                     or words[0] in {"env", "npx"}):
+                     or words[0] in {"env", "npx", "timeout"}):
         if words[0] == "env":
             words = words[1:]
             while words and words[0].startswith("-"):
                 words = words[2:] if words[0] in {"-u", "--unset", "-C", "--chdir"} else words[1:]
+        elif words[0] == "timeout":     # timeout [options] DURATION COMMAND
+            words = words[1:]
+            while words and words[0].startswith("-"):
+                words = words[1:]
+            words = words[1:]
         else:
             words = words[1:]
     if not words:
         return ""
-    first = re.split(r"[\\/]", words[0])[-1]
+    first = re.sub(r"\.exe$", "", words[0].rsplit("/", 1)[-1], flags=re.IGNORECASE)
     first = "python" if re.fullmatch(r"python[0-9.]*", first) else first
     rest = words[1:]
+    if first in {"bash", "sh", "zsh"} and len(rest) > 1 and rest[0] in {"-c", "-lc"}:
+        return command_family(rest[1], "Bash")
     if first == "python":
-        return f"python -m {rest[1]}" if len(rest) > 1 and rest[0] == "-m" else first
-    if first not in {"git", "gh", "npm", "pnpm", "uv", "cargo", "go"}:
+        for index, word in enumerate(rest):
+            if word == "-m" and index + 1 < len(rest):
+                return f"python -m {rest[index + 1]}"
+            if not word.startswith("-"):
+                break
+        return first
+    if first not in {"git", "gh", "npm", "pnpm", "uv", "poetry", "cargo", "go"}:
         return first
     i = 0
     while i < len(rest) and rest[i].startswith("-"):
         i += 2 if first == "git" and rest[i] in {"-C", "-c"} else 1
     if i >= len(rest):
         return first
-    if first == "uv" and rest[i] == "run":    # uv run X is X's family under uv run
+    if first in {"uv", "poetry"} and rest[i] == "run":    # uv run X is X's family under uv run
         after = rest[i + 1:]
         while after and after[0].startswith("-"):
             after = after[1:]
-        return f"uv run {_family(after)}" if after else "uv run"
+        return f"{first} run {_family(after)}" if after else f"{first} run"
     return f"{first} {rest[i]}"
+
+
+def _segments(command: str) -> list[list[str]]:
+    """Words of each simple command, split at ; & | outside quotes."""
+    # Backslashes become slashes so Windows paths survive POSIX quoting rules.
+    command = command.replace("\\", "/").replace("\n", ";")
+    lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|")
+    lexer.whitespace_split = True
+    try:
+        tokens = list(lexer)
+    except ValueError:      # unbalanced quotes, often from a clipped input
+        tokens = re.split(r"\s+|(?<=[;&|])|(?=[;&|])", command)
+    segments: list[list[str]] = [[]]
+    for token in tokens:
+        if token and set(token) <= {";", "&", "|"}:
+            segments.append([])
+        elif token:
+            segments[-1].append(token)
+    return segments
 
 
 def command_family(call_text: str, tool: str) -> str:
     """A short stable name for what a call ran, such as `git push` or `python -m pytest`.
-    Leading `cd ... &&`, `VAR=...`, `env` and `npx` are skipped. Non-shell tools give the tool
-    name, with MCP tools shortened to `mcp:server`."""
+    Leading `cd ...`, `source ...`, `VAR=...`, `env`, `npx` and `timeout` are skipped, and
+    `bash -c '...'` is read inside. Non-shell tools give the tool name, with MCP tools
+    shortened to `mcp:server`."""
     command = _shell_text(call_text, tool)
     if command is None:
         parts = tool.split("__")
         return f"mcp:{parts[1]}" if len(parts) > 2 and parts[0] == "mcp" else tool
-    for segment in re.split(r"&&|\|\||[;|\n]", command):
-        try:
-            words = shlex.split(segment)
-        except ValueError:
-            words = segment.split()
-        if words and words[0] not in {"cd", "pushd"}:
+    for words in _segments(command):
+        if words and words[0] not in {"cd", "pushd", "source", "."}:
             family = _family(words)
             if family:
                 return family

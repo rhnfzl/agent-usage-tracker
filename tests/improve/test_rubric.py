@@ -134,13 +134,32 @@ def test_check_failures_keep_todays_repair_feedback_and_new_checks_apply():
     assert judge._review_rules(BUILTIN["completion_supported"]) == ""
 
 
+def test_new_rubric_review_prompts_state_only_their_own_checks():
+    prompts = []
+
+    class Model:
+        def generate(self, prompt, max_tokens):
+            prompts.append(prompt)
+            return json.dumps({"verdict": "pass", "evidence_ids": [], "cause": "unknown",
+                               "rationale": "fine"})
+
+    for name in ("verbosity", "redundant_tests"):
+        judge._llm_review(CASE, BUILTIN[name], Model())
+    assert "A failure must cite its claim." in prompts[0]
+    assert "A failure must cite the tool call." in prompts[1]
+    assert not any("completion" in prompt or "recovery" in prompt for prompt in prompts)
+    override = replace(BUILTIN["completion_supported"], checks={"fail_must_cite": ["reply"]})
+    judge._llm_review(CASE, override, Model())
+    assert "BOTH" not in prompts[-1] and "A failure must cite its claim." in prompts[-1]
+
+
 # 2. parse refuses each bad field
 @pytest.mark.parametrize("front", [
     {"threshold": 0.5}, {"threshold": 1.2}, {"max_input_chars": 24001},
     {"id": "Bad-Id"}, {"id": "x" * 41}, {"applies_to": {"requires": ["moon"]}},
     {"applies_to": {"triggers": ["nightly"]}}, {"checks": {"fail_must_quote": ["reply"]}},
     {"checks": {"fail_cause_not_in": ["bad_cause"]}}, {"version": 0}, {"colour": "blue"},
-    {"input": "outputs_summary"}, {"max_cases": 0}, {"blocking": "yes"},
+    {"input": "outputs_summary"}, {"input": []}, {"max_cases": 0}, {"blocking": "yes"},
 ])
 def test_parse_refuses_bad_fields(front):
     with pytest.raises(AutError, match="rubric"):
@@ -158,11 +177,18 @@ def test_parse_refuses_bad_headings_and_label_sets(body):
         rubric.parse("---\nid: sample\nversion: 1\n---\n" + body, "user")
 
 
+def test_parse_reads_negative_and_leading_dot_numbers():
+    item = rubric.parse(text().replace("version: 1", "version: 1\npriority: -5\nthreshold: .8"),
+                        "user")
+    assert (item.priority, item.threshold) == (-5, .8)
+
+
 def test_parse_tolerates_crlf_and_wrapped_lines_with_a_line_ending_free_identity():
     wrapped = text().replace("Is it so?", "Is it\nso?").replace("- fail: No.", "- fail: No,\n  never.")
     item = rubric.parse(wrapped, "user")
     assert item.question == "Is it so?" and item.labels["fail"] == "No, never."
     assert rubric.parse(wrapped.replace("\n", "\r\n"), "user") == item
+    assert rubric.parse("\ufeff" + wrapped, "user") == item     # byte-order mark from an editor
 
 
 # 3. user files override built-ins, and switch them off
@@ -174,6 +200,12 @@ def test_user_file_replaces_a_builtin_and_enabled_false_removes_one(tmp_path):
     assert [item.id for item in loaded] == ["verbosity", "avoidable_recovery",
                                             "completion_supported", "code_quality"]
     assert loaded[0].source == "user" and loaded[0].question == "Is it so?"
+    (tmp_path / "core.md").write_text(text(id="completion_supported"), encoding="utf-8")
+    (tmp_path / "loose.md").write_text(text(id="avoidable_recovery", blocking=False),
+                                       encoding="utf-8")
+    loaded = {item.id: item for item in rubric.load(tmp_path)}
+    assert loaded["completion_supported"].blocking      # an override keeps the built-in's gate
+    assert not loaded["avoidable_recovery"].blocking    # unless it sets its own
     (tmp_path / "again.md").write_text(text(id="verbosity"), encoding="utf-8")
     with pytest.raises(AutError, match="share id verbosity"):
         rubric.load(tmp_path)
@@ -244,6 +276,16 @@ def test_applies_checks_triggers_finals_test_commands_and_outputs():
     ('{"command": "pytest ' + "x" * 50, "Bash", "pytest"),     # clipped JSON input
     ('{"owner": "x"}', "mcp__github__list_issues", "mcp:github"),
     ('{"file_path": "/a"}', "Read", "Read"),
+    ('bash -c "cd x && pytest -q"', "Bash", "pytest"),
+    ("python -u -m pytest", "Bash", "python -m pytest"),
+    ("timeout 60 pytest", "Bash", "pytest"),
+    ("poetry run pytest", "Bash", "poetry run pytest"),
+    ("source .venv/bin/activate && pytest", "Bash", "pytest"),
+    ("C:\\Py\\python.exe -m pytest", "Bash", "python -m pytest"),
+    ("pytest.exe -q", "Bash", "pytest"),
+    ("cd repo && python -m pytest -q 2>&1 | tail", "Bash", "python -m pytest"),
+    ('echo "a;b"; git status', "Bash", "echo"),
+    ('pytest "unbalanced', "Bash", "pytest"),
 ])
 def test_command_family(call_text, tool, family):
     assert rubric.command_family(call_text, tool) == family
@@ -332,6 +374,15 @@ def test_unfinished_non_blocking_rubric_still_completes_the_diagnosis(tmp_path, 
     assert report["stopped_by"]["limit"] == "max_calls"
 
 
+def test_blocking_rubrics_run_before_non_blocking_ones_of_lower_priority(tmp_path, monkeypatch):
+    store, audit = five_rubric_store(tmp_path, monkeypatch, sessions=1)
+    late = replace(BUILTIN["completion_supported"], priority=99)
+    monkeypatch.setattr(judge, "_rubrics", lambda: [BUILTIN["verbosity"], late])
+    tasks = []
+    judge.diagnose(store, audit, models=("test",), backend_for=lambda _: Recorder(tasks))
+    assert tasks == ["improve_completion_supported", "improve_verbosity"]
+
+
 def test_blocking_work_left_keeps_the_diagnosis_incomplete(tmp_path, monkeypatch):
     store, audit = five_rubric_store(tmp_path, monkeypatch, sessions=1)
     report = judge.diagnose(store, audit, models=("test",), max_calls=1,
@@ -408,3 +459,63 @@ def test_rubric_files_ship_in_the_package():
     names = {path.name for path in rubric.BUILTIN_DIR.glob("*.md")}
     assert names == {f"{name}.md" for name in BUILTIN}
     assert Path(rubric.__file__).parent / "rubrics" == rubric.BUILTIN_DIR
+
+
+def test_cut_off_extra_rubric_after_cached_blocking_work_releases_the_audit(tmp_path, monkeypatch):
+    store, audit = five_rubric_store(tmp_path, monkeypatch, sessions=1)
+    monkeypatch.setattr(judge, "_rubrics", lambda: list(BUILTIN.values())[:2])
+    judge.diagnose(store, audit, models=("test",), backend_for=lambda _: Recorder([]))
+    monkeypatch.setattr(judge, "_rubrics", lambda: list(BUILTIN.values()))
+    policy_id = store.put("cycle_policies", {"days": 7, "limit": 30, "budget_s": 60,
+        "case_limit": 12, "max_calls": 10, "models": ["test"], "explain_model": None})
+    monkeypatch.setattr(schedule, "audit", lambda *a, **kw: {"audit_id": audit, "sessions": 1})
+
+    class Alarm(Recorder):
+        def distribution(self, request):     # the cooperative deadline fires mid extra call
+            raise schedule._BudgetExpired
+
+    monkeypatch.setattr(schedule, "diagnose", lambda *a, **kw: judge.diagnose(
+        *a, **kw, backend_for=lambda _: Alarm([])))
+    report = schedule._worker(store, policy_id, "run")
+    assert report["status"] == "ok" and report["diagnosis"]["complete"]
+    assert report["diagnosis"]["unfinished_call"]["rubric"] == "verbosity"
+    assert json.loads((store.root / "pending_cycle.json").read_text())["audit"] is None
+
+
+def test_cached_blocking_work_publishes_complete_before_the_first_extra_call(tmp_path, monkeypatch):
+    store, audit = five_rubric_store(tmp_path, monkeypatch, sessions=1)
+    monkeypatch.setattr(judge, "_rubrics", lambda: list(BUILTIN.values())[:2])
+    judge.diagnose(store, audit, models=("test",), backend_for=lambda _: Recorder([]))
+    monkeypatch.setattr(judge, "_rubrics", lambda: list(BUILTIN.values()))
+
+    def low_memory():
+        raise AutError("improve: not enough free memory")
+
+    monkeypatch.setattr(judge, "memory_guard", low_memory)
+    seen = []
+    with pytest.raises(AutError, match="memory"):
+        judge.diagnose(store, audit, models=("test",), backend_for=lambda _: Recorder([]),
+                       progress=seen.append)
+    assert seen[-1]["complete"] and seen[-1]["optional_finished"] == 0
+
+
+def test_a_policy_without_rubrics_accepts_only_the_two_historical_ids(tmp_path):
+    store = Store(tmp_path / "private")
+    case = {"events": [{"id": "p", "kind": "prompt", "text": "Check"}],
+            "coverage": {"complete": True}, "omitted_task_events": 0}
+    job = store.put("diagnoses", {"version": 7, "cases": [store.put("cases", case)],
+                                  "audit_id": "a"})
+    oracle = tmp_path / "oracle.py"
+    oracle.write_text("print('{}')\n")
+    for name, accepted in (("completion_supported", True), ("verbosity", False)):
+        spec = store.put("reference_specs", {"version": 1, "split": "holdout",
+            "references": [{"evidence_sha256": validation.evidence_key(case), "rubric": name,
+                            "expected": "fail"}],
+            "oracle_argv": [sys.executable, str(oracle), "{reference_input}"],
+            "oracle_cwd": str(tmp_path), "oracle_files": {str(oracle): file_digest(oracle)},
+            "timeout_s": 5})
+        if accepted:
+            assert validation.validate(store, spec, job)["execution_required"]
+        else:
+            with pytest.raises(AutError, match="invalid executable reference"):
+                validation.validate(store, spec, job)

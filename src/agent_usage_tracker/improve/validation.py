@@ -53,10 +53,10 @@ def validate(store: Store, spec_id: str, diagnosis_id: str, *,
                 or "{reference_input}" not in argv:
             raise ValueError
         identities = set()
-        # A policy names its rubrics; a policy without any keeps the built-in set.
+        # A policy names its rubrics; one without any predates them and had only the two core ones.
         known = policy.get("rubrics")
         if not isinstance(known, dict):
-            known = {item.id for item in rubric.load()}
+            known = set(rubric.LEGACY_V1)
         for ref in references:
             if ref["rubric"] not in known or ref["expected"] not in LABELS \
                     or not re.fullmatch(r"[a-f0-9]{64}", ref["evidence_sha256"]):

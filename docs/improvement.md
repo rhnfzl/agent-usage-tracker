@@ -165,9 +165,11 @@ Each criterion is a markdown file. Built-ins ship in
 never runs.
 
 Your own files go in `rubrics/` next to the config file
-(`~/.config/agent-usage-tracker/rubrics/*.md`). A file with the same `id` replaces the built-in.
+(`~/.config/agent-usage-tracker/rubrics/*.md`). A file with the same `id` replaces the built-in, and keeps the built-in's `blocking` unless the
+file sets it.
 A file with only `id: NAME` and `enabled: false` in its frontmatter switches that rubric off.
-A broken file stops the diagnosis with its file name; it is never skipped silently.
+A broken file stops the diagnosis with its file name; it is never skipped silently, so keep
+notes and other markdown out of that folder.
 
 ```markdown
 ---
@@ -222,10 +224,12 @@ the text the v1 files were moved from, else 0. Validation of an older diagnosis 
 identity, so its result does not change. The first night after the update re-votes the pending
 audit's cases once, because the rubric identity changed.
 
-The diagnosis judges rubric by rubric in priority order, so the blocking rubrics finish before
-the others get budget. `complete` counts blocking work only. `finished` and `total` count blocking
-judgments; `optional_finished` and `optional_total` count the rest. `reason` is `budget` when any
-work, blocking or not, was left. The scheduled worker releases its pending audit at the first
+The diagnosis judges rubric by rubric: blocking rubrics first, each group in priority order, so
+the others get only what is left. Before markdown rubrics it went case by case; after a cut-off
+night, the first rubric may now have more cases judged than the second. `complete` counts
+blocking work only, so with no blocking rubric enabled it is complete at once. `finished` and
+`total` count blocking judgments; `optional_finished` and `optional_total` count the rest;
+`verdicts` counts both. `reason` is `budget` when any work, blocking or not, was left. The scheduled worker releases its pending audit at the first
 checkpoint where blocking work is complete, so a slow non-blocking rubric never holds the next
 audit, even if the run is cut off later.
 
