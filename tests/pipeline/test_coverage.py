@@ -266,11 +266,11 @@ def test_publication_receipts_validate_freshness_revision_and_completed_day(cfg,
 
 def test_save_report_tracks_issue_signature_only(cfg):
     report = coverage.build_report(cfg, now=NOW)
-    assert coverage.save_report(report)
+    assert coverage.save_report(report)[0]
     report["generated_at"] = (NOW + timedelta(seconds=1)).isoformat()
-    assert not coverage.save_report(report)
+    assert not coverage.save_report(report)[0]
     report["issues"].append({"code": "new", "source_id": "x", "severity": "warning"})
-    assert coverage.save_report(report)
+    assert coverage.save_report(report)[0]
     assert json.loads(coverage.report_path().read_text())["issues"][-1]["code"] == "new"
 
 

@@ -177,8 +177,78 @@ def test_delayed_older_report_cannot_clear_newer_warning(world):
     before = coverage.report_path().read_bytes()
     older = {"version": 1, "generated_at": (now - timedelta(minutes=1)).isoformat(),
              "issues": []}
-    assert coverage.save_report(older) is False
+    assert coverage.save_report(older) is None
     assert coverage.report_path().read_bytes() == before
+
+
+def assessed(monkeypatch, *, at, issues, during=None):
+    """Run the scan's coverage step with a fixed assessment; `during` runs inside its build."""
+    from agent_usage_tracker import coverage
+
+    def build(cfg):
+        if during:
+            during()
+        return {"version": 1, "generated_at": at.isoformat(), "issues": issues}
+
+    monkeypatch.setattr(coverage, "build_report", build)
+    monkeypatch.setattr(coverage, "save_scan_observations", lambda rows: None)
+    from agent_usage_tracker.config import load_config
+    return scan._record_coverage(load_config(), [])
+
+
+def test_an_older_overlapping_scan_publishes_no_coverage_row(world, monkeypatch):
+    from datetime import datetime, timedelta, timezone
+    from agent_usage_tracker import coverage
+
+    now = datetime.now(timezone.utc)
+    assert assessed(monkeypatch, at=now - timedelta(minutes=2), issues=[])["status"] == "ok"
+    newer = assessed(monkeypatch, at=now, issues=[MISSING])
+    assert newer["collector"] == "coverage" and newer["status"] == "degraded"
+    assert newer["finished_at"] == now
+    saved = coverage.report_path().read_bytes()
+    assert assessed(monkeypatch, at=now - timedelta(minutes=1), issues=[]) is None
+    assert coverage.report_path().read_bytes() == saved
+    assert list(json.loads(saved)["alerts"]) == ["source_payload_missing:collector:cursor"]
+
+
+def test_alert_state_merges_with_a_report_saved_during_the_build(world, monkeypatch):
+    from datetime import datetime, timedelta, timezone
+    from agent_usage_tracker import coverage
+
+    now = datetime.now(timezone.utc)
+    coverage.report_path().parent.mkdir(parents=True, exist_ok=True)
+    coverage.report_path().write_text(json.dumps(       # written before alerts existed
+        {"version": 1, "generated_at": (now - timedelta(hours=2)).isoformat(), "issues": []}))
+    # Another scan saves the baseline while this one builds, so this scan's issue is new.
+    row = assessed(monkeypatch, at=now, issues=[MISSING], during=lambda: assessed(
+        monkeypatch, at=now - timedelta(hours=1), issues=[]))
+    assert row["status"] == "degraded" and row["error"] == "new: cursor payloads missing"
+
+
+def test_a_damaged_previous_report_does_not_hide_a_new_issue(world, monkeypatch):
+    from datetime import datetime, timezone
+    from agent_usage_tracker import coverage
+
+    coverage.report_path().parent.mkdir(parents=True, exist_ok=True)
+    coverage.report_path().write_text("{not json")
+    row = assessed(monkeypatch, at=datetime.now(timezone.utc), issues=[MISSING])
+    assert row["status"] == "degraded"
+
+
+def test_heartbeat_goes_out_when_the_coverage_step_raises(world, monkeypatch):
+    from agent_usage_tracker import push
+
+    delivered = []
+    monkeypatch.setattr(scan, "make_sender", lambda cfg: [].extend)
+    monkeypatch.setattr(push, "send_scan_rows", lambda dsn, rows: delivered.extend(rows))
+
+    def broken(cfg, observations):
+        raise RuntimeError("fixture coverage failure")
+
+    monkeypatch.setattr(scan, "_record_coverage", broken)
+    with pytest.raises(RuntimeError, match="fixture coverage failure"):
+        cli.main(["--agents", "claude_code", "scan"])
+    assert [row["collector"] for row in delivered] == ["claude_code"]
 
 
 

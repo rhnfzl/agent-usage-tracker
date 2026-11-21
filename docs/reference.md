@@ -232,7 +232,9 @@ actionable coverage warning appears (`harness_active_unread`, `discovery_limited
 Its `error` names the new issues with fixed phrases and source ids only, never a path, for example
 `new: hermes harness active, no AUT reader`. The first scan after an upgrade records the
 current issues as known without an alert. An issue that is gone for 7 days is forgotten, so it
-alerts again if it comes back. The state lives under `alerts` in `coverage.json`. A `degraded`
+alerts again if it comes back. The state lives under `alerts` in `coverage.json`. Overlapping
+scans merge it under the report lock; a scan whose assessment is older than the saved one
+sends no row, and the row's `finished_at` is its assessment time. A `degraded`
 row pages only with a watchdog rule for it; the existing rule pages only on `error` rows.
 
 ## Privacy model

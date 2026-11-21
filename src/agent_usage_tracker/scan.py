@@ -227,26 +227,28 @@ def run_scan(cfg: Config, agents: Sequence[str], *, dry_run: bool) -> dict[str, 
 
 def _record_coverage(cfg: Config, observations: list[dict[str, Any]]) -> dict[str, Any] | None:
     """Save the coverage receipt and return its `coverage` scan row (None if unavailable)."""
-    from .coverage import (ALERT_STATUS, _read_json, alert_state, build_report, report_path,
-                           save_report, save_scan_observations)
+    from .coverage import ALERT_STATUS, build_report, save_report, save_scan_observations
 
     started_at = datetime.now(timezone.utc)
     try:
         save_scan_observations(observations)
-        _, previous = _read_json(report_path())
         assessment = build_report(cfg)
-        assessment["alerts"], alert = alert_state(
-            assessment, previous, datetime.fromisoformat(assessment["generated_at"]))
-        changed = save_report(assessment)
+        saved = save_report(assessment)
     except (OSError, ValueError) as exc:
         print(f"aut: coverage receipt unavailable ({type(exc).__name__}); "
               "inspect with aut doctor --json", file=sys.stderr)
         return None
+    if saved is None:       # an overlapping scan saved a newer assessment; only its row counts
+        return None
+    changed, alert = saved
     if changed and assessment["issues"]:
         print(f"aut: coverage changed: {len(assessment['issues'])} reported issue(s) "
               "within inspected sources; inspect with aut doctor --json", file=sys.stderr)
     # The row returns to ok once an issue is known: the effort view marks a pair stale without ok.
-    return scan_row(cfg, "coverage", started_at, status=ALERT_STATUS if alert else "ok", error=alert)
+    row = scan_row(cfg, "coverage", started_at, status=ALERT_STATUS if alert else "ok", error=alert)
+    # Ordered by the assessment it reports, not by when this scan reached delivery.
+    row["finished_at"] = datetime.fromisoformat(assessment["generated_at"])
+    return row
 
 
 def _print_tokens(name: str, agg: AgentTally) -> None:

@@ -548,14 +548,16 @@ _ALERT_PHRASES = {
 }
 
 
-def alert_state(report: dict[str, Any], previous: dict[str, Any],
-                now: datetime) -> tuple[dict[str, dict[str, str]], str | None]:
+def alert_state(report: dict[str, Any], previous: dict[str, Any], now: datetime, *,
+                previous_status: str = "available") -> tuple[dict[str, dict[str, str]], str | None]:
     """Carry per-issue alert state and return it with the text of the issues that are new.
     An actionable warning alerts for ALERT_HOURS after it first appears, then it is known.
     A key absent for ALERT_FORGET_DAYS is forgotten, so flapping issues do not page again.
     The text holds fixed phrases and source ids only, never paths."""
     prior = previous.get("alerts")
-    baseline = not isinstance(prior, dict)      # first report after upgrade: today's issues are known
+    # The first report after an install or upgrade knows today's issues. A damaged previous file
+    # is not a first report, so its issues still alert.
+    baseline = not isinstance(prior, dict) and previous_status in {"available", "missing"}
     prior = prior if isinstance(prior, dict) else {}
     forget = timedelta(days=ALERT_FORGET_DAYS)
 
@@ -584,18 +586,23 @@ def alert_state(report: dict[str, Any], previous: dict[str, Any],
     return alerts, ("new: " + "; ".join(phrases))[:300]
 
 
-def save_report(report: dict[str, Any]) -> bool:
-    """Keep the latest private assessment and identify changes to the current issue set."""
+def save_report(report: dict[str, Any]) -> tuple[bool, str | None] | None:
+    """Merge alert state from the previous assessment and keep this one, both under the report
+    lock, so overlapping scans cannot lose each other's alerts. Returns (issue set changed,
+    new-alert text), or None when a newer assessment is already saved."""
     signature = hashlib.sha256(json.dumps(sorted(
         (str(i.get("code", "")), str(i.get("source_id", "")), str(i.get("severity", "")))
         for i in report.get("issues", []) if isinstance(i, dict))).encode()).hexdigest()
     path = report_path()
     with _locked(path):
-        _, previous = _read_json(path)
+        status, previous = _read_json(path)
         previous_at = _stamp(previous.get("generated_at"))
         incoming_at = _stamp(report.get("generated_at"))
         if (previous_at and previous_at <= datetime.now(timezone.utc)
                 and (incoming_at is None or previous_at > incoming_at)):
-            return False
+            return None
+        report["alerts"], alert = alert_state(report, previous,
+                                              incoming_at or datetime.now(timezone.utc),
+                                              previous_status=status)
         atomic_write_text(path, json.dumps({**report, "issue_signature": signature}, sort_keys=True))
-    return previous.get("issue_signature") != signature
+    return previous.get("issue_signature") != signature, alert
