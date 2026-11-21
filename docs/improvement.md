@@ -329,6 +329,92 @@ read are counted as `skipped`.
 on every outcome. A grouping failure journals `groups_error` with the error type and never
 fails the cycle or the inbox.
 
+## Drafted proposals
+
+`aut improve draft` prepares a small change for human review. It writes proposals and candidates
+inside the private store. It never edits source files, accepts proposals, commits, applies or merges changes.
+
+```bash
+aut improve draft --max-groups 1 --budget-usd 1
+aut improve draft --target /path/to/project/config.toml
+aut improve draft --mode failover --order pi --explain-model cached-local-model
+aut improve draft --mode round_robin --order codex,claude,cursor,pi
+```
+
+The newest group report supplies recurring groups, in report order. Default: one group, at most
+two calls per group, a 360-second run budget and 180 seconds per model call. Rejected groups
+stay blocked unless `--reconsider FULL_GROUP_KEY` names one. Open proposals, accepted proposals
+and adoptions also block drafting. A stale proposal permits a new draft.
+
+Automatic selection prefers the group's harness. Ties use current quota headroom and the last
+100 draft attempts' success rates. Missing or stale quota stays unknown. Existing quota reports
+come from `~/.config/aut/observations.sqlite3`, opened read-only. Errors and timeouts advance to
+the next adapter. Invalid output gets one repair attempt. MLX always comes last, including manual
+`failover` and `round_robin` modes. Decisions and skip reasons are recorded privately.
+
+Remote packets contain signals, counts, redacted review rationales and selected redacted file
+text. The user approved selected file text on 2026-11-21. The default excludes conversation
+events for every remote flavor and failover attempt. `--excerpts all` separately opts in to
+redacted events from at most three cases, clipped to 4,000 characters each. MLX includes these
+events locally. Target paths are local mappings; the model receives `target_1` style aliases.
+The exact sent prompt is saved under `draft_packets`, and its digest is kept in the proposal.
+Redaction detects known patterns; it cannot identify every possible secret.
+
+Discovery offers project AGENTS.md (otherwise CLAUDE.md) for one project. Cross-project groups
+use global instruction files from every registered Claude and Codex profile, plus ~/AGENTS.md.
+Tool-contract groups may also offer matching Claude skill files. Environment groups use explicit
+configuration globs, restricted to `.toml`, `.json`, `.yaml`, `.yml`, `.ini`, `.cfg`, `.conf` and
+`.env` files. Code requires `--target`. At most four readable text targets of 8,000 characters
+each are offered. Oversized or unreadable files are skipped with reasons.
+
+Optional settings are read without loading sink configuration:
+
+```toml
+[improve]
+draft_targets = ["~/.config/example/*.toml"]
+draft_excerpts = "none"
+```
+
+Generated BEGIN/END blocks and lines with detected secrets are hidden. Returned `before` spans
+must match the original local file exactly once and cannot cross hidden regions. No secret is
+restored into model output. Responses must have exactly the requested fields, bounded explanatory
+text, offered rubric ids and at most 1,200 added characters. A changed source invalidates the draft.
+
+Git targets stage in a private shared clone at source HEAD, without source worktree metadata
+writes. A dirty source target can produce an unstaged proposal when the clone differs. Non-Git
+targets stage in a plain private candidate directory. Review the inbox diff and use the existing
+human accept/reject commands. A shared clone depends on the source object store until accepted.
+
+### Adapter limits
+
+The verified remote protocol is **Pi 1.5.0** with a configured model and unexpired file-based
+OAuth credentials. It uses a temporary credential-only home and an empty working directory.
+Tools, MCP, extensions, skills, context files, templates, themes and session persistence are
+disabled explicitly. Only the chosen provider's credential is copied; the source is not refreshed
+or changed. Other Pi versions fail closed until their isolation is checked.
+
+Installed Codex 0.171.0 has no verified zero-tools control. Cursor 2026.11.05 print mode retains
+tools. Claude 2.1.330 OAuth mode cannot prove absence of managed hooks; bare mode disables OAuth
+and still permits managed hooks. These adapters are unavailable with explicit reasons. A read-only
+filesystem sandbox is insufficient. No command silently runs these CLIs with tools enabled.
+
+Pi OAuth cost is unknown, not zero. The report separates `known_spend_usd` and `unpriced_calls`.
+`--budget-usd` caps admission against reported dollar spend; it cannot cap an unpriced subscription
+call. Call counts and subprocess deadlines still apply. MLX uses the shared `replay-model` lock,
+offline mode and a hard subprocess deadline. No MLX inference or remote model calls were used
+to validate this feature.
+
+Isolation references: [Pi CLI](https://docs.pi.dev/latest/cli),
+[Pi settings](https://docs.pi.dev/latest/settings),
+[Claude hooks](https://code.claude.com/docs/en/hooks),
+[Claude CLI](https://code.claude.com/docs/en/cli-reference), and
+[Cursor parameters](https://cursor.com/docs/cli/reference/parameters).
+Installed help was checked on 2026-11-21. These references describe CLI controls, not a live-run result.
+
+`packaging/launchd/dev.aut.improve-draft.plist` is an optional 05:30 template. It does not run at
+load. Replace its runtime, user and PATH placeholders before operator installation. Its PATH must
+find the CLI and its runtime. Merging or packaging the template changes no live job.
+
 ## Prepare a scoped change
 
 Create text files with the exact old and new spans:

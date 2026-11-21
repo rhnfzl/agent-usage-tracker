@@ -59,15 +59,22 @@ def parse_dist(text: str, ids: list[str]) -> dict[str, float] | None:
     return {i: v / s for i, v in vals.items()} if s > 0 else None
 
 
-def ask_claude(prompt: str, timeout: int = 180) -> tuple[str, float]:
+def ask_claude(prompt: str, timeout: int = 180, *, system: str = SYSTEM,
+               budget_usd: float | None = None) -> tuple[str, float]:
     """(answer text, cost in USD) of one headless Sonnet call. Raises on any failure; the error
     never carries the prompt or claude's output."""
     exe = shutil.which("claude")
     if not exe:
         raise AutError("label teach: the claude CLI is not on PATH")
+    args = [*CLAUDE_ARGS[:-1], system]
+    if budget_usd is not None:
+        import math
+        if not math.isfinite(budget_usd) or budget_usd <= 0:
+            raise AutError("label teach: budget must be a finite positive dollar amount")
+        args.extend(("--max-budget-usd", str(budget_usd)))
     with tempfile.TemporaryDirectory() as d:
         p = subprocess.run(  # nosec B603 # constant args, no shell; the prompt goes over stdin
-            [exe, *CLAUDE_ARGS], input=prompt, capture_output=True, text=True,
+            [exe, *args], input=prompt, capture_output=True, text=True,
             encoding="utf-8", timeout=timeout, cwd=d)
     if p.returncode:
         raise RuntimeError(f"claude exited {p.returncode}")

@@ -40,6 +40,7 @@ other command refuses it.
 | `aut label review [--task T] [--days D]` | answer gold labels one unit at a time on a local page | `pg_dsn` |
 | `aut improve label --rubric ID [--limit N]` | compare advisory judges with human labels on a token-protected local page; no model calls | eligible cases in the private store |
 | `aut improve report-card [--days 28] [--format md\|html\|json]` | refresh qualifications, write private Markdown and HTML reports, and print the chosen format; no model or sink calls | private store and optional ledger timezone setting |
+| `aut improve draft [--max-groups 1] [--budget-usd 1] [--budget-s 360] [--mode auto\|failover\|round_robin] [--order codex,claude,cursor,pi] [--excerpts none\|all] [--target PATH] [--reconsider KEY] [--explain-model MODEL]` | draft recurring groups into private candidates for human review; no source edits or acceptance | safely isolated signed-in Pi 1.5.0, or cached MLX model; see [adapter limits](improvement.md#drafted-proposals) |
 | `aut label eval --task T [--days D]` | score every backend on your gold labels (saved scores are re-used) and print one table: quality, speed, memory | same as `run` |
 | `aut label eval --task T --final --model M [--days D]` | score M on the final test days, which nothing else reads | an eval record of M |
 | `aut label choose --task T [--model M]` | with `--model`, write M's saved result into `label.json`; without it, print the table and a recommendation and write nothing | an eval record |
