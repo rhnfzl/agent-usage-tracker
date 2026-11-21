@@ -178,7 +178,7 @@ def run_once(store: Store, *, days: int = 7, limit: int = 30, case_limit: int = 
                 if result["accepted"]:
                     raise AutError("improve: worker did not preserve its matching result") from exc
             diagnosis = report.get("diagnosis", report.get("progress", {}).get("diagnosis", {}))
-            if audit_id is None and diagnosis.get("complete"):
+            if audit_id is None and not result["accepted"] and diagnosis.get("complete"):
                 # A worker killed after its early release never wrote pending again; a freezer
                 # that started after that release must still see a new write identity.
                 atomic_write_text(store.root / "pending_cycle.json",

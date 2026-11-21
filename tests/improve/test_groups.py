@@ -1,5 +1,5 @@
 import json
-from datetime import date
+from datetime import date, datetime
 
 import pytest
 
@@ -8,7 +8,10 @@ from agent_usage_tracker.improve.rubric import command_family
 from agent_usage_tracker.improve.store import Store
 
 TODAY = date(2026, 11, 20)
-NOON = "2026-11-{day:02d}T12:00:00-08:00"     # midday in Los Angeles, the same day in UTC+1
+
+
+def noon(day):      # local midday, so the work day is the same in every time zone
+    return datetime(2026, 11, day, 12).astimezone().isoformat()
 
 
 @pytest.fixture
@@ -21,7 +24,7 @@ def failing_case(store, session="s1", *, day=19, error="Exit code 1\nzsh: comman
                  command="cd repo && python -m pytest -q", cwd="/work/aut", agent="codex"):
     events = [
         {"id": f"{session}-p", "kind": "prompt", "text": "run", "call_id": "", "tool": "",
-         "status": "unknown", "timestamp": NOON.format(day=day)},
+         "status": "unknown", "timestamp": noon(day)},
         {"id": f"{session}-c", "kind": "call", "text": json.dumps({"command": command}),
          "call_id": f"{session}-x", "tool": "Bash", "status": "unknown", "timestamp": None},
         {"id": f"{session}-r", "kind": "result", "text": error, "call_id": f"{session}-x",
@@ -52,6 +55,15 @@ def test_error_class_ignores_paths_numbers_and_quotes():
     assert groups.error_class("zsh: no matches found: *.tmp") == "shell_glob"
     # a specific class wins over the exit code line that Claude Code and Codex print first
     assert groups.error_class("Exit code 127\nzsh: command not found: uvx") == "command_not_found"
+    # incidental words in a long output do not pick a specific class
+    declined = "Exit code 1\nThe user doesn't want to proceed. The tool use was rejected."
+    assert groups.error_class(declined) == "user_declined"
+    assert groups.error_class("Exit code 2\nmake: Error 2\nsee conflict in docs") == "nonzero_exit"
+    assert groups.error_class("Exit code 1\nBuild failed") == "nonzero_exit"
+    assert groups.error_class("! [rejected]  main -> main (fetch first)") == "push_rejected"
+    assert groups.error_class("CONFLICT (content): Merge conflict in a.py") == "conflict"
+    assert groups.error_class("Exit code 1\n== 2 failed, 3 passed in 1s ==") == "test_failure"
+    assert groups.error_class("FAILED tests/x.py::test_a - assert 1") == "test_failure"
     assert groups.error_class("") == ""
     assert "frobnicate" not in groups.error_class("frobnicate went wrong")
 

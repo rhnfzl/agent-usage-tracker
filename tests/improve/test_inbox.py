@@ -56,6 +56,9 @@ def test_the_inbox_escapes_group_signals_and_survives_a_bad_report(store):
     page = (store.root / "inbox.html").read_text()
     assert "<script>" not in page and "&lt;script&gt;x&lt;/script&gt; · c" in page
     assert "&lt;b&gt; (1)" in page
+    store.append("groups", report_id=store.put("group_reports", {"groups": [{"old": 1}]}))
+    inbox.write(store, [])                                 # an older record shape
+    assert "could not be read" in (store.root / "inbox.html").read_text()
     store.append("groups", report_id="0" * 64)            # missing record
     inbox.write(store, [])
     assert "could not be read" in (store.root / "inbox.html").read_text()

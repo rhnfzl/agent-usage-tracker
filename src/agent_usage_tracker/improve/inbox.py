@@ -17,12 +17,15 @@ def _groups(store: Store) -> str:
             "<p>Fail and split-vote judgments grouped by rubric, cause, tool, command and error "
             "class. Tasks counts distinct sessions, so one long session is one task. "
             "Last audit counts unsampled error results with the same tool, command and error.</p>")
-    try:
-        report = groups.latest(store)
-    except Exception:       # the page must render even when the group report is unreadable
+    try:    # the page must render even when the group report is missing, old or malformed
+        return head + _group_table(groups.latest(store))
+    except Exception:
         return head + "<p>The group report could not be read.</p>"
+
+
+def _group_table(report: dict[str, Any] | None) -> str:
     if not report or not report["groups"]:
-        return head + "<p>No failure groups yet.</p>"
+        return "<p>No failure groups yet.</p>"
     rows = []
     for group in report["groups"][:TOP_GROUPS]:
         values = group["signals"]
@@ -33,8 +36,8 @@ def _groups(store: Store) -> str:
                  f"{group['first_work_day']} to {group['last_work_day']}",
                  "yes" if group["recurring"] else "no", str(group["audit_incidents"])]
         rows.append("<tr>" + "".join(f"<td>{html.escape(cell)}</td>" for cell in cells) + "</tr>")
-    return (head + f"<p>Last {report['window_days']} days up to {html.escape(report['day'])}; "
-            f"recurring at {report['threshold']} or more tasks.</p>"
+    return (f"<p>Last {int(report['window_days'])} days up to {html.escape(report['day'])}; "
+            f"recurring at {int(report['threshold'])} or more tasks.</p>"
             "<div class=scroll role=region aria-label='Failure groups' tabindex=0><table>"
             "<tr><th>Group</th><th>Tasks</th><th>Judgments</th><th>Projects</th>"
             "<th>Work days</th><th>Recurring</th><th>Last audit</th></tr>"

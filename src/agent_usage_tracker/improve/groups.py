@@ -16,21 +16,22 @@ from ..config import AutError
 from ..event import parse_ts
 from .rubric import command_family, tool_name
 from .store import Store, digest, repository
-from .studies import identity, shortlist
+from .studies import shortlist
 
 # First match wins, so specific classes come before the generic ones.
-_CLASSES = [(name, re.compile(pattern)) for name, pattern in (
+_CLASSES = [(name, re.compile(pattern, re.M)) for name, pattern in (
     ("command_not_found", r"command not found"),
     ("no_such_file", r"no such file"),
     ("missing_module", r"no module named"),
     ("permission_denied", r"permission denied|operation not permitted"),
     ("timeout", r"timed out"),
     ("unknown_tool", r"unknown tool"),
+    ("user_declined", r"tool use was rejected"),
     ("shell_glob", r"no matches found"),
-    ("push_rejected", r"non-fast-forward|rejected"),
-    ("conflict", r"conflict"),
+    ("push_rejected", r"non-fast-forward|\[rejected\]|\[remote rejected\]"),
+    ("conflict", r"merge conflict|^conflict \("),
     ("syntax_error", r"syntaxerror"),
-    ("test_failure", r"assertionerror| failed"),
+    ("test_failure", r"assertionerror|^failed |<n> failed"),
     ("nonzero_exit", r"exit(?:ed with)? code:? <n>"),
 )]
 _NAME = re.compile(r"[A-Za-z0-9_.:+@ -]{1,60}")
@@ -179,7 +180,7 @@ def refresh(store: Store, *, window_days: int = 14, threshold: int = 3,
             snapshot = case["session_snapshot"]
             session = sessions[snapshot] = sessions.get(snapshot) or store.get("sessions", snapshot)
             values = signals(row, case, session)
-            task = identity(store, case_id)["session"]
+            task = digest([session["agent"], session["session_id"]])    # studies.identity()
             cwd = str(session.get("cwd") or "")
             if cwd not in projects:
                 repo = repository(Path(cwd)) if cwd else None

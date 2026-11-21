@@ -234,11 +234,12 @@ night, the first rubric may now have more cases judged than the second. `complet
 blocking work only, so with no blocking rubric enabled it is complete at once. `finished` and
 `total` count blocking judgments; `optional_finished` and `optional_total` count the rest;
 `verdicts` counts both. `reason` is `budget` when any work, blocking or not, was left.
-An error during non-blocking work, such as low memory or an invalid model distribution, stops
-the non-blocking rubrics without failing the diagnosis: `reason` is `optional_error` (or
-`budget` when blocking work was also left) and `optional_skipped` names the rubric and the
-error type. An error during blocking work still
-fails the run. The scheduled worker releases its pending audit at the first
+An error during non-blocking work never fails the diagnosis. An invalid model vote skips that
+case only; an error outside a vote, such as low memory, stops the remaining non-blocking
+rubrics. `reason` is then `optional_error` (or `budget` when blocking work was also left) and
+`optional_skipped` lists each rubric and error type. A skipped case is tried again next night.
+An error during blocking work still fails the run.
+The scheduled worker releases its pending audit at the first
 checkpoint where blocking work is complete, so a slow non-blocking rubric never holds the next
 audit, even if the run is cut off later. When the run ends it writes the released state once
 more, so an `audit --cycle` that started during the non-blocking work returns `superseded`.
@@ -249,11 +250,13 @@ more, so an `audit --cycle` that started during the non-blocking work returns `s
 aut improve groups --days 14 --threshold 3
 ```
 
-This reads the stored judgments and runs no model. It groups judgments whose case falls in the
+This reads the stored judgments, runs no model, and saves a new report. It groups judgments whose case falls in the
 last `--days` local work days (the date of the case's first timestamped event) and that are
 `fail`, or `unknown` with at least one model voting `fail` at the rubric threshold (a split
 vote). Only the newest judgment per case and rubric counts: the highest `rubric_version`, then
-the one the latest diagnosis listed.
+the one the latest diagnosis listed. A diagnosis that was killed journals no list, so a tie
+among its judgments falls back to a fixed but arbitrary order. Cases dated after today are
+left out.
 
 The group key is a digest of five signals:
 
