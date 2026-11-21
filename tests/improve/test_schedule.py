@@ -254,6 +254,65 @@ def test_freeze_cycle_audit_queues_nothing_when_a_cycle_finishes_during_the_buil
     assert json.loads((store.root / "pending_cycle.json").read_text()) == finished
 
 
+def test_freeze_cycle_audit_is_superseded_by_a_cycle_that_released_early(tmp_path, monkeypatch):
+    # The worker releases pending at its first complete checkpoint, then judges non-blocking
+    # rubrics. A freezer that starts in that phase and finishes after the cycle must not freeze.
+    import threading
+
+    from agent_usage_tracker.improve import schedule
+
+    store = Store(tmp_path / "private")
+    write_pending(store, {"audit": frozen_audit(store)})
+    policy = cycle_policy(store)
+    released, go = threading.Event(), threading.Event()
+
+    def diagnose(*args, progress, **kwargs):
+        done = {"complete": True, "finished": 1, "total": 1, "reason": "complete",
+                "calls": 1, "judgment_ids": []}
+        progress(done)          # releases pending
+        released.set()
+        assert go.wait(10)      # a non-blocking rubric is still being judged
+        return done
+
+    monkeypatch.setattr(schedule, "diagnose", diagnose)
+    worker = threading.Thread(target=schedule._worker, args=(store, policy, "run"))
+    worker.start()
+    assert released.wait(10)
+    fresh = frozen_audit(store, tag="next")
+
+    def build(*args, **kwargs):     # the cycle finishes while the freezer builds
+        go.set()
+        worker.join(10)
+        return fresh
+
+    monkeypatch.setattr(schedule, "audit", build)
+    assert schedule.freeze_cycle_audit(store) == {"status": "superseded",
+                                                  "audit_id": fresh["audit_id"]}
+    assert json.loads((store.root / "pending_cycle.json").read_text())["audit"] is None
+
+
+def test_a_worker_killed_after_its_early_release_still_changes_the_pending_write(
+        tmp_path, monkeypatch):
+    from agent_usage_tracker.improve import schedule
+
+    store = Store(tmp_path / "private")
+    write_pending(store, {"audit": frozen_audit(store)})
+    seen = {}
+
+    def killed(argv, cwd, timeout):
+        run_id, policy = argv[argv.index("--run-id") + 1], argv[argv.index("--policy") + 1]
+        write_pending(store, {"policy_id": policy, "audit": None})     # the early release
+        (store.root / "worker_result.json").write_text(json.dumps({"run_id": run_id, "report": {
+            "policy_id": policy, "status": "running", "diagnosis": {"complete": True}}}))
+        seen["release"] = schedule._pending_write(store)
+        return {"accepted": False, "timeout": True, "exit_code": -9}
+
+    monkeypatch.setattr(schedule, "command", killed)
+    assert run_once(store, budget_s=5)["status"] == "timeout"
+    assert schedule._pending_write(store) != seen["release"]
+    assert json.loads((store.root / "pending_cycle.json").read_text())["audit"] is None
+
+
 @pytest.mark.parametrize("days, kept", [(7, True), (14, False)])
 def test_a_pre_v4_pending_audit_is_kept_by_its_policy_days_and_limit(
         tmp_path, monkeypatch, days, kept):

@@ -200,10 +200,15 @@ def run_once(store: Store, *, days: int = 7, limit: int = 30, case_limit: int = 
             except (OSError, ValueError, KeyError, TypeError) as exc:
                 if result["accepted"]:
                     raise AutError("improve: worker did not preserve its matching result") from exc
+            diagnosis = report.get("diagnosis", report.get("progress", {}).get("diagnosis", {}))
+            if audit_id is None and diagnosis.get("complete"):
+                # A worker killed after its early release never wrote pending again; a freezer
+                # that started after that release must still see a new write identity.
+                atomic_write_text(store.root / "pending_cycle.json",
+                                  json.dumps({"policy_id": key, "audit": None}) + "\n")
             store.append("cycle_finished", **report)
             atomic_write_text(store.root / "last_cycle.json", json.dumps(report, indent=2) + "\n")
-            inbox(store, report.get("diagnosis", report.get("progress", {}).get("diagnosis", {}))
-                  .get("judgment_ids", []))
+            inbox(store, diagnosis.get("judgment_ids", []))
             return report
     except LockBusy:
         return {"status": "busy"}
@@ -274,7 +279,9 @@ def _worker(store: Store, policy_id: str, run_id: str, *,
     except _BudgetExpired:     # keeps the last checkpoint's complete: blocking work may be done
         judged = {**judged, "reason": "budget"}
     report.update(status="ok" if judged["complete"] else "deferred", diagnosis=judged)
-    if judged["complete"] and not provided and not cleared:
+    # Write again even after an early release: a freezer that started after that release must
+    # see a new write identity, or it would freeze an audit while this cycle was still judging.
+    if judged["complete"] and not provided:
         atomic_write_text(pending_path, json.dumps({"policy_id": policy_id, "audit": None}) + "\n")
     atomic_write_text(store.root / "worker_result.json",
                       json.dumps({"run_id": run_id, "report": report}) + "\n")

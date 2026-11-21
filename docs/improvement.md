@@ -231,7 +231,8 @@ blocking work only, so with no blocking rubric enabled it is complete at once. `
 `total` count blocking judgments; `optional_finished` and `optional_total` count the rest;
 `verdicts` counts both. `reason` is `budget` when any work, blocking or not, was left. The scheduled worker releases its pending audit at the first
 checkpoint where blocking work is complete, so a slow non-blocking rubric never holds the next
-audit, even if the run is cut off later.
+audit, even if the run is cut off later. When the run ends it writes the released state once
+more, so an `audit --cycle` that started during the non-blocking work returns `superseded`.
 
 ## Prepare a scoped change
 
@@ -395,7 +396,8 @@ aut improve audit --cycle --days 7 --limit 30 --budget-s 1500
 ```
 
 It returns `frozen`, `kept` (a matching audit is already pending), `busy`, `budget`, or
-`superseded` (a cycle finished while it built, so it queues nothing).
+`superseded` (a cycle finished while it built, so it queues nothing; this includes a cycle
+that released its audit early and was still judging non-blocking rubrics when the build began).
 Only `budget` exits 1, and it leaves the pending audit unchanged.
 `--cycle` takes no `--project`. Plain `aut improve audit` is unchanged and writes no pending audit.
 `packaging/launchd/dev.aut.improve-audit.plist` is a template that runs this step at 03:50.
