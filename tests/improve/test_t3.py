@@ -168,6 +168,7 @@ def test_t3_missing_output_and_projection_loss_remain_incomplete(tmp_path):
 @pytest.mark.parametrize('kind,fields,expected', [
     ('command_execution', {'status': 'completed', 'exitCode': 0}, 'success'),
     ('command_execution', {'status': 'failed', 'exitCode': 2}, 'error'),
+    ('command_execution', {'status': 'failed', 'exitCode': 0}, 'error'),
     ('dynamic_tool', {'status': 'completed'}, 'success'),
     ('command_execution', {'status': 'interrupted'}, 'unknown'),
 ])

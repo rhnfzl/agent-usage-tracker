@@ -215,7 +215,7 @@ def _thread(db: sqlite3.Connection, path: Path, thread: str, cwd: str, since: fl
                     if kind in {'file_change', 'error'} or 'output' in value:
                         result = result_status(_text(output), failed)
                     elif type(value.get('exitCode')) is int:
-                        result = result_status({'exit_code': value['exitCode']})
+                        result = result_status({'exit_code': value['exitCode']}, failed)
                     else:
                         result = ('error' if failed else
                                   'success' if item_state == 'completed' else 'unknown')
