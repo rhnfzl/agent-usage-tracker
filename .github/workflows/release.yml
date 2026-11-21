@@ -1,0 +1,55 @@
+name: Release
+
+# Push a tag such as v0.2.0 to publish that version to PyPI. A version cannot be uploaded twice,
+# so bump __version__ in src/agent_usage_tracker/__init__.py first; the build stops on a mismatch.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # all branches, for the main check below
+      # Only merged code is published: a tag pushed on a feature branch stops here.
+      - name: the tag is on main
+        run: git merge-base --is-ancestor "$GITHUB_SHA" origin/main || { echo "$GITHUB_REF_NAME is not on main"; exit 1; }
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install build==1.3.0 twine==7.0.0
+      # The sdist first, then the wheel from it: a file the sdist leaves out breaks the wheel here.
+      - run: python -m build
+      - run: twine check --strict dist/*
+      - name: tag matches the package version
+        run: |
+          version=$(python -c "import glob, re; print(re.search(r'-([^-]+)-py3', glob.glob('dist/*.whl')[0]).group(1))")
+          test "v$version" = "$GITHUB_REF_NAME" || { echo "tag $GITHUB_REF_NAME, package $version"; exit 1; }
+      - name: the wheel ships the sink stack and no secrets
+        run: |
+          unzip -l dist/*.whl | grep -q sink_stack/compose.yaml
+          if unzip -l dist/*.whl | grep -q 'sink_stack/\.env$'; then echo "the wheel holds a .env"; exit 1; fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  # Trusted publishing: PyPI trusts this workflow and environment, so no token is stored anywhere.
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      # Pinned by commit: this job can mint a PyPI upload token.
+      - uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3

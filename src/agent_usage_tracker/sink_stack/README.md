@@ -33,7 +33,7 @@ The dashboards are in the "Coding agents" folder.
 Install aut with the PostgreSQL extra on every machine you code on:
 
 ```bash
-uv tool install "agent-usage-tracker[postgres] @ git+https://github.com/rhnfzl/agent-usage-tracker"
+uv tool install "agent-usage-tracker[postgres]"
 ```
 
 In `~/.config/agent-usage-tracker/config.toml`:

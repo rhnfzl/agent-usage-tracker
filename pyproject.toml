@@ -1,11 +1,18 @@
 [project]
 name = "agent-usage-tracker"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Passive, subscription-safe tracker of coding-agent work (Claude Code, Codex, Cursor, Pi): usage, sessions, activity, active time, outcomes and local labels. Reads local logs, normalizes, pushes to a self-hosted sink."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
 keywords = ["tokens", "usage", "coding-agent", "claude-code", "codex", "cursor", "pi", "observability"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Topic :: Software Development",
+]
 # Base install has ZERO runtime dependencies: stdlib json / sqlite3 / urllib / tomllib / hashlib.
 # The one exception is Windows only: it ships no time zone database, and zoneinfo needs one.
 dependencies = ["tzdata; sys_platform == 'win32'"]
@@ -30,15 +37,31 @@ merge = ["torch>=2.14", "peft>=0.21", "transformers>=5.17", "huggingface_hub>=1.
 # Run the suite: pip install -e '.[test]' && pytest -q
 test = ["pytest"]
 
+[project.urls]
+Homepage = "https://github.com/rhnfzl/agent-usage-tracker"
+Issues = "https://github.com/rhnfzl/agent-usage-tracker/issues"
+
 [project.scripts]
 aut = "agent_usage_tracker.cli:main"
+# The package name too, so `uvx agent-usage-tracker` runs without --from.
+agent-usage-tracker = "agent_usage_tracker.cli:main"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+# One version: the release workflow checks the tag against it.
+[tool.hatch.version]
+path = "src/agent_usage_tracker/__init__.py"
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/agent_usage_tracker"]
+
+# Listed, not "everything not gitignored": a local checkout holds .worktrees/, .runtime-releases/,
+# old venvs and agent folders that must never reach an upload. Tests read packaging/ and docs/.
+[tool.hatch.build.targets.sdist]
+include = ["/src", "/tests", "/docs", "/packaging", "/README.md", "/LICENSE", "/CONTRACT.md",
+           "/DEPLOY.md", "/config.example.toml"]
 
 [tool.ruff]
 line-length = 100

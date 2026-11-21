@@ -84,7 +84,7 @@ tunnel. Label every USD figure "estimated". Never expose titles or anything only
 See [README.md](README.md) and [packaging/README.md](packaging/README.md). Short version:
 
 ```bash
-uv tool install "agent-usage-tracker[postgres] @ git+https://github.com/rhnfzl/agent-usage-tracker"
+uv tool install "agent-usage-tracker[postgres]"
 mkdir -p ~/.config/agent-usage-tracker
 cp config.example.toml ~/.config/agent-usage-tracker/config.toml   # machine, agents, [transport]
 chmod 600 ~/.config/agent-usage-tracker/config.toml

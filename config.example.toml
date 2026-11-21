@@ -164,5 +164,5 @@ webhook_secret = "env:AUT_WEBHOOK_SECRET"      # shared secret sent as the X-AUT
 # For a remote host add sslmode=require; without it aut warns, because libpq can fall back to
 # plaintext. On a private link such as Tailscale, sslmode=disable says that is intended.
 # Requires the [postgres] (or [label]) extra:
-#   uv tool install "agent-usage-tracker[postgres] @ git+https://github.com/rhnfzl/agent-usage-tracker"
+#   uv tool install "agent-usage-tracker[postgres]"
 # pg_dsn = "env:AUT_PG_DSN"                     # e.g. postgresql://agents_writer@db.example:5432/agents?sslmode=require

@@ -7,7 +7,7 @@
 Install the label extra before configuring a model:
 
 ```bash
-uv tool install "agent-usage-tracker[label] @ git+https://github.com/rhnfzl/agent-usage-tracker"
+uv tool install "agent-usage-tracker[label]"
 ```
 
 This adds PostgreSQL support and, on Apple silicon, the MLX runtime and Hugging Face tools.
