@@ -253,3 +253,23 @@ def test_a_far_future_timestamp_is_skipped_not_fatal(store, monkeypatch):
     monkeypatch.setattr(groups, "_work_day", work_day)
     report = groups.refresh(store, today=TODAY)
     assert report["skipped"] == 1 and report["groups"][0]["distinct_tasks"] == 1
+
+
+def test_an_explicit_error_field_beats_incidental_output():
+    top = json.dumps({"exit_code": 1, "error": "request timed out",
+                      "output": "Example: command not found"})
+    nested = json.dumps({"result": {"error": "request timed out",
+                                    "output": "Example: command not found"}})
+    assert groups.error_class(top) == groups.error_class(nested) == "timeout"
+
+
+def test_a_successful_anchor_has_no_error_class(store):
+    ok = {"id": "s1-ok", "kind": "result", "call_id": "s1-x", "tool": "", "status": "success",
+          "text": json.dumps({"exit_code": 0, "output": "FAILED tests/x.py (docs example)"}),
+          "timestamp": None}
+    case_id = failing_case(store)
+    case = store.get("cases", case_id)
+    case["events"] = [*case["events"][:2], ok]
+    values = groups.signals({"rubric": "r", "review": {"evidence_ids": ["s1-ok"]}}, case,
+                            {"events": []})
+    assert values["error_class"] == "" and values["command_family"] == "python -m pytest"

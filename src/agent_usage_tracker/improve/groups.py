@@ -46,9 +46,11 @@ def _normalise(line: str) -> str:
     return " ".join(line.split())
 
 
-# Keys whose string value is the message of a JSON-shaped result (Codex CommandExecution and
-# MCP errors, T3 dict outputs). Classifying the raw JSON would turn every quoted value into <q>.
-_MESSAGE_KEYS = ("error", "stderr", "message", "output", "aggregated_output", "content", "text")
+# Fields holding the message of a JSON-shaped result (Codex CommandExecution and MCP errors,
+# T3 dict outputs). Classifying the raw JSON would turn every quoted value into <q>. Explicit
+# error fields win; ordinary output is read only when no error field is present.
+_ERROR_KEYS = ("error", "stderr", "message")
+_OUTPUT_KEYS = ("output", "aggregated_output", "content", "text")
 
 
 def _message(text: str) -> str:
@@ -58,9 +60,9 @@ def _message(text: str) -> str:
         return text
     if not isinstance(value, dict):
         return text
-    parts: list[str] = []
-    for item in (value, *(v for v in value.values() if isinstance(v, dict))):
-        parts += [item[k] for k in _MESSAGE_KEYS if isinstance(item.get(k), str)]
+    items = (value, *(v for v in value.values() if isinstance(v, dict)))
+    parts = [item[k] for item in items for k in _ERROR_KEYS if isinstance(item.get(k), str)] \
+        or [item[k] for item in items for k in _OUTPUT_KEYS if isinstance(item.get(k), str)]
     code = value.get("exit_code", value.get("exitCode"))
     if type(code) is int and code != 0:
         parts.append(f"exit code {code}")
@@ -97,8 +99,10 @@ def _anchor_signals(anchor: dict[str, Any] | None, *sources: list[dict[str, Any]
         return "", "", ""
     call = _call(anchor, *sources) or {}
     family = command_family(call["text"], call.get("tool", "")) if call.get("text") else ""
-    return (_bounded(tool_name(anchor.get("tool") or call.get("tool", ""))),
-            error_class(anchor.get("text", "")), _bounded(family))
+    # A successful result has no error class, whatever its output happens to mention.
+    error = "" if anchor.get("status") == "success" else error_class(anchor.get("text", ""))
+    return (_bounded(tool_name(anchor.get("tool") or call.get("tool", ""))), error,
+            _bounded(family))
 
 
 def signals(judgment: dict[str, Any], case: dict[str, Any],
