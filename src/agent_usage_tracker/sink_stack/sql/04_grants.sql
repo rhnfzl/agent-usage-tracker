@@ -64,9 +64,11 @@ BEGIN
         -- new scans and reads each day's latest value, to write only the days that changed.
         GRANT SELECT, INSERT ON agents.git_commit_day TO agents_writer;
         GRANT SELECT ON agents.git_commits_daily TO agents_writer;
+        GRANT SELECT, INSERT ON agents.improve_score_daily, agents.improve_adoption TO agents_writer;
     END IF;
     IF have_ro THEN
         GRANT USAGE ON SCHEMA agents TO agents_ro;
+        GRANT SELECT ON agents.improve_score_latest, agents.improve_adoption TO agents_ro;
         REVOKE ALL ON agents.work_taxonomy_mode, agents.decision_work_latest_by_taxonomy,
             agents.outcome_evidence_mode, agents.decision_outcome_latest_by_contract,
             agents.decision_input_status_latest FROM agents_ro;

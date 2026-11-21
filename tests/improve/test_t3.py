@@ -1,6 +1,7 @@
 """T3 app requests stay linked when the provider changes."""
 
 import json
+import os
 import sqlite3
 
 import pytest
@@ -102,6 +103,7 @@ def test_t3_native_mirror_is_not_another_observation(tmp_path, limit):
            {'type': 'event_msg', 'timestamp': '2020-01-01T00:00:00Z',
             'payload': {'type': 'user_message', 'message': 'native-only check'}}]
     (folder / 'rollout-native.jsonl').write_text(''.join(json.dumps(r)+'\n' for r in raw))
+    os.utime(folder / 'rollout-native.jsonl', (1_000_000_000, 1_000_000_000))
     store, result, sessions = capture(tmp_path, home, limit=limit)
     assert result['sessions'] == 1
     assert result['t3_native_mirrors'] == 1
@@ -123,6 +125,8 @@ def test_t3_identical_linked_native_files_share_one_supplement(tmp_path):
     raw = json.dumps({'type': 'session_meta', 'payload': {'id': 'nativer1', 'source': 'cli'}})+'\n'
     for name in ['rollout-one.jsonl', 'rollout-two.jsonl']:
         (folder / name).write_text(raw)
+        # Keep fixtures idle when filesystem timestamps lead the wall clock.
+        os.utime(folder / name, (1_000_000_000, 1_000_000_000))
     _, result, sessions = capture(tmp_path, home, limit=1)
     assert len(sessions[0]['supplemental_sources']) == 1
     assert result['duplicates'] == 1

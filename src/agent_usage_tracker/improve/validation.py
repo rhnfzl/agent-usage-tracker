@@ -8,7 +8,7 @@ import re
 import sys
 from collections import Counter
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 from ..config import AutError
 from . import rubric
@@ -21,6 +21,33 @@ from .trial import command
 def evidence_key(case: dict[str, Any]) -> str:
     return digest({name: case[name] for name in (
         "events", "coverage", "omitted_task_events")})
+
+
+def score(pairs: Iterable[tuple[str, str | None]]) -> dict[str, Any]:
+    """Compare (reference, observed) labels. None means missing, never abstention."""
+    counts: Counter[str] = Counter()
+    for expected, verdict in pairs:
+        if expected not in LABELS or verdict is not None and verdict not in LABELS:
+            raise AutError("improve: scoring needs pass/fail/unknown labels")
+        if verdict is None:
+            counts["missing"] += 1
+            continue
+        counts[f"reference_{expected}"] += 1
+        counts["abstentions"] += verdict == "unknown"
+        counts["detected_failures"] += expected == "fail" and verdict == "fail"
+        counts["missed_failures"] += expected == "fail" and verdict != "fail"
+        counts["false_alarms"] += expected == "pass" and verdict == "fail"
+        counts["supported_passes"] += expected == "pass" and verdict == "pass"
+        counts["decisions_on_unknown"] += expected == "unknown" and verdict != "unknown"
+
+    def rate(numerator: str, denominator: str) -> float | None:
+        return counts[numerator] / counts[denominator] if counts[denominator] \
+            and not counts["missing"] else None
+
+    return {"complete": not counts["missing"], "counts": dict(counts),
+            "failure_recall": rate("detected_failures", "reference_fail"),
+            "false_alarm_rate": rate("false_alarms", "reference_pass"),
+            "pass_recall": rate("supported_passes", "reference_pass")}
 
 
 def _oracle_inputs(spec: dict[str, Any]) -> None:
@@ -106,39 +133,23 @@ def validate(store: Store, spec_id: str, diagnosis_id: str, *,
         raise AutError(f"improve: reference oracle failed or disagreed; record {oracle_id}") from exc
     judgments = {value["evaluation_key"]: (key, value) for key in store.keys("judgments")
                  if (value := store.get("judgments", key))}
-    counts: Counter[str] = Counter()
     rows = []
     for ref in references:
         key = evaluation_key(evaluator(policy, ref["rubric"]), cases[ref["evidence_sha256"]],
                              ref["rubric"])
         if key not in judgments:
-            counts["missing"] += 1
             rows.append({**ref, "observed": None, "judgment_id": None})
             continue
         judgment_id, judgment = judgments[key]
         verdict = judgment["verdict"]
         if verdict not in LABELS:
             raise AutError("improve: reference judgment has an invalid verdict")
-        expected = ref["expected"]
-        counts[f"reference_{expected}"] += 1
-        counts["abstentions"] += verdict == "unknown"
-        counts["detected_failures"] += expected == "fail" and verdict == "fail"
-        counts["missed_failures"] += expected == "fail" and verdict != "fail"
-        counts["false_alarms"] += expected == "pass" and verdict == "fail"
-        counts["supported_passes"] += expected == "pass" and verdict == "pass"
-        counts["decisions_on_unknown"] += expected == "unknown" and verdict != "unknown"
         rows.append({**ref, "observed": verdict, "judgment_id": judgment_id})
-
-    def rate(numerator: str, denominator: str) -> float | None:
-        return counts[numerator] / counts[denominator] if counts[denominator] \
-            and not counts["missing"] else None
 
     report = {"spec_id": spec_id, "diagnosis_id": diagnosis_id, "oracle_id": oracle_id,
         "input_id": input_id,
-        "complete": not counts["missing"], "split": spec["split"], "counts": dict(counts),
-        "failure_recall": rate("detected_failures", "reference_fail"),
-        "false_alarm_rate": rate("false_alarms", "reference_pass"),
-        "pass_recall": rate("supported_passes", "reference_pass"), "cases": rows,
+        **score((row["expected"], row["observed"]) for row in rows),
+        "split": spec["split"], "cases": rows,
         "scope": "executable references only; not real-work accuracy",
         "human_verified": False, "automation_qualified": False,
         "holdout_independence_verified": False}
