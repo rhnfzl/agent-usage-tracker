@@ -221,6 +221,7 @@ Native desktop receipts use `aut improve desktop`; command success does not esta
 ```bash
 aut improve audit --days 7 --limit 30
 aut improve status
+aut improve report-card --days 28 --format md
 ```
 
 Local judging uses cached models through the existing label extra.
