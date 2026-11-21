@@ -226,6 +226,8 @@ aut improve status
 Local judging uses cached models through the existing label extra.
 Bounded reviews preserve completed judgments and resume unfinished work within the configured budget.
 `aut improve inspect --case CASE_ID` writes a private view of a captured attempt and its source references.
+
+`aut improve label --rubric completion_supported` opens a private human review page to check an advisory judge against captured cases.
 Missing or clipped evidence stays explicit; inspection does not upgrade a judgment.
 Read the [private improvement guide](docs/improvement.md) before judging, staging changes, or executing trials.
 The guide covers executable judge references, independent agent-task acceptance, and stable wheel installations.
