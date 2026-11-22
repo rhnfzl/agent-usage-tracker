@@ -71,6 +71,8 @@ def default_excludes() -> list[str]:
         data_dir() / "label" / "models",
         data_dir() / "improve" / "session_content",
         root.resolve() / "session_content",
+        data_dir() / "improve" / "investigation_runs",
+        root.resolve() / "investigation_runs",
     ))))
 
 

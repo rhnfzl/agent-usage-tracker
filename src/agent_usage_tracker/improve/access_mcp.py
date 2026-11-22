@@ -7,6 +7,7 @@ import os
 import re
 from collections.abc import Callable
 from functools import partial, wraps
+from threading import BoundedSemaphore
 from typing import Any
 
 import anyio
@@ -51,7 +52,8 @@ def _tool(method: Callable[..., dict[str, Any]]) -> Callable[..., Any]:
     return call
 
 
-def serve(evidence: Evidence, transport: str, port: int) -> None:
+def serve(evidence: Evidence, transport: str, port: int,
+          code_scopes: list[dict[str, Any]] | None = None) -> None:
     token = os.environ.get("AUT_EVIDENCE_TOKEN", "")
     if transport == "http" and not re.fullmatch(r"[A-Za-z0-9_-]{32,128}", token):
         raise AutError("evidence: HTTP requires a URL-safe AUT_EVIDENCE_TOKEN of 32..128 characters")
@@ -68,6 +70,29 @@ def serve(evidence: Evidence, transport: str, port: int) -> None:
     for operation in operations:
         server.add_tool(_tool(operation), annotations=ToolAnnotations(
             readOnlyHint=True, destructiveHint=False, openWorldHint=False))
+    if code_scopes is not None:
+        from .investigation import catalog, require_runtime, run
+
+        require_runtime()
+        slots = BoundedSemaphore(2)
+        scopes = code_scopes
+
+        def code_catalog() -> dict[str, Any]:
+            """List the evidence operations and arguments accepted by run_code."""
+            return {**catalog(), "scopes": [str(i) for i in range(1, len(scopes) + 1)]}
+
+        def run_code(source: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+            """Run scoped Python using read(operation, scope='1', lead=None, **arguments)."""
+            if not slots.acquire(blocking=False):
+                raise AutError("investigation: both execution slots are busy")
+            try:
+                return run(source, params if params is not None else {}, scopes)
+            finally:
+                slots.release()
+
+        for code_tool in (code_catalog, run_code):
+            server.add_tool(_tool(code_tool), annotations=ToolAnnotations(
+                readOnlyHint=True, destructiveHint=False, openWorldHint=False))
     if transport == "stdio":
         server.run()
     else:
