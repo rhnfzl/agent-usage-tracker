@@ -3,8 +3,23 @@
 import io
 import socket
 import threading
+from http.server import HTTPServer
+
+import pytest
 
 from agent_usage_tracker import local_page
+
+
+def test_review_page_binds_loopback_without_resolving_a_hostname(monkeypatch):
+    def unexpected_lookup(host):
+        pytest.fail(f"Review page tried to resolve {host}")
+
+    monkeypatch.setattr(socket, "getfqdn", unexpected_lookup)
+    monkeypatch.setattr(HTTPServer, "serve_forever", lambda self: None)
+    urls = []
+    local_page.serve("tok", lambda tail: b"page", lambda form: b"done", "{url}",
+                     open_browser=False, on_ready=urls.append)
+    assert len(urls) == 1 and urls[0].startswith("http://127.0.0.1:")
 
 
 def _rejected_post(monkeypatch, *, flood=False):

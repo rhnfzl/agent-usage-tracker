@@ -7,10 +7,21 @@ from __future__ import annotations
 import http.client
 import urllib.request
 from email.message import Message
+from http.server import HTTPServer
+from socketserver import TCPServer
 from typing import IO
 
 HTTP_ERRORS = (OSError, http.client.HTTPException)
 LOCAL_HOSTS = ("localhost", "127.0.0.1", "::1")
+
+
+class LoopbackHTTPServer(HTTPServer):
+    """Start a server on a numeric loopback address without waiting for DNS."""
+
+    def server_bind(self) -> None:
+        TCPServer.server_bind(self)
+        host, self.server_port = self.server_address[:2]
+        self.server_name = str(host)
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):

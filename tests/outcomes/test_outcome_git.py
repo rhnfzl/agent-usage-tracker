@@ -21,6 +21,7 @@ from agent_usage_tracker import outcome_git as og
 from agent_usage_tracker import outcomes as oc
 from agent_usage_tracker.git_safe import git_argv
 from agent_usage_tracker.git_safe import git_env
+from agent_usage_tracker.net import LoopbackHTTPServer
 from agent_usage_tracker.repo_keys import RepoKeys
 from test_outcomes import (NOW, SALT, _commit, _g, _key, _lines, _row, _states, _with_git)
 
@@ -156,7 +157,10 @@ def test_signing_proxy_alternates_and_helpers_never_run(monkeypatch, world):
         def log_message(self, *a):
             pass
 
-    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Deny)
+    class Server(http.server.ThreadingHTTPServer, LoopbackHTTPServer):
+        pass
+
+    srv = Server(("127.0.0.1", 0), Deny)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     url = f"http://127.0.0.1:{srv.server_port}/r.git"
     with tempfile.TemporaryDirectory() as d:

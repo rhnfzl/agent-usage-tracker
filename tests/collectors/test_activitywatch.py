@@ -36,6 +36,7 @@ from agent_usage_tracker.collectors import activitywatch as aw
 from agent_usage_tracker.config import (ALL_AGENTS, DEFAULT_AGENTS, AutError,
                                         Config, load_config)
 from agent_usage_tracker.event import CollectorUnavailable, TimeInterval, UsageEvent
+from agent_usage_tracker.net import LoopbackHTTPServer
 from fake_psycopg import _fake_psycopg
 
 HOST = "host-a"
@@ -496,7 +497,7 @@ def test_http_against_a_real_server():
         def log_message(self, *args) -> None:
             pass
 
-    srv = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+    srv = LoopbackHTTPServer(("127.0.0.1", 0), Handler)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     try:
         cfg = _cfg(activitywatch_url=f"http://127.0.0.1:{srv.server_port}/")
