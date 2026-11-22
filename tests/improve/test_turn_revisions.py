@@ -1,8 +1,14 @@
 import json
+import os
 import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
+from hashlib import sha256
+from types import SimpleNamespace
 
+import pytest
+
+from agent_usage_tracker.improve import store as improve_store
 from agent_usage_tracker.improve.access import Evidence
 from agent_usage_tracker.improve.evidence import read_session
 from agent_usage_tracker.improve.file_reads import path_fingerprint
@@ -10,7 +16,7 @@ from agent_usage_tracker.improve.judge import freeze_case
 from agent_usage_tracker.improve.store import Store, audit
 from agent_usage_tracker.improve.study_independence import ReservedEvidence
 from agent_usage_tracker.improve.study_observe import _sample, baseline_gate
-from agent_usage_tracker.improve.turn_revisions import RECORD_KIND, lookup, record_hook
+from agent_usage_tracker.improve.turn_revisions import RECORD_KIND, _file_digest, lookup, record_hook
 
 
 def git(repo, *args):
@@ -53,6 +59,7 @@ def test_project_hook_records_a_later_worktree_turn_for_baseline_preflight(tmp_p
     saved = store.path(RECORD_KIND, record["turn_key"]).read_text()
     assert "private-fixture" not in saved and str(worktree) not in saved and relative_target not in saved
     receipt_time = datetime.fromisoformat(record["recorded_at"])
+    completed_at = receipt_time + timedelta(milliseconds=10)
     record_hook(root, project, hook(worktree, "later"))
     assert lookup(store, "session", "later") == record
 
@@ -64,7 +71,7 @@ def test_project_hook_records_a_later_worktree_turn_for_baseline_preflight(tmp_p
                                     "git": {"commit_hash": header}})]
     for turn, began, ended in (
         ("opening", start, start + timedelta(milliseconds=25)),
-        ("later", receipt_time - timedelta(milliseconds=10), receipt_time + timedelta(milliseconds=10)),
+        ("later", receipt_time - timedelta(milliseconds=10), completed_at),
     ):
         rows.extend([
             ("event_msg", began, {"type": "task_started", "turn_id": turn}),
@@ -75,8 +82,14 @@ def test_project_hook_records_a_later_worktree_turn_for_baseline_preflight(tmp_p
         ])
     path.write_text("".join(json.dumps({"type": kind, "timestamp": time.isoformat(),
                                         "payload": payload}) + "\n" for kind, time, payload in rows))
+    # Model a completed transcript even when the filesystem clock has finer resolution.
+    completed_stamp = completed_at.timestamp()
+    os.utime(path, (completed_stamp, completed_stamp))
     writable = Store(root)
-    captured = audit(writable, home, project=project, idle_s=0)
+    with monkeypatch.context() as clock:
+        clock.setattr(improve_store, "time", SimpleNamespace(time=lambda: completed_stamp + 1))
+        captured = audit(writable, home, project=project, idle_s=0)
+    assert captured["sessions"] == 1, captured
     reader = Evidence("redacted", store, captured["audit_id"])
     snapshot = reader.keys[0]
     events = [event for event in reader.session(snapshot)["items"] if event["kind"] == "boundary"]
@@ -133,8 +146,6 @@ def test_hook_skips_other_projects_and_unrecognized_inputs(tmp_path):
 
 
 def test_hook_checks_literal_scoped_paths_and_keeps_unavailable_files_unknown(tmp_path):
-    from hashlib import sha256
-
     project, root = tmp_path / "project", tmp_path / "private"
     scope = project / "subproject"
     scope.mkdir(parents=True)
@@ -149,6 +160,34 @@ def test_hook_checks_literal_scoped_paths_and_keeps_unavailable_files_unknown(tm
     files = lookup(Store(root, read_only=True), "session", "files")["setup_files"]
     assert files == {path_fingerprint(scope.resolve() / "present"): sha256(b"correct\r\n").hexdigest(),
                      path_fingerprint(scope.resolve() / "missing"): None}
+
+
+@pytest.mark.parametrize("changes_during_read", [False, True])
+def test_setup_digest_compares_change_timestamps_from_the_same_api(tmp_path, monkeypatch,
+                                                                   changes_during_read):
+    target = tmp_path / "setup"
+    contents = b"setup instructions\r\n"
+    target.write_bytes(contents)
+    fstat = os.fstat
+    calls = 0
+
+    def handle_stat(fd):
+        nonlocal calls
+        calls += 1
+        result = fstat(fd)
+        # On affected Windows builds, path and handle APIs return different ctimes.
+        return SimpleNamespace(st_mode=result.st_mode, st_size=result.st_size,
+                               st_ino=result.st_ino, st_dev=result.st_dev,
+                               st_mtime_ns=result.st_mtime_ns,
+                               st_ctime_ns=result.st_ctime_ns + 100
+                               + (calls if changes_during_read else 0))
+
+    monkeypatch.setattr(os, "fstat", handle_stat)
+    if changes_during_read:
+        with pytest.raises(ValueError, match="changed while reading"):
+            _file_digest(tmp_path.resolve(), (target.name,))
+    else:
+        assert _file_digest(tmp_path.resolve(), (target.name,)) == sha256(contents).hexdigest()
 
 
 def test_turn_revision_rejects_late_mismatched_and_ambiguous_receipts(tmp_path):

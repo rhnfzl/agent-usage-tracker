@@ -60,6 +60,12 @@ def _target(value: str) -> PurePosixPath:
     return target
 
 
+def _same_snapshot(first: os.stat_result, second: os.stat_result) -> bool:
+    return (os.path.samestat(first, second)
+            and (first.st_size, first.st_mtime_ns, first.st_ctime_ns)
+            == (second.st_size, second.st_mtime_ns, second.st_ctime_ns))
+
+
 def _file_digest(root: Path, parts: tuple[str, ...]) -> str | None:
     path = root
     try:
@@ -77,13 +83,15 @@ def _file_digest(root: Path, parts: tuple[str, ...]) -> str | None:
              | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
     with os.fdopen(os.open(path, flags), "rb") as source:
         opened = os.fstat(source.fileno())
-        if (not stat.S_ISREG(opened.st_mode) or opened.st_size > _FILE_LIMIT
+        if (not stat.S_ISREG(opened.st_mode) or opened.st_size != before.st_size
+                or opened.st_mtime_ns != before.st_mtime_ns
                 or not os.path.samestat(before, opened)):
             raise ValueError("setup file changed while opening")
         contents = source.read(_FILE_LIMIT + 1)
         after = os.fstat(source.fileno())
-    if (len(contents) != before.st_size or not os.path.samestat(before, path.lstat())
-            or (before.st_mtime_ns, before.st_ctime_ns) != (after.st_mtime_ns, after.st_ctime_ns)
+    # Windows can report different ctimes for a path and an open handle.
+    if (len(contents) != before.st_size or not _same_snapshot(before, path.lstat())
+            or not _same_snapshot(opened, after)
             or path.resolve(strict=True) != path):
         raise ValueError("setup file changed while reading")
     return hashlib.sha256(contents).hexdigest()
