@@ -23,6 +23,7 @@ from ..label.core import data_dir
 from ..state import _locked
 from .groups import _journal
 from .proposals import file_digest, matches_file, prepare, stage
+from .setup_git import verify_setup
 from .store import Store, repository
 
 KINDS = ("instruction", "skill", "config", "code")
@@ -403,12 +404,20 @@ def adopt(store: Store, proposal_id: str | None = None, *, commit: str,
                  "commit": commit, "pr": pr, "rubric_ids": sorted(set(rubric_ids)),
                  "proposal_id": proposal_id, "group_key": proposal.get("group_key"),
                  "note": _text(note, 500, "note"), "benefit_claim": False}
+        setup = verify_setup(proposal, commit, "after") if proposal else None
+        revision = setup.get("revision") if setup else None
         same = ("proposal_id", "commit") if proposal_id else ("title", "commit")
         for key in store.keys("adoptions"):     # again on a later day is still the same adoption
             old = store.get("adoptions", key)
-            if all(old.get(name) == value[name] for name in same):
+            if (all(old.get(name) == value[name] for name in same)
+                    or proposal_id and old.get("proposal_id") == proposal_id and revision
+                    and (old.get("commit_setup") or {}).get("revision") == revision):
                 return {"status": "unchanged", "adoption_id": key, "adopted_at": old["adopted_at"],
-                        "notice": NOTICE}
+                        "notice": NOTICE, **({"commit_setup": old["commit_setup"]}
+                                             if "commit_setup" in old else {})}
+        verification = {"commit_setup": setup} if setup else {}
+        value.update(verification)
         key = store.put("adoptions", value)
         store.append("adoption", adoption_id=key, proposal_id=proposal_id)
-    return {"status": "adopted", "adoption_id": key, "adopted_at": day, "notice": NOTICE}
+    return {"status": "adopted", "adoption_id": key, "adopted_at": day, "notice": NOTICE,
+            **verification}

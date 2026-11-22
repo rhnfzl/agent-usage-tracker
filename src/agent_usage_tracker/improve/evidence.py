@@ -16,6 +16,7 @@ from ..collectors.activity_common import result_status
 from ..event import parse_ts
 from ..redact import redact
 from ..state import parse_record
+from .setup_git import COMMIT_ID
 
 TEXT_LIMIT = 6000
 BYTE_LIMIT = 16 * 1024 * 1024
@@ -184,6 +185,8 @@ def read_session(path: Path, agent: str, max_bytes: int = BYTE_LIMIT,
     active_turn: str | None = None
     active_turn_key: str | None = None
     recorded_context: dict[str, Any] | None = None
+    session_start_revision: str | None = None
+    turn_start_revision: str | None = None
     seen_native_turns: set[str] = set()
     model_calls: _CodexModelCalls | None = None
     item_turns: dict[str, set[str]] = {}
@@ -267,6 +270,7 @@ def read_session(path: Path, agent: str, max_bytes: int = BYTE_LIMIT,
         record = parse_record(raw)
         if record is None:
             counts["malformed_records"] += 1
+            session_start_revision = turn_start_revision = None
             continue
         kind = record.get("type")
         if track_workspaces:
@@ -332,6 +336,10 @@ def read_session(path: Path, agent: str, max_bytes: int = BYTE_LIMIT,
                 session = str(payload.get("id") or payload.get("session_id") or session)
                 cwd = str(payload.get("cwd") or "")
                 origin = codex.run_origin(payload)
+                commit = dict_or_empty(payload.get("git")).get("commit_hash")
+                if (origin == "interactive" and not prefix_omitted and not payload.get("forked_from_id")
+                        and isinstance(commit, str) and COMMIT_ID.fullmatch(commit)):
+                    session_start_revision = commit
                 # Audits discard these sources; avoid normalizing their private bodies first.
                 if exclude_automated and origin in {"subagent", "automated"}:
                     return None
@@ -339,6 +347,8 @@ def read_session(path: Path, agent: str, max_bytes: int = BYTE_LIMIT,
                     ordinal = payload.get("subagent_history_start_ordinal")
                     unknown_copy_boundary = not isinstance(ordinal, int) or ordinal < 1
                     copied_until = ordinal if isinstance(ordinal, int) else 0
+            elif kind == "session_meta":
+                session_start_revision = turn_start_revision = None
             if unknown_copy_boundary or (line < 0 and copied_until):
                 counts["unknown_copy_boundary"] += 1
                 model_calls = None
@@ -351,9 +361,11 @@ def read_session(path: Path, agent: str, max_bytes: int = BYTE_LIMIT,
                     and codex.imported_record(record, (imports or {}).get(session)):
                 counts["imported_records"] += 1
                 model_calls = None
+                session_start_revision = turn_start_revision = None
                 continue
             if kind not in {"session_meta", "turn_context"} and not in_window(record):
                 model_calls = None
+                session_start_revision = turn_start_revision = None
                 continue
             sub = payload.get("type")
             if track_native_items and active_turn_key:
@@ -412,6 +424,8 @@ def read_session(path: Path, agent: str, max_bytes: int = BYTE_LIMIT,
                                        if active_turn else None)
                     recorded_context = None
                     started = parse_ts(record.get("timestamp"))
+                    turn_start_revision = session_start_revision if active_turn and started and started.tzinfo else None
+                    session_start_revision = None
                     model_calls = None
                     if (origin == "interactive" and active_turn and started and started.tzinfo
                             and active_turn not in seen_native_turns):
@@ -432,6 +446,10 @@ def read_session(path: Path, agent: str, max_bytes: int = BYTE_LIMIT,
                     if completed_turn or active_turn:
                         completed_context = recorded_context if active_turn == completed_turn else None
                         completed_context = completed_context or {"status": "missing"}
+                    if (last_closed and turn_start_revision and completed_context
+                            and completed_context.get("cwd") == cwd):
+                        completed_context = {**completed_context,
+                                             "session_start_revision": turn_start_revision}
                     receipt = (model_calls.receipt(record.get("timestamp"))
                                if model_calls is not None and last_closed and completed_context
                                and completed_context["status"] == "observed" else None)
@@ -439,6 +457,7 @@ def read_session(path: Path, agent: str, max_bytes: int = BYTE_LIMIT,
                          line, record, context=completed_context, codex_model_call_receipt=receipt)
                     active_turn, active_turn_key, recorded_context = None, None, None
                     model_calls = None
+                    session_start_revision = turn_start_revision = None
                 elif sub == "item_completed" and item.get("type") == "CommandExecution":
                     identity = item.get("id") or f"command-{line}"
                     emit("call", item.get("command", ""), line, record,

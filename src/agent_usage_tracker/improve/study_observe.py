@@ -6,6 +6,7 @@ import math
 import re
 from collections import Counter
 from datetime import date, datetime, timezone
+from functools import lru_cache
 from pathlib import Path
 from statistics import mean
 from typing import Any
@@ -15,15 +16,18 @@ from ..event import parse_ts
 from .case_view import _attempt
 from .evidence import event_links
 from .judge import _attempt_coverage, _complete_attempt
+from .setup_git import COMMIT_ID, verify_setup
 from .store import Store, digest, repository
 
 
 def validate_policy(policy: Any) -> None:
     if (not isinstance(policy, dict)
-            or set(policy) - {"require_turn_context", "coverage_basis"}
+            or set(policy) - {"require_turn_context", "coverage_basis", "require_setup_revision"}
             != {"metric", "minimum_pairs", "minimum_improvement", "baseline_cases"}
             or policy.get("coverage_basis", "full_case") not in ("full_case", "tool_events")
             or type(policy.get("require_turn_context", False)) is not bool
+            or type(policy.get("require_setup_revision", False)) is not bool
+            or policy.get("require_setup_revision") and not policy.get("require_turn_context")
             or policy["metric"] not in ("tool_errors", "tool_calls", "codex_model_calls")
             or policy["metric"] == "codex_model_calls" and (
                 not policy.get("require_turn_context") or "coverage_basis" in policy)
@@ -91,6 +95,8 @@ def _sample(store: Store, case_id: str) -> dict[str, Any]:
                            for event in events]),
         "cwd": context.get("cwd") if context else session.get("cwd"),
         "model": context.get("model") if context else session.get("model"),
+        "setup_revision": context.get("session_start_revision")
+        if context and context_status == "observed" else None,
         "started": min(times) if times else None, "ended": max(times) if times else None,
         "complete": completed, "tool_events_complete": tool_events_complete, "tool_calls": calls,
         "codex_model_calls": model_calls,
@@ -116,12 +122,17 @@ def _sufficient_coverage(sample: dict[str, Any], policy: dict[str, Any]) -> bool
     return bool(sample["complete"])
 
 
+def _is_revision(value: Any) -> bool:
+    return isinstance(value, str) and bool(COMMIT_ID.fullmatch(value))
+
+
 def check_strict_baselines(store: Store, policy: dict[str, Any], scope: Path, before: datetime,
-                           excluded_sessions: set[str]) -> None:
+                           excluded_sessions: set[str], proposal: dict[str, Any] | None = None) -> None:
     scope = scope.resolve()
     project = repository(scope)
     sessions: set[str] = set()
     contents: set[str] = set()
+    setup_matches = {}
     for key in policy["baseline_cases"]:
         sample = _sample(store, key)
         source = digest(list(sample["identity"]))
@@ -130,10 +141,19 @@ def check_strict_baselines(store: Store, policy: dict[str, Any], scope: Path, be
                 or source in excluded_sessions or source in sessions
                 or sample["content"] in contents or not _in_scope(sample["cwd"], scope, project)):
             continue
+        if policy.get("require_setup_revision"):
+            revision = sample["setup_revision"]
+            if not proposal or not _is_revision(revision):
+                continue
+            if revision not in setup_matches:
+                setup_matches[revision] = verify_setup(proposal, revision, "before")["status"] == "verified"
+            if not setup_matches[revision]:
+                continue
         sessions.add(source)
         contents.add(sample["content"])
     if len(sessions) < policy["minimum_pairs"]:
-        raise AutError("improve: not enough eligible baseline cases with recorded turn context")
+        needed = " and verified setup revisions" if policy.get("require_setup_revision") else ""
+        raise AutError(f"improve: not enough eligible baseline cases with recorded turn context{needed}")
 
 
 def observe(store: Store, study_id: str, spec: dict[str, Any]) -> dict[str, Any]:
@@ -160,6 +180,17 @@ def observe(store: Store, study_id: str, spec: dict[str, Any]) -> dict[str, Any]
     if not isinstance(pairs, list) or len(pairs) > 200:
         raise AutError("improve: supply up to 200 matched pairs")
     proposal = store.get("proposals", study["proposal_id"])
+    require_setup = policy.get("require_setup_revision", False)
+
+    @lru_cache(maxsize=400)
+    def read_setup(revision: str, condition: str) -> dict[str, str]:
+        return verify_setup(proposal, revision, condition)
+
+    adoption_setup = None
+    if require_setup:
+        saved = adoption.get("commit_setup") or {}
+        adopted_revision = saved.get("revision") or adoption.get("commit", "")
+        adoption_setup = read_setup(adopted_revision, "after")
     scope = Path(proposal["scope"]).resolve()
     project = repository(scope)
     known = set(study["known_case_ids"])
@@ -213,6 +244,12 @@ def observe(store: Store, study_id: str, spec: dict[str, Any]) -> dict[str, Any]
         elif (metric != "codex_model_calls" and before["tool_representation"] and after["tool_representation"]
               and before["tool_representation"] != after["tool_representation"]):
             reason = "tool_representations_differ"
+        elif require_setup and adoption_setup and adoption_setup["status"] != "verified":
+            reason = "adoption_commit_unverified"
+        elif require_setup and not all(_is_revision(sample["setup_revision"])
+                and read_setup(sample["setup_revision"], condition)["status"] == "verified"
+                for sample, condition in ((before, "before"), (after, "after"))):
+            reason = "setup_revision_unverified"
         elif before[metric] is None or after[metric] is None:
             reason = "metric_unknown"
         seen_sources.update(sources)
@@ -226,6 +263,7 @@ def observe(store: Store, study_id: str, spec: dict[str, Any]) -> dict[str, Any]
                          "reduction": before[metric] - after[metric],
                          "uses_tool_events_only": policy.get("coverage_basis") == "tool_events"
                          and not (before["complete"] and after["complete"]),
+                         "setup_revision_verified": require_setup,
                          "basis": "recorded_turn_context" if contexts == {"observed"}
                          else "includes_session_labels"})
 
@@ -247,6 +285,9 @@ def observe(store: Store, study_id: str, spec: dict[str, Any]) -> dict[str, Any]
               "excluded_pairs": len(pairs) - len(reductions), "exclusions": dict(counts),
               "recorded_turn_context_pairs": sum(row.get("basis") == "recorded_turn_context"
                                                    for row in outcomes),
+              "setup_revision_verified_pairs": sum(row.get("setup_revision_verified", False)
+                                                      for row in outcomes),
+              **({"adoption_commit_setup": adoption_setup} if require_setup else {}),
               "unpaired_baseline_ids": unpaired, "mean_reduction": reduction, "pairs": outcomes,
               "causal_effect_established": False, "task_quality_verified": False,
               "attempt_setup_exposure_verified": False,

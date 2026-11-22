@@ -521,6 +521,10 @@ meant for the sink (a later `publish-improve` step); targets, commit and note st
 `benefit_claim` is always false. The same proposal and commit (or, without a proposal, the same
 title and commit) is one adoption, even when the command runs again on a later day.
 
+For a linked proposal, AUT checks the target file in the locally available commit.
+The result records whether the committed bytes match the proposal, differ, or are unavailable.
+The command records the operator's declaration in each case.
+
 ## Compare baseline and candidate
 
 A trusted specification uses argv arrays and independent working directories:

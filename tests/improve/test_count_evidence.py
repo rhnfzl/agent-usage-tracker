@@ -125,3 +125,39 @@ def test_count_evidence_checks_original_codex_records(tmp_path, extra, expected,
         row = evidence.event(snapshot, session["events"][-1]["id"])
         assert row["codex_model_call_receipt"] == {"count": 1, "started_at": "2026-11-02T09:00:00+00:00"}
         assert "text" not in row
+
+
+@pytest.mark.parametrize("mode", ["original", "moved", "fork", "limited"])
+def test_native_session_revision_is_bound_to_the_first_observed_turn(tmp_path, mode):
+    rev = "b" * 40
+    path = tmp_path / "session.jsonl"
+    meta = {"id": "native", "source": "cli", "cwd": str(tmp_path), "git": {"commit_hash": rev}}
+    if mode == "fork":
+        meta.update(forked_from_id="parent", subagent_history_start_ordinal=1)
+    rows = [("session_meta", meta)]
+    for i in ("1", "2"):
+        cwd = tmp_path / "other" if mode == "moved" else tmp_path
+        rows.extend([
+            ("event_msg", {"type": "task_started", "turn_id": i}),
+            ("turn_context", {"turn_id": i, "model": "model", "cwd": str(cwd)}),
+            ("event_msg", {"type": "user_message", "message": "check " + i}),
+            ("event_msg", {"type": "task_complete", "turn_id": i}),
+        ])
+    path.write_text("".join(json.dumps({"type": kind, "timestamp": "2026-11-02T09:00:00Z",
+                                      "payload": payload}) + "\n" for kind, payload in rows))
+    limit = len(path.read_bytes()) - 25 if mode == "limited" else 16 * 1024 * 1024
+    session = read_session(path, "codex", recent=True, max_bytes=limit)
+    assert session is not None
+    boundaries = [event for event in session["events"] if event["kind"] == "boundary"]
+    assert boundaries
+    assert [row["turn_context"].get("session_start_revision") for row in boundaries] == (
+        [rev, None] if mode == "original" else [None] * len(boundaries))
+    if mode == "original":
+        store = Store(tmp_path / "private")
+        snapshot = store.put("sessions", session)
+        audit = store.put("audits", {"session_ids": [snapshot], "coverage": {}})
+        for grant in ("metadata", "redacted"):
+            evidence = Evidence(grant, store=store, audit_id=audit)
+            event = evidence.event(snapshot, boundaries[0]["id"])
+            assert event["turn_context"].get("session_start_revision") == (
+                rev if grant == "redacted" else None)

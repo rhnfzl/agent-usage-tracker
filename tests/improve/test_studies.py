@@ -636,6 +636,99 @@ def test_natural_work_observation_measures_only_eligible_pairs(
     assert set(no_work["unpaired_baseline_ids"]) == set(baseline)
 
 
+def test_strict_observation_checks_adoption_and_session_setup_revisions(tmp_path, monkeypatch):
+    import json
+    import subprocess
+    from datetime import datetime, timezone
+
+    from agent_usage_tracker.improve import decide, studies
+    from agent_usage_tracker.improve.evidence import read_session
+    from agent_usage_tracker.improve.judge import freeze_case
+    from agent_usage_tracker.improve.proposals import prepare
+    from agent_usage_tracker.improve.study_observe import observe
+
+    class PolicyClock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2025, 2, 28, 12, tzinfo=timezone.utc)
+
+    monkeypatch.setattr(studies, "datetime", PolicyClock)
+    store, policy = fixture(tmp_path)
+    source = tmp_path / "source"
+    source.mkdir()
+
+    def git(*args):
+        return subprocess.check_output(["git", "-C", str(source), "-c", "user.name=T",
+                                        "-c", "user.email=t@x", "-c", "commit.gpgsign=false",
+                                        *args], text=True).strip()
+
+    target = source / "setup"
+    git("init", "-q", "-b", "main")
+    target.write_text("before")
+    git("add", "setup")
+    git("commit", "-qm", "baseline")
+    old = git("rev-parse", "HEAD")
+    proposal = prepare(store, policy["discovery_cases"][0], source, target, "before", "after",
+                       extra={"title": "Update setup"})
+    decide.accept(store, proposal)
+    target.write_text("after")
+    git("add", "setup")
+    git("commit", "-qm", "candidate")
+    new = git("rev-parse", "HEAD")
+    policy["proposal_id"] = proposal
+
+    def add(name, phase, revision, exit_code):
+        stamp = "2025-02-27T12:00:00Z" if phase == "baseline" else "2025-03-03T12:00:00Z"
+        cwd = str(source)
+        rows = [
+            ("session_meta", {"id": name, "source": "cli", "cwd": cwd,
+                              "git": {"commit_hash": revision}}),
+            ("event_msg", {"type": "task_started", "turn_id": name}),
+            ("turn_context", {"turn_id": name, "model": "one", "cwd": cwd}),
+            ("event_msg", {"type": "user_message", "message": "Check " + name}),
+            ("event_msg", {"type": "item_completed", "item": {"type": "CommandExecution",
+                          "id": "run", "command": "check", "exit_code": exit_code}}),
+            ("event_msg", {"type": "task_complete", "turn_id": name}),
+        ]
+        path = tmp_path / (name + ".jsonl")
+        path.write_text("".join(json.dumps({"type": kind, "payload": payload, "timestamp": stamp})
+                                + "\n" for kind, payload in rows))
+        row = read_session(path, "codex")
+        snapshot = store.put("sessions", row)
+        audit = store.put("audits", {"session_ids": [snapshot]})
+        return freeze_case(store, audit, snapshot, row["events"][-1]["id"])
+
+    baseline = [add("base-" + str(n), "baseline", old, 1) for n in range(2)]
+    policy["observation_policy"] = {
+        "metric": "tool_errors", "require_turn_context": True, "require_setup_revision": True,
+        "minimum_pairs": 2, "minimum_improvement": 0,
+        "baseline_cases": {case: "setup" for case in baseline},
+    }
+    wrong = add("baseline-with-candidate", "baseline", new, 0)
+    with pytest.raises(AutError, match="verified setup revisions"):
+        create(store, policy | {"observation_policy": policy["observation_policy"] |
+                                {"baseline_cases": {baseline[0]: "setup", wrong: "setup"}}})
+    key = create(store, policy)["study_id"]
+    adopted = decide.adopt(store, proposal, commit=new, adopted_at="2025-03-01")
+    wrongly_adopted = decide.adopt(store, proposal, commit=old, adopted_at="2025-03-01")
+    candidates = [add("candidate-" + str(n), "candidate", new, 0) for n in range(2)]
+    pairs = [{"baseline": b, "candidate": c, "family": "setup"}
+             for b, c in zip(baseline, candidates)]
+    observed = observe(store, key, {"adoption_id": adopted["adoption_id"], "pairs": pairs})
+    assert observed["comparison"] == "observed_decrease"
+    assert observed["setup_revision_verified_pairs"] == 2
+    assert observed["adoption_commit_setup"] == {"status": "verified", "revision": new}
+    assert not observed["attempt_setup_exposure_verified"]
+    excluded = observe(store, key, {"adoption_id": wrongly_adopted["adoption_id"], "pairs": pairs})
+    assert excluded["exclusions"] == {"adoption_commit_unverified": 2}
+    assert excluded["comparison"] == "inconclusive"
+    stale = add("stale-candidate", "candidate", old, 0)
+    pairs[0]["candidate"] = stale
+    excluded = observe(store, key, {"adoption_id": adopted["adoption_id"], "pairs": pairs})
+    assert excluded["exclusions"] == {"setup_revision_unverified": 1}
+    assert excluded["comparison"] == "inconclusive"
+
+
 def test_create_can_freeze_a_trusted_trial_file_with_the_policy(tmp_path, capsys):
     import json
 

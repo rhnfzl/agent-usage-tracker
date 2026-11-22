@@ -125,7 +125,8 @@ def _manifest(store: Store, value: dict[str, Any]) -> dict[str, Any]:
     if observation is not None and observation.get("require_turn_context"):
         from .study_observe import check_strict_baselines
         check_strict_baselines(store, observation, Path(proposal["scope"]),
-                               datetime.now(timezone.utc), {row["session"] for row in identities})
+                               datetime.now(timezone.utc), {row["session"] for row in identities},
+                               proposal=proposal)
     trial = _spec(store, value["trial_spec_id"])
     if trial["kind"] == "command_check":
         from .trial import _acceptance_inputs

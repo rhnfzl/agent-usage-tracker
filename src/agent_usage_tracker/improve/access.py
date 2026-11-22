@@ -16,6 +16,7 @@ from ..config import AutError
 from ..event import parse_ts
 from ..redact import redact
 from .evidence import event_links
+from .setup_git import COMMIT_ID
 from .store import Store, canonical, digest
 
 MODES = ("metadata", "redacted", "full")
@@ -135,6 +136,9 @@ class Evidence:
                 if self.content != "metadata":
                     visible.update({name: self._label(context[name]) for name in ("model", "cwd")
                                     if isinstance(context.get(name), str)})
+                    revision = context.get("session_start_revision")
+                    if isinstance(revision, str) and COMMIT_ID.fullmatch(revision):
+                        visible["session_start_revision"] = revision
             result["turn_context"] = visible
         if self.content != "metadata":
             result.update({field: self._label(event[field]) for field in EVENT_LABELS

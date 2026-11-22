@@ -250,3 +250,14 @@ Inspect the count and start time on the boundary event through the CLI or MCP.
 The study checks capture coverage and requires an interactive native Codex session.
 An old capture or a turn without a complete request stream provides no count.
 The observation window uses the recorded native turn start.
+
+Set `require_setup_revision: true` with `require_turn_context: true` to verify the proposed file
+in the recorded Git revisions. The study requires the original file in each baseline revision.
+It requires the approved file in both the adoption commit and each candidate revision.
+For a new file, the baseline revision must show that the path is absent.
+Git objects must be available locally. Missing revisions and different contents exclude the pair.
+
+AUT can use a native Codex session header for the first observed turn in the same workspace.
+Later turns need their own revision evidence. Fetch or create a new capture when a source
+or local Git object is missing. The report counts verified revisions separately from evidence
+that the agent loaded the file or that the working copy matched its commit.
