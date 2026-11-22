@@ -1,12 +1,15 @@
 import hashlib
 import json
+import os
 import sqlite3
+from datetime import datetime
 from pathlib import Path
 
 from agent_usage_tracker.improve.judge import cases
 from agent_usage_tracker.improve.store import Store, audit
 
 STAMP = "2026-04-12T10:00:00Z"
+COMPLETED = datetime.fromisoformat(STAMP).timestamp()
 
 
 def _pi(home: Path, *, branched: bool = False, retry: bool = False) -> None:
@@ -32,6 +35,7 @@ def _pi(home: Path, *, branched: bool = False, retry: bool = False) -> None:
                         "parentId": "0" if branched and index == 3 else parent,
                         "timestamp": STAMP, "message": message})
     path.write_text("".join(json.dumps(row) + "\n" for row in records), encoding="utf-8")
+    os.utime(path, (COMPLETED, COMPLETED))
 
 
 def _cursor(home: Path, *, compacted: bool = False, image: bool = False) -> Path:
@@ -74,6 +78,7 @@ def _cursor(home: Path, *, compacted: bool = False, image: bool = False) -> Path
         meta = {"agentId": "cursor-run", "latestRootBlobId": root, "createdAt": 1775988000000}
         db.execute("INSERT INTO meta VALUES ('0', ?)", (json.dumps(meta).encode().hex(),))
     db.close()
+    os.utime(path, (COMPLETED, COMPLETED))
     return path
 
 
@@ -103,6 +108,7 @@ def test_branched_pi_trace_is_inspectable_but_ineligible(tmp_path):
     _pi(home, branched=True)
     store = Store(tmp_path / "private")
     report = audit(store, home, since_epoch=0, idle_s=0)
+    assert report["sessions"] == 1, report
     found = cases(store, report["audit_id"])
     assert found
     assert all(not row["coverage"]["complete"] for row in found)
@@ -124,6 +130,7 @@ def test_cursor_keeps_an_incomplete_root_ineligible(tmp_path):
     with sqlite3.connect(path) as db:
         db.execute("UPDATE blobs SET data=NULL WHERE instr(data, ?) > 0", (b'"role": "system"',))
     db.close()
+    os.utime(path, (COMPLETED, COMPLETED))
     store = Store(tmp_path / "private")
     report = audit(store, home, since_epoch=0, idle_s=0)
     found = cases(store, report["audit_id"])
@@ -140,6 +147,7 @@ def test_corrupt_cursor_root_leaves_other_sources_readable(tmp_path):
         root = json.loads(bytes.fromhex(raw))["latestRootBlobId"]
         db.execute("UPDATE blobs SET data=? WHERE id=?", (b"\x0a", root))
     db.close()
+    os.utime(path, (COMPLETED, COMPLETED))
     store = Store(tmp_path / "private")
     report = audit(store, home, since_epoch=0, idle_s=0)
     assert report["sessions"] == 1

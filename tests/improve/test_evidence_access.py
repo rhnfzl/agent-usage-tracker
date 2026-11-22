@@ -1,4 +1,5 @@
 import json
+import os
 from datetime import datetime, timezone
 
 from agent_usage_tracker.cli import main
@@ -38,11 +39,13 @@ def test_capture_search_content_modes_and_bundle(tmp_path, monkeypatch, capsys):
     root = tmp_path / "private"
     log = home / ".claude" / "projects" / "demo" / "run.jsonl"
     log.parent.mkdir(parents=True)
-    stamp = datetime.now(timezone.utc).isoformat()
+    stamp = datetime.now(timezone.utc)
     text = "A failed setup password=fixture-only " + "x" * 6100
-    row = {"timestamp": stamp, "type": "user", "sessionId": "demo", "entrypoint": "cli",
+    row = {"timestamp": stamp.isoformat(), "type": "user", "sessionId": "demo", "entrypoint": "cli",
            "uuid": "user", "cwd": str(tmp_path), "message": {"role": "user", "content": text}}
     log.write_text(json.dumps(row) + "\n", encoding="utf-8")
+    completed = stamp.timestamp() - 1
+    os.utime(log, (completed, completed))
     monkeypatch.setattr("agent_usage_tracker.improve.store.claude_code.main_session_files",
                         lambda _: [str(log)])
 
@@ -306,11 +309,13 @@ def test_project_audit_excludes_mixed_workspace_history(tmp_path, monkeypatch):
     wanted = tmp_path / "wanted"
     unrelated = tmp_path / "unrelated"
     log = home / "mixed.jsonl"
-    stamp = datetime.now(timezone.utc).isoformat()
+    stamp = datetime.now(timezone.utc)
     log.write_text("".join(json.dumps({
-        "timestamp": stamp, "type": "user", "sessionId": "mixed", "entrypoint": "cli",
+        "timestamp": stamp.isoformat(), "type": "user", "sessionId": "mixed", "entrypoint": "cli",
         "uuid": str(n), "cwd": str(cwd), "message": {"role": "user", "content": str(n)},
     }) + "\n" for n, cwd in enumerate((unrelated, wanted))), encoding="utf-8")
+    completed = stamp.timestamp() - 1
+    os.utime(log, (completed, completed))
     monkeypatch.setattr(module, "repository", lambda path: str(path))
     monkeypatch.setattr(module.claude_code, "main_session_files", lambda _: [log])
     monkeypatch.setattr(module.codex, "session_files", lambda _: [])
