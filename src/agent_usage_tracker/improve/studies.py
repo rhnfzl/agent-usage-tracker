@@ -32,8 +32,8 @@ def identity(store: Store, case_id: str) -> dict[str, str]:
     case = store.get("cases", case_id)
     session = store.get("sessions", case["session_snapshot"])
     # Copies can change event ids, line numbers and snapshot coverage without changing the task.
-    content = [{k: v for k, v in event.items() if k not in {"id", "line", "byte_offset", "timestamp"}}
-               for event in case["events"]]
+    ignored = {"id", "line", "byte_offset", "timestamp", "turn_context", "native_turn_key"}
+    content = [{k: v for k, v in event.items() if k not in ignored} for event in case["events"]]
     return {"session": digest([session["agent"], session["session_id"]]),
             "content": digest(content), "evidence": evidence_key(case)}
 
@@ -100,6 +100,10 @@ def _manifest(store: Store, value: dict[str, Any]) -> dict[str, Any]:
     proposal = store.get("proposals", value["proposal_id"])
     if proposal["case_id"] not in value["discovery_cases"]:
         raise AutError("improve: proposal must link discovery evidence")
+    if observation is not None and observation.get("require_turn_context"):
+        from .study_observe import check_strict_baselines
+        check_strict_baselines(store, observation, Path(proposal["scope"]),
+                               datetime.now(timezone.utc), {row["session"] for row in identities})
     trial = _spec(store, value["trial_spec_id"])
     if trial["kind"] == "command_check":
         from .trial import _acceptance_inputs

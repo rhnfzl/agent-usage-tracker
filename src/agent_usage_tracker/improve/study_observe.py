@@ -18,7 +18,9 @@ from .store import Store, digest, repository
 
 def validate_policy(policy: Any) -> None:
     if (not isinstance(policy, dict)
-            or set(policy) != {"metric", "minimum_pairs", "minimum_improvement", "baseline_cases"}
+            or set(policy) - {"require_turn_context"}
+            != {"metric", "minimum_pairs", "minimum_improvement", "baseline_cases"}
+            or type(policy.get("require_turn_context", False)) is not bool
             or policy["metric"] not in ("tool_errors", "tool_calls")
             or type(policy["minimum_pairs"]) is not int or not 2 <= policy["minimum_pairs"] <= 200
             or type(policy["minimum_improvement"]) not in (float, int)
@@ -44,16 +46,51 @@ def _sample(store: Store, case_id: str) -> dict[str, Any]:
     completed = bool(case["coverage"].get("complete") and not case.get("omitted_task_events")
                      and len(times) == len(events) and session.get("session_id")
                      and session.get("origin") not in {"automated", "subagent"})
+    context = events[-1].get("turn_context") if events[-1]["kind"] == "boundary" else None
+    context_status = context["status"] if context else "legacy_session_labels"
+    if context_status == "observed":
+        turn = events[-1].get("native_turn_key")
+        if not turn or any(event.get("native_turn_key") != turn for event in events):
+            context_status = "ambiguous"
     return {
+        "context_status": context_status,
         "identity": (session["agent"], session.get("session_id")),
         "content": digest([{key: event.get(key) for key in ("kind", "status", "text", "tool")}
                            for event in events]),
-        "cwd": session.get("cwd"), "model": session.get("model"),
+        "cwd": context.get("cwd") if context else session.get("cwd"),
+        "model": context.get("model") if context else session.get("model"),
         "started": min(times) if times else None, "ended": max(times) if times else None,
         "complete": completed, "tool_calls": sum(event["kind"] == "call" for event in events),
         "tool_errors": sum(event.get("status") == "error" for event in results)
                        if known_errors else None,
     }
+
+
+def _in_scope(cwd: str | None, scope: Path, project: str | None) -> bool:
+    if not cwd or not Path(cwd).is_absolute():
+        return False
+    path = Path(cwd).resolve()
+    return path == scope or (project is not None and repository(path) == project)
+
+
+def check_strict_baselines(store: Store, policy: dict[str, Any], scope: Path, before: datetime,
+                           excluded_sessions: set[str]) -> None:
+    scope = scope.resolve()
+    project = repository(scope)
+    sessions: set[str] = set()
+    contents: set[str] = set()
+    for key in policy["baseline_cases"]:
+        sample = _sample(store, key)
+        source = digest(list(sample["identity"]))
+        if (sample["context_status"] != "observed" or not sample["complete"]
+                or sample["ended"] >= before or sample[policy["metric"]] is None
+                or source in excluded_sessions or source in sessions
+                or sample["content"] in contents or not _in_scope(sample["cwd"], scope, project)):
+            continue
+        sessions.add(source)
+        contents.add(sample["content"])
+    if len(sessions) < policy["minimum_pairs"]:
+        raise AutError("improve: not enough eligible baseline cases with recorded turn context")
 
 
 def observe(store: Store, study_id: str, spec: dict[str, Any]) -> dict[str, Any]:
@@ -77,8 +114,8 @@ def observe(store: Store, study_id: str, spec: dict[str, Any]) -> dict[str, Any]
         raise AutError("improve: the recorded adoption day must follow the policy day")
     baseline = policy["baseline_cases"]
     pairs = spec["pairs"]
-    if not isinstance(pairs, list) or not 1 <= len(pairs) <= 200:
-        raise AutError("improve: supply 1..200 matched pairs")
+    if not isinstance(pairs, list) or len(pairs) > 200:
+        raise AutError("improve: supply up to 200 matched pairs")
     proposal = store.get("proposals", study["proposal_id"])
     scope = Path(proposal["scope"]).resolve()
     project = repository(scope)
@@ -97,12 +134,6 @@ def observe(store: Store, study_id: str, spec: dict[str, Any]) -> dict[str, Any]
     outcomes = []
     metric = policy["metric"]
 
-    def in_scope(cwd: str | None) -> bool:
-        if not cwd or not Path(cwd).is_absolute():
-            return False
-        path = Path(cwd).resolve()
-        return path == scope or (project is not None and repository(path) == project)
-
     for pair in pairs:
         fields(pair, "baseline candidate family")
         left, right, family = (pair[key] for key in ("baseline", "candidate", "family"))
@@ -117,6 +148,7 @@ def observe(store: Store, study_id: str, spec: dict[str, Any]) -> dict[str, Any]
         before, after = _sample(store, left), _sample(store, right)
         sources = {before["identity"], after["identity"]}
         content = {before["content"], after["content"]}
+        contexts = {before["context_status"], after["context_status"]}
         reason = None
         if (left in discovery or right in discovery or sources & excluded_sources
                 or len(sources) != 2 or len(content) != 2 or seen_sources & sources
@@ -126,10 +158,14 @@ def observe(store: Store, study_id: str, spec: dict[str, Any]) -> dict[str, Any]
               or before["ended"] >= frozen or after["started"] <= frozen
               or after["started"].date() <= adopted):
             reason = "missing_coverage_or_wrong_window"
-        elif (not in_scope(before["cwd"]) or not in_scope(after["cwd"])
+        elif (contexts & {"missing", "ambiguous"}
+              or policy.get("require_turn_context") and contexts != {"observed"}):
+            reason = "turn_context_unverified"
+        elif (not _in_scope(before["cwd"], scope, project)
+              or not _in_scope(after["cwd"], scope, project)
               or before["identity"][0] != after["identity"][0]
               or not before["model"] or before["model"] != after["model"]):
-            reason = "session_project_harness_or_model_labels_differ"
+            reason = "project_harness_or_model_labels_differ"
         elif before[metric] is None or after[metric] is None:
             reason = "metric_unknown"
         seen_sources.update(sources)
@@ -140,7 +176,9 @@ def observe(store: Store, study_id: str, spec: dict[str, Any]) -> dict[str, Any]
             continue
         outcomes.append({**pair, "eligible": True, "baseline_value": before[metric],
                          "candidate_value": after[metric],
-                         "reduction": before[metric] - after[metric]})
+                         "reduction": before[metric] - after[metric],
+                         "basis": "recorded_turn_context" if contexts == {"observed"}
+                         else "includes_session_labels"})
 
     reductions = [row["reduction"] for row in outcomes if row["eligible"]]
     reduction = mean(reductions) if reductions else None
@@ -154,9 +192,11 @@ def observe(store: Store, study_id: str, spec: dict[str, Any]) -> dict[str, Any]
     record = {"study_id": study_id, "adoption_id": adoption_id, "metric": metric,
               "comparison": comparison, "eligible_pairs": len(reductions),
               "excluded_pairs": len(pairs) - len(reductions), "exclusions": dict(counts),
+              "recorded_turn_context_pairs": sum(row.get("basis") == "recorded_turn_context"
+                                                   for row in outcomes),
               "unpaired_baseline_ids": unpaired, "mean_reduction": reduction, "pairs": outcomes,
               "causal_effect_established": False, "task_quality_verified": False,
               "attempt_setup_exposure_verified": False,
-              "scope": "Operator-paired ordinary work with matching recorded session labels."}
+              "scope": "Operator-paired ordinary work with matching recorded context labels."}
     key = store.put("study_observations", record)
     return {"observation_id": key, **record}

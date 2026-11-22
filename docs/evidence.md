@@ -25,7 +25,9 @@ each query. Narrow the filters if the index would exceed 50,000 events or 64 MiB
 
 Copy the full audit, session, and event IDs from the JSON results. Follow search's `next_cursor`
 with the same filters. An empty search page can still have a cursor when the scan budget runs out.
-Session results list event references. Read a referenced event and follow `next_offset` to read its
+Session results list event references. Supported native Codex turns link the completed turn to its
+recorded model and workspace. Metadata-only clients can see the status and source location.
+Read a referenced event and follow `next_offset` to read its
 remaining text. Commit lookup cites a matched Git call and result. A short recorded prefix can
 match more than one commit. AUT reports the prefix as captured. Comparison shows event counts and the first difference in the observed tool
 sequence. A missing result stays unknown. The comparison does not infer why two runs differed.

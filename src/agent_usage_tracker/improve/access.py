@@ -105,6 +105,19 @@ class Evidence:
 
     def _event(self, event: dict[str, Any], *, text: bool = True) -> dict[str, Any]:
         result = {field: event[field] for field in EVENT_METADATA if field in event}
+        context = event.get("turn_context")
+        if isinstance(context, dict) and context.get("status") in ("observed", "missing", "ambiguous"):
+            visible = {"status": context["status"]}
+            if context["status"] == "observed":
+                record = context.get("record")
+                if isinstance(record, dict):
+                    visible["record"] = {name: record[name] for name in ("line", "byte_offset")
+                                         if name in record and (record[name] is None
+                                                               or type(record[name]) is int)}
+                if self.content != "metadata":
+                    visible.update({name: self._label(context[name]) for name in ("model", "cwd")
+                                    if isinstance(context.get(name), str)})
+            result["turn_context"] = visible
         if self.content != "metadata":
             result.update({field: self._label(event[field]) for field in EVENT_LABELS
                            if isinstance(event.get(field), str)})

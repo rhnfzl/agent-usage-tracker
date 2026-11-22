@@ -134,6 +134,9 @@ def read_session(path: Path, agent: str, max_bytes: int = BYTE_LIMIT,
     last_closed = False
     copied_until = 0
     model: str | None = None
+    active_turn: str | None = None
+    active_turn_key: str | None = None
+    recorded_context: dict[str, Any] | None = None
     used = 0
     ranges: list[list[int]] = []
     observation: dict[str, int] = {}
@@ -156,7 +159,7 @@ def read_session(path: Path, agent: str, max_bytes: int = BYTE_LIMIT,
 
     def emit(kind: str, value: object, line: int, record: dict[str, Any], *,
              call: object = "", tool: object = "", status: str = "unknown",
-             key: object = "") -> None:
+             key: object = "", context: dict[str, Any] | None = None) -> None:
         nonlocal last_closed
         identity = str(call or key or line)
         event = trace_event(agent, session, kind, identity, value, record.get("timestamp"),
@@ -169,7 +172,9 @@ def read_session(path: Path, agent: str, max_bytes: int = BYTE_LIMIT,
         seen[kind, identity] = signature
         counts["truncated_events"] += event["truncated"]
         events.append({**event, "line": line if line > 0 else None,
-                       "byte_offset": -line if line < 0 else None})
+                       "byte_offset": -line if line < 0 else None,
+                       **({"turn_context": context} if context is not None else {}),
+                       **({"native_turn_key": active_turn_key} if active_turn_key else {})})
         if kind in {"call", "prompt"}:
             last_closed = False
 
@@ -288,6 +293,20 @@ def read_session(path: Path, agent: str, max_bytes: int = BYTE_LIMIT,
             sub = payload.get("type")
             if kind == "turn_context":
                 model = payload.get("model") or model
+                context_model, context_cwd = payload.get("model"), payload.get("cwd")
+                if active_turn and active_turn == payload.get("turn_id"):
+                    if (not isinstance(context_model, str) or not context_model
+                            or not isinstance(context_cwd, str) or not Path(context_cwd).is_absolute()):
+                        recorded_context = {"status": "ambiguous"}
+                    elif recorded_context is None:
+                        recorded_context = {
+                            "status": "observed", "model": context_model, "cwd": context_cwd,
+                            "record": {"line": line if line > 0 else None,
+                                       "byte_offset": -line if line < 0 else None},
+                        }
+                    elif (recorded_context.get("model"), recorded_context.get("cwd")) != (
+                            context_model, context_cwd):
+                        recorded_context = {"status": "ambiguous"}
             elif kind == "response_item":
                 call_id = payload.get("call_id")
                 if sub in {"function_call", "custom_tool_call"}:
@@ -302,7 +321,13 @@ def read_session(path: Path, agent: str, max_bytes: int = BYTE_LIMIT,
                          payload.get("content", ""), line, record, key=payload.get("id"))
             elif kind == "event_msg":
                 item = dict_or_empty(payload.get("item"))
-                if sub == "user_message":
+                if sub == "task_started":
+                    turn_id = payload.get("turn_id")
+                    active_turn = turn_id if isinstance(turn_id, str) and turn_id else None
+                    active_turn_key = (hashlib.sha256(active_turn.encode()).hexdigest()[:32]
+                                       if active_turn else None)
+                    recorded_context = None
+                elif sub == "user_message":
                     message = payload.get("message", "")
                     if codex.is_scheduled_automation(message):
                         origin = "automated"
@@ -311,8 +336,14 @@ def read_session(path: Path, agent: str, max_bytes: int = BYTE_LIMIT,
                     emit("reply", payload.get("message", ""), line, record)
                 elif sub in {"task_complete", "turn_aborted"}:
                     last_closed = sub == "task_complete"
+                    completed_turn = payload.get("turn_id")
+                    completed_context = None
+                    if completed_turn or active_turn:
+                        completed_context = recorded_context if active_turn == completed_turn else None
+                        completed_context = completed_context or {"status": "missing"}
                     emit("boundary", "turn_complete" if last_closed else "turn_aborted",
-                         line, record)
+                         line, record, context=completed_context)
+                    active_turn, active_turn_key, recorded_context = None, None, None
                 elif sub == "item_completed" and item.get("type") == "CommandExecution":
                     identity = item.get("id") or f"command-{line}"
                     emit("call", item.get("command", ""), line, record,

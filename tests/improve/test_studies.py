@@ -506,7 +506,7 @@ def test_natural_work_observation_measures_only_eligible_pairs(tmp_path, monkeyp
     proposal["scope"] = str(project)
     policy["proposal_id"] = store.put("proposals", proposal)
 
-    def add(name, timestamp, errors, complete=True):
+    def add(name, timestamp, errors, complete=True, model="one"):
         events = [{"id": "p", "kind": "prompt", "text": name, "timestamp": timestamp}]
         for n in range(2):
             events.extend([
@@ -515,8 +515,11 @@ def test_natural_work_observation_measures_only_eligible_pairs(tmp_path, monkeyp
                 {"id": f"r{n}", "kind": "result", "call_id": str(n),
                  "status": "error" if n < errors else "success", "timestamp": timestamp},
             ])
+        context = {"status": "observed", "model": model, "cwd": str(project)}
         events.append({"id": "end", "kind": "boundary", "text": "turn_complete",
-                       "timestamp": timestamp})
+                       "timestamp": timestamp, "turn_context": context})
+        for event in events:
+            event["native_turn_key"] = name
         snapshot = store.put("sessions", {"agent": "pi", "session_id": name, "model": "one",
             "cwd": str(project), "origin": "interactive", "events": events,
             "coverage": {"complete": complete}})
@@ -526,8 +529,15 @@ def test_natural_work_observation_measures_only_eligible_pairs(tmp_path, monkeyp
     baseline = [add("old" + str(n), "2025-02-27T12:00:00+00:00", 1) for n in range(3)]
     policy["observation_policy"] = {
         "metric": "tool_errors", "minimum_pairs": 2, "minimum_improvement": 0,
+        "require_turn_context": True,
         "baseline_cases": {case_id: "workspace setup" for case_id in baseline},
     }
+    invalid = add("incomplete-baseline", "2025-02-27T12:00:00+00:00", 1, complete=False)
+    too_few = policy["observation_policy"] | {"baseline_cases": {
+        baseline[0]: "workspace setup", invalid: "workspace setup",
+    }}
+    with pytest.raises(AutError, match="eligible baseline"):
+        create(store, policy | {"observation_policy": too_few})
     key = create(store, policy)["study_id"]
     adoption = store.put("adoptions", {"proposal_id": policy["proposal_id"],
         "adopted_at": "2025-03-01", "commit": "a" * 40})
@@ -542,6 +552,7 @@ def test_natural_work_observation_measures_only_eligible_pairs(tmp_path, monkeyp
     result = json.loads(capsys.readouterr().out)
     assert result["comparison"] == "observed_decrease"
     assert result["eligible_pairs"] == 2
+    assert result["recorded_turn_context_pairs"] == 2
     assert result["excluded_pairs"] == 1
     assert result["mean_reduction"] == 1
     assert not result["causal_effect_established"]
@@ -553,6 +564,24 @@ def test_natural_work_observation_measures_only_eligible_pairs(tmp_path, monkeyp
     report = assess(store, key)
     assert report["stages"]["observations"][0]["observation_id"] == result["observation_id"]
     assert not report["improvement_established"]
+
+    different_model = add("different-turn-model", "2025-03-03T12:00:00+00:00", 0, model="two")
+    spec.write_text(json.dumps({"adoption_id": adoption, "pairs": [
+        {"baseline": baseline[0], "candidate": different_model, "family": "workspace setup"},
+    ]}))
+    command = ["improve", "--root", str(store.root), "study", "observe",
+               "--study", key, "--spec-file", str(spec)]
+    assert main(command) == 0
+    mismatch = json.loads(capsys.readouterr().out)
+    assert mismatch["comparison"] == "inconclusive"
+    assert mismatch["exclusions"] == {"project_harness_or_model_labels_differ": 1}
+
+    spec.write_text(json.dumps({"adoption_id": adoption, "pairs": []}))
+    assert main(command) == 0
+    no_work = json.loads(capsys.readouterr().out)
+    assert no_work["comparison"] == "inconclusive"
+    assert no_work["eligible_pairs"] == 0
+    assert set(no_work["unpaired_baseline_ids"]) == set(baseline)
 
 
 def test_create_can_freeze_a_trusted_trial_file_with_the_policy(tmp_path, capsys):

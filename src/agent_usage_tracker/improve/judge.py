@@ -39,6 +39,9 @@ def _attempt_coverage(attempt: list[dict[str, Any]], coverage: dict[str, Any]) -
         local["missing_timestamps"] = sum(
             runs.get(run, {}).get("missing_timestamps", 1)
             for run in {event.get("run_id") for event in attempt})
+    native_turns = {event.get("native_turn_key") for event in attempt}
+    if len(native_turns) > 1:
+        local["source_incomplete"] = True
     return local
 
 

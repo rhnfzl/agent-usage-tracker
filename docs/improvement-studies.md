@@ -187,6 +187,7 @@ study. Freeze the baseline cases first. Keep them separate from discovery and co
   "metric": "tool_errors",
   "minimum_pairs": 3,
   "minimum_improvement": 0,
+  "require_turn_context": true,
   "baseline_cases": {
     "FIRST_BASELINE_CASE_ID": "fresh worktree setup",
     "SECOND_BASELINE_CASE_ID": "fresh worktree setup",
@@ -218,3 +219,10 @@ the time window. Candidates must come from a UTC day after the recorded adoption
 Unpaired baselines, too few eligible pairs, or a mean reduction within the threshold leave the result
 inconclusive. The result reports a decrease or increase in the measured count. It does not verify
 task quality, cause, or the setup loaded for each attempt. The controlled trial keeps its own result.
+
+Set `require_turn_context` to require an observed model and workspace from both attempts.
+AUT can link those fields to completed turns in supported native Codex logs. Missing or conflicting
+records and attempts spanning several native turns exclude the pair. Strict policies require
+enough eligible baseline cases at creation, before adoption. Legacy cases can still use session labels when the
+policy allows them. The report counts the pairs that used observed turn context separately.
+Submit an empty `pairs` list to record an inconclusive result while eligible follow-up is pending.
