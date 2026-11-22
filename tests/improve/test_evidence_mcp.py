@@ -101,3 +101,53 @@ def test_http_auth_and_read_on_real_loopback(connection, tmp_path):
         finally:
             server.terminate()
             server.communicate(timeout=10)
+
+
+def test_code_tool_matches_cli_and_uses_connection_grant(connection, tmp_path):
+    pytest.importorskip("pydantic_monty")
+    args, key = connection
+    source = f'read("event", session_id="{key}", event_id="event")["data"]["text"]'
+    recipe = tmp_path / "recipe.py"
+    recipe.write_text(source, encoding="utf-8")
+    expected = json.loads(subprocess.check_output(
+        [sys.executable, *args, "run-code", str(recipe)], text=True))
+
+    async def run():
+        async with stdio_client(StdioServerParameters(
+                command=sys.executable, args=[*args, "mcp", "--code"])) as streams:
+            async with ClientSession(*streams) as client:
+                await client.initialize()
+                catalog = await client.call_tool("code_catalog", {})
+                assert "search" in catalog.structuredContent["operations"]
+                result = await client.call_tool("run_code", {"source": source})
+                assert result.structuredContent == expected
+                assert expected["result"] == "password=[redacted]"
+                denied = await client.call_tool("run_code", {"source": 'read("export")'})
+                assert denied.isError
+
+    asyncio.run(asyncio.wait_for(run(), timeout=15))
+
+
+def test_code_tool_pins_bundle_for_life_of_connection(connection, tmp_path):
+    pytest.importorskip("pydantic_monty")
+    args, key = connection
+    bundle, replacement = (tmp_path / name for name in ("selected.json", "updated.json"))
+    for output, content in ((bundle, "metadata"), (replacement, "full")):
+        subprocess.run([sys.executable, *args[:-1], content, "export", str(output), key], check=True)
+    args = ["-m", "agent_usage_tracker.cli", "evidence", "--bundle", str(bundle),
+            "--content", "full", "mcp", "--code"]
+    source = f'read("event", session_id="{key}", event_id="event")["data"].get("text")'
+
+    async def run():
+        async with stdio_client(StdioServerParameters(command=sys.executable, args=args)) as streams:
+            async with ClientSession(*streams) as client:
+                await client.initialize()
+                before = await client.call_tool("run_code", {"source": source})
+                assert before.structuredContent["result"] is None
+                replacement.replace(bundle)
+                after = await client.call_tool("run_code", {"source": source})
+                assert after.isError
+                direct = await client.call_tool("event", {"session_id": key, "event_id": "event"})
+                assert "text" not in direct.structuredContent
+
+    asyncio.run(asyncio.wait_for(run(), timeout=15))

@@ -179,3 +179,103 @@ hash. To trial the addition, explicitly list the file with a null value in `file
 SHA-256 hash in `files.candidate`. This binds the trial to the absence of the skill before the change.
 A successful tool result is evidence for the cited step. Review whether the proposed instructions
 apply to the whole workflow before you adopt the skill.
+
+## Run a programmable investigation
+
+A recipe can use evidence from one session to decide what to search for in another.
+Give it explicit audits or bundles, then return citations, a timeline, a hypothesis,
+or a statistic with its counting rule.
+
+```sh
+pip install 'agent-usage-tracker[code]'
+aut evidence code-catalog
+aut evidence --audit FIRST --content redacted run-code follow.py --include-audit SECOND --save
+```
+
+For example, put this program in `follow.py`. It takes a lead from a match in the
+first audit and searches the second. The last expression becomes the JSON result.
+
+```python
+seed = read("search", query="setup failed", limit=1)
+found = []
+if seed["data"]["items"]:
+    query = seed["data"]["items"][0]["preview"].split()[-1]
+    cursor = ""
+    while cursor is not None:
+        page = read("search", scope="2", lead=seed["receipt"], query=query, cursor=cursor)
+        for hit in page["data"]["items"]:
+            found.append({"session_id": hit["session_id"], "event_id": hit["event_id"]})
+        cursor = page["data"]["next_cursor"]
+found
+```
+
+Use `-` in place of the path to read source from stdin. Pass a JSON object with
+`--params` to populate the program's `params` variable. The `scopes` variable lists
+the actual coverage and content grant per source. Scope `1` is the main audit or
+bundle. Additional audits come next, followed by additional bundles. Each type
+retains command-line order. Bundles can narrow the content grant. Code mode
+defaults to redacted access. Existing direct commands keep their own defaults.
+
+The catalog lists the read operations, their parameters, and defaults. Set `lead`
+to an earlier read's receipt to record which observation motivated a later read.
+Each successful read records available event references, a result digest, and
+whether a further page was offered. Continue an empty page if it has a cursor.
+Check scope and session coverage before drawing conclusions. A returned citation
+identifies an observed record. A person or a reviewed rule must check what it
+supports. Snapshot IDs may repeat across audits or change after a recapture.
+When comparing distinct source sessions, use an available source identity and
+report cases where it is unknown. The readers expose recorded Git outcomes and
+study evidence. They require independently verified links for joins with usage
+or records outside the selected evidence.
+
+Recipes run in fresh local Monty sessions. The runner limits source size, host
+calls, evidence bytes, output, and wall time. Failed execution reports an error.
+Recipes use the Python subset supported by Monty. They get no general host
+filesystem, network, or shell operations. Plan a stopping rule for recursive
+searches, and report which leads you left open if you stop early.
+
+Save a run with `--save` to keep its program, parameters, scopes, and read receipts
+in the private AUT store. Saving can retain sensitive text in a program or its
+parameters. The default AUT backup exclusions cover this directory under the
+standard store and `AUT_IMPROVE_ROOT`. Add a backup exclusion when using a different
+`--root` inside a backed-up directory.
+
+```sh
+aut evidence --audit FIRST replay-code RUN_ID --include-audit SECOND
+aut evidence --audit NEW_FIRST run-code --recipe RUN_ID --include-audit NEW_SECOND
+```
+
+Replay checks the original scope and compares the result and read record with the
+saved digest. Deleted inputs can prevent replay. Changes in AUT or Monty versions
+can change the digest. Use `--recipe` to run the same program on new inputs and
+optionally pass new parameters.
+
+Install `agent-usage-tracker[mcp,code]` to use a recipe through MCP. If you use
+the pinned-wheel runtime installer, pass `--code` to include both optional dependencies. Add `--code`
+to the server arguments after `mcp` and include any additional scopes there.
+The server adds `code_catalog` and `run_code(source, params)`. The client receives
+the result under the connection's grant. Restart the MCP server to select a
+changed bundle. A client connected to a hosted model can
+forward that result. Session observability settings govern a separate delivery
+path.
+
+## Send session evidence to a configured receiver
+
+Set `AUT_SESSION_OBSERVABILITY_URL` to an HTTPS endpoint that accepts AUT evidence
+bundle JSON by POST. Loopback HTTP is available for local development. Set
+`AUT_SESSION_OBSERVABILITY_TOKEN` if your receiver requires bearer authentication.
+AUT uses a dedicated endpoint for session evidence. The existing usage sink
+continues to receive usage data.
+
+With a destination configured, `aut evidence capture` sends the new audit with
+redacted content by default. Set `AUT_SESSION_OBSERVABILITY=metadata` for event
+references and coverage, `full` for available raw session text, or `off` to stop
+delivery. Use `capture --no-observe` to keep a single capture local. A capture or
+bundle can further restrict what is sent. Redaction masks recognized patterns.
+Review the content policy and the receiver's retention before sharing private work.
+
+A delivery failure appears in the capture's JSON as `observability.status=failed`.
+The private audit remains available. Retry with
+`aut evidence --audit AUDIT_ID observe`, or select a bundle to deliver a smaller
+set of sessions. The request carries an `Idempotency-Key` that matches the bundle
+digest. A receiver can use it to deduplicate identical deliveries.
