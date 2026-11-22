@@ -73,10 +73,10 @@ def _repo(path: Path, commits: list[tuple[str, str]]) -> None:
         _g(path, "commit", "-q", "--allow-empty", "-m", f"c{i}", email=email, when=when)
 
 
-@pytest.fixture
-def world(tmp_path, monkeypatch):
-    """Two repos and a worktree under projects/, a vendored repo that is skipped."""
-    p = tmp_path / "projects"
+@pytest.fixture(scope="session")
+def repo_template(tmp_path_factory):
+    """Build the fixed Git histories once per pytest worker."""
+    p = tmp_path_factory.mktemp("git-days-repos")
     _repo(p / "app", [(ME, "2026-11-02T10:00:00+00:00"),
                       (ALIAS, "2026-11-02T23:30:00+00:00"),      # 00:30 on 11-03 at +01:00
                       (SHARED, "2026-11-03T10:00:00+00:00"),     # shared, but not its repo
@@ -85,8 +85,17 @@ def world(tmp_path, monkeypatch):
                       (ME, "2026-10-31T10:00:00+00:00"),         # before since
                       (ME, "2026-11-06T08:00:00+00:00")])        # today: not yet
     _repo(p / "demo_fn_tool", [(SHARED, "2026-11-04T10:00:00+00:00")])
-    _g(p / "app", "worktree", "add", "-q", str(p / "app-wt"), "-b", "wt")
     _repo(p / "app" / "node_modules" / "dep", [(ME, "2026-11-04T10:00:00+00:00")])
+    return p
+
+
+@pytest.fixture
+def world(tmp_path, monkeypatch, repo_template):
+    """Give each test its own repos, linked worktree and scan state."""
+    p = tmp_path / "projects"
+    shutil.copytree(repo_template, p)
+    # Git writes absolute paths on both sides of a linked worktree.
+    _g(p / "app", "worktree", "add", "-q", str(p / "app-wt"), "-b", "wt")
     monkeypatch.setenv("AUT_STATE", str(tmp_path / "state.json"))
     return tmp_path
 

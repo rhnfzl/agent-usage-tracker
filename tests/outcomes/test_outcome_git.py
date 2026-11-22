@@ -22,13 +22,12 @@ from agent_usage_tracker import outcomes as oc
 from agent_usage_tracker.git_safe import git_argv
 from agent_usage_tracker.git_safe import git_env
 from agent_usage_tracker.repo_keys import RepoKeys
-from test_outcomes import (NOW, SALT, _commit, _g, _key, _lines, _row, _states, _with_git,
-                           _world)
+from test_outcomes import (NOW, SALT, _commit, _g, _key, _lines, _row, _states, _with_git)
 
 
-def test_fetch_failure_and_timeout_are_counted():
+def test_fetch_failure_and_timeout_are_counted(world):
     with tempfile.TemporaryDirectory() as d:
-        work, s = _world(Path(d))
+        work, s = world(Path(d))
         bad = Path(d) / "projects" / "bad"
         bad.mkdir()
         _g(bad, "init", "-q")
@@ -39,9 +38,9 @@ def test_fetch_failure_and_timeout_are_counted():
         assert sum(c.fetched_at > 0 for c in clones) == 1 and og.FETCH_TIMEOUT_S == 30
 
 
-def test_find_clones_dedups_worktrees_and_skips_vendored():
+def test_find_clones_dedups_worktrees_and_skips_vendored(world):
     with tempfile.TemporaryDirectory() as d:
-        work, s = _world(Path(d))
+        work, s = world(Path(d))
         _g(work, "worktree", "add", "-q", str(Path(d) / "projects" / "wt"), "-b", "wt-branch")
         nm = Path(d) / "projects" / "node_modules" / "dep"
         nm.mkdir(parents=True)
@@ -84,11 +83,11 @@ def test_fetch_leaves_the_repo_alone_and_terminates_on_timeout(monkeypatch):
     assert prompt == "0" and "--prune" not in cmd
 
 
-def test_repo_config_never_runs_commands():
+def test_repo_config_never_runs_commands(world):
     if os.name == "nt":                    # the fakes are POSIX shell scripts
         return
     with tempfile.TemporaryDirectory() as d:
-        work, s = _world(Path(d))
+        work, s = world(Path(d))
         marks = Path(d) / "marks"
         marks.mkdir()
         git_dir = work / ".git"
@@ -141,7 +140,7 @@ def test_repo_config_never_runs_commands():
         assert not list(marks.iterdir()), sorted(marks.iterdir())
 
 
-def test_signing_proxy_alternates_and_helpers_never_run(monkeypatch):
+def test_signing_proxy_alternates_and_helpers_never_run(monkeypatch, world):
     if os.name == "nt":                    # the fakes are POSIX shell scripts
         return
     import http.server
@@ -161,7 +160,7 @@ def test_signing_proxy_alternates_and_helpers_never_run(monkeypatch):
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     url = f"http://127.0.0.1:{srv.server_port}/r.git"
     with tempfile.TemporaryDirectory() as d:
-        work, s = _world(Path(d))
+        work, s = world(Path(d))
         marks = Path(d) / "marks"
         marks.mkdir()
         tools = {}
@@ -227,16 +226,16 @@ def test_signing_proxy_alternates_and_helpers_never_run(monkeypatch):
             srv.shutdown()
 
 
-def test_patch_id_failure_is_not_an_empty_answer():
+def test_patch_id_failure_is_not_an_empty_answer(world):
     with tempfile.TemporaryDirectory() as d:
-        work, s = _world(Path(d))
+        work, s = world(Path(d))
         assert s["A"] in og._patch_ids(str(work), ["-1", s["A"]])
         assert og._patch_ids(str(work), ["refs/heads/no-such-ref"]) is None
 
 
-def test_a_clone_git_cannot_identify_is_unreadable_not_gone(monkeypatch):
+def test_a_clone_git_cannot_identify_is_unreadable_not_gone(monkeypatch, world):
     with tempfile.TemporaryDirectory() as d:
-        _work, s = _world(Path(d))
+        _work, s = world(Path(d))
         with monkeypatch.context() as m:
             m.setattr(og, "_common_dir", lambda path: None)      # rev-parse timed out
             clones = oc.find_clones([str(Path(d) / "projects")], RepoKeys(SALT))
@@ -251,9 +250,9 @@ def test_a_clone_git_cannot_identify_is_unreadable_not_gone(monkeypatch):
         assert oc.find_clones([str(stale.parent)], RepoKeys(SALT)) == []
 
 
-def test_default_ref_ignores_an_origin_head_outside_origin():
+def test_default_ref_ignores_an_origin_head_outside_origin(world):
     with tempfile.TemporaryDirectory() as d:
-        work, _s = _world(Path(d))
+        work, _s = world(Path(d))
         tip = _g(work, "rev-parse", "refs/remotes/origin/main").strip()
         (work / ".git" / "--ext-diff").write_text(tip + "\n")   # would reach git log as a flag
         (work / ".git" / "refs" / "remotes" / "origin" / "HEAD").write_text("ref: --ext-diff\n")
@@ -262,9 +261,9 @@ def test_default_ref_ignores_an_origin_head_outside_origin():
         assert og._default_ref(str(work)) == ("refs/remotes/origin/main", True)
 
 
-def test_default_ref_failure_is_not_no_default():
+def test_default_ref_failure_is_not_no_default(world):
     with tempfile.TemporaryDirectory() as d:
-        work, s = _world(Path(d))
+        work, s = world(Path(d))
         assert og._default_ref(str(work)) == ("refs/remotes/origin/main", True)
         _g(work, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/gone")
         assert og._default_ref(str(work)) == ("refs/remotes/origin/main", True)   # dangling HEAD
@@ -312,11 +311,11 @@ def test_a_clone_with_no_branches_still_answers():
         assert outs[0]["state"] == "abandoned" and not stats["repo_unreadable"], (outs, stats)
 
 
-def test_repo_cannot_switch_a_protocol_back_on():
+def test_repo_cannot_switch_a_protocol_back_on(world):
     # protocol.<name>.allow beats protocol.allow, so a repo setting protocol.git.allow=always
     # would turn git:// (and with it the repo's own core.gitProxy) back on; GIT_ALLOW_PROTOCOL wins.
     with tempfile.TemporaryDirectory() as d:
-        work, _s = _world(Path(d))
+        work, _s = world(Path(d))
         mark = Path(d) / "proxy-ran"
         sc = Path(d) / "evil-proxy.sh"
         sc.write_text(f"#!/bin/sh\necho ran > '{mark}'\n")
