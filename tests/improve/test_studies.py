@@ -139,6 +139,27 @@ def test_shortlist_deduplicates_events_across_snapshots(tmp_path):
     assert len(result['incidents'][0]['snapshots']) == 2
 
 
+def test_shortlist_counts_recurrence_by_source_and_skips_empty_error_reports(tmp_path):
+    from agent_usage_tracker.improve.studies import shortlist
+
+    store = Store(tmp_path / 'store')
+    snapshots = []
+    for session, reports in [
+        ('first', ['', '{"exit_code":1,"output":""}', 'permission denied', 'permission denied']),
+        ('second', ['', '{"exit_code":1,"output":""}', 'permission denied']),
+    ]:
+        events = [{'id': str(i), 'kind': 'result', 'status': 'error', 'text': report}
+                  for i, report in enumerate(reports)]
+        snapshots.append(store.put('sessions', {'agent': 'codex', 'session_id': session,
+                                                'events': events}))
+    audit = store.put('audits', {'session_ids': snapshots})
+    result = shortlist(store, audit)
+    assert len(result['incidents']) == 7
+    assert sum(incident['signal'] is None for incident in result['incidents']) == 4
+    assert list(result['signal_counts'].values()) == [3]
+    assert list(result['signal_session_counts'].values()) == [2]
+
+
 def followup_fixture(tmp_path):
     from agent_usage_tracker.improve.proposals import file_digest
     store, study = fixture(tmp_path)

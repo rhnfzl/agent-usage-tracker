@@ -13,6 +13,8 @@ aut improve study shortlist --audit AUDIT_ID
 ```
 
 The shortlist deduplicates source-session and event identities across snapshots.
+It counts occurrences and distinct source sessions for each error signal.
+Errors with empty output remain visible as individual incidents.
 Repeated snapshots do not establish recurrence. Groups are investigation signals, not proof of a cause.
 Review source coverage before choosing discovery cases and independent clean controls.
 

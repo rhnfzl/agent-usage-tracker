@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
@@ -38,6 +39,23 @@ def identity(store: Store, case_id: str) -> dict[str, str]:
             "content": digest(content), "evidence": evidence_key(case)}
 
 
+def _failure_signal(event: dict[str, Any]) -> str | None:
+    raw = event.get("text")
+    if not isinstance(raw, str) or not (text := raw.strip()):
+        return None
+    if text.startswith("{"):
+        try:
+            value = json.loads(text)
+        except (ValueError, RecursionError):
+            value = None
+        if isinstance(value, dict) and set(value) <= {
+            "exit_code", "exitCode", "output", "aggregated_output",
+        } and all(value.get(key) is None or isinstance(value[key], str) and not value[key].strip()
+                  for key in ("output", "aggregated_output")):
+            return None
+    return digest([event.get("tool"), text])
+
+
 def shortlist(store: Store, audit_id: str) -> dict[str, Any]:
     audit = store.get("audits", audit_id)
     incidents: dict[str, dict[str, Any]] = {}
@@ -55,10 +73,14 @@ def shortlist(store: Store, audit_id: str) -> dict[str, Any]:
                 continue
             incidents[key] = {"incident_id": key, "source_session": source,
                 "event_id": event["id"], "snapshots": [snapshot],
-                "signal": digest([event.get("tool"), event.get("text")])}
-    counts = Counter(row["signal"] for row in incidents.values())
+                "signal": _failure_signal(event)}
+    signals = [(row["signal"], row["source_session"]) for row in incidents.values()
+               if row["signal"] is not None]
+    counts = Counter(signal for signal, _ in signals)
+    session_counts = Counter(signal for signal, _ in set(signals))
     return {"audit_id": audit_id, "distinct_source_sessions": len(sessions),
             "incidents": list(incidents.values()), "signal_counts": dict(counts),
+            "signal_session_counts": dict(session_counts),
             "scope": "Error groups are investigation signals, not causal findings."}
 
 
