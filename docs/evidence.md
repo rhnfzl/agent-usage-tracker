@@ -24,6 +24,9 @@ can index the selected events. It gives phrase hits priority. Without a usable m
 SQLite FTS5 BM25. The response reports the actual `search_mode` and any fallback reason.
 A search without text lists events using the supplied filters.
 
+To repeat a search across the CLI, MCP, and a Python recipe, use the same audit, content
+mode, filters, and explicit search mode. Pass the cursor back with the same arguments.
+
 Exact mode matches literal substrings. Ranked mode uses BM25 to match words
 in any order and puts exact phrases first. A running MCP server reuses an in-memory index for
 queries and pages that use the same filters. It rebuilds the index when the filters or source
@@ -311,6 +314,11 @@ Use the same improvement root for both commands. The
 isolated baseline and candidate with the same acceptance check. Record the result and compare
 fresh eligible work before claiming a lasting benefit. The source configuration changes only
 through the existing review and adoption process.
+
+For a rule you can check mechanically, add the smallest test or lint check that rejects the
+observed mistake. Run it against a known bad example and an allowed example. For example,
+AUT checks that local preflight and CI invoke the `pytest` console script. Running
+`python -m pytest` can change the import path and hide errors during test collection.
 
 ## Propose a project skill from successful work
 

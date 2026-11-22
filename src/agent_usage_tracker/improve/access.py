@@ -16,7 +16,7 @@ from ..config import AutError
 from ..event import parse_ts
 from ..redact import redact
 from .evidence import event_links
-from .ranked_search import RankedSearch, SearchMode, WordSearchUnavailable, words
+from .ranked_search import DEFAULT_SEARCH_MODE, RankedSearch, SearchMode, WordSearchUnavailable, words
 from .semantic_search import Embedder, SemanticUnavailable
 from .setup_git import COMMIT_ID
 from .store import Store, canonical, digest
@@ -264,7 +264,7 @@ class Evidence:
     def search(self, query: str = "", agent: str = "", kind: str = "", status: str = "",
                since: str = "", until: str = "", cursor: str = "", limit: int = 20,
                tool: str = "", workspace: str = "",
-               mode: SearchMode = "auto", session_id: str = "",
+               mode: SearchMode = DEFAULT_SEARCH_MODE, session_id: str = "",
                exclude_sessions: list[str] | None = None, group_by_session: bool = False,
                argument_path: str | None = None) -> dict[str, Any]:
         """Find cited events by phrase, words, meaning, or combined ranking.

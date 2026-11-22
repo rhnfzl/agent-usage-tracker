@@ -5,4 +5,4 @@ session, activity and active-time rows, and pushes them to a self-hosted sink. C
 local-model labels are separate pipelines over the same sink.
 """
 
-__version__ = "0.4.1"
+__version__ = "0.4.2"
