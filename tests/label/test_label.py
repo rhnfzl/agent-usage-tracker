@@ -331,7 +331,16 @@ def test_config_and_evalset_stay_below_their_callers():
 
 
 def test_cli_and_config(tmp_path, monkeypatch):
+    # Freeze the clock while UTC and the ledger are on different days.
+    instant = datetime(2026, 11, 21, 23, 30, tzinfo=timezone.utc)
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return instant.replace(tzinfo=None) if tz is None else instant.astimezone(tz)
+
     seen = {}
+    monkeypatch.setattr(cli, "datetime", Clock)
     monkeypatch.setattr(cli, "load_config", lambda: _cfg(tmp_path))
     monkeypatch.setattr(run, "run_label", lambda cfg, t, since, dry_run, local_estimates=False: seen.update(
         t=t, since=since, dry=dry_run) or {})
@@ -340,7 +349,7 @@ def test_cli_and_config(tmp_path, monkeypatch):
     assert seen["t"] == ["steer_intent"] and seen["dry"] is True
     assert seen["since"].date() == date(2026, 10, 1) and seen["since"].tzinfo is not None
     assert cli.main(["label", "backfill", "--task", "work_category", "--days", "3"]) == 0
-    assert seen["since"].date() == date.today() - timedelta(days=3) and seen["dry"] is False
+    assert seen["since"] == datetime(2026, 11, 19, tzinfo=LEDGER) and seen["dry"] is False
     assert cli.main(["label", "run"]) == 0 and seen["t"] is None
     from agent_usage_tracker import config
     p = tmp_path / "c.toml"
