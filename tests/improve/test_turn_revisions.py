@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from agent_usage_tracker.improve import store as improve_store
 from agent_usage_tracker.improve.access import Evidence
 from agent_usage_tracker.improve.evidence import read_session
 from agent_usage_tracker.improve.file_reads import path_fingerprint
@@ -58,6 +59,7 @@ def test_project_hook_records_a_later_worktree_turn_for_baseline_preflight(tmp_p
     saved = store.path(RECORD_KIND, record["turn_key"]).read_text()
     assert "private-fixture" not in saved and str(worktree) not in saved and relative_target not in saved
     receipt_time = datetime.fromisoformat(record["recorded_at"])
+    completed_at = receipt_time + timedelta(milliseconds=10)
     record_hook(root, project, hook(worktree, "later"))
     assert lookup(store, "session", "later") == record
 
@@ -69,7 +71,7 @@ def test_project_hook_records_a_later_worktree_turn_for_baseline_preflight(tmp_p
                                     "git": {"commit_hash": header}})]
     for turn, began, ended in (
         ("opening", start, start + timedelta(milliseconds=25)),
-        ("later", receipt_time - timedelta(milliseconds=10), receipt_time + timedelta(milliseconds=10)),
+        ("later", receipt_time - timedelta(milliseconds=10), completed_at),
     ):
         rows.extend([
             ("event_msg", began, {"type": "task_started", "turn_id": turn}),
@@ -80,8 +82,14 @@ def test_project_hook_records_a_later_worktree_turn_for_baseline_preflight(tmp_p
         ])
     path.write_text("".join(json.dumps({"type": kind, "timestamp": time.isoformat(),
                                         "payload": payload}) + "\n" for kind, time, payload in rows))
+    # Model a completed transcript even when the filesystem clock has finer resolution.
+    completed_stamp = completed_at.timestamp()
+    os.utime(path, (completed_stamp, completed_stamp))
     writable = Store(root)
-    captured = audit(writable, home, project=project, idle_s=0)
+    with monkeypatch.context() as clock:
+        clock.setattr(improve_store, "time", SimpleNamespace(time=lambda: completed_stamp + 1))
+        captured = audit(writable, home, project=project, idle_s=0)
+    assert captured["sessions"] == 1, captured
     reader = Evidence("redacted", store, captured["audit_id"])
     snapshot = reader.keys[0]
     events = [event for event in reader.session(snapshot)["items"] if event["kind"] == "boundary"]
