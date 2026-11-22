@@ -31,7 +31,8 @@ def _verify_wheel(wheel: Path, library: Path) -> None:
 
 
 def install(store: Store, wheel: Path, runtime_root: Path, *,
-            constraints: Path | None = None, code: bool = False) -> dict[str, Any]:
+            constraints: Path | None = None, code: bool = False,
+            semantic: bool = False) -> dict[str, Any]:
     wheel = wheel.resolve()
     if wheel.suffix != ".whl" or not wheel.is_file():
         raise AutError("improve: runtime needs a readable wheel")
@@ -49,7 +50,10 @@ def install(store: Store, wheel: Path, runtime_root: Path, *,
     sha = file_digest(wheel)
     name = sha[:16] + ("-" + constraint_sha[:12] if constraint_sha else "")
     extras = ["label", "mcp", "code"] if code else ["label"]
-    root = runtime_root.expanduser().resolve() / "releases" / (name + ("-code" if code else ""))
+    if semantic:
+        extras.append("semantic")
+    root = runtime_root.expanduser().resolve() / "releases" / (
+        name + ("-code" if code else "") + ("-semantic" if semantic else ""))
     root.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     with _locked(root.parent / "install"):
         manifest_path = root / "runtime.json"
@@ -85,6 +89,7 @@ def install(store: Store, wheel: Path, runtime_root: Path, *,
                  "print(json.dumps({'module':a.__file__, 'version':d.version, "
                  "'library':str(d.locate_file('')), "
                  "'code_available':all(u.find_spec(name) for name in ('pydantic_monty','mcp')), "
+                 "'semantic_available':all(u.find_spec(name) for name in ('transformers','torch')), "
                  "'source':json.loads(d.read_text('direct_url.json') or '{}')}))")
         identity = json.loads(subprocess.check_output(
             [str(python), "-I", "-c", probe], cwd=store.root, text=True, timeout=30))
@@ -94,6 +99,8 @@ def install(store: Store, wheel: Path, runtime_root: Path, *,
             raise AutError("improve: runtime probe did not resolve the pinned non-editable wheel")
         if code and not identity.get("code_available"):
             raise AutError("improve: runtime is missing code-mode or MCP dependencies")
+        if semantic and not identity.get("semantic_available"):
+            raise AutError("improve: runtime is missing semantic search dependencies")
         _verify_wheel(saved_wheel, Path(identity["library"]))
         pins = subprocess.check_output([uv, "pip", "freeze", "--python", str(python)],
                                        text=True, timeout=30)
@@ -118,6 +125,7 @@ if __name__ == "__main__":
     parser.add_argument("--runtime-root", required=True, type=Path)
     parser.add_argument("--constraints", type=Path)
     parser.add_argument("--code", action="store_true", help="include code mode and MCP dependencies")
+    parser.add_argument("--semantic", action="store_true", help="include local embedding dependencies")
     args = parser.parse_args()
     print(json.dumps(install(Store(args.store), args.wheel, args.runtime_root,
-                             constraints=args.constraints, code=args.code)))
+                             constraints=args.constraints, code=args.code, semantic=args.semantic)))

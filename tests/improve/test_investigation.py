@@ -145,3 +145,29 @@ def test_unicode_source_parameters_and_output(evidence, tmp_path, capsys):
     assert main(["evidence", "--root", str(store.root), "--audit", audits[0],
                  "run-code", str(recipe), "--params", '{"place":"東京"}']) == 0
     assert json.loads(capsys.readouterr().out)["result"] == "café 東京"
+
+
+def test_recipe_lists_searches_structured_arguments_and_reads_linked_context(tmp_path, capsys):
+    pytest.importorskip("pydantic_monty")
+    store = Store(tmp_path / "private")
+    key = store.put("sessions", {"agent": "pi", "coverage": {}, "events": [
+        {"id": "call", "kind": "call", "call_id": "pair", "text": '{"path":"guide.md"}'},
+        {"id": "result", "kind": "result", "call_id": "pair", "text": "file edited"},
+    ]})
+    audit = store.put("audits", {"session_ids": [key], "coverage": {}})
+    source = tmp_path / "recipe.py"
+    source.write_text('''listing = read("list_sessions")
+session_id = listing["data"]["items"][0]["id"]
+page = read("search", lead=listing["receipt"], session_id=session_id,
+            argument_path="/path", query="guide.md", exclude_sessions=[])
+hit = page["data"]["items"][0]
+pair = read("context", lead=page["receipt"], session_id=session_id,
+            event_id=hit["event_id"], radius=0, limit=5)
+pair["data"]["counterpart"]["id"]
+''', encoding="utf-8")
+    assert main(["evidence", "--root", str(store.root), "--audit", audit, "run-code", str(source)]) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["result"] == "result"
+    assert [row["lead"] for row in report["reads"]] == [None, 1, 2]
+    assert report["reads"][2]["has_more"]
+    assert [ref["event_id"] for ref in report["reads"][2]["references"]] == ["call", "result"]

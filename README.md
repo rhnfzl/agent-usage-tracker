@@ -48,7 +48,7 @@ uvx agent-usage-tracker improve audit --days 7 --limit 30
 
 The [improvement guide](https://github.com/rhnfzl/agent-usage-tracker/blob/main/docs/improvement.md) covers private evidence, advisory judgments, drafts, and the review inbox. The [study guide](https://github.com/rhnfzl/agent-usage-tracker/blob/main/docs/improvement-studies.md) explains how to test a candidate. Source edits require an explicit decision. A passing check supports the tested change; measuring an improvement in real work requires comparable follow-up.
 
-You can also ask a coding agent to explore that evidence directly. Run `aut evidence capture` for a private full-text audit, then search and compare runs through the CLI or MCP. Choose what the client can read and link useful findings to a repair you can test. See the [agent evidence guide](docs/evidence.md).
+You can also ask a coding agent to explore that evidence directly. Run `aut evidence capture` for a private full-text audit, then search tool arguments and compare runs through the CLI, MCP, or Code Mode. Choose what the client can read and link useful findings to a repair you can test. See the [agent evidence guide](docs/evidence.md).
 
 ## How I run AUT
 

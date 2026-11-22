@@ -8,21 +8,138 @@ audit or a portable evidence bundle.
 
 ```sh
 aut evidence capture --project /path/to/repo --days 7 --limit 20
-aut evidence --audit AUDIT_ID describe
+aut evidence --audit AUDIT_ID describe --text-coverage
 aut evidence --audit AUDIT_ID search --status error
-aut evidence --audit AUDIT_ID search --query "Operation not permitted"
+aut evidence --audit AUDIT_ID search --mode exact --query "Operation not permitted"
 aut evidence --audit AUDIT_ID search --mode ranked --query "permissions cache"
 aut evidence --audit AUDIT_ID session SESSION_ID
+aut evidence --audit AUDIT_ID context SESSION_ID EVENT_ID
 aut evidence --audit AUDIT_ID event SESSION_ID EVENT_ID
 aut evidence --audit AUDIT_ID commits COMMIT_SHA
 aut evidence --audit AUDIT_ID compare FAILED_SESSION_ID CLEAN_SESSION_ID
 ```
 
-Exact mode is the default. It matches literal substrings. Ranked mode uses SQLite FTS5 to match words
+Auto is the default. It combines word and semantic ranking when a local model is configured and
+can index the selected events. It gives phrase hits priority. Without a usable model it uses
+SQLite FTS5 BM25. The response reports the actual `search_mode` and any fallback reason.
+A search without text lists events using the supplied filters.
+
+Exact mode matches literal substrings. Ranked mode uses BM25 to match words
 in any order and puts exact phrases first. A running MCP server reuses an in-memory index for
 queries and pages that use the same filters. It rebuilds the index when the filters or source
 files change. Each CLI invocation builds a fresh index. Narrow the filters if the index would
 exceed 50,000 events or 64 MiB. Metadata-only scope supports filters without text search.
+
+Use exact search for URLs, command fragments, and error strings. Use ranked search for words.
+Use sessions mode to find more than one attempt. Each item cites the best ranked event for its
+session. The page limit counts sessions, and `matching_events` counts word matches under the filters.
+Narrow to one session with `--session-id` and skip inspected sessions with repeatable
+`--exclude-session`. Apply `--kind`, `--status` or date filters when you know what to look for.
+
+```sh
+aut evidence --audit AUDIT_ID search --mode sessions --query "cache permissions"
+aut evidence --audit AUDIT_ID search --session-id SESSION_ID --kind result --mode exact --query "Permission denied"
+aut evidence --audit AUDIT_ID context SESSION_ID EVENT_ID --radius 2 --limit 2000
+```
+
+Context returns the anchor, its recorded tool counterpart, and nearby events. It keeps the linked
+event even when it falls outside the radius. `link_status` distinguishes a missing call or result
+from an event type that has no tool link. The limit is characters per event. Read longer text
+with `event` and the returned `next_offset`. Context also works on metadata-only bundles.
+
+Pair inspection gives an agent evidence of what ran and what happened. Compare independent
+attempts before treating a match count as evidence of a recurring pattern.
+
+## List, grep, and read captured evidence
+
+Use these commands the way you use a directory listing, a literal grep, and a file read.
+Session and event IDs address records inside the selected audit or bundle.
+
+```sh
+aut evidence --audit AUDIT_ID list-sessions --agent codex
+aut evidence --audit AUDIT_ID session SESSION_ID --limit 30
+aut evidence --audit AUDIT_ID search --mode exact --kind call --query 'rg --files'
+aut evidence --audit AUDIT_ID search --mode exact --tool file_change \
+  --argument-path /file --query docs/evidence.md
+aut evidence --audit AUDIT_ID context SESSION_ID EVENT_ID --radius 1
+```
+
+`list-sessions` pages summaries, including sessions with no matching events. Use the summary
+`id` for subsequent reads. Exact search matches case-insensitive substrings in authorized event
+text. A JSON pointer such as `/path` or `/edits/0/file` restricts search to that recorded tool
+argument. Field search examines call events. For a plain shell input, use literal call search or
+the empty pointer `--argument-path ''` to search the recorded input as a whole.
+
+A pointer selects recorded data. AUT skips missing fields, clipped input, and text it cannot read
+as JSON. An exact page reports resolved and unavailable fields among the calls it visited. Ranked
+search counts indexed fields. Follow cursors before concluding that no available call matches.
+Field search works with full or redacted access. In redacted mode, redaction can obscure fields.
+
+## Search by meaning on this machine
+
+Install the optional `semantic` extra in a Python environment supported by its dependencies.
+Supply a local MiniLM-compatible sentence model directory with Hugging Face configuration, a
+fast tokenizer and safetensors weights. AUT uses mean pooling and cosine similarity. It uses
+MPS on supported Apple hardware and CPU elsewhere. The model loads from local files and the
+index stays in memory. With the pinned-wheel installer, pass `--semantic` to include its dependencies.
+The base install needs only SQLite for word ranking.
+
+```sh
+pip install 'agent-usage-tracker[semantic]'
+aut evidence --audit AUDIT_ID --embedding-model /path/to/model \
+  search --mode hybrid --kind reply --query "Where did the temporary database go?"
+```
+
+Semantic mode ranks by the best scoring passage from each event. Hybrid mode adds reciprocal
+ranks from word and semantic search, and each hit exposes its two ranks. Both modes can return
+a candidate even when the audit contains no answer. Check the cited text and report when it
+gives insufficient evidence. Use `--group-by-session` to keep the best event per session.
+For these modes, `matching_events` counts all ranked candidates for the session, including
+semantic candidates. It does not measure confirmed occurrences.
+
+Modes share the same event filters and content grant. Narrow the scope if it exceeds 8,192
+embedding passages. A running MCP server reuses the last scope in memory. Changing filters
+can rebuild it. Each CLI process starts without an index. For MCP, put `--embedding-model`
+before `mcp` in the server arguments. Set `AUT_EVIDENCE_EMBEDDING_MODEL` to make a local model
+available to default searches. The explicit flag takes precedence over the environment variable.
+With automatic search, a scope that exceeds the passage limit falls back to BM25.
+Explicit semantic and hybrid searches report the limit so the caller can narrow the filters.
+
+## Measure retrieval against known evidence
+
+Save a local evaluation set for a frozen audit. Give each question one or more acceptable
+`[session_id, event_id]` labels. Use an empty label list for a known no-answer question.
+Collect questions before reading the logs when possible. Include literal identifiers, paraphrases,
+tool results, and cases that require an answer from multiple sessions.
+
+```json
+{
+  "version": 1,
+  "audit_id": "AUDIT_ID",
+  "content": "full",
+  "cases": [
+    {
+      "id": "setup",
+      "category": "paraphrase",
+      "query": "Why did setup stop before installing dependencies?",
+      "filters": {"kind": "result"},
+      "relevant": [["SESSION_ID", "EVENT_ID"]]
+    }
+  ]
+}
+```
+
+```sh
+aut evidence --audit AUDIT_ID evaluate questions.json --limit 5
+aut evidence --audit AUDIT_ID --embedding-model /path/to/model \
+  evaluate questions.json --mode ranked --mode semantic --mode hybrid
+```
+
+The report gives per-question event and session rank, recall, serialized result size, and search
+time. No-answer controls report how often search returned empty. Evaluate answer correctness
+separately using the cited events. Keep the input labels with the private audit they refer to.
+
+## Read and verify a citation
 
 Copy the full audit, session, and event IDs from the JSON results. Follow search's `next_cursor`
 with the same filters. An empty search page can still have a cursor when the scan budget runs out.
@@ -94,8 +211,8 @@ Set the client's MCP command to the absolute path to `aut`. Pass these arguments
 ```
 
 Use the same `--root` as capture if you use a custom store. Add `--content redacted` before
-`mcp` to mask text. The server exposes `describe`, `search`, `session`, `event`, `compare`,
-`commits`, `case`, `ordinary_work`, and `retries` with the same scope and results as the CLI.
+`mcp` to mask text. The server exposes `describe`, `list_sessions`, `search`, `session`, `event`, `context`,
+`compare`, `commits`, `case`, `ordinary_work`, and `retries` with the same scope and results as the CLI.
 It provides read operations only.
 
 An example prompt for the connected agent:
@@ -250,7 +367,25 @@ Use `-` in place of the path to read source from stdin. Pass a JSON object with
 the actual coverage and content grant per source. Scope `1` is the main audit or
 bundle. Additional audits come next, followed by additional bundles. Each type
 retains command-line order. Bundles can narrow the content grant. Code mode
-defaults to redacted access. Existing direct commands keep their own defaults.
+defaults to redacted access. Pass `--content full` for a private local investigation.
+Existing recipes keep exact search when they omit `mode`. Request `mode="auto"` to use the
+operator's configured ranking, or select a mode for each step. Model-enabled workers have
+a 30-second wall limit for model startup and evidence reads. Other recipes have 12 seconds.
+Both have the same sandbox compute, call, and output limits.
+
+Use a single recipe to find a structured edit and read its paired result:
+
+```python
+hits = read("search", mode="exact", tool="file_change",
+            argument_path="/file", query=params["path"], limit=1)
+found = []
+for hit in hits["data"]["items"]:
+    pair = read("context", lead=hits["receipt"], session_id=hit["session_id"],
+                event_id=hit["event_id"], radius=0, limit=500)
+    found.append({"session": hit["session_id"], "call": hit["event_id"],
+                  "result": pair["data"]["counterpart"]})
+found
+```
 
 The catalog lists the read operations, their parameters, and defaults. Set `lead`
 to an earlier read's receipt to record which observation motivated a later read.
@@ -315,3 +450,41 @@ The private audit remains available. Retry with
 `aut evidence --audit AUDIT_ID observe`, or select a bundle to deliver a smaller
 set of sessions. The request carries an `Idempotency-Key` that matches the bundle
 digest. A receiver can use it to deduplicate identical deliveries.
+
+## Discover patterns in your work
+
+Use discovery to follow questions that arise from the evidence. It can compare decisions across
+projects, find a counterexample, or keep an unanswered question for another run.
+
+```sh
+aut evidence discover
+aut evidence --audit RECENT discover --include-audit OLDER \
+  --question "Where did an explanation change the next instruction?"
+aut evidence --audit AUDIT --content redacted context SESSION EVENT
+```
+
+`discover` runs a local cached MLX instruct model and bounded Code Mode searches over saved
+redacted audits. Install the `label` and `code` extras, or use the stable runtime installer with
+`--code`. The default model is `mlx-community/Qwen3-4B-Instruct-2507-4bit`.
+Pass `--model` for another model already in your cache. Discovery uses the newest three saved audits
+by default. Select up to four distinct audits explicitly and use `--rounds` to limit follow-up.
+
+Code Mode records which source prompted each search and saves replayable receipts.
+`context --focus "matching phrase"` keeps the matching part of a long event in view. AUT uses the
+local Git workspace to identify projects. Missing workspace or source identity stays visible.
+Two records of the same native session cannot support a comparison. Separate sessions may still
+belong to one task, so review the cited context before counting recurrence.
+
+The private HTML digest shows model-proposed findings, open leads and coverage. It includes only
+captured excerpts. Candidate counts describe the searches that ran. They do not measure how often
+a pattern occurs. The same question, model revision and audit selection reuse the latest report.
+With new audits, the investigator sees the previous run's open questions and identifies evidence
+pairs it has already reported.
+
+For recurring local review, use the pinned Python from the runtime installer in
+`packaging/launchd/dev.aut.discover.plist`. Replace its placeholders with absolute paths to the
+runtime and existing private store, then load it as a user LaunchAgent. The sample runs on Sunday
+at 09:15 local time. AUT saves the digest under `discoveries/` in that store.
+Default backups exclude its reports, pointers, and Code Mode run records for the standard store
+and the store set by `AUT_IMPROVE_ROOT`. For another `--root`, exclude those directories from backups
+explicitly. The command never applies a proposed practice.

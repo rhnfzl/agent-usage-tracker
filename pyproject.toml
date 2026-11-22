@@ -37,6 +37,7 @@ merge = ["torch>=2.14", "peft>=0.21", "transformers>=5.17", "huggingface_hub>=1.
 # The evidence CLI runs without the optional MCP server.
 mcp = ["mcp>=1.30,<2"]
 code = ["pydantic-monty>=1.6,<1.7"]
+semantic = ["torch>=2.8", "transformers>=4.57,<6"]
 
 # Run the suite: pip install -e '.[test]' && pytest -q
 test = ["pytest", "pytest-xdist==3.8.0"]
