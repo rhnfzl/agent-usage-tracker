@@ -452,3 +452,122 @@ def test_byte_offsets_do_not_establish_study_or_followup_independence(tmp_path):
     follow_spec['trial_case_evidence'] = {'fresh': [copied_id]}
     with pytest.raises(AutError, match='copied|source event'):
         followup(store, sid, follow_spec)
+
+
+def test_study_freezes_absence_when_proposal_adds_a_skill(tmp_path):
+    from agent_usage_tracker.improve.proposals import file_digest
+    from agent_usage_tracker.improve.studies import run
+
+    store, study = fixture(tmp_path)
+    trial = store.get("trial_specs", study["trial_spec_id"])
+    source = tmp_path / "source"
+    source.mkdir()
+    target = ".agents/skills/check/SKILL.md"
+    candidate = Path(trial["directories"]["candidate"]) / target
+    candidate.parent.mkdir(parents=True)
+    candidate.write_text("Verified instructions", encoding="utf-8")
+    expected = file_digest(candidate)
+    proposal = store.get("proposals", study["proposal_id"])
+    proposal.update(scope=str(source), target=target, before_sha256=None, after_sha256=expected)
+    study["proposal_id"] = store.put("proposals", proposal)
+    acceptance = tmp_path / "accept.py"
+    acceptance.write_text(f"from pathlib import Path\nassert Path({target!r}).is_file()\n")
+    trial["files"] = {"baseline": {target: None}, "candidate": {target: expected}}
+    trial["cases"][0].update(argv=[sys.executable, str(acceptance)],
+                             acceptance_files={str(acceptance): file_digest(acceptance)})
+    study["trial_spec_id"] = store.put("trial_specs", trial)
+    key = create(store, study)["study_id"]
+    assert run(store, key, execute=True)["trial"]["accepted"] == {"baseline": 0, "candidate": 1}
+    assert not (source / target).exists()
+    baseline = Path(trial["directories"]["baseline"]) / target
+    baseline.parent.mkdir(parents=True)
+    baseline.write_text("Contaminated baseline")
+    with pytest.raises(AutError, match="baseline.*hash"):
+        run(store, key)
+
+
+def test_natural_work_observation_measures_only_eligible_pairs(tmp_path, monkeypatch, capsys):
+    import json
+    from datetime import datetime, timezone
+
+    from agent_usage_tracker.cli import main
+    from agent_usage_tracker.improve import studies
+
+    class PolicyClock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2025, 2, 28, 12, tzinfo=timezone.utc)
+
+    monkeypatch.setattr(studies, "datetime", PolicyClock)
+    store, policy = fixture(tmp_path)
+    project = tmp_path / "source"
+    project.mkdir()
+    proposal = store.get("proposals", policy["proposal_id"])
+    proposal["scope"] = str(project)
+    policy["proposal_id"] = store.put("proposals", proposal)
+
+    def add(name, timestamp, errors, complete=True):
+        events = [{"id": "p", "kind": "prompt", "text": name, "timestamp": timestamp}]
+        for n in range(2):
+            events.extend([
+                {"id": f"c{n}", "kind": "call", "call_id": str(n),
+                 "text": name, "timestamp": timestamp},
+                {"id": f"r{n}", "kind": "result", "call_id": str(n),
+                 "status": "error" if n < errors else "success", "timestamp": timestamp},
+            ])
+        events.append({"id": "end", "kind": "boundary", "text": "turn_complete",
+                       "timestamp": timestamp})
+        snapshot = store.put("sessions", {"agent": "pi", "session_id": name, "model": "one",
+            "cwd": str(project), "origin": "interactive", "events": events,
+            "coverage": {"complete": complete}})
+        return store.put("cases", {"session_snapshot": snapshot, "events": events,
+            "coverage": {"complete": complete}, "omitted_task_events": 0})
+
+    baseline = [add("old" + str(n), "2025-02-27T12:00:00+00:00", 1) for n in range(3)]
+    policy["observation_policy"] = {
+        "metric": "tool_errors", "minimum_pairs": 2, "minimum_improvement": 0,
+        "baseline_cases": {case_id: "workspace setup" for case_id in baseline},
+    }
+    key = create(store, policy)["study_id"]
+    adoption = store.put("adoptions", {"proposal_id": policy["proposal_id"],
+        "adopted_at": "2025-03-01", "commit": "a" * 40})
+    candidate = [add("new" + str(n), "2025-03-03T12:00:00+00:00", 0, complete=n < 2)
+                 for n in range(3)]
+    spec = tmp_path / "observations.json"
+    spec.write_text(json.dumps({"adoption_id": adoption, "pairs": [
+        {"baseline": old, "candidate": new, "family": "workspace setup"}
+        for old, new in zip(baseline, candidate)]}))
+    assert main(["improve", "--root", str(store.root), "study", "observe",
+                 "--study", key, "--spec-file", str(spec)]) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["comparison"] == "observed_decrease"
+    assert result["eligible_pairs"] == 2
+    assert result["excluded_pairs"] == 1
+    assert result["mean_reduction"] == 1
+    assert not result["causal_effect_established"]
+    assert not result["task_quality_verified"]
+    spec.write_text(json.dumps({"adoption_id": None, "pairs": []}))
+    assert main(["improve", "--root", str(store.root), "study", "observe",
+                 "--study", key, "--spec-file", str(spec)]) == 1
+    capsys.readouterr()
+    report = assess(store, key)
+    assert report["stages"]["observations"][0]["observation_id"] == result["observation_id"]
+    assert not report["improvement_established"]
+
+
+def test_create_can_freeze_a_trusted_trial_file_with_the_policy(tmp_path, capsys):
+    import json
+
+    from agent_usage_tracker.cli import main
+
+    store, spec = fixture(tmp_path)
+    trial_id = spec.pop("trial_spec_id")
+    trial = tmp_path / "trial.json"
+    trial.write_text(json.dumps(store.get("trial_specs", trial_id)))
+    policy = tmp_path / "policy.json"
+    policy.write_text(json.dumps(spec))
+    assert main(["improve", "--root", str(store.root), "study", "create",
+                 "--spec-file", str(policy), "--trial-spec-file", str(trial)]) == 0
+    study_id = json.loads(capsys.readouterr().out)["study_id"]
+    assert store.get("studies", study_id)["trial_spec_id"] == trial_id
+    assert not store.keys("trial_results")

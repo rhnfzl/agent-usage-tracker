@@ -401,3 +401,18 @@ def read_session(path: Path, agent: str, max_bytes: int = BYTE_LIMIT,
             "source": {"path": str(path), "sha256": digest.hexdigest(), "bytes": used,
                        "ranges": ranges,
                        "size": observation["size"] if recent else path.stat().st_size}}
+
+
+def event_links(events: list[dict[str, Any]]) -> dict[str, str]:
+    # Event references survive masking even when native call and run IDs do not.
+    pending: dict[tuple[str, str], str] = {}
+    links = {}
+    for event in events:
+        if not event.get("call_id"):
+            continue
+        key = (event.get("run_id", ""), event["call_id"])
+        if event["kind"] == "call":
+            pending[key] = event["id"]
+        elif event["kind"] == "result" and key in pending:
+            links[pending.pop(key)] = event["id"]
+    return links

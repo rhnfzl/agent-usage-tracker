@@ -22,7 +22,7 @@ from ..git_safe import git_argv, git_env
 from ..label.core import data_dir
 from ..state import _locked
 from .groups import _journal
-from .proposals import file_digest, prepare, stage
+from .proposals import file_digest, matches_file, prepare, stage
 from .store import Store, repository
 
 KINDS = ("instruction", "skill", "config", "code")
@@ -249,6 +249,9 @@ def _next_steps(store: Store, proposal_id: str, proposal: dict[str, Any],
         return [f"git -C {shlex.quote(str(scope))} fetch {shlex.quote(str(candidate))} {branch}",
                 f"git -C {shlex.quote(str(scope))} switch -c {branch} FETCH_HEAD",
                 "review it, push and open a pull request", adopt]
+    if candidate and proposal["before_sha256"] is None:
+        return [f"review and add {shlex.quote(str(candidate / proposal['target']))} at "
+                f"{shlex.quote(str(target))} if that path is still absent", adopt]
     if candidate:
         return [f"check that sha256 of {shlex.quote(str(target))} is still "
                 f"{proposal['before_sha256']}",
@@ -271,13 +274,18 @@ def accept(store: Store, proposal_id: str, note: str | None = None) -> dict[str,
         candidate = staged_at(store, proposal_id)
         superseded = None
         try:
-            unchanged = file_digest(source) == proposal["before_sha256"]
+            expected = proposal["before_sha256"]
+            unchanged = (file_digest(source) == expected if expected is not None else
+                         source == source.resolve() and
+                         source.is_relative_to(Path(proposal["scope"])) and
+                         matches_file(source, None))
         except FileNotFoundError:
             unchanged = False
         except OSError as exc:      # a passing lock or permission problem must not mark it stale
             raise AutError("improve: the proposal target cannot be read now; try again") from exc
         if not unchanged:
-            new_id = _reprepare(store, proposal_id, proposal, source)
+            new_id = (_reprepare(store, proposal_id, proposal, source)
+                      if proposal["before_sha256"] is not None else None)
             if new_id is None:
                 key = _record(store, proposal_id, proposal, "stale", reason="target changed")
                 return {"status": "stale", "proposal_id": proposal_id, "decision_id": key,

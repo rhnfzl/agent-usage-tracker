@@ -34,6 +34,7 @@ def register(commands: Any) -> None:
     search = actions.add_parser("search", help="filter captured events and return matching references")
     for arg in ("query", "agent", "kind", "status", "since", "until", "cursor", "tool", "workspace"):
         search.add_argument(f"--{arg}", default="")
+    search.add_argument("--mode", choices=("exact", "ranked"), default="exact")
     search.add_argument("--limit", type=int, default=20)
 
     session = actions.add_parser("session", help="read a page of events from a session")
@@ -45,6 +46,11 @@ def register(commands: Any) -> None:
         action.add_argument("--offset", type=int, default=0)
         action.add_argument("--limit", type=int, default=limit)
 
+    commits = actions.add_parser("commits", help="find sessions that recorded a commit result")
+    commits.add_argument("commit")
+    commits.add_argument("--offset", type=int, default=0)
+    commits.add_argument("--limit", type=int, default=30)
+
     compare = actions.add_parser("compare", help="compare observed failures and activity in two sessions")
     compare.add_argument("baseline")
     compare.add_argument("candidate")
@@ -52,6 +58,12 @@ def register(commands: Any) -> None:
     select = actions.add_parser("freeze-case", help="save the attempt around an event for repair review")
     select.add_argument("session_id")
     select.add_argument("event_id")
+    skill = actions.add_parser("propose-skill", help="draft a project skill from corroborated evidence")
+    skill.add_argument("--scope", type=Path, required=True)
+    skill.add_argument("--target", required=True)
+    skill.add_argument("--draft-file", type=Path, required=True)
+    skill.add_argument("--proof", action="append", required=True, metavar="CASE_ID:EVENT_ID")
+    skill.add_argument("--candidate", type=Path)
     case = actions.add_parser("case", help="resolve a saved improvement case to evidence references")
     case.add_argument("case_id")
     freeze = actions.add_parser("freeze-cases", help="save observed failures and controls as improvement cases")
@@ -86,7 +98,22 @@ def run(args: argparse.Namespace) -> None:
                 raise AutError("evidence: install agent-usage-tracker[mcp] for MCP access") from exc
             serve(evidence, args.transport, args.port)
             return
-        if action == "freeze-case":
+        if action == "propose-skill":
+            if store is None:
+                raise AutError("evidence: skill proposals require an audit in the private store")
+            from .proposals import stage
+            from .skill_proposals import propose_skill
+            try:
+                with args.draft_file.open("rb") as file:
+                    draft = file.read(32_769).decode("utf-8")
+            except (OSError, UnicodeError) as exc:
+                raise AutError("evidence: skill draft must be a readable UTF-8 file") from exc
+            writable = Store(root)
+            key = propose_skill(writable, args.audit, args.scope, args.target, draft, args.proof)
+            if args.candidate:
+                stage(writable, key, args.candidate)
+            value = {"proposal_id": key, "staged": bool(args.candidate)}
+        elif action == "freeze-case":
             if store is None:
                 raise AutError("evidence: freezing cases requires an audit in the private store")
             from .judge import freeze_case
@@ -101,11 +128,13 @@ def run(args: argparse.Namespace) -> None:
                      "cases": [evidence.case(row["case_id"]) for row in rows]}
         elif action == "search":
             value = evidence.search(args.query, args.agent, args.kind, args.status, args.since,
-                                    args.until, args.cursor, args.limit, args.tool, args.workspace)
+                                    args.until, args.cursor, args.limit, args.tool, args.workspace, args.mode)
         elif action == "event":
             value = evidence.event(args.session_id, args.event_id, args.offset, args.limit)
         elif action == "session":
             value = evidence.session(args.session_id, args.offset, args.limit)
+        elif action == "commits":
+            value = evidence.commits(args.commit, args.offset, args.limit)
         elif action == "compare":
             value = evidence.compare(args.baseline, args.candidate, args.cases)
         elif action == "case":

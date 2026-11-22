@@ -11,15 +11,23 @@ aut evidence capture --project /path/to/repo --days 7 --limit 20
 aut evidence --audit AUDIT_ID describe
 aut evidence --audit AUDIT_ID search --status error
 aut evidence --audit AUDIT_ID search --query "Operation not permitted"
+aut evidence --audit AUDIT_ID search --mode ranked --query "permissions cache"
 aut evidence --audit AUDIT_ID session SESSION_ID
 aut evidence --audit AUDIT_ID event SESSION_ID EVENT_ID
+aut evidence --audit AUDIT_ID commits COMMIT_SHA
 aut evidence --audit AUDIT_ID compare FAILED_SESSION_ID CLEAN_SESSION_ID
 ```
+
+Exact mode is the default. It matches literal substrings. Ranked mode uses SQLite FTS5 to match words
+in any order and puts exact phrases first. It builds an in-memory index from authorized text for
+each query. Narrow the filters if the index would exceed 50,000 events or 64 MiB. The same
+`mode` option is available in MCP. Metadata-only scope supports filters without text search.
 
 Copy the full audit, session, and event IDs from the JSON results. Follow search's `next_cursor`
 with the same filters. An empty search page can still have a cursor when the scan budget runs out.
 Session results list event references. Read a referenced event and follow `next_offset` to read its
-remaining text. Comparison shows event counts and the first difference in the observed tool
+remaining text. Commit lookup cites a matched Git call and result. A short recorded prefix can
+match more than one commit. AUT reports the prefix as captured. Comparison shows event counts and the first difference in the observed tool
 sequence. A missing result stays unknown. The comparison does not infer why two runs differed.
 
 The project filter includes its Git worktrees and excludes sessions with recorded directories in
@@ -70,7 +78,7 @@ Set the client's MCP command to the absolute path to `aut`. Pass these arguments
 
 Use the same `--root` as capture if you use a custom store. Add `--content redacted` before
 `mcp` to mask text. The server exposes `describe`, `search`, `session`, `event`, `compare`,
-and `case` with the same scope and results as the CLI. It provides read operations only.
+`commits`, and `case` with the same scope and results as the CLI. It provides read operations only.
 
 An example prompt for the connected agent:
 
@@ -132,3 +140,24 @@ Use the same improvement root for both commands. The
 isolated baseline and candidate with the same acceptance check. Record the result and compare
 fresh eligible work before claiming a lasting benefit. The source configuration changes only
 through the existing review and adoption process.
+
+## Propose a project skill from successful work
+
+Open the successful attempts and freeze their case IDs. Ask the reviewing agent to write a draft
+`SKILL.md` with a matching `name`, a `description`, and the instructions. Cite at least two independent
+sessions from the same project. Each citation identifies a successful result matched to a captured
+call. AUT records the supporting cases and any observed commit IDs.
+
+```sh
+aut evidence --audit AUDIT_ID propose-skill --scope /path/to/repo \
+  --target .agents/skills/check-setup/SKILL.md --draft-file draft.md \
+  --proof CASE_ID:EVENT_ID --proof OTHER_CASE_ID:OTHER_EVENT_ID \
+  --candidate /path/outside/the/repo
+```
+
+Review the proposal with `aut improve inbox list` and the existing review workflow. AUT can prepare
+an addition or update, and stage it in the independent candidate. A new file has a null baseline
+hash. To trial the addition, explicitly list the file with a null value in `files.baseline`. List its
+SHA-256 hash in `files.candidate`. This binds the trial to the absence of the skill before the change.
+A successful tool result is evidence for the cited step. Review whether the proposed instructions
+apply to the whole workflow before you adopt the skill.

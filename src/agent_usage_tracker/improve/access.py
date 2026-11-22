@@ -7,14 +7,15 @@ import os
 import re
 import tempfile
 from collections import Counter
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from itertools import zip_longest
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from ..config import AutError
 from ..event import parse_ts
 from ..redact import redact
+from .evidence import event_links
 from .store import Store, canonical, digest
 
 MODES = ("metadata", "redacted", "full")
@@ -121,8 +122,9 @@ class Evidence:
 
     def search(self, query: str = "", agent: str = "", kind: str = "", status: str = "",
                since: str = "", until: str = "", cursor: str = "", limit: int = 20,
-               tool: str = "", workspace: str = "") -> dict[str, Any]:
-        """Find captured events, returning references and short text previews."""
+               tool: str = "", workspace: str = "",
+               mode: Literal["exact", "ranked"] = "exact") -> dict[str, Any]:
+        """Find exact phrases or rank word matches, returning event references and previews."""
         _page(0, limit)
         if len(query) > 500 or ((query or tool or workspace) and self.content == "metadata"):
             raise AutError("evidence: text, tool and workspace filters require content access; "
@@ -131,33 +133,66 @@ class Evidence:
         if (since and (start is None or start.tzinfo is None)) or (
                 until and (end is None or end.tzinfo is None)) or (start and end and start >= end):
             raise AutError("evidence: use timezone-aware timestamps in increasing order")
+        def matches(event: dict[str, Any]) -> bool:
+            if (kind and event["kind"] != kind) or (status and event.get("status") != status):
+                return False
+            if tool and self._label(event.get("tool") or "") != tool:
+                return False
+            if start or end:
+                stamp = parse_ts(event.get("timestamp"))
+                return bool(stamp and stamp.tzinfo and (not start or stamp >= start)
+                            and (not end or stamp < end))
+            return True
+
+        def sessions(first: int, *, with_text: bool) -> Iterator[tuple[int, str, dict[str, Any]]]:
+            for index in range(first, len(self.keys)):
+                key = self.keys[index]
+                row = self._read(key, include_text=with_text)
+                if ((agent and row["agent"] != agent)
+                        or (workspace and self._label(row.get("cwd") or "") != workspace)):
+                    continue
+                yield index, key, row
+
+        def hit(key: str, row: dict[str, Any], event: dict[str, Any]) -> dict[str, Any]:
+            return {"session_id": key, "event_id": event["id"], "agent": row["agent"],
+                    **self._event(event, text=bool(query))}
+
+        if mode == "ranked":
+            from .ranked_search import rank
+
+            if self.content == "metadata":
+                raise AutError("evidence: ranked search requires content access")
+            binding = digest([self.audit_id, self.keys, self.content, query,
+                              agent, kind, status, since, until, tool, workspace])[:24]
+            offset = 0
+            if cursor:
+                match = re.fullmatch(rf"ranked:([0-9]{{1,6}}):{binding}", cursor)
+                if not match:
+                    raise AutError("evidence: ranked cursor does not match this query and scope")
+                offset = int(match[1])
+            entries = (hit(key, row, event) for _, key, row in sessions(0, with_text=True)
+                       for event in row["events"] if matches(event))
+            ranked_hits, more, count = rank(query, entries, offset, limit)
+            continuation = f"ranked:{offset + limit}:{binding}" if more else None
+            return {"items": ranked_hits, "next_cursor": continuation, "indexed_events": count,
+                    "search_mode": "ranked", **self.describe()}
+
         if cursor and not re.fullmatch(r"[0-9]{1,6}:[0-9]{1,8}", cursor):
             raise AutError("evidence: invalid search cursor")
         first, offset = map(int, (cursor or "0:0").split(":"))
         needle = query.casefold()
         hits: list[dict[str, Any]] = []
         scanned = 0
-        for index in range(first, len(self.keys)):
-            key = self.keys[index]
-            row = self._read(key, include_text=bool(query))
-            if ((agent and row["agent"] != agent)
-                    or (workspace and self._label(row.get("cwd") or "") != workspace)):
-                continue
+        for index, key, row in sessions(first, with_text=bool(query)):
             events = row["events"]
             for position in range(offset if index == first else 0, len(events)):
                 if len(hits) >= limit or scanned >= SEARCH_BUDGET:
                     return {"items": hits, "next_cursor": f"{index}:{position}", **self.describe()}
                 scanned += 1
                 event = events[position]
-                if (kind and event["kind"] != kind) or (status and event.get("status") != status):
+                if not matches(event):
                     continue
-                if start or end:
-                    stamp = parse_ts(event.get("timestamp"))
-                    if not stamp or not stamp.tzinfo or (start and stamp < start) or (end and stamp >= end):
-                        continue
-                if tool and self._label(event.get("tool") or "") != tool:
-                    continue
-                result = self._event(event, text=bool(query))
+                result = hit(key, row, event)
                 text = result.pop("text", "")
                 if needle and needle not in text.casefold():
                     continue
@@ -165,7 +200,7 @@ class Evidence:
                     found = text.casefold().find(needle)
                     left = max(0, found - 80)
                     result["preview"] = text[left:left + 240]
-                hits.append({"session_id": key, "event_id": event["id"], "agent": row["agent"], **result})
+                hits.append(result)
         return {"items": hits, "next_cursor": None, **self.describe()}
 
     def session(self, session_id: str, offset: int = 0, limit: int = 30) -> dict[str, Any]:
@@ -193,6 +228,35 @@ class Evidence:
             return {"session_id": session_id, **result, **self.describe()}
         raise AutError("evidence: event is missing from this session")
 
+    def commits(self, commit: str, offset: int = 0, limit: int = 30) -> dict[str, Any]:
+        """Find captured Git commit results in the selected sessions."""
+        from .outputs import commit_evidence
+
+        _page(offset, limit)
+        if not re.fullmatch(r"[0-9a-fA-F]{7,40}", commit):
+            raise AutError("evidence: use a hexadecimal commit prefix of 7..40 characters")
+        commit = commit.lower()
+        items: list[dict[str, str]] = []
+        matched = 0
+        for key in self.keys:
+            row = self._read(key, include_text=self.content == "full")
+            commits = row.get("commits")
+            if commits is None:
+                commits = commit_evidence(row["events"], row.get("links"))
+            for link in commits:
+                observed = link["observed_sha"]
+                if not (commit.startswith(observed) or observed.startswith(commit)):
+                    continue
+                matched += 1
+                if matched <= offset:
+                    continue
+                if len(items) == limit:
+                    return {"items": items, "next_offset": offset + limit, **self.describe()}
+                kind = ("equal_recorded_id" if observed == commit else
+                        "observed_prefix" if commit.startswith(observed) else "query_prefix")
+                items.append({"session_id": key, **link, "match": kind})
+        return {"items": items, "next_offset": None, **self.describe()}
+
     def compare(self, baseline: str, candidate: str, cases: bool = False) -> dict[str, Any]:
         """Compare observed session or attempt counts and the first differing tool outcome."""
         def observed(key: str) -> tuple[dict[str, Any], list[dict[str, Any]]]:
@@ -213,7 +277,7 @@ class Evidence:
             summary.update(error_event_ids=errors[:100], counts={
                 "prompts": kinds["prompt"], "calls": kinds["call"],
                 "errors": len(errors), "compactions": kinds["compaction"]})
-            links = _links(events) if cases or not self.bundled else row["links"]
+            links = event_links(events) if cases or not self.bundled else row["links"]
             return summary, self._tool_outcomes(events, links)
 
         before, before_tools = observed(baseline)
@@ -264,6 +328,8 @@ class Evidence:
                 "omitted_task_events": case.get("omitted_task_events", 0)}
 
     def export(self, path: Path, ids: list[str]) -> dict[str, Any]:
+        from .outputs import commit_evidence
+
         if not ids or len(set(ids)) != len(ids):
             raise AutError("evidence: select distinct session IDs for export")
         sessions = {}
@@ -273,8 +339,12 @@ class Evidence:
             summary = self._summary(row)
             summary["related_sessions"] = [sid for sid in row["related_sessions"] if sid in ids]
             events = row["events"]
-            links = row["links"] if self.bundled else _links(events)
-            projected = {**summary, "events": [self._event(event) for event in events], "links": links}
+            links = row["links"] if self.bundled else event_links(events)
+            commits = row.get("commits")
+            if commits is None:
+                commits = list(commit_evidence(events, links))
+            projected = {**summary, "events": [self._event(event) for event in events],
+                         "links": links, "commits": commits}
             size += len(canonical(projected).encode("utf-8"))
             if size > BUNDLE_LIMIT:
                 raise AutError("evidence: select fewer sessions for the 64 MiB bundle limit")
@@ -286,21 +356,6 @@ class Evidence:
             raise AutError("evidence: select fewer sessions for the 64 MiB bundle limit")
         _create_bundle(path, data)
         return {"path": str(path), "sessions": len(ids), "content": self.content}
-
-
-def _links(events: list[dict[str, Any]]) -> dict[str, str]:
-    # Event references survive masking even when native call and run IDs do not.
-    pending: dict[tuple[str, str], str] = {}
-    links = {}
-    for event in events:
-        if not event.get("call_id"):
-            continue
-        key = (event.get("run_id", ""), event["call_id"])
-        if event["kind"] == "call":
-            pending[key] = event["id"]
-        elif event["kind"] == "result" and key in pending:
-            links[pending.pop(key)] = event["id"]
-    return links
 
 
 def _create_bundle(path: Path, data: bytes) -> None:
@@ -347,6 +402,15 @@ def _read_bundle(path: Path) -> dict[str, Any]:
                 positions[call][0] >= positions[result][0]
                 for call, result in row["links"].items()
             )):
+                raise ValueError
+            commits = row.get("commits", [])
+            if not isinstance(commits, list) or not all(
+                isinstance(link, dict) and set(link) == {"observed_sha", "call_event_id", "result_event_id"}
+                and re.fullmatch(r"[0-9a-f]{7,40}", link["observed_sha"])
+                and isinstance(link["result_event_id"], str)
+                and row["links"].get(link["call_event_id"]) == link["result_event_id"]
+                for link in commits
+            ):
                 raise ValueError
         return value
     except (AttributeError, KeyError, OSError, TypeError, ValueError, RecursionError) as exc:

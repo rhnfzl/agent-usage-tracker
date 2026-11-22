@@ -65,6 +65,15 @@ aut improve trial --spec TRIAL_SPEC_ID --execute --budget-s 180
 aut improve study assess --study STUDY_ID
 ```
 
+To freeze a new trial with the policy in one operation, omit `trial_spec_id` from the policy.
+Pass the trusted trial file separately. Review the frozen inputs before you execute.
+
+```sh
+aut improve study create --spec-file /private/study.json --trial-spec-file /private/trial.json
+aut improve study run --study STUDY_ID
+aut improve study run --study STUDY_ID --execute
+```
+
 Policy creation rejects experiments with existing stored results, including metadata-only copies.
 Changing a trial label, ordering, seed, repeat count or ignored note does not make it prospective.
 This checks local history; it cannot establish that an experiment never ran outside AUT.
@@ -167,3 +176,45 @@ Only explicitly reviewed outcomes from a different producer can enter the minima
 The result excludes trace text, command arguments, captured outputs and provenance prose.
 This writes a local record; it does not send anything. Participant identity and an actual two-person
 pilot remain unverified until independently observed outside these declarations.
+
+## Measure ordinary work after adoption
+
+If you want a comparison from ordinary sessions, add an observation policy when you create the
+study. Freeze the baseline cases first. Keep them separate from discovery and control cases.
+
+```json
+"observation_policy": {
+  "metric": "tool_errors",
+  "minimum_pairs": 3,
+  "minimum_improvement": 0,
+  "baseline_cases": {
+    "FIRST_BASELINE_CASE_ID": "fresh worktree setup",
+    "SECOND_BASELINE_CASE_ID": "fresh worktree setup",
+    "THIRD_BASELINE_CASE_ID": "fresh worktree setup"
+  }
+}
+```
+
+Use `tool_errors` or `tool_calls`. The threshold is a mean reduction per eligible pair. Record the
+adoption with `aut improve adopt`. Then capture fresh ordinary work and pair attempts with the
+same task family and matching recorded project, harness, and model labels. Use independent sessions for every case.
+
+```json
+{
+  "adoption_id": "ADOPTION_ID",
+  "pairs": [
+    {"baseline": "BASELINE_CASE_ID", "candidate": "FRESH_CASE_ID", "family": "fresh worktree setup"}
+  ]
+}
+```
+
+```sh
+aut improve study observe --study STUDY_ID --spec-file paired-observations.json
+aut improve study assess --study STUDY_ID
+```
+
+The comparison excludes incomplete cases, repeated evidence, mismatched setups, and cases outside
+the time window. Candidates must come from a UTC day after the recorded adoption date.
+Unpaired baselines, too few eligible pairs, or a mean reduction within the threshold leave the result
+inconclusive. The result reports a decrease or increase in the measured count. It does not verify
+task quality, cause, or the setup loaded for each attempt. The controlled trial keeps its own result.
