@@ -42,7 +42,7 @@ def test_stdio_matches_cli_and_cannot_write(connection):
                 tools = await client.list_tools()
                 assert {tool.name for tool in tools.tools} == {
                     "describe", "search", "session", "event", "compare", "commits", "case",
-                    "ordinary_work"}
+                    "ordinary_work", "context", "list_sessions"}
                 result = await client.call_tool("event", {"session_id": key, "event_id": "event"})
                 assert result.structuredContent == expected
                 ranked = await client.call_tool("search", {"query": "password", "mode": "ranked"})
@@ -52,6 +52,17 @@ def test_stdio_matches_cli_and_cannot_write(connection):
                 expected_ranked = json.loads(subprocess.check_output(
                     [sys.executable, *args, "search", "--query", "redacted", "--mode", "ranked"], text=True))
                 assert ranked_again.structuredContent == expected_ranked
+                grouped = await client.call_tool("search", {"query": "redacted", "mode": "sessions",
+                                                      "session_id": key})
+                expected_grouped = json.loads(subprocess.check_output(
+                    [sys.executable, *args, "search", "--query", "redacted", "--mode", "sessions",
+                     "--session-id", key], text=True))
+                assert grouped.structuredContent == expected_grouped
+                assert expected_grouped["items"][0]["matching_events"] == 1
+                context = await client.call_tool("context", {"session_id": key, "event_id": "event"})
+                expected_context = json.loads(subprocess.check_output(
+                    [sys.executable, *args, "context", key, "event"], text=True))
+                assert context.structuredContent == expected_context
                 denied = await client.call_tool("session", {"session_id": "0" * 64})
                 assert denied.isError
                 expected_work = json.loads(subprocess.check_output(
