@@ -13,6 +13,7 @@ from ..event import parse_ts
 from .judge import _record_attempt
 from .store import Store, digest
 from .study_observe import _sample_attempt, measurement_issue, validate_measurement
+from .t3 import projection_gaps
 
 _SESSION_BUDGET = 32
 _ATTEMPT_BUDGET = 1000
@@ -116,6 +117,9 @@ def ordinary_work_page(store: Store, scope: dict[str, Any], keys: list[str],
                     "ended": sample["ended"].isoformat() if sample["ended"] else None,
                     "context_status": sample["context_status"], "measurable": issue is None,
                     "reason": issue, "metric_value": sample[metric] if not issue else None}
+            if issue == "measurement_coverage_incomplete" and session["agent"] == "t3":
+                if gaps := projection_gaps(coverage, event.get("run_id")):
+                    item["projection_gaps"] = gaps
             if not issue and metric == "codex_model_calls":
                 item["metric_evidence"] = sample["model_call_evidence"]
             if scope["content"] != "metadata":

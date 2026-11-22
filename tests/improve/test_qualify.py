@@ -363,3 +363,19 @@ def test_label_cli_registration_without_sink_or_model(tmp_path, monkeypatch, cap
                      "--rubric", RUBRIC.id, "--limit", "7"]) == 0
     assert json.loads(capsys.readouterr().out) == {
         "rubric_id": RUBRIC.id, "limit": 7, "private": True}
+
+
+def test_saving_one_label_does_not_scan_other_unlabelled_cases(tmp_path, monkeypatch):
+    store = Store(tmp_path / "store")
+    chosen = case(store, "chosen")
+    unrelated = case(store, "unrelated")
+    get = store.get
+
+    def read(kind, key):
+        if kind == "cases" and key == unrelated:
+            raise AssertionError("saving a label must not load unrelated unlabelled cases")
+        return get(kind, key)
+
+    monkeypatch.setattr(store, "get", read)
+    label = qualify.save(store, RUBRIC, chosen, "fail")
+    assert get("human_labels", label)["case_id"] == chosen

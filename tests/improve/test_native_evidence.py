@@ -12,7 +12,7 @@ STAMP = "2026-04-12T10:00:00Z"
 COMPLETED = datetime.fromisoformat(STAMP).timestamp()
 
 
-def _pi(home: Path, *, branched: bool = False, retry: bool = False) -> None:
+def _pi(home: Path, *, branched: bool = False, retry: bool = False, missing_result: bool = False) -> None:
     path = home / ".pi" / "agent" / "sessions" / "project" / "trace.jsonl"
     path.parent.mkdir(parents=True)
     records = [{"type": "session", "id": "pi-run", "cwd": str(home), "timestamp": STAMP}]
@@ -27,6 +27,8 @@ def _pi(home: Path, *, branched: bool = False, retry: bool = False) -> None:
          "content": [{"type": "text", "text": "Process exited with code 1"}]},
         {"role": "assistant", "stopReason": "stop", "content": [{"type": "text", "text": "Failed"}]},
     ]
+    if missing_result:
+        messages[2].pop("content")
     if retry:
         messages.insert(3, {"role": "assistant", "stopReason": "error", "content": []})
     for index, message in enumerate(messages):
@@ -38,7 +40,7 @@ def _pi(home: Path, *, branched: bool = False, retry: bool = False) -> None:
     os.utime(path, (COMPLETED, COMPLETED))
 
 
-def _cursor(home: Path, *, compacted: bool = False, image: bool = False) -> Path:
+def _cursor(home: Path, *, compacted: bool = False, image: bool = False, missing_result: bool = False, null_result: bool = False) -> Path:
     path = home / ".cursor" / "chats" / "project" / "cursor-run" / "store.db"
     path.parent.mkdir(parents=True)
     with sqlite3.connect(path) as db:
@@ -59,6 +61,10 @@ def _cursor(home: Path, *, compacted: bool = False, image: bool = False) -> Path
             {"role": "assistant", "content": [{"type": "text", "text": "Failed"}]},
             {"role": "user", "content": "Next request", "providerOptions": {"cursor": {"requestId": "b"}}},
         ]
+        if missing_result:
+            rows[3]["content"][0].pop("result")
+        elif null_result:
+            rows[3]["content"][0]["result"] = None
         if image:
             rows[1]["content"] = [
                 {"type": "text", "text": rows[1]["content"]},
@@ -185,3 +191,58 @@ def test_pi_keeps_a_retried_model_error_in_the_same_attempt(tmp_path):
     [failure] = [row for row in cases(store, report["audit_id"]) if row["trigger"] == "error_result"]
     assert failure["coverage"]["complete"]
     assert failure["events"][-2]["text"] == "Failed"
+
+
+def test_claude_server_web_search_uses_explicit_tool_result(tmp_path):
+    import json
+    from agent_usage_tracker.improve.evidence import read_session
+
+    trace = tmp_path / "session.jsonl"
+    rows = [
+        {"type": "user", "uuid": "prompt", "message": {"role": "user", "content": "Find references"}},
+        {"type": "assistant", "uuid": "assistant", "message": {"role": "assistant", "content": [
+            {"type": "server_tool_use", "id": "search-1", "name": "web_search", "input": {"query": "query"}},
+            {"type": "web_search_tool_result", "tool_use_id": "search-1",
+             "content": [{"type": "web_search_result", "title": "Reference", "url": "https://example.org/"}]},
+            {"type": "server_tool_use", "id": "search-2", "name": "web_search", "input": {"query": "query"}},
+            {"type": "web_search_tool_result", "tool_use_id": "search-2",
+             "content": {"type": "web_search_tool_result_error", "error_code": "unavailable"}},
+            {"type": "server_tool_use", "id": "search-3", "name": "web_search", "input": {"query": "query"}},
+        ]}},
+        {"type": "system", "subtype": "turn_duration"},
+    ]
+    trace.write_text("".join(json.dumps({"timestamp": "2026-01-02T00:00:00Z", **r}) + "\n" for r in rows))
+    report = read_session(trace, "claude_code")
+    results = [e for e in report["events"] if e["kind"] == "result"]
+    assert [e["status"] for e in results] == ["success", "error"]
+    assert "Reference" in results[0]["text"]
+    assert report["coverage"]["unmatched_calls"] == 1
+    assert not report["coverage"]["complete"]
+
+
+
+def test_missing_native_tool_results_remain_gaps_in_pi_and_cursor(tmp_path):
+    home = tmp_path / "home"
+    _pi(home, missing_result=True)
+    _cursor(home, missing_result=True)
+    store = Store(tmp_path / "private")
+    report = audit(store, home, since_epoch=0, idle_s=0)
+    assert report["sessions"] == 2
+    for key in store.get("audits", report["audit_id"])["session_ids"]:
+        session = store.get("sessions", key)
+        assert session["coverage"]["unmatched_calls"] == 1
+        assert not any(event["kind"] == "result" for event in session["events"])
+        assert any(event["kind"] == "tool_gap" for event in session["events"])
+
+
+
+def test_cursor_preserves_explicit_null_tool_results(tmp_path):
+    home = tmp_path / "home"
+    _cursor(home, null_result=True)
+    store = Store(tmp_path / "private")
+    report = audit(store, home, since_epoch=0, idle_s=0)
+    key, = store.get("audits", report["audit_id"])["session_ids"]
+    session = store.get("sessions", key)
+    result, = [event for event in session["events"] if event["kind"] == "result"]
+    assert result["text"] == "null"
+    assert session["coverage"]["matched_results"] == 1

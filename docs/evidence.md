@@ -211,8 +211,8 @@ Set the client's MCP command to the absolute path to `aut`. Pass these arguments
 ```
 
 Use the same `--root` as capture if you use a custom store. Add `--content redacted` before
-`mcp` to mask text. The server exposes `describe`, `list_sessions`, `search`, `session`, `event`, `context`, `compare`,
-`commits`, `case`, and `ordinary_work` with the same scope and results as the CLI.
+`mcp` to mask text. The server exposes `describe`, `list_sessions`, `search`, `session`, `event`, `context`,
+`compare`, `commits`, `case`, `ordinary_work`, and `retries` with the same scope and results as the CLI.
 It provides read operations only.
 
 An example prompt for the connected agent:
@@ -249,6 +249,42 @@ that supports custom bearer headers to use `http://127.0.0.1:8765/mcp` with that
 binds to loopback and scopes one token to the selected evidence. It supports explicit bearer
 credentials over the tunnel. It does not run an OAuth authorization server or a multi-tenant
 service. The host's normal AUT usage sink does not provide transcript access.
+
+## Follow linked tool results
+
+Codex native logs can contain web-search results that the T3 projection omits.
+AUT uses a native result only when its recorded item ID matches one result in the corroborated
+native turn. The result has a `source_result` reference to its native event. Select both
+snapshots when exporting a bundle that needs the reference. The T3 case keeps the redacted text.
+Read the native event with full content access if you need the captured original.
+
+Claude Code web-search result blocks are captured directly when present. Pi and Cursor records
+with a missing result payload leave a tool gap. An unlinked or ambiguous search result leaves a gap. A clipped result keeps its reference
+and still leaves the T3 run incomplete. Other gaps still apply when a result is recovered.
+
+## Find retries across sessions
+
+```sh
+aut evidence --audit AUDIT_ID retries
+aut evidence --audit AUDIT_ID retries --tool Edit --minimum-sessions 1
+```
+
+The query groups retries by agent and tool. It counts occurrences and distinct source sessions.
+The default requires two distinct source sessions. Duplicate incidents in snapshots count once. An observed result takes precedence over a missing
+one. If snapshots show conflicting observed outcomes, the query excludes that incident and
+increments `conflicting_incidents`.
+Divergent snapshots and linked supplemental sources do not contribute to the counts.
+The result shows identical and changed-argument match counts and the observed result statuses.
+A group can contain several causes. Use its example event IDs to inspect the original failure
+and intervening actions before choosing a case.
+
+The query returns up to ten examples per group from distinct sources. Capture gaps can hide
+other retries. Metadata mode omits tool names. This query requires a local audit because evidence
+bundles omit the private request fingerprints.
+
+Freeze a discovery case with the example's `session_id` and `error_result`.
+Find a comparable successful attempt and freeze its result as a control.
+Use one acceptance criterion across both in a [private study](improvement-studies.md).
 
 ## Turn an observation into a repair
 

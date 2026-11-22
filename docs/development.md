@@ -54,6 +54,8 @@ It uses a disposable TimescaleDB container on a random loopback port.
 The preflight defaults to Python 3.11. Set `AUT_CI_PYTHON` to test another supported version.
 For the Mac batch publisher, pass `./scripts/local-ci.sh quick` as `--light` and `./scripts/local-ci.sh check` as `--full`.
 The full local preflight fails above 60 seconds, including dependency setup and cleanup.
+Successful unit-test scratch directories are removed as the tests finish.
+The MCP and code-mode tests share one test environment.
 It lets every check finish and reports the results before rejecting an over-budget run.
 GitHub still runs the required platform matrix for the pull request. That run has its own runner queue and timing.
 
@@ -64,6 +66,9 @@ Build from the merged commit when preparing a deployment candidate.
 Check the bundle with `shasum -a 256 -c SHA256SUMS` from its output directory.
 Use the verified wheel with the [standalone runtime installer](improvement.md#install-a-stable-runtime) to stage an upgrade before switching a timer.
 
-To release, raise `__version__` in `src/agent_usage_tracker/__init__.py`, merge, and push the tag `v<version>`.
-The [release workflow](../.github/workflows/release.yml) builds it and publishes it to PyPI through trusted publishing.
+To release, raise `__version__` in `src/agent_usage_tracker/__init__.py` to a new `X.Y.Z` version and merge the PR.
+[Tag release](../.github/workflows/tag-release.yml) creates `v<version>` on the merged commit and starts
+[Release](../.github/workflows/release.yml) on that tag. The build checks that the tag matches the package version.
+Release publishes to PyPI through trusted publishing, then creates the GitHub Release for that tag.
+For a failed run, rerun the failed jobs from GitHub Actions.
 Use synthetic fixtures in public contributions. Keep session logs, personal labels, and private benchmarks out of commits.

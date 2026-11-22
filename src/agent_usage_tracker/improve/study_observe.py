@@ -18,6 +18,7 @@ from .case_view import _attempt
 from .evidence import event_links
 from .file_reads import observed_file_read, path_fingerprint
 from .judge import _attempt_coverage, _complete_attempt
+from .retries import count_identical
 from .setup_git import COMMIT_ID, target_in_workspace, verify_setup
 from .store import Store, repository
 from .study_independence import ReservedEvidence, attempt_fingerprint, reserved_evidence, source_identities
@@ -25,7 +26,7 @@ from .study_model_calls import native_count, t3_count
 from .study_reviews import baseline_reviews, read_review
 from .turn_revisions import details as turn_revision_details
 
-METRICS = ("tool_errors", "tool_calls", "codex_model_calls")
+METRICS = ("tool_errors", "tool_calls", "identical_tool_retries", "codex_model_calls")
 COVERAGE_BASES = ("full_case", "tool_events")
 
 
@@ -55,6 +56,8 @@ def validate_policy(policy: Any) -> None:
         raise AutError("improve: invalid ordinary-work observation policy")
     validate_measurement(policy)
 
+    if policy["metric"] == "identical_tool_retries" and "baseline_reviews" not in policy:
+        raise AutError("improve: retry studies require frozen task acceptance reviews")
     baseline = policy["baseline_cases"]
     if (not isinstance(baseline, dict) or not policy["minimum_pairs"] <= len(baseline) <= 200
             or any(not isinstance(key, str) or not re.fullmatch(r"[0-9a-f]{64}", key)
@@ -135,6 +138,7 @@ def _sample_attempt(session: dict[str, Any], case: dict[str, Any],
         "read_origin": origin,
         "started": min(times) if times else None, "ended": max(times) if times else None,
         "complete": completed, "tool_events_complete": tool_events_complete, "tool_calls": calls,
+        "identical_tool_retries": count_identical(events) if tool_events_complete and known_errors else None,
         "codex_model_calls": model_calls,
         "codex_model_started": model_started.astimezone(timezone.utc) if model_started else None,
         "model_call_evidence": {"session_id": origin[0], "event_id": origin[1]} if measured and origin else None,

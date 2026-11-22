@@ -136,6 +136,10 @@ def _save_session(store: Store, evidence: dict[str, Any]) -> str:
     content = {event["id"]: {"text": event.pop("raw_text"),
                              "attachment_omitted": event.pop("attachment_omitted", False)}
                for event in evidence["events"] if "raw_text" in event}
+    retry_keys = {event["id"]: [event.pop("retry_target_sha256"), event.pop("retry_arguments_sha256")]
+                  for event in evidence["events"] if "retry_target_sha256" in event}
+    if retry_keys:
+        evidence["retry_keys"] = retry_keys
     if content:
         evidence["full_content_id"] = store.put("session_content", content)
     return store.put("sessions", evidence)
@@ -299,6 +303,13 @@ def audit(store: Store, home: Path, *, days: int = 7, limit: int = 40,
         supplements = {sid: store.get("sessions", sid) for sid in row["supplemental_sources"]}
         if corroborated := t3.link_native_context(row, supplements, shared_native):
             counts["t3_corroborated_turns"] += corroborated
+            restored = row["coverage"].get("linked_web_search_results", 0)
+            if restored:
+                counts["t3_linked_web_search_results"] += restored
+                counts["matched_results"] += restored
+                counts["unmatched_calls"] -= restored
+                counts["truncated_events"] += sum(
+                    e["truncated"] for e in row["events"] if e.get("source_result"))
             updated = store.put("sessions", row)
             sessions[index] = updated
             copies["t3", row["session_id"]] = [updated]
