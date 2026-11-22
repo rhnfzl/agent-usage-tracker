@@ -48,6 +48,10 @@ def test_stdio_matches_cli_and_cannot_write(connection):
                 ranked = await client.call_tool("search", {"query": "password", "mode": "ranked"})
                 assert ranked.structuredContent["items"][0]["event_id"] == "event"
                 assert "fixture-secret" not in json.dumps(ranked.structuredContent)
+                ranked_again = await client.call_tool("search", {"query": "redacted", "mode": "ranked"})
+                expected_ranked = json.loads(subprocess.check_output(
+                    [sys.executable, *args, "search", "--query", "redacted", "--mode", "ranked"], text=True))
+                assert ranked_again.structuredContent == expected_ranked
                 denied = await client.call_tool("session", {"session_id": "0" * 64})
                 assert denied.isError
                 expected_work = json.loads(subprocess.check_output(

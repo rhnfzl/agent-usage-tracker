@@ -19,9 +19,10 @@ aut evidence --audit AUDIT_ID compare FAILED_SESSION_ID CLEAN_SESSION_ID
 ```
 
 Exact mode is the default. It matches literal substrings. Ranked mode uses SQLite FTS5 to match words
-in any order and puts exact phrases first. It builds an in-memory index from authorized text for
-each query. Narrow the filters if the index would exceed 50,000 events or 64 MiB. The same
-`mode` option is available in MCP. Metadata-only scope supports filters without text search.
+in any order and puts exact phrases first. A running MCP server reuses an in-memory index for
+queries and pages that use the same filters. It rebuilds the index when the filters or source
+files change. Each CLI invocation builds a fresh index. Narrow the filters if the index would
+exceed 50,000 events or 64 MiB. Metadata-only scope supports filters without text search.
 
 Copy the full audit, session, and event IDs from the JSON results. Follow search's `next_cursor`
 with the same filters. An empty search page can still have a cursor when the scan budget runs out.

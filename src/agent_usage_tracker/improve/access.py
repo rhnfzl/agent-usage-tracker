@@ -7,7 +7,7 @@ import os
 import re
 import tempfile
 from collections import Counter
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from itertools import zip_longest
 from pathlib import Path
 from typing import Any, Literal
@@ -16,6 +16,7 @@ from ..config import AutError
 from ..event import parse_ts
 from ..redact import redact
 from .evidence import event_links
+from .ranked_search import RankedSearch
 from .setup_git import COMMIT_ID
 from .store import Store, canonical, digest
 
@@ -51,6 +52,7 @@ class Evidence:
         self.store = store
         self.bundled: dict[str, Any] = {}
         self.supplemental: set[str] = set()
+        self._ranked = RankedSearch()
         if bundle is not None:
             self.bundled = _read_bundle(bundle)
             self.keys = list(self.bundled["sessions"])
@@ -66,12 +68,15 @@ class Evidence:
         self.ambiguous = set(audit.get("ambiguous_session_ids", []))
         self.supplemental = set(audit.get("supplemental_session_ids", []))
 
-    def _read(self, key: str, *, include_text: bool = True) -> dict[str, Any]:
+    def _read(self, key: str, *, include_text: bool = True,
+              observe_file: Callable[[Path], None] | None = None) -> dict[str, Any]:
         if key not in self.keys and key not in self.supplemental:
             raise AutError("evidence: session is outside this audit or bundle")
         if self.bundled:
             return self.bundled["sessions"][key]
         assert self.store is not None
+        if observe_file is not None:
+            observe_file(self.store.path("sessions", key))
         row = self.store.get("sessions", key)
         coverage = _coverage(row["coverage"])
         if key in self.ambiguous:
@@ -83,14 +88,17 @@ class Evidence:
         if self.content != "metadata":
             output.update({field: row[field] for field in SESSION_LABELS if field in row})
         ref = row.get("full_content_id")
-        if (include_text and ref and self.content != "metadata"
-                and self.store.path("session_content", ref).is_file()):
-            original = self.store.get("session_content", ref)
-            output["events"] = [
-                {**event, **original[event["id"]],
-                 "truncated": original[event["id"]]["attachment_omitted"],
-                 "text_source": "captured_full"}
-                if event["id"] in original else event for event in row["events"]]
+        if include_text and ref and self.content != "metadata":
+            path = self.store.path("session_content", ref)
+            if observe_file is not None:
+                observe_file(path)
+            if path.is_file():
+                original = self.store.get("session_content", ref)
+                output["events"] = [
+                    {**event, **original[event["id"]],
+                     "truncated": original[event["id"]]["attachment_omitted"],
+                     "text_source": "captured_full"}
+                    if event["id"] in original else event for event in row["events"]]
         return output
 
     def _summary(self, row: dict[str, Any]) -> dict[str, Any]:
@@ -179,10 +187,11 @@ class Evidence:
                             and (not end or stamp < end))
             return True
 
-        def sessions(first: int, *, with_text: bool) -> Iterator[tuple[int, str, dict[str, Any]]]:
+        def sessions(first: int, *, with_text: bool, observe_file: Callable[[Path], None] | None = None
+                     ) -> Iterator[tuple[int, str, dict[str, Any]]]:
             for index in range(first, len(self.keys)):
                 key = self.keys[index]
-                row = self._read(key, include_text=with_text)
+                row = self._read(key, include_text=with_text, observe_file=observe_file)
                 if ((agent and row["agent"] != agent)
                         or (workspace and self._label(row.get("cwd") or "") != workspace)):
                     continue
@@ -193,8 +202,6 @@ class Evidence:
                     **self._event(event, text=bool(query))}
 
         if mode == "ranked":
-            from .ranked_search import rank
-
             if self.content == "metadata":
                 raise AutError("evidence: ranked search requires content access")
             binding = digest([self.audit_id, self.keys, self.content, query,
@@ -205,9 +212,14 @@ class Evidence:
                 if not match:
                     raise AutError("evidence: ranked cursor does not match this query and scope")
                 offset = int(match[1])
-            entries = (hit(key, row, event) for _, key, row in sessions(0, with_text=True)
-                       for event in row["events"] if matches(event))
-            ranked_hits, more, count = rank(query, entries, offset, limit)
+            def entries(observe_file: Callable[[Path], None]) -> Iterator[dict[str, Any]]:
+                for _, key, row in sessions(0, with_text=True, observe_file=observe_file):
+                    for event in row["events"]:
+                        if matches(event):
+                            yield hit(key, row, event)
+
+            scope = digest([self.keys, self.content, agent, kind, status, since, until, tool, workspace])
+            ranked_hits, more, count = self._ranked.search(scope, query, entries, offset, limit)
             continuation = f"ranked:{offset + limit}:{binding}" if more else None
             return {"items": ranked_hits, "next_cursor": continuation, "indexed_events": count,
                     "search_mode": "ranked", **self.describe()}

@@ -1,6 +1,12 @@
 import json
+from concurrent.futures import ThreadPoolExecutor
+from unittest.mock import Mock
+
+import pytest
 
 from agent_usage_tracker.cli import main
+from agent_usage_tracker.config import AutError
+from agent_usage_tracker.improve.access import Evidence
 from agent_usage_tracker.improve.store import Store
 
 
@@ -39,6 +45,59 @@ def test_ranked_search_finds_reordered_terms_and_pages_within_the_grant(tmp_path
     assert main([*args, "--content", "redacted", "search", "--query", "fixtureonly",
                  "--mode", "ranked"]) == 0
     assert json.loads(capsys.readouterr().out)["items"] == []
+
+
+def test_ranked_reader_reuses_only_the_current_scope_across_queries_and_threads(tmp_path, monkeypatch):
+    store = Store(tmp_path / "private")
+    session = store.put("sessions", {"agent": "codex", "coverage": {}, "events": [
+        {"id": "alpha", "kind": "result", "status": "success", "text": "python tests"},
+        {"id": "beta", "kind": "result", "status": "error", "text": "sqlite tests"},
+    ]})
+    audit = store.put("audits", {"session_ids": [session], "coverage": {}})
+    reader = Evidence("redacted", store, audit)
+    read = Mock(wraps=reader._read)
+    monkeypatch.setattr(reader, "_read", read)
+
+    first = reader.search("tests", mode="ranked", limit=1)
+    second = reader.search("tests", mode="ranked", limit=1, cursor=first["next_cursor"])
+    assert [part["items"][0]["event_id"] for part in (first, second)] == ["alpha", "beta"]
+    with ThreadPoolExecutor(max_workers=4) as workers:
+        responses = list(workers.map(lambda term: reader.search(term, mode="ranked"),
+                                     ["python", "sqlite"] * 4))
+    assert [result["items"][0]["event_id"] for result in responses] == ["alpha", "beta"] * 4
+    assert read.call_count == 1
+
+    filtered = reader.search("tests", mode="ranked", status="error")
+    assert [hit["event_id"] for hit in filtered["items"]] == ["beta"]
+    assert filtered["indexed_events"] == 1
+    assert read.call_count == 2
+    assert reader.search("tests", mode="ranked", limit=1) == first
+    assert read.call_count == 3
+
+
+def test_ranked_reader_rechecks_capture_availability_and_snapshot_integrity(tmp_path):
+    store = Store(tmp_path / "private")
+    capture = store.put("session_content", {
+        "note": {"text": "password=fixtureonly", "attachment_omitted": False},
+    })
+    capture_path = store.path("session_content", capture)
+    archived = capture_path.rename(tmp_path / "archived.json")
+    session = store.put("sessions", {"agent": "codex", "coverage": {}, "full_content_id": capture,
+                                    "events": [{"id": "note", "kind": "reply", "text": "fallback"}]})
+    audit = store.put("audits", {"session_ids": [session], "coverage": {}})
+    reader = Evidence("full", store, audit)
+    assert reader.search("fixtureonly", mode="ranked")["items"] == []
+    archived.rename(capture_path)
+    assert reader.search("fixtureonly", mode="ranked")["items"][0]["event_id"] == "note"
+    redacted = Evidence("redacted", store, audit)
+    assert redacted.search("fixtureonly", mode="ranked")["items"] == []
+
+    capture_path.rename(archived)
+    assert reader.search("fixtureonly", mode="ranked")["items"] == []
+    assert reader.search("fallback", mode="ranked")["items"][0]["event_id"] == "note"
+    store.path("sessions", session).write_text("{}\n")
+    with pytest.raises(AutError, match="private record changed"):
+        reader.search("fallback", mode="ranked")
 
 
 def test_commit_provenance_uses_matched_calls_and_the_selected_scope(tmp_path, capsys):
