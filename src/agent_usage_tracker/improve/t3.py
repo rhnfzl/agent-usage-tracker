@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
+import re
 import sqlite3
+import subprocess
 import time
 from collections import Counter, defaultdict
 from contextlib import closing
@@ -16,9 +19,14 @@ from ..collectors.activity_common import result_status
 from ..event import parse_ts
 from ..redact import redact
 from .evidence import TEXT_LIMIT, VERSION, _text, native_item_key
+from .setup_git import COMMIT_ID, _read_git
 
 MAX_ROWS = 20000
 HUMAN_SOURCES = {"web", "mobile"}
+_CHECKPOINT_PREFIX = 'refs/t3/orchestration-v2/checkpoints'
+CHECKPOINT_REF = re.compile(rf"{_CHECKPOINT_PREFIX}/[A-Za-z0-9_-]{{43}}/ordinal/[0-9]{{1,12}}")
+_CHECKPOINT_TABLE = 'orchestration_v2_projection_checkpoints'
+_SCOPE_TABLE = 'orchestration_v2_projection_checkpoint_scopes'
 # Item states after which T3 will add no output.
 TERMINAL = {"completed", "failed", "error", "interrupted", "cancelled"}
 
@@ -32,6 +40,67 @@ def _strong_codex_id(ref: object) -> str | None:
         if isinstance(value := ref.get('nativeId'), str) and value:
             return value
     return None
+
+
+def _checkpoint_ref(scope_id: str, ordinal: int) -> str:
+    scope_hash = hashlib.sha256(scope_id.encode()).hexdigest()[:32].encode('ascii')
+    key = base64.urlsafe_b64encode(scope_hash).decode('ascii').rstrip('=')
+    return f'{_CHECKPOINT_PREFIX}/{key}/ordinal/{ordinal}'
+
+
+def _checkpoint(db: sqlite3.Connection, thread: str, run: str, ordinal: int,
+                checkpoint_id: str, completed: str) -> dict[str, str] | None:
+    try:
+        rows = db.execute(f"""
+            SELECT cp.scope_id, cp.captured_at, json_extract(cp.payload_json, '$.ref'),
+                   json_extract(scope.payload_json, '$.cwd')
+            FROM {_CHECKPOINT_TABLE} cp
+            JOIN {_SCOPE_TABLE} scope ON scope.scope_id=cp.scope_id AND scope.thread_id=cp.thread_id
+            WHERE cp.thread_id=? AND cp.run_id=? AND cp.checkpoint_id=? AND scope.kind='root_run'
+              AND cp.app_run_ordinal=? AND cp.ordinal_within_scope=? AND cp.status='ready'
+            LIMIT 2
+            """, (thread, run, checkpoint_id, ordinal, ordinal)).fetchall()
+    except sqlite3.Error:
+        return None
+    if len(rows) != 1:
+        return None
+    scope_id, captured, ref, cwd = rows[0]
+    stamp, closed = parse_ts(captured), parse_ts(completed)
+    if (not stamp or not stamp.tzinfo or not closed or not closed.tzinfo or stamp < closed
+            or not isinstance(scope_id, str) or not 1 <= len(scope_id) <= 256
+            or ref != _checkpoint_ref(scope_id, ordinal)
+            or not isinstance(cwd, str) or len(cwd) > 4096 or not Path(cwd).is_absolute()):
+        return None
+    return {'captured_at': stamp.isoformat(), 'ref': ref, 'cwd': cwd}
+
+
+def resolve_run_checkpoints(session: dict[str, Any]) -> int:
+    """Freeze the local Git object reached by each completed run's workspace checkpoint."""
+    checkpoints = session.pop('checkpoint_refs', {})
+    if not checkpoints:
+        return 0
+    cwd = Path(session['cwd'])
+    if not cwd.is_absolute():
+        return 0
+    resolved = 0
+    for event in session['events']:
+        if event['kind'] != 'boundary' or event.get('text') != 'turn_complete':
+            continue
+        if not (checkpoint := checkpoints.get(event['run_id'])):
+            continue
+        try:
+            if Path(checkpoint['cwd']).resolve() != cwd.resolve():
+                continue
+            ref = checkpoint['ref']
+            commit = _read_git(cwd, 'rev-parse', '--verify', '--end-of-options',
+                               f'{ref}^{{commit}}').decode('ascii').strip()
+        except (OSError, subprocess.SubprocessError, ValueError, RuntimeError):
+            continue
+        if COMMIT_ID.fullmatch(commit):
+            event['workspace_checkpoint'] = {'captured_at': checkpoint['captured_at'],
+                                             'commit': commit, 'ref': ref}
+            resolved += 1
+    return resolved
 
 
 def link_native_context(session: dict[str, Any], supplements: dict[str, dict[str, Any]],
@@ -193,6 +262,7 @@ def _thread(db: sqlite3.Connection, path: Path, thread: str, cwd: str, since: fl
     seen_providers: set[str] = set()
     run_coverage: dict[str, dict[str, Any]] = {}
     native_runs: dict[str, dict[str, Any]] = {}
+    checkpoints: dict[str, dict[str, str]] = {}
 
     def emit(kind: str, value: Any, record: dict[str, Any], timestamp: Any,
              run: str, provider: str, *, call: str = '', tool: str = '',
@@ -296,6 +366,18 @@ def _thread(db: sqlite3.Connection, path: Path, thread: str, cwd: str, since: fl
                 coverage['projection_gaps'] += 1
         if status == 'completed' and completed:
             emit('boundary', 'turn_complete', run, completed, key, provider)
+            checkpoint_id = run['value'].get('checkpointId')
+            ordinal = run['value'].get('ordinal')
+            if (used < max_bytes and isinstance(checkpoint_id, str) and 1 <= len(checkpoint_id) <= 256
+                    and type(ordinal) is int and 0 < ordinal < 10**12):
+                checkpoint = _checkpoint(db, thread, key, ordinal, checkpoint_id, completed)
+                if checkpoint:
+                    selected = {'table': _CHECKPOINT_TABLE, 'key': checkpoint_id, 'value': checkpoint}
+                    size = len(json.dumps(selected, ensure_ascii=False).encode())
+                    if used + size <= max_bytes:
+                        captured.append(selected)
+                        used += size
+                        checkpoints[key] = checkpoint
         else:
             coverage['incomplete_runs'] += 1
         run_coverage[key] = {'source_incomplete': bool(coverage['byte_cap_reached']) or any(
@@ -327,6 +409,7 @@ def _thread(db: sqlite3.Connection, path: Path, thread: str, cwd: str, since: fl
             'cwd': cwd, 'origin': 'interactive', 'model': None,
             'providers': sorted(seen_providers), 'native_sessions': sorted(native),
             **({'native_runs': native_runs} if native_runs else {}),
+            **({'checkpoint_refs': checkpoints} if checkpoints else {}),
             'instruction_exposure': {'status': 'unknown',
                 'reason': 'Project files alone do not prove past instruction delivery.'},
             'events': events, 'coverage': state,

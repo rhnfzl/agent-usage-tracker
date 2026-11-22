@@ -1,8 +1,11 @@
 """T3 app requests stay linked when the provider changes."""
 
+import base64
+import hashlib
 import json
 import os
 import sqlite3
+import subprocess
 
 import pytest
 
@@ -247,6 +250,77 @@ def test_t3_automation_does_not_become_human_work(tmp_path):
     _, result, sessions = capture(tmp_path, home)
     assert sessions == []
     assert result['t3_automated_runs'] == 1
+
+
+@pytest.mark.parametrize('mode', [
+    'valid', 'pre_run', 'wrong_scope', 'wrong_ordinal', 'missing_ref', 'wrong_run', 'wrong_ref',
+])
+def test_t3_freezes_only_its_ready_end_of_run_git_checkpoint(tmp_path, mode):
+    home, repo = tmp_path / 'home', tmp_path / 'project'
+    repo.mkdir()
+
+    def git(*args):
+        return subprocess.check_output(['git', '-C', str(repo), '-c', 'user.name=Test',
+                                       '-c', 'user.email=test@example.test', '-c', 'commit.gpgsign=false',
+                                       '-c', 'core.hooksPath=/dev/null', *args], text=True).strip()
+
+    git('init', '-q')
+    git('commit', '-qm', 'checkpoint contents', '--allow-empty')
+    commit = git('rev-parse', 'HEAD')
+    scope_hash = hashlib.sha256(b'other' if mode == 'wrong_ref' else b'scope').hexdigest()[:32]
+    key = base64.urlsafe_b64encode(scope_hash.encode()).decode().rstrip('=')
+    ref = f'refs/t3/orchestration-v2/checkpoints/{key}/ordinal/1'
+    if mode != 'missing_ref':
+        git('update-ref', ref, commit)
+    db, _ = fixture_db(home)
+    db.execute('UPDATE projection_projects SET workspace_root=?', (str(repo),))
+    add_run(db)
+    payload = db.execute('SELECT payload_json FROM orchestration_v2_projection_runs').fetchone()[0]
+    db.execute('UPDATE orchestration_v2_projection_runs SET payload_json=?',
+               (json.dumps({**json.loads(payload), 'checkpointId': 'checkpoint', 'ordinal': 1}),))
+    db.execute('''CREATE TABLE orchestration_v2_projection_checkpoint_scopes
+                  (scope_id TEXT, thread_id TEXT, kind TEXT, payload_json TEXT)''')
+    db.execute('''CREATE TABLE orchestration_v2_projection_checkpoints
+                  (checkpoint_id TEXT, thread_id TEXT, run_id TEXT, scope_id TEXT,
+                   app_run_ordinal INTEGER, ordinal_within_scope INTEGER,
+                   status TEXT, captured_at TEXT, payload_json TEXT)''')
+    db.execute('INSERT INTO orchestration_v2_projection_checkpoint_scopes VALUES (?,?,?,?)',
+               ('scope', 'app', 'root_run',
+                json.dumps({'cwd': str(tmp_path if mode == 'wrong_scope' else repo)})))
+    db.execute('INSERT INTO orchestration_v2_projection_checkpoints VALUES (?,?,?,?,?,?,?,?,?)',
+               ('checkpoint', 'app', 'other' if mode == 'wrong_run' else 'r1', 'scope', 1,
+                2 if mode == 'wrong_ordinal' else 1, 'ready', START if mode == 'pre_run' else END,
+                json.dumps({'ref': ref})))
+    db.commit()
+    db.close()
+
+    store, capture_result, [session] = capture(tmp_path, home, project=repo)
+    audit_id = capture_result['audit_id']
+    snapshot, = store.get('audits', audit_id)['session_ids']
+    boundary = next(event for event in session['events'] if event['kind'] == 'boundary')
+    if mode != 'valid':
+        assert 'workspace_checkpoint' not in boundary
+        assert not capture_result.get('t3_workspace_checkpoints')
+        return
+    assert capture_result['t3_workspace_checkpoints'] == 1
+    view = Evidence('redacted', store=store, audit_id=audit_id)
+    checkpoint = view.event(snapshot, boundary['id'])['workspace_checkpoint']
+    assert checkpoint == {'commit': commit, 'captured_at': '2026-01-01T10:00:10+00:00', 'ref': ref}
+    metadata = Evidence('metadata', store=store, audit_id=audit_id)
+    assert metadata.describe()['coverage']['t3_workspace_checkpoints'] == 1
+    assert metadata.event(snapshot, boundary['id'])['workspace_checkpoint'] == {
+        'captured_at': checkpoint['captured_at'],
+    }
+    bundle = tmp_path / 'selected.json'
+    metadata.export(bundle, [snapshot])
+    assert commit not in bundle.read_text()
+    assert Evidence('full', bundle=bundle).event(snapshot, boundary['id'])['workspace_checkpoint'] == {
+        'captured_at': checkpoint['captured_at'],
+    }
+    git('commit', '-qm', 'another commit', '--allow-empty')
+    git('update-ref', ref, git('rev-parse', 'HEAD'))
+    assert view.event(snapshot, boundary['id'])['workspace_checkpoint'] == checkpoint
+    assert _sample(store, freeze_case(store, audit_id, snapshot, boundary['id']))['setup_revision'] is None
     db.close()
 
 

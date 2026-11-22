@@ -19,6 +19,7 @@ from .evidence import event_links
 from .ranked_search import RankedSearch
 from .setup_git import COMMIT_ID
 from .store import Store, canonical, digest
+from .t3 import CHECKPOINT_REF
 from .turn_revisions import SETUP_FILE_LIMIT, details as turn_revision_details
 
 MODES = ("metadata", "redacted", "full")
@@ -36,7 +37,7 @@ SESSION_LABELS = ("session_id", "model", "cwd", "origin")
 
 def _coverage(values: Mapping[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in values.items()
-            if re.fullmatch(r"[a-z_]{1,60}", key) and type(value) in (int, bool)}
+            if re.fullmatch(r"[a-z_]{1,60}|t3_[a-z_]{1,57}", key) and type(value) in (int, bool)}
 
 
 def _page(start: int, limit: int, maximum: int = PAGE_SIZE) -> None:
@@ -158,6 +159,15 @@ class Evidence:
                         if type(checked) is int and 1 <= checked <= SETUP_FILE_LIMIT:
                             visible["turn_start_revision"]["setup_files_checked"] = checked
             result["turn_context"] = visible
+        checkpoint = event.get("workspace_checkpoint")
+        if event["kind"] == "boundary" and isinstance(checkpoint, dict):
+            saved = parse_ts(checkpoint.get("captured_at"))
+            if saved and saved.tzinfo:
+                result["workspace_checkpoint"] = {"captured_at": saved.isoformat()}
+                commit, ref = checkpoint.get("commit"), checkpoint.get("ref")
+                if (self.content != "metadata" and isinstance(commit, str) and COMMIT_ID.fullmatch(commit)
+                        and isinstance(ref, str) and CHECKPOINT_REF.fullmatch(ref)):
+                    result["workspace_checkpoint"].update(commit=commit, ref=ref)
         if self.content != "metadata":
             result.update({field: self._label(event[field]) for field in EVENT_LABELS
                            if isinstance(event.get(field), str)})

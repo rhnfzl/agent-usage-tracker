@@ -231,6 +231,8 @@ def audit(store: Store, home: Path, *, days: int = 7, limit: int = 40,
                            or project_identity(Path(cwd)) != project_repo for cwd in workspaces):
             counts["other_projects"] += 1
             continue
+        if agent == "t3" and (verified := t3.resolve_run_checkpoints(evidence)):
+            counts["t3_workspace_checkpoints"] += verified
         if (agent, evidence["session_id"]) in mirrors:
             source = (agent, evidence["source"]["sha256"])
             if source in seen:

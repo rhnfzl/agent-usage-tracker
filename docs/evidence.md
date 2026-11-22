@@ -33,6 +33,11 @@ remaining text. Commit lookup cites a matched Git call and result. A short recor
 match more than one commit. AUT reports the prefix as captured. Comparison shows event counts and the first difference in the observed tool
 sequence. A missing result stays unknown. The comparison does not infer why two runs differed.
 
+For a completed T3 run with a ready workspace checkpoint, AUT resolves its local Git ref
+when it captures the audit. Open the boundary event to see the checkpoint time and, with
+full or redacted access, the ref and commit. This is the workspace state saved by T3 after a run.
+Ordinary-work studies still verify turn-start setup from the evidence recorded for that turn.
+
 The project filter includes its Git worktrees and excludes sessions with recorded directories in
 other repositories. It cannot infer where unrecorded tool activity took place. Select explicit
 sessions before sharing externally. Use `--workspace` or `--tool` to filter on recorded labels. Capture uses AUT's existing Claude Code, Codex, Pi,
