@@ -13,6 +13,8 @@ from ..config import AutError
 from ..label.core import data_dir
 from .access import MODES, Evidence
 from .evidence import BYTE_LIMIT
+from .ranked_search import SEARCH_MODES
+from .search_eval import evaluate
 from .store import Store, audit
 
 _MIB = 1024 * 1024
@@ -27,7 +29,14 @@ def register(commands: Any) -> None:
     scope.add_argument("--bundle", type=Path, help="open a previously exported evidence bundle")
     parser.add_argument("--content", choices=MODES,
                         help="content available through this command or MCP connection")
+    parser.add_argument("--embedding-model", type=Path, help="local sentence model directory")
     actions = parser.add_subparsers(dest="evidence_cmd", required=True)
+
+    discover = actions.add_parser("discover", help="investigate open questions locally across audits")
+    discover.add_argument("--include-audit", action="append", default=[])
+    discover.add_argument("--question", help="optional direction for the investigation")
+    discover.add_argument("--model", help="cached local instruct model")
+    discover.add_argument("--rounds", type=int, choices=(1, 2, 3), default=2)
 
     capture = actions.add_parser("capture", help="save a private audit with full text by default")
     capture.add_argument("--days", type=int, default=7)
@@ -43,12 +52,29 @@ def register(commands: Any) -> None:
     record.add_argument("--setup-file", action="append", default=[], metavar="PROJECT_PATH",
                         help="record the file digest or absence for this project-relative setup path")
 
-    actions.add_parser("describe", help="report the evidence scope and coverage")
+    describe = actions.add_parser("describe", help="report the evidence scope and coverage")
+    describe.add_argument("--text-coverage", action="store_true")
     search = actions.add_parser("search", help="filter captured events and return matching references")
     for arg in ("query", "agent", "kind", "status", "since", "until", "cursor", "tool", "workspace"):
         search.add_argument(f"--{arg}", default="")
-    search.add_argument("--mode", choices=("exact", "ranked"), default="exact")
+    search.add_argument("--session-id", default="")
+    search.add_argument("--exclude-session", action="append", default=[])
+    search.add_argument("--group-by-session", action="store_true")
+    search.add_argument("--argument-path", help="JSON pointer into a recorded tool call")
+    search.add_argument("--mode", choices=SEARCH_MODES,
+                        default="auto")
     search.add_argument("--limit", type=int, default=20)
+
+    evaluation = actions.add_parser("evaluate", help="measure search against a local labeled set")
+    evaluation.add_argument("path", type=Path)
+    evaluation.add_argument("--mode", choices=SEARCH_MODES, action="append")
+    evaluation.add_argument("--limit", type=int, default=5)
+
+    listing = actions.add_parser("list-sessions", help="list captured sessions and their coverage")
+    listing.add_argument("--offset", type=int, default=0)
+    listing.add_argument("--limit", type=int, default=30)
+    listing.add_argument("--agent", default="")
+    listing.add_argument("--workspace", default="")
 
     session = actions.add_parser("session", help="read a page of events from a session")
     event = actions.add_parser("event", help="read text from one captured event")
@@ -58,6 +84,14 @@ def register(commands: Any) -> None:
     for action, limit in ((event, 8_000), (session, 30)):
         action.add_argument("--offset", type=int, default=0)
         action.add_argument("--limit", type=int, default=limit)
+
+    context = actions.add_parser("context", help="read an event with its recorded counterpart")
+    context.add_argument("session_id")
+    context.add_argument("event_id")
+    context.add_argument("--radius", type=int, default=2)
+    context.add_argument("--limit", type=int, default=2_000)
+    context.add_argument("--focus", default="", help="center the anchor excerpt near these words")
+    context.add_argument("--view", choices=("nearby", "conversation"), default="nearby")
 
     commits = actions.add_parser("commits", help="find runs by a recorded Git result or checkpoint commit")
     commits.add_argument("commit")
@@ -114,11 +148,22 @@ def register(commands: Any) -> None:
 def run(args: argparse.Namespace) -> None:
     root = args.root or Path(os.environ.get("AUT_IMPROVE_ROOT", str(data_dir() / "improve")))
     action = args.evidence_cmd
+    if action == "discover":
+        if args.bundle or args.content not in (None, "redacted"):
+            raise AutError("discovery: use redacted audits in a private local store")
+        from .discovery import run as discover
+
+        value = discover(Store(root), args.audit, args.include_audit, question=args.question,
+                         model_name=args.model, rounds=args.rounds)
+        print(json.dumps(value, sort_keys=True))
+        return
+    configured_model = args.embedding_model or os.environ.get("AUT_EVIDENCE_EMBEDDING_MODEL")
+    model_path = Path(configured_model).expanduser().resolve() if configured_model else None
     with_code = action in {"run-code", "replay-code", "code-catalog"} or (
         action == "mcp" and args.code)
     args.content = args.content or ("redacted" if with_code else "full")
     if action == "code-catalog" or action in {"run-code", "replay-code"}:
-        value = _code(args, root)
+        value = _code(args, root, model_path)
         print(json.dumps(value, sort_keys=True))
         return
     if action == "record-codex-turn":
@@ -151,7 +196,10 @@ def run(args: argparse.Namespace) -> None:
             from .session_observability import publish
             print(json.dumps(publish(args.content, store, args.audit, args.bundle), sort_keys=True))
             return
-        evidence = Evidence(args.content, store, args.audit, args.bundle)
+        from .semantic_search import LocalEmbedder
+
+        embedder = LocalEmbedder(model_path) if model_path else None
+        evidence = Evidence(args.content, store, args.audit, args.bundle, embedder=embedder)
         if action == "mcp":
             try:
                 from .access_mcp import serve
@@ -163,7 +211,7 @@ def run(args: argparse.Namespace) -> None:
             if args.code:
                 from .investigation import scope_specs
                 scopes = scope_specs(root, args.content, args.audit, args.bundle,
-                                     args.include_audit, args.include_bundle)
+                                     args.include_audit, args.include_bundle, model_path)
             elif args.include_audit or args.include_bundle:
                 raise AutError("investigation: additional scopes require mcp --code")
             serve(evidence, args.transport, args.port, scopes)
@@ -198,9 +246,17 @@ def run(args: argparse.Namespace) -> None:
                      "cases": [evidence.case(row["case_id"]) for row in rows]}
         elif action == "search":
             value = evidence.search(args.query, args.agent, args.kind, args.status, args.since,
-                                    args.until, args.cursor, args.limit, args.tool, args.workspace, args.mode)
+                                    args.until, args.cursor, args.limit, args.tool, args.workspace,
+                                    args.mode, args.session_id, args.exclude_session,
+                                    args.group_by_session, args.argument_path)
+        elif action == "evaluate":
+            value = evaluate(evidence, args.path, args.mode or ["auto", "exact", "ranked", "sessions"], args.limit)
         elif action == "event":
             value = evidence.event(args.session_id, args.event_id, args.offset, args.limit)
+        elif action == "context":
+            value = evidence.context(args.session_id, args.event_id, args.radius, args.limit, args.focus, args.view)
+        elif action == "list-sessions":
+            value = evidence.list_sessions(args.offset, args.limit, args.agent, args.workspace)
         elif action == "session":
             value = evidence.session(args.session_id, args.offset, args.limit)
         elif action == "commits":
@@ -215,20 +271,20 @@ def run(args: argparse.Namespace) -> None:
         elif action == "export":
             value = evidence.export(args.path, args.ids)
         else:
-            value = evidence.describe()
+            value = evidence.describe(args.text_coverage)
     print(json.dumps(value, sort_keys=True))
 
 
-def _code(args: argparse.Namespace, root: Path) -> dict[str, Any]:
-    from .investigation import CONTRACT, MAX_SOURCE, catalog, run, scope_specs
+def _code(args: argparse.Namespace, root: Path, model_path: Path | None) -> dict[str, Any]:
+    from .investigation import CONTRACT, MAX_SOURCE, catalog, run, save, scope_specs
     from .store import digest
 
     if args.evidence_cmd == "code-catalog":
-        return catalog()
+        return catalog(with_model=model_path is not None)
     if not (args.audit or args.bundle):
         raise AutError("investigation: select --audit ID or --bundle PATH")
     specs = scope_specs(root, args.content, args.audit, args.bundle,
-                        args.include_audit, args.include_bundle)
+                        args.include_audit, args.include_bundle, model_path)
     if args.evidence_cmd == "replay-code":
         record = Store(root, read_only=True).get("investigation_runs", args.run_id)
         if record["contract"] != CONTRACT:
@@ -255,9 +311,5 @@ def _code(args: argparse.Namespace, root: Path) -> dict[str, Any]:
         raise AutError("investigation: provide UTF-8 source and valid JSON parameters") from exc
     value = run(source, params, specs)
     if args.save:
-        record = {"contract": CONTRACT, "source": source, "params": params,
-                  "scopes": value["scopes"], "result_sha256": digest(value),
-                  "reads": value["reads"], "aut_version": value["aut_version"],
-                  "runtime_version": value["runtime_version"]}
-        value["run_id"] = Store(root).put("investigation_runs", record)
+        value["run_id"] = save(Store(root), source, params, value)
     return value
