@@ -144,6 +144,7 @@ def test_a_needed_file_beside_the_weights_counts(tmp_path, monkeypatch):
 
 FAKE_SERVER = """#!{python}
 import http.server, json, os, sys
+from agent_usage_tracker.net import LoopbackHTTPServer
 if "--version" in sys.argv:
     print("version: 1 (build {build}, commit x)", file=sys.stderr)
     sys.exit(0)
@@ -166,7 +167,7 @@ class H(http.server.BaseHTTPRequestHandler):
         q = json.loads(self.rfile.read(int(self.headers["Content-Length"])))["questions"]["q"]
         self.send(200, {{"answers": {{"q": {{"noul": 0.75}} if q["type"] == "noul" else
             {{"probabilities": {{k: 1 / len(q["criteria"]) for k in q["criteria"]}}}}}}}})
-http.server.HTTPServer(("127.0.0.1", int(a[a.index("--port") + 1])), H).serve_forever()
+LoopbackHTTPServer(("127.0.0.1", int(a[a.index("--port") + 1])), H).serve_forever()
 """
 
 

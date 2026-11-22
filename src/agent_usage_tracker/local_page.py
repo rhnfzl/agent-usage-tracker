@@ -14,10 +14,11 @@ import threading
 import time
 import webbrowser
 from email.message import Message
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler
 from typing import Callable
 from urllib.parse import parse_qs
 
+from .net import LoopbackHTTPServer as HTTPServer
 from .push import redacted_error
 
 _MAX_BODY = 1 << 20
