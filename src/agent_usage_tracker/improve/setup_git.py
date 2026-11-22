@@ -58,3 +58,22 @@ def verify_setup(proposal: dict[str, Any], revision: str, condition: str) -> dic
         return result | {"status": "verified"} if hashlib.sha256(blob).hexdigest() == expected else result
     except (OSError, subprocess.SubprocessError, ValueError):
         return {"status": "unavailable"}
+
+
+def target_in_workspace(proposal: dict[str, Any], cwd: str) -> Path | None:
+    """Find the proposal path in the observed worktree of the same local repository."""
+    scope, workspace = Path(proposal["scope"]).resolve(), Path(cwd)
+    target = PurePosixPath(proposal["target"])
+    if target.is_absolute() or not target.parts or ".." in target.parts or not workspace.is_absolute():
+        return None
+    if workspace.resolve() == scope:
+        return scope / target
+    try:
+        args = ("--path-format=absolute", "--git-common-dir")
+        if _read_git(scope, "rev-parse", *args) != _read_git(workspace, "rev-parse", *args):
+            return None
+        root = Path(os.fsdecode(_read_git(workspace, "rev-parse", "--show-toplevel").removesuffix(b"\n")))
+        prefix = os.fsdecode(_read_git(scope, "rev-parse", "--show-prefix").removesuffix(b"\n"))
+        return root / prefix / target if root.is_absolute() else None
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None

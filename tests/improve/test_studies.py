@@ -636,16 +636,18 @@ def test_natural_work_observation_measures_only_eligible_pairs(
     assert set(no_work["unpaired_baseline_ids"]) == set(baseline)
 
 
-def test_strict_observation_checks_adoption_and_session_setup_revisions(tmp_path, monkeypatch):
+@pytest.mark.parametrize("read_mode", [None, "native", "mirrored"])
+def test_strict_observation_checks_adoption_and_session_setup_revisions(tmp_path, monkeypatch, read_mode):
     import json
     import subprocess
     from datetime import datetime, timezone
 
     from agent_usage_tracker.improve import decide, studies
-    from agent_usage_tracker.improve.evidence import read_session
+    from agent_usage_tracker.improve.evidence import native_item_key, read_session
     from agent_usage_tracker.improve.judge import freeze_case
     from agent_usage_tracker.improve.proposals import prepare
     from agent_usage_tracker.improve.study_observe import observe
+    from agent_usage_tracker.improve.t3 import link_native_context
 
     class PolicyClock(datetime):
         @classmethod
@@ -677,7 +679,7 @@ def test_strict_observation_checks_adoption_and_session_setup_revisions(tmp_path
     new = git("rev-parse", "HEAD")
     policy["proposal_id"] = proposal
 
-    def add(name, phase, revision, exit_code):
+    def add(name, phase, revision, exit_code, returned="after", read_turn=None):
         stamp = "2025-02-27T12:00:00Z" if phase == "baseline" else "2025-03-03T12:00:00Z"
         cwd = str(source)
         rows = [
@@ -685,15 +687,36 @@ def test_strict_observation_checks_adoption_and_session_setup_revisions(tmp_path
                               "git": {"commit_hash": revision}}),
             ("event_msg", {"type": "task_started", "turn_id": name}),
             ("turn_context", {"turn_id": name, "model": "one", "cwd": cwd}),
-            ("event_msg", {"type": "user_message", "message": "Check " + name}),
+            ("event_msg", {"type": "item_completed", "item": {"type": "UserMessage",
+                          "id": "prompt", "content": "Check " + name}}),
             ("event_msg", {"type": "item_completed", "item": {"type": "CommandExecution",
                           "id": "run", "command": "check", "exit_code": exit_code}}),
             ("event_msg", {"type": "task_complete", "turn_id": name}),
         ]
+        if read_mode and phase == "candidate":
+            rows.insert(-1, ("event_msg", {"type": "item_completed", "item": {
+                "type": "CommandExecution", "id": "read-setup", "command": "cat setup",
+                "exit_code": 0, "cwd": cwd, "aggregated_output": returned,
+            }, "turn_id": read_turn or name}))
         path = tmp_path / (name + ".jsonl")
         path.write_text("".join(json.dumps({"type": kind, "payload": payload, "timestamp": stamp})
                                 + "\n" for kind, payload in rows))
-        row = read_session(path, "codex")
+        row = read_session(path, "codex", track_native_items=read_mode == "mirrored")
+        if read_mode == "mirrored":
+            native = store.put("sessions", row)
+            app = {
+                **row, "agent": "t3", "session_id": "t3:" + name,
+                "supplemental_sources": [native],
+                "native_runs": {name: {"session_id": name, "items": [
+                    native_item_key("prompt"), native_item_key("run"),
+                ]}},
+                "events": [{**event, "run_id": name} for event in row["events"]],
+            }
+            for event in app["events"]:
+                for key in ("native_turn_key", "turn_context", "native_file_read"):
+                    event.pop(key, None)
+            assert link_native_context(app, {native: row}, set()) == 1
+            row = app
         snapshot = store.put("sessions", row)
         audit = store.put("audits", {"session_ids": [snapshot]})
         return freeze_case(store, audit, snapshot, row["events"][-1]["id"])
@@ -704,6 +727,8 @@ def test_strict_observation_checks_adoption_and_session_setup_revisions(tmp_path
         "minimum_pairs": 2, "minimum_improvement": 0,
         "baseline_cases": {case: "setup" for case in baseline},
     }
+    if read_mode:
+        policy["observation_policy"]["require_approved_file_read"] = True
     wrong = add("baseline-with-candidate", "baseline", new, 0)
     with pytest.raises(AutError, match="verified setup revisions"):
         create(store, policy | {"observation_policy": policy["observation_policy"] |
@@ -717,6 +742,11 @@ def test_strict_observation_checks_adoption_and_session_setup_revisions(tmp_path
     observed = observe(store, key, {"adoption_id": adopted["adoption_id"], "pairs": pairs})
     assert observed["comparison"] == "observed_decrease"
     assert observed["setup_revision_verified_pairs"] == 2
+    assert observed["approved_file_read_pairs"] == (2 if read_mode else 0)
+    if read_mode == "mirrored":
+        for pair in observed["pairs"]:
+            native_source = store.get("sessions", pair["approved_file_read"]["session_snapshot"])
+            assert native_source["agent"] == "codex"
     assert observed["adoption_commit_setup"] == {"status": "verified", "revision": new}
     assert not observed["attempt_setup_exposure_verified"]
     excluded = observe(store, key, {"adoption_id": wrongly_adopted["adoption_id"], "pairs": pairs})
@@ -727,6 +757,13 @@ def test_strict_observation_checks_adoption_and_session_setup_revisions(tmp_path
     excluded = observe(store, key, {"adoption_id": adopted["adoption_id"], "pairs": pairs})
     assert excluded["exclusions"] == {"setup_revision_unverified": 1}
     assert excluded["comparison"] == "inconclusive"
+    if read_mode:
+        for label, args in (("wrong-read", {"returned": "different bytes"}),
+                            ("other-turn", {"read_turn": "earlier"})):
+            pairs[0]["candidate"] = add(label, "candidate", new, 0, **args)
+            excluded = observe(store, key, {"adoption_id": adopted["adoption_id"], "pairs": pairs})
+            assert excluded["exclusions"] == {"approved_file_read_unverified": 1}
+            assert excluded["comparison"] == "inconclusive"
 
 
 def test_create_can_freeze_a_trusted_trial_file_with_the_policy(tmp_path, capsys):

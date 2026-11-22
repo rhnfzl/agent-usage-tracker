@@ -261,3 +261,12 @@ AUT can use a native Codex session header for the first observed turn in the sam
 Later turns need their own revision evidence. Fetch or create a new capture when a source
 or local Git object is missing. The report counts verified revisions separately from evidence
 that the agent loaded the file or that the working copy matched its commit.
+
+Set `require_approved_file_read: true` with `require_turn_context: true` to require evidence
+that the candidate received the approved file contents. AUT recognizes a successful native
+Codex `cat` of a single literal path when the command result belongs to the same recorded turn.
+It compares the path and returned bytes with the proposed file. T3 can use the same evidence
+from a corroborated native turn. The report saves the matching call and result references.
+Partial reads, missing receipts, and changed bytes leave the pair unverified.
+This check records the content the tool returned. Following the instructions and task quality
+remain separate questions.

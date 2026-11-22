@@ -15,19 +15,23 @@ from ..config import AutError
 from ..event import parse_ts
 from .case_view import _attempt
 from .evidence import event_links
+from .file_reads import observed_file_read
 from .judge import _attempt_coverage, _complete_attempt
-from .setup_git import COMMIT_ID, verify_setup
+from .setup_git import COMMIT_ID, target_in_workspace, verify_setup
 from .store import Store, digest, repository
 
 
 def validate_policy(policy: Any) -> None:
     if (not isinstance(policy, dict)
-            or set(policy) - {"require_turn_context", "coverage_basis", "require_setup_revision"}
+            or set(policy) - {"require_turn_context", "coverage_basis", "require_setup_revision",
+                              "require_approved_file_read"}
             != {"metric", "minimum_pairs", "minimum_improvement", "baseline_cases"}
             or policy.get("coverage_basis", "full_case") not in ("full_case", "tool_events")
             or type(policy.get("require_turn_context", False)) is not bool
             or type(policy.get("require_setup_revision", False)) is not bool
             or policy.get("require_setup_revision") and not policy.get("require_turn_context")
+            or type(policy.get("require_approved_file_read", False)) is not bool
+            or policy.get("require_approved_file_read") and not policy.get("require_turn_context")
             or policy["metric"] not in ("tool_errors", "tool_calls", "codex_model_calls")
             or policy["metric"] == "codex_model_calls" and (
                 not policy.get("require_turn_context") or "coverage_basis" in policy)
@@ -70,6 +74,7 @@ def _sample(store: Store, case_id: str) -> dict[str, Any]:
                      and (not checked or tool_events_complete))
     context = events[-1].get("turn_context") if events[-1]["kind"] == "boundary" else None
     context_status = context["status"] if context else "legacy_session_labels"
+    turn = None
     if context_status == "observed":
         turn = events[-1].get("native_turn_key")
         if not turn or any(event.get("native_turn_key") != turn for event in events):
@@ -97,6 +102,8 @@ def _sample(store: Store, case_id: str) -> dict[str, Any]:
         "model": context.get("model") if context else session.get("model"),
         "setup_revision": context.get("session_start_revision")
         if context and context_status == "observed" else None,
+        "read_origin": _read_origin(session, case["session_snapshot"], events[-1], context, turn)
+        if context and context_status == "observed" and turn else None,
         "started": min(times) if times else None, "ended": max(times) if times else None,
         "complete": completed, "tool_events_complete": tool_events_complete, "tool_calls": calls,
         "codex_model_calls": model_calls,
@@ -105,6 +112,17 @@ def _sample(store: Store, case_id: str) -> dict[str, Any]:
         "tool_errors": sum(event.get("status") == "error" for event in results)
                        if known_errors else None,
     }
+
+
+def _read_origin(session: dict[str, Any], snapshot: str, end: dict[str, Any],
+                 context: dict[str, Any], turn: str) -> tuple[str, str, str] | None:
+    if session["agent"] == "codex":
+        return snapshot, end["id"], turn
+    count = context.get("matching_items")
+    if (session["agent"] == "t3" and context.get("source_session") in session.get("supplemental_sources", ())
+            and isinstance(context.get("source_event"), str) and type(count) is int and count >= 2):
+        return context["source_session"], context["source_event"], turn
+    return None
 
 
 def _in_scope(cwd: str | None, scope: Path, project: str | None) -> bool:
@@ -181,10 +199,15 @@ def observe(store: Store, study_id: str, spec: dict[str, Any]) -> dict[str, Any]
         raise AutError("improve: supply up to 200 matched pairs")
     proposal = store.get("proposals", study["proposal_id"])
     require_setup = policy.get("require_setup_revision", False)
+    require_read = policy.get("require_approved_file_read", False)
 
     @lru_cache(maxsize=400)
     def read_setup(revision: str, condition: str) -> dict[str, str]:
         return verify_setup(proposal, revision, condition)
+
+    @lru_cache(maxsize=200)
+    def read_target(cwd: str) -> Path | None:
+        return target_in_workspace(proposal, cwd)
 
     adoption_setup = None
     if require_setup:
@@ -252,6 +275,18 @@ def observe(store: Store, study_id: str, spec: dict[str, Any]) -> dict[str, Any]
             reason = "setup_revision_unverified"
         elif before[metric] is None or after[metric] is None:
             reason = "metric_unknown"
+        approved_read = None
+        if require_read and reason is None:
+            source = after["read_origin"]
+            target = read_target(after["cwd"])
+            if source and target:
+                snapshot, end, turn = source
+                match = observed_file_read(store.get("sessions", snapshot), end, turn, target,
+                                           proposal["after_sha256"])
+                if match:
+                    approved_read = {"session_snapshot": snapshot, **match}
+            if approved_read is None:
+                reason = "approved_file_read_unverified"
         seen_sources.update(sources)
         seen_content.update(content)
         if reason:
@@ -264,6 +299,7 @@ def observe(store: Store, study_id: str, spec: dict[str, Any]) -> dict[str, Any]
                          "uses_tool_events_only": policy.get("coverage_basis") == "tool_events"
                          and not (before["complete"] and after["complete"]),
                          "setup_revision_verified": require_setup,
+                         **({"approved_file_read": approved_read} if approved_read else {}),
                          "basis": "recorded_turn_context" if contexts == {"observed"}
                          else "includes_session_labels"})
 
@@ -287,6 +323,7 @@ def observe(store: Store, study_id: str, spec: dict[str, Any]) -> dict[str, Any]
                                                    for row in outcomes),
               "setup_revision_verified_pairs": sum(row.get("setup_revision_verified", False)
                                                       for row in outcomes),
+              "approved_file_read_pairs": sum("approved_file_read" in row for row in outcomes),
               **({"adoption_commit_setup": adoption_setup} if require_setup else {}),
               "unpaired_baseline_ids": unpaired, "mean_reduction": reduction, "pairs": outcomes,
               "causal_effect_established": False, "task_quality_verified": False,

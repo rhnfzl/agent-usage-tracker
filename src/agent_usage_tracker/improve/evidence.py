@@ -16,6 +16,7 @@ from ..collectors.activity_common import result_status
 from ..event import parse_ts
 from ..redact import redact
 from ..state import parse_record
+from .file_reads import capture_file_read
 from .setup_git import COMMIT_ID
 
 TEXT_LIMIT = 6000
@@ -214,7 +215,8 @@ def read_session(path: Path, agent: str, max_bytes: int = BYTE_LIMIT,
              call: object = "", tool: object = "", status: str = "unknown",
              key: object = "", context: dict[str, Any] | None = None,
              tool_representation: str = "",
-             codex_model_call_receipt: dict[str, Any] | None = None) -> None:
+             codex_model_call_receipt: dict[str, Any] | None = None,
+             native_file_read: dict[str, str] | None = None) -> None:
         nonlocal last_closed
         identity = str(call or key or line)
         event = trace_event(agent, session, kind, identity, value, record.get("timestamp"),
@@ -236,6 +238,7 @@ def read_session(path: Path, agent: str, max_bytes: int = BYTE_LIMIT,
                          if tool_representation else {}),
                       **({"codex_model_call_receipt": codex_model_call_receipt}
                          if codex_model_call_receipt is not None else {}),
+                      **({"native_file_read": native_file_read} if native_file_read is not None else {}),
                       **({"native_turn_key": active_turn_key} if active_turn_key else {})})
         seen[kind, identity] = event
         events.append(event)
@@ -465,7 +468,9 @@ def read_session(path: Path, agent: str, max_bytes: int = BYTE_LIMIT,
                     emit("result", {"exit_code": item.get("exit_code"),
                                    "output": item.get("aggregated_output", "")},
                          line, record, call=identity,
-                         status=result_status({"exit_code": item.get("exit_code")}))
+                         status=result_status({"exit_code": item.get("exit_code")}),
+                         native_file_read=capture_file_read(item)
+                         if active_turn and payload.get("turn_id") == active_turn else None)
                 elif sub == "item_completed" and item.get("type") == "McpToolCall":
                     identity = item.get("id") or f"mcp-{line}"
                     emit("call", item.get("arguments", {}), line, record, call=identity,
