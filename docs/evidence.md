@@ -250,7 +250,8 @@ saved digest. Deleted inputs can prevent replay. Changes in AUT or Monty version
 can change the digest. Use `--recipe` to run the same program on new inputs and
 optionally pass new parameters.
 
-Install `agent-usage-tracker[mcp,code]` to use a recipe through MCP. Add `--code`
+Install `agent-usage-tracker[mcp,code]` to use a recipe through MCP. If you use
+the pinned-wheel runtime installer, pass `--code` to include both optional dependencies. Add `--code`
 to the server arguments after `mcp` and include any additional scopes there.
 The server adds `code_catalog` and `run_code(source, params)`. The client receives
 the result under the connection's grant. Restart the MCP server to select a
