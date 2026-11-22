@@ -25,15 +25,8 @@ jobs:
       - run: pip install build==1.3.0 twine==7.0.0
       # The sdist first, then the wheel from it: a file the sdist leaves out breaks the wheel here.
       - run: python -m build
-      - run: twine check --strict dist/*
-      - name: tag matches the package version
-        run: |
-          version=$(python -c "import glob, re; print(re.search(r'-([^-]+)-py3', glob.glob('dist/*.whl')[0]).group(1))")
-          test "v$version" = "$GITHUB_REF_NAME" || { echo "tag $GITHUB_REF_NAME, package $version"; exit 1; }
-      - name: the wheel ships the sink stack and no secrets
-        run: |
-          unzip -l dist/*.whl | grep -q sink_stack/compose.yaml
-          if unzip -l dist/*.whl | grep -q 'sink_stack/\.env$'; then echo "the wheel holds a .env"; exit 1; fi
+      - name: Validate distributions, tag, and wheel contents
+        run: bash scripts/local-ci.sh verify-dist "$GITHUB_REF_NAME" dist
       - uses: actions/upload-artifact@v4
         with:
           name: dist
