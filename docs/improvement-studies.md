@@ -296,9 +296,11 @@ and custom tool requests. Omit `coverage_basis` for this metric. AUT counts raw 
 the native turn start, and requires one matching output of the same type for each request.
 Execution records, built-in search, and other tool types are outside this metric.
 Inspect the count and start time on the boundary event through the CLI or MCP.
-The study checks capture coverage and requires an interactive native Codex session.
-An old capture or a turn without a complete request stream provides no count.
-The observation window uses the recorded native turn start.
+The study checks coverage in an interactive native Codex session. T3 can use that count
+when the audit includes its corroborated native source. AUT requires one opening request,
+matching prompt evidence, and native timestamps within the T3 run. Later steering makes
+the count unavailable for the paired attempt. The preview and study cite the native boundary
+that supplied each count. The observation window includes the opening time from both sources.
 
 Set `require_setup_revision: true` with `require_turn_context: true` to verify the proposed file
 in the recorded Git revisions. The study requires the original file in each baseline revision.

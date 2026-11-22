@@ -135,7 +135,10 @@ def test_t3_identical_linked_native_files_share_one_supplement(tmp_path):
     db.close()
 
 
-@pytest.mark.parametrize('mode', ['linked', 'one_item', 'split_turns', 'two_copies', 'reused_turn'])
+@pytest.mark.parametrize('mode', [
+    'linked', 'one_item', 'split_turns', 'two_copies', 'reused_turn', 'wrong_prompt', 'late_native', 'steered',
+    'native_steered',
+])
 def test_t3_turn_context_requires_distinct_native_items_in_one_completed_turn(tmp_path, mode):
     home = tmp_path / 'home'
     db, _ = fixture_db(home)
@@ -146,6 +149,10 @@ def test_t3_turn_context_requires_distinct_native_items_in_one_completed_turn(tm
     item(db, 'r1', 'two', 'assistant_message', 4, text='second',
          nativeItemRef={**ref, 'nativeId': 'second',
                         'strength': 'weak' if mode == 'one_item' else 'strong'})
+    if mode == 'steered':
+        db.execute('INSERT INTO orchestration_v2_projection_messages VALUES (?,?,?,?,?,?)',
+            ('steer', 'app', 'r1', 'user', '2026-01-01T10:00:01Z',
+             json.dumps({'text': 'Change the task', 'createdBy': 'user', 'creationSource': 'web'})))
     if mode == 'reused_turn':
         add_run(db, 'r2', 'codex', 2)
         db.execute("""UPDATE orchestration_v2_projection_provider_threads SET payload_json=?
@@ -163,10 +170,16 @@ def test_t3_turn_context_requires_distinct_native_items_in_one_completed_turn(tm
         rows.extend([
             ('event_msg', {'type': 'task_started', 'turn_id': turn_id}),
             ('turn_context', {'turn_id': turn_id, 'model': 'actual-model', 'cwd': str(tmp_path)}),
+            ('event_msg', {'type': 'user_message',
+                           'message': 'Another request' if mode == 'wrong_prompt' else 'Fix the checks'}),
+            ('response_item', {'type': 'function_call', 'call_id': 'tool-'+turn_id, 'name': 'exec_command'}),
+            ('response_item', {'type': 'function_call_output', 'call_id': 'tool-'+turn_id, 'output': 'result'}),
         ])
         for name in names:
             rows.append(('event_msg', {'type': 'item_completed',
                          'item': {'type': 'AgentMessage', 'id': name, 'text': name}}))
+        if mode == 'native_steered':
+            rows.append(('event_msg', {'type': 'user_message', 'message': 'Change the task'}))
         rows.append(('event_msg', {'type': 'task_complete', 'turn_id': turn_id}))
 
     if mode == 'split_turns':
@@ -174,7 +187,8 @@ def test_t3_turn_context_requires_distinct_native_items_in_one_completed_turn(tm
         native_turn('other-turn', ['second'])
     else:
         native_turn('native-turn', ['first', 'second'])
-    raw = ''.join(json.dumps({'type': kind, 'timestamp': END, 'payload': payload}) + '\n'
+    stamp = '2026-01-01T10:00:11Z' if mode == 'late_native' else END
+    raw = ''.join(json.dumps({'type': kind, 'timestamp': stamp, 'payload': payload}) + '\n'
                   for kind, payload in rows)
     (folder / 'rollout-native.jsonl').write_text(raw)
     os.utime(folder / 'rollout-native.jsonl', (1_000_000_000, 1_000_000_000))
@@ -185,17 +199,30 @@ def test_t3_turn_context_requires_distinct_native_items_in_one_completed_turn(tm
     audit_id = result['audit_id']
     key, = store.get('audits', audit_id)['session_ids']
     boundary = next(event for event in session['events'] if event['kind'] == 'boundary')
-    sample = _sample(store, freeze_case(store, audit_id, key, boundary['id']))
-    if mode == 'linked':
+    sample = _sample(store, freeze_case(store, audit_id, key, boundary['id']), use_native_model_calls=True)
+    if mode in {'linked', 'wrong_prompt', 'late_native', 'steered', 'native_steered'}:
         assert sample['context_status'] == 'observed'
         assert sample['model'] == 'actual-model'
         assert sample['cwd'] == str(tmp_path)
-        assert sample['tool_events_complete']
+        assert sample['tool_events_complete'] == (mode != 'steered')
         view = Evidence('metadata', store=store, audit_id=audit_id)
         context = view.event(key, boundary['id'])['turn_context']
         assert context['source_session'] == session['supplemental_sources'][0]
         assert context['matching_items'] == 2
         assert 'model' not in context and 'cwd' not in context
+        results = view.ordinary_work(metric='codex_model_calls', require_turn_context=True)
+        if mode == 'linked':
+            assert sample['codex_model_calls'] == 1
+            receipt = results['items'][0]['metric_evidence']
+            assert receipt == {'session_id': context['source_session'], 'event_id': context['source_event']}
+            assert results['items'][0]['metric_value'] == 1
+            assert view.event(receipt['session_id'], receipt['event_id'])['codex_model_call_receipt']['count'] == 1
+            restricted = store.put('audits', {'session_ids': [key], 'coverage': {}})
+            without_source = Evidence('metadata', store=store, audit_id=restricted)
+            assert without_source.ordinary_work(metric='codex_model_calls', require_turn_context=True)['items'] == []
+        else:
+            assert sample['codex_model_calls'] is None
+            assert results['items'] == []
         view = Evidence('redacted', store=store, audit_id=audit_id)
         for name, snapshots in [('single', [key]), ('with-source', [key, context['source_session']])]:
             bundle = tmp_path / (name + '.json')

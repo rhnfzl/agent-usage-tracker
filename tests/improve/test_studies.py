@@ -754,7 +754,7 @@ def test_reviewed_ordinary_work_requires_accepted_outcomes_for_the_frozen_cohort
     assert len(store.keys("study_observations")) == 1
 
 
-@pytest.mark.parametrize("read_mode", [None, "native", "mirrored"])
+@pytest.mark.parametrize("read_mode", [None, "native", "mirrored", "mirrored_count"])
 def test_strict_observation_checks_adoption_and_session_setup_revisions(tmp_path, monkeypatch, read_mode):
     import hashlib
     import json
@@ -765,6 +765,7 @@ def test_strict_observation_checks_adoption_and_session_setup_revisions(tmp_path
     from agent_usage_tracker.improve.evidence import native_item_key, read_session
     from agent_usage_tracker.improve.judge import freeze_case
     from agent_usage_tracker.improve.proposals import prepare
+    from agent_usage_tracker.improve.store import digest
     from agent_usage_tracker.improve.study_observe import observe
     from agent_usage_tracker.improve.t3 import link_native_context
 
@@ -774,6 +775,8 @@ def test_strict_observation_checks_adoption_and_session_setup_revisions(tmp_path
             return cls(2025, 2, 28, 12, tzinfo=timezone.utc)
 
     monkeypatch.setattr(studies, "datetime", PolicyClock)
+    mirrored = read_mode in {"mirrored", "mirrored_count"}
+    measure_count = read_mode == "mirrored_count"
     store, policy = fixture(tmp_path)
     source = tmp_path / "source"
     source.mkdir()
@@ -803,7 +806,7 @@ def test_strict_observation_checks_adoption_and_session_setup_revisions(tmp_path
         cwd = str(source)
         rows = [
             ("session_meta", {"id": name, "source": "cli", "cwd": cwd,
-                              **({"git": {"commit_hash": revision}} if read_mode != "mirrored" else {})}),
+                              **({"git": {"commit_hash": revision}} if not mirrored else {})}),
             ("event_msg", {"type": "task_started", "turn_id": name}),
             ("turn_context", {"turn_id": name, "model": "one", "cwd": cwd}),
             ("event_msg", {"type": "item_completed", "item": {"type": "UserMessage",
@@ -817,6 +820,13 @@ def test_strict_observation_checks_adoption_and_session_setup_revisions(tmp_path
                 "type": "CommandExecution", "id": "read-setup", "command": "cat setup",
                 "exit_code": 0, "cwd": cwd, "aggregated_output": returned,
             }, "turn_id": read_turn or name}))
+        if measure_count:
+            for index in range(2 if phase == "baseline" else 1):
+                call = f"request-{index}"
+                rows[-1:-1] = [
+                    ("response_item", {"type": "function_call", "name": "check", "call_id": call}),
+                    ("response_item", {"type": "function_call_output", "output": "done", "call_id": call}),
+                ]
         path = tmp_path / (name + ".jsonl")
         path.write_text("".join(json.dumps({"type": kind, "payload": payload, "timestamp": stamp})
                                 + "\n" for kind, payload in rows))
@@ -830,9 +840,9 @@ def test_strict_observation_checks_adoption_and_session_setup_revisions(tmp_path
                         path_fingerprint(source / "setup"): hashlib.sha256(workspace_text.encode()).hexdigest(),
                     }}
 
-        row = read_session(path, "codex", track_native_items=read_mode == "mirrored",
-                           turn_revision=lookup_revision if read_mode == "mirrored" else None)
-        if read_mode == "mirrored":
+        row = read_session(path, "codex", track_native_items=mirrored,
+                           turn_revision=lookup_revision if mirrored else None)
+        if mirrored:
             native = store.put("sessions", row)
             app = {
                 **row, "agent": "t3", "session_id": "t3:" + name,
@@ -843,24 +853,28 @@ def test_strict_observation_checks_adoption_and_session_setup_revisions(tmp_path
                 "events": [{**event, "run_id": name} for event in row["events"]],
             }
             for event in app["events"]:
-                for key in ("native_turn_key", "turn_context", "native_file_read"):
+                for key in ("native_turn_key", "turn_context", "native_file_read", "codex_model_call_receipt"):
                     event.pop(key, None)
+                if event["kind"] == "prompt":
+                    event["source_sha256"] = digest(event["text"])
             assert link_native_context(app, {native: row}, set()) == 1
             assert app["events"][-1]["turn_context"]["turn_start_revision"]["commit"] == revision
             row = app
         snapshot = store.put("sessions", row)
-        audit = store.put("audits", {"session_ids": [snapshot]})
+        audit = store.put("audits", {"session_ids": [snapshot],
+                                    "supplemental_session_ids": row.get("supplemental_sources", [])})
         return freeze_case(store, audit, snapshot, row["events"][-1]["id"])
 
     baseline = [add("base-" + str(n), "baseline", old, 1) for n in range(2)]
     policy["observation_policy"] = {
-        "metric": "tool_errors", "require_turn_context": True, "require_setup_revision": True,
+        "metric": "codex_model_calls" if measure_count else "tool_errors",
+        "require_turn_context": True, "require_setup_revision": True,
         "minimum_pairs": 2, "minimum_improvement": 0,
         "baseline_cases": {case: "setup" for case in baseline},
     }
     if read_mode:
         policy["observation_policy"]["require_approved_file_read"] = True
-    if read_mode == "mirrored":
+    if mirrored:
         policy["observation_policy"]["require_worktree_setup"] = True
     wrong = add("baseline-with-candidate", "baseline", new, 0)
     with pytest.raises(AutError, match="verified setup revisions"):
@@ -876,11 +890,18 @@ def test_strict_observation_checks_adoption_and_session_setup_revisions(tmp_path
     assert observed["comparison"] == "observed_decrease"
     assert observed["setup_revision_verified_pairs"] == 2
     assert observed["approved_file_read_pairs"] == (2 if read_mode else 0)
-    if read_mode == "mirrored":
+    if mirrored:
         assert observed["worktree_setup_verified_pairs"] == 2
         for pair in observed["pairs"]:
             native_source = store.get("sessions", pair["approved_file_read"]["session_snapshot"])
             assert native_source["agent"] == "codex"
+            if measure_count:
+                assert (pair["baseline_value"], pair["candidate_value"]) == (2, 1)
+                for condition, expected in (("baseline", 2), ("candidate", 1)):
+                    proof = pair[f"{condition}_metric_evidence"]
+                    metric_source = store.get("sessions", proof["session_id"])
+                    boundary = next(event for event in metric_source["events"] if event["id"] == proof["event_id"])
+                    assert boundary["codex_model_call_receipt"]["count"] == expected
         changed = add("dirty-worktree", "candidate", new, 0, worktree_content="local changes")
         dirty = observe(store, key, {"adoption_id": adopted["adoption_id"], "pairs": [
             pairs[0], {**pairs[1], "candidate": changed},

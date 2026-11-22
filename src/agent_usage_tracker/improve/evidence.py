@@ -88,6 +88,11 @@ def native_item_key(value: str) -> str:
     return hashlib.sha256(value.encode()).hexdigest()
 
 
+def source_signature(text: str, status: str, tool: str) -> str:
+    return hashlib.sha256(json.dumps({"text": text, "status": status, "tool": tool},
+                                    sort_keys=True).encode()).hexdigest()
+
+
 def trace_event(agent: str, session: str, kind: str, identity: str, value: object,
                 timestamp: object, *, call: object = "", tool: object = "",
                 status: str = "unknown", omitted_attachment: bool = False,
@@ -96,8 +101,7 @@ def trace_event(agent: str, session: str, kind: str, identity: str, value: objec
     omitted_attachment = omitted_attachment or has_attachment(value)
     if omitted_attachment:
         raw = "[Attachment omitted]\n" + raw
-    signature = hashlib.sha256(json.dumps({"text": raw, "status": status,
-        "tool": str(tool or "")}, sort_keys=True).encode()).hexdigest()
+    signature = source_signature(raw, status, str(tool or ""))
     cleaned = redact(raw)
     content = {"raw_text": raw, "attachment_omitted": omitted_attachment} if capture_full else {}
     return {"id": hashlib.sha256(f"{agent}|{session}|{kind}|{identity}".encode()).hexdigest()[:32],

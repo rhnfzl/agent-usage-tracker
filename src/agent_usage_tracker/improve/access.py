@@ -397,7 +397,8 @@ class Evidence:
         if coverage_basis is not None:
             policy["coverage_basis"] = coverage_basis
         return ordinary_work_page(self.store, self.describe(), self.keys, self.ambiguous, policy,
-                                  agent, before, include_excluded, cursor, limit, self._label)
+                                  agent, before, include_excluded, cursor, limit, self._label,
+                                  supplemental=self.supplemental)
 
     def export(self, path: Path, ids: list[str]) -> dict[str, Any]:
         from .outputs import commit_evidence

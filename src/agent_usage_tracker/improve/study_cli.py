@@ -97,7 +97,8 @@ def _preflight(args: argparse.Namespace, store: Store) -> dict[str, Any]:
     evidence = Evidence(args.content, store=store, audit_id=args.audit)
     report = ordinary_work_page(store, evidence.describe(), evidence.keys, evidence.ambiguous,
         policy, args.agent, args.before, args.include_excluded, args.cursor, args.limit, evidence._label,
-        gate=baseline_gate(policy, proposal, reserved, before), gate_key=digest(draft))
+        gate=baseline_gate(policy, proposal, reserved, before), gate_key=digest(draft),
+        supplemental=evidence.supplemental)
     return {"proposal_id": draft["proposal_id"], "prospective_baseline_preview": True, **report}
 
 

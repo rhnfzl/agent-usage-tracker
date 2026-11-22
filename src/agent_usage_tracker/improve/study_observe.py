@@ -21,6 +21,7 @@ from .judge import _attempt_coverage, _complete_attempt
 from .setup_git import COMMIT_ID, target_in_workspace, verify_setup
 from .store import Store, repository
 from .study_independence import ReservedEvidence, attempt_fingerprint, reserved_evidence, source_identities
+from .study_model_calls import native_count, t3_count
 from .study_reviews import baseline_reviews, read_review
 from .turn_revisions import details as turn_revision_details
 
@@ -68,14 +69,20 @@ def validate_policy(policy: Any) -> None:
             raise AutError("improve: freeze one acceptance review ID for each baseline case")
 
 
-def _sample(store: Store, case_id: str) -> dict[str, Any]:
+def _sample(store: Store, case_id: str, *, use_native_model_calls: bool = False) -> dict[str, Any]:
     case = store.get("cases", case_id)
     session = store.get("sessions", case["session_snapshot"])
-    return _sample_attempt(session, case, _attempt(session, case))
+
+    def lookup(key: str) -> dict[str, Any]:
+        return store.get("sessions", key)
+
+    return _sample_attempt(session, case, _attempt(session, case),
+                           native_lookup=lookup if use_native_model_calls else None)
 
 
 def _sample_attempt(session: dict[str, Any], case: dict[str, Any],
-                    events: list[dict[str, Any]]) -> dict[str, Any]:
+                    events: list[dict[str, Any]], *,
+                    native_lookup: Callable[[str], dict[str, Any] | None] | None = None) -> dict[str, Any]:
     stamps = [parse_ts(event.get("timestamp")) for event in events]
     times = [stamp.astimezone(timezone.utc) for stamp in stamps if stamp and stamp.tzinfo]
     calls = sum(event["kind"] == "call" for event in events)
@@ -103,20 +110,12 @@ def _sample_attempt(session: dict[str, Any], case: dict[str, Any],
         turn = events[-1].get("native_turn_key")
         if not turn or any(event.get("native_turn_key") != turn for event in events):
             context_status = "ambiguous"
-    receipt = events[-1].get("codex_model_call_receipt")
-    if not isinstance(receipt, dict):
-        receipt = {}
-    model_calls = receipt.get("count")
-    model_started = parse_ts(receipt.get("started_at"))
-    if (not has_timed_source or session["agent"] != "codex"
-            or session.get("origin") != "interactive" or context_status != "observed"
-            or receipt.get("thread_origin") != "interactive"
-            or events[0]["kind"] != "prompt" or events[-1].get("text") != "turn_complete"
-            or type(model_calls) is not int or model_calls < 1
-            or not model_started or not model_started.tzinfo or model_started > min(times)
-            or any(coverage.get(gap) for gap in ("malformed_records", "missing_timestamps",
-                       "divergent_copy", "source_incomplete", "unknown_copy_boundary"))):
-        model_calls, model_started = None, None
+    origin = _read_origin(session, case["session_snapshot"], events[-1], context, turn) \
+        if context and context_status == "observed" and turn else None
+    measured = native_count(session, events, coverage)
+    if session["agent"] == "t3" and origin and native_lookup and has_timed_source:
+        measured = t3_count(session, events, coverage, origin, native_lookup)
+    model_calls, model_started = measured if measured else (None, None)
     setup_revision = None
     setup_files: dict[str, str | None] = {}
     if context and context_status == "observed":
@@ -133,12 +132,12 @@ def _sample_attempt(session: dict[str, Any], case: dict[str, Any],
         "model": context.get("model") if context else session.get("model"),
         "setup_revision": setup_revision,
         "setup_files": setup_files,
-        "read_origin": _read_origin(session, case["session_snapshot"], events[-1], context, turn)
-        if context and context_status == "observed" and turn else None,
+        "read_origin": origin,
         "started": min(times) if times else None, "ended": max(times) if times else None,
         "complete": completed, "tool_events_complete": tool_events_complete, "tool_calls": calls,
         "codex_model_calls": model_calls,
         "codex_model_started": model_started.astimezone(timezone.utc) if model_started else None,
+        "model_call_evidence": {"session_id": origin[0], "event_id": origin[1]} if measured and origin else None,
         "tool_representation": next(iter(representations)) if len(representations) == 1 else None,
         "tool_errors": sum(event.get("status") == "error" for event in results)
                        if known_errors else None,
@@ -241,7 +240,7 @@ def check_baselines(store: Store, policy: dict[str, Any], proposal: dict[str, An
     sessions: set[tuple[str, str]] = set()
     contents: set[str] = set()
     for key in policy["baseline_cases"]:
-        sample = _sample(store, key)
+        sample = _sample(store, key, use_native_model_calls=policy["metric"] == "codex_model_calls")
         if (check(sample) or key in reserved.case_ids
                 or sample["source_identities"] & sessions or sample["content"] in contents):
             continue
@@ -324,7 +323,8 @@ def observe(store: Store, study_id: str, spec: dict[str, Any], *,
         if left == right or seen_cases & {left, right}:
             raise AutError("improve: a case can appear only once in a comparison")
         seen_cases.update((left, right))
-        before, after = _sample(store, left), _sample(store, right)
+        before = _sample(store, left, use_native_model_calls=metric == "codex_model_calls")
+        after = _sample(store, right, use_native_model_calls=metric == "codex_model_calls")
         review_fields = {}
         review_issue = None
         if frozen_reviews:
@@ -344,7 +344,9 @@ def observe(store: Store, study_id: str, spec: dict[str, Any], *,
         sources = before["source_identities"] | after["source_identities"]
         content = {before["content"], after["content"]}
         contexts = {before["context_status"], after["context_status"]}
-        after_started = after["codex_model_started"] if metric == "codex_model_calls" else after["started"]
+        after_started = after["started"]
+        if metric == "codex_model_calls" and after["codex_model_started"]:
+            after_started = min(after_started, after["codex_model_started"])
         reason = None
         if (reserved.case_ids & {left, right} or sources & reserved.sources
                 or before["source_identities"] & after["source_identities"]
@@ -399,6 +401,9 @@ def observe(store: Store, study_id: str, spec: dict[str, Any], *,
             continue
         outcomes.append({**pair, **review_fields, "eligible": True, "baseline_value": before[metric],
                          "candidate_value": after[metric],
+                         **({"baseline_metric_evidence": before["model_call_evidence"],
+                             "candidate_metric_evidence": after["model_call_evidence"]}
+                            if metric == "codex_model_calls" else {}),
                          "reduction": before[metric] - after[metric],
                          "uses_tool_events_only": policy.get("coverage_basis") == "tool_events"
                          and not (before["complete"] and after["complete"]),

@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from collections import Counter
 from collections.abc import Callable
+from functools import lru_cache
 from typing import Any
 
 from ..config import AutError
@@ -22,12 +23,17 @@ def ordinary_work_page(store: Store, scope: dict[str, Any], keys: list[str],
                        include_excluded: bool, cursor: str, limit: int,
                        label: Callable[[str], str], *,
                        gate: Callable[[dict[str, Any]], str | None] | None = None,
-                       gate_key: str = "") -> dict[str, Any]:
+                       gate_key: str = "", supplemental: set[str] | None = None) -> dict[str, Any]:
     validate_measurement(policy)
     cutoff = parse_ts(before) if before else None
     if before and (cutoff is None or cutoff.tzinfo is None):
         raise AutError("evidence: ordinary-work cutoff needs a timezone")
     metric = policy["metric"]
+
+    @lru_cache(maxsize=8)
+    def lookup(key: str) -> dict[str, Any] | None:
+        return store.get("sessions", key) if supplemental is not None and key in supplemental else None
+
     binding = digest([scope["audit_id"], keys, scope["content"], policy, agent, before,
                       include_excluded, gate_key])[:24]
     first, first_event = 0, 0
@@ -81,7 +87,8 @@ def ordinary_work_page(store: Store, scope: dict[str, Any], keys: list[str],
             attempt = events[opened:index + 1]
             case = _record_attempt(session, snapshot, coverage, attempt, len(attempt) - 1,
                                    "selected_attempt", False)
-            sample = _sample_attempt(session, case, attempt)
+            sample = _sample_attempt(session, case, attempt,
+                                     native_lookup=lookup if metric == "codex_model_calls" else None)
             issue: str | None
             if coverage.get("divergent_copy"):
                 issue = "divergent_copy"
@@ -109,6 +116,8 @@ def ordinary_work_page(store: Store, scope: dict[str, Any], keys: list[str],
                     "ended": sample["ended"].isoformat() if sample["ended"] else None,
                     "context_status": sample["context_status"], "measurable": issue is None,
                     "reason": issue, "metric_value": sample[metric] if not issue else None}
+            if not issue and metric == "codex_model_calls":
+                item["metric_evidence"] = sample["model_call_evidence"]
             if scope["content"] != "metadata":
                 item.update({field: label(sample[field]) for field in ("cwd", "model")
                              if isinstance(sample[field], str)})
