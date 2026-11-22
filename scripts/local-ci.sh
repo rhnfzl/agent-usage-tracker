@@ -66,15 +66,13 @@ check_units() {
     # Use the console entry point and the same targets as the hosted jobs.
     TZ=$1 run --with-editable '.[test]' pytest -q -n "$3" --dist worksteal \
         --max-worker-restart=0 --durations=15 --basetemp "$scratch/$2" \
-        -o "cache_dir=$scratch/$2-cache"
+        -o "cache_dir=$scratch/$2-cache" -o tmp_path_retention_policy=failed
 }
 
 check_mcp() {
     run --with-editable '.[test,mcp,code]' pytest -q tests/improve/test_evidence_mcp.py \
-        --basetemp "$scratch/mcp" -o "cache_dir=$scratch/mcp-cache"
-    run --with-editable '.[test,mcp,code]' pytest -q \
         tests/improve/test_investigation.py tests/improve/test_session_observability.py \
-        --basetemp "$scratch/code" -o "cache_dir=$scratch/code-cache"
+        --basetemp "$scratch/mcp" -o "cache_dir=$scratch/mcp-cache"
 }
 
 check_sink() (
@@ -150,7 +148,7 @@ check() {
                 cleanup_pids+=("$!")
                 ;;
             mcp)
-                rm -rf -- "$scratch/mcp" "$scratch/mcp-cache" "$scratch/code" "$scratch/code-cache" &
+                rm -rf -- "$scratch/mcp" "$scratch/mcp-cache" &
                 cleanup_pids+=("$!")
                 ;;
             sink)

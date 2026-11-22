@@ -216,9 +216,10 @@ def test_each_root_stops_enumerating_after_its_share(cfg, monkeypatch):
                     yield entry
             yield bounded()
 
-    monkeypatch.setattr(coverage.os, "scandir", counted)
     budget = [0]
-    info = coverage._metadata(root, {}, budget, "codex", 3)
+    with monkeypatch.context() as patch:
+        patch.setattr(coverage.os, "scandir", counted)
+        info = coverage._metadata(root, {}, budget, "codex", 3)
     assert info["limited"] and info["files"] == 2
     assert budget[0] == 3
 
@@ -314,8 +315,9 @@ def test_unreadable_registered_source_is_explicit(cfg, monkeypatch):
             raise PermissionError("AUT_PRIVATE_ERROR_SENTINEL_794")
         return original(root)
 
-    monkeypatch.setattr(coverage.os, "scandir", denied)
-    report = coverage.build_report(cfg, now=NOW)
+    with monkeypatch.context() as patch:
+        patch.setattr(coverage.os, "scandir", denied)
+        report = coverage.build_report(cfg, now=NOW)
     assert source(report, "local")["availability"] == "unreadable"
     assert "source_unreadable" in codes(report)
     assert "AUT_PRIVATE_ERROR_SENTINEL_794" not in json.dumps(report)

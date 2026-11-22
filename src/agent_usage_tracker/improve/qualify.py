@@ -132,15 +132,21 @@ def judgments(store: Store, rubric: Rubric) -> list[dict[str, Any]]:
     return sorted(found, key=lambda row: (order.get(row["judgment_id"], -1), row["judgment_id"]))
 
 
+def _candidate(store: Store, rubric: Rubric, key: str, case: dict[str, Any],
+               output: tuple[str, dict[str, Any]] | None) -> dict[str, Any] | None:
+    candidate = judge._input_case({**case, "case_id": key}, rubric, output)
+    if judge._eligible(candidate) and rubrics.applies(rubric, case, output[1] if output else None):
+        store.get("sessions", case["session_snapshot"])
+        return candidate
+    return None
+
+
 def _cases(store: Store, rubric: Rubric) -> dict[str, dict[str, Any]]:
     found = {}
     attached = outputs.latest(store) if "outputs" in rubric.requires else {}
     for key in store.keys("cases"):
         case = store.get("cases", key)
-        output = attached.get(key)
-        candidate = judge._input_case({**case, "case_id": key}, rubric, output)
-        if judge._eligible(candidate) and rubrics.applies(rubric, case, output[1] if output else None):
-            store.get("sessions", case["session_snapshot"])
+        if candidate := _candidate(store, rubric, key, case, attached.get(key)):
             found[key] = candidate
     return found
 
@@ -206,14 +212,17 @@ def save(store: Store, rubric: Rubric, case_id: str, label: str | None, *,
     """Append one human answer, or a tombstone when undo restores an unlabelled item."""
     with (_locked(store.root / "outputs") if "outputs" in rubric.requires else nullcontext()), \
             _locked(store.root / "human_labels"):
-        candidate = _cases(store, rubric).get(case_id)
-        if label is not None and label not in LABELS or candidate is None:
+        if label is not None and label not in LABELS or not store.path("cases", case_id).is_file():
+            raise AutError("improve: answer needs an eligible case and a rubric label")
+        case = store.get("cases", case_id)
+        attached = outputs.latest(store).get(case_id) if "outputs" in rubric.requires else None
+        candidate = _candidate(store, rubric, case_id, case, attached)
+        if candidate is None:
             raise AutError("improve: answer needs an eligible case and a rubric label")
         if outputs_id is not None and candidate.get("outputs_id") != outputs_id:
             raise AutError("improve: output evidence changed; reopen the label page")
         outputs_id = candidate.get("outputs_id")
         labels(store, rubric)  # refuse invalid history before extending it
-        case = store.get("cases", case_id)
         stamp = datetime.fromisoformat(_now())
         previous = [datetime.fromisoformat(store.get("human_labels", key)["labelled_at"])
                     for key in store.keys("human_labels")]
