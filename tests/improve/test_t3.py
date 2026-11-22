@@ -155,12 +155,14 @@ def test_t3_reads_committed_wal_rows(tmp_path):
     db.close()
 
 
-def test_t3_missing_output_and_projection_loss_remain_incomplete(tmp_path):
+@pytest.mark.parametrize('output', [{}, {'output': 'partial output'}])
+def test_t3_missing_output_and_projection_loss_remain_incomplete(tmp_path, output):
     home = tmp_path / 'home'
     db, _ = fixture_db(home)
     add_run(db)
     db.execute("DELETE FROM orchestration_v2_projection_turn_items WHERE type='command_execution'")
-    item(db, 'r1', 'incomplete', 'command_execution', 1, input='pytest', status='running')
+    item(db, 'r1', 'incomplete', 'command_execution', 1,
+         input='pytest', status='running', **output)
     db.commit()
     store, result, sessions = capture(tmp_path, home)
     assert sessions[0]['coverage']['unmatched_calls'] == 1
@@ -175,6 +177,7 @@ def test_t3_missing_output_and_projection_loss_remain_incomplete(tmp_path):
     ('command_execution', {'status': 'failed', 'exitCode': 0}, 'error'),
     ('dynamic_tool', {'status': 'completed'}, 'success'),
     ('command_execution', {'status': 'interrupted'}, 'unknown'),
+    ('command_execution', {'status': 'cancelled', 'output': 'partial output'}, 'unknown'),
 ])
 def test_t3_finished_item_without_output_still_has_a_result(tmp_path, kind, fields, expected):
     home = tmp_path / 'home'

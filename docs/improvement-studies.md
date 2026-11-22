@@ -188,6 +188,7 @@ study. Freeze the baseline cases first. Keep them separate from discovery and co
   "minimum_pairs": 3,
   "minimum_improvement": 0,
   "require_turn_context": true,
+  "coverage_basis": "tool_events",
   "baseline_cases": {
     "FIRST_BASELINE_CASE_ID": "fresh worktree setup",
     "SECOND_BASELINE_CASE_ID": "fresh worktree setup",
@@ -221,8 +222,18 @@ inconclusive. The result reports a decrease or increase in the measured count. I
 task quality, cause, or the setup loaded for each attempt. The controlled trial keeps its own result.
 
 Set `require_turn_context` to require an observed model and workspace from both attempts.
-AUT can link those fields to completed turns in supported native Codex logs. Missing or conflicting
-records and attempts spanning several native turns exclude the pair. Strict policies require
-enough eligible baseline cases at creation, before adoption. Legacy cases can still use session labels when the
-policy allows them. The report counts the pairs that used observed turn context separately.
+AUT can link those fields to completed turns in supported native Codex logs.
+Missing or conflicting records and attempts spanning several native turns exclude the pair.
+Strict policies require enough eligible baseline cases at creation, before adoption.
+Legacy cases can still use session labels when the policy allows them.
+The report counts the pairs that used observed turn context separately.
 Submit an empty `pairs` list to record an inconclusive result while eligible follow-up is pending.
+
+Choose `coverage_basis: "tool_events"` before adoption to measure counts from complete tool events.
+Freeze cases from a capture that checks for tool record gaps. AUT requires the prompt, a completed
+boundary, timestamps, and one result per call. Clipped text and events omitted from the review
+sample can still provide count evidence. Compaction, ambiguous tool identities, and mixed runs
+exclude a pair. A Codex turn that mixes model calls with execution items can count an action twice.
+AUT excludes those turns and pairs where the two attempts use different known representations.
+The report counts the pairs that qualify through tool events alone.
+The default `full_case` basis also requires a complete review sample.

@@ -46,7 +46,7 @@ def _attempt_coverage(attempt: list[dict[str, Any]], coverage: dict[str, Any]) -
 
 
 def _complete_attempt(attempt: list[dict[str, Any]], coverage: dict[str, Any], *,
-                      legacy_complete: bool = False) -> bool:
+                      legacy_complete: bool = False, require_text: bool = True) -> bool:
     calls = {event.get("call_id") for event in attempt if event["kind"] == "call"}
     results = {event.get("call_id") for event in attempt if event["kind"] == "result"}
     closed = bool(attempt and attempt[-1]["kind"] == "boundary"
@@ -54,7 +54,9 @@ def _complete_attempt(attempt: list[dict[str, Any]], coverage: dict[str, Any], *
     return bool((closed or legacy_complete) and not any(coverage.get(name) for name in (
         "malformed_records", "conflicting_records", "missing_timestamps", "divergent_copy",
         "source_incomplete"))
-        and not any(event.get("truncated") or event["kind"] == "compaction" for event in attempt)
+        and not any(event["kind"] in {"compaction", "tool_gap"} or event.get("tool_event_ambiguous")
+                    or (require_text and event.get("truncated"))
+                    for event in attempt)
         and calls == results and not (calls & {"", None})
         and (attempt[0]["kind"] == "prompt" or legacy_complete))
 

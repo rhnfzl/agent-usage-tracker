@@ -486,7 +486,10 @@ def test_study_freezes_absence_when_proposal_adds_a_skill(tmp_path):
         run(store, key)
 
 
-def test_natural_work_observation_measures_only_eligible_pairs(tmp_path, monkeypatch, capsys):
+@pytest.mark.parametrize("coverage_basis", ["full_case", "tool_events"])
+def test_natural_work_observation_measures_only_eligible_pairs(
+    tmp_path, monkeypatch, capsys, coverage_basis,
+):
     import json
     from datetime import datetime, timezone
 
@@ -520,16 +523,20 @@ def test_natural_work_observation_measures_only_eligible_pairs(tmp_path, monkeyp
                        "timestamp": timestamp, "turn_context": context})
         for event in events:
             event["native_turn_key"] = name
+        coverage = {"complete": complete, "source_incomplete": not complete,
+                    "tool_events_checked": True}
+        if coverage_basis == "tool_events":
+            events[2]["truncated"] = True
+            coverage["complete"] = False
         snapshot = store.put("sessions", {"agent": "pi", "session_id": name, "model": "one",
-            "cwd": str(project), "origin": "interactive", "events": events,
-            "coverage": {"complete": complete}})
+            "cwd": str(project), "origin": "interactive", "events": events, "coverage": coverage})
         return store.put("cases", {"session_snapshot": snapshot, "events": events,
-            "coverage": {"complete": complete}, "omitted_task_events": 0})
+            "coverage": coverage, "omitted_task_events": 0})
 
     baseline = [add("old" + str(n), "2025-02-27T12:00:00+00:00", 1) for n in range(3)]
     policy["observation_policy"] = {
         "metric": "tool_errors", "minimum_pairs": 2, "minimum_improvement": 0,
-        "require_turn_context": True,
+        "require_turn_context": True, "coverage_basis": coverage_basis,
         "baseline_cases": {case_id: "workspace setup" for case_id in baseline},
     }
     invalid = add("incomplete-baseline", "2025-02-27T12:00:00+00:00", 1, complete=False)
@@ -553,6 +560,8 @@ def test_natural_work_observation_measures_only_eligible_pairs(tmp_path, monkeyp
     assert result["comparison"] == "observed_decrease"
     assert result["eligible_pairs"] == 2
     assert result["recorded_turn_context_pairs"] == 2
+    assert result["coverage_basis"] == coverage_basis
+    assert result["tool_events_only_pairs"] == (2 if coverage_basis == "tool_events" else 0)
     assert result["excluded_pairs"] == 1
     assert result["mean_reduction"] == 1
     assert not result["causal_effect_established"]

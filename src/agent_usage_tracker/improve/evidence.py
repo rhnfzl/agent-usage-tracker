@@ -19,8 +19,16 @@ from ..state import parse_record
 
 TEXT_LIMIT = 6000
 BYTE_LIMIT = 16 * 1024 * 1024
-VERSION = 7
+VERSION = 8
 ATTACHMENT_TYPES = ("image", "file", "document", "audio", "video", "resource")
+_CODEX_UNCOUNTED_RESPONSE_TOOLS = {
+    "web_search_call", "image_generation_call", "local_shell_call",
+    "tool_search_call", "tool_search_output",
+}
+_CODEX_UNCOUNTED_COMPLETED_ITEMS = {
+    "CollabAgentToolCall", "Extension", "FileChange", "FunctionCallOutput",
+    "ImageGeneration", "ImageView", "WebSearch",
+}
 
 
 def _text(value: object) -> str:
@@ -127,7 +135,7 @@ def read_session(path: Path, agent: str, max_bytes: int = BYTE_LIMIT,
         raise ValueError("choose a supported trace source and a positive byte limit")
     events: list[dict[str, Any]] = []
     workspaces: set[str] = set()
-    seen: dict[tuple[str, str], str] = {}
+    seen: dict[tuple[str, str], dict[str, Any]] = {}
     counts: Counter[str] = Counter()
     digest = hashlib.sha256()
     session, cwd, origin = path.stem, "", "unknown"
@@ -159,22 +167,30 @@ def read_session(path: Path, agent: str, max_bytes: int = BYTE_LIMIT,
 
     def emit(kind: str, value: object, line: int, record: dict[str, Any], *,
              call: object = "", tool: object = "", status: str = "unknown",
-             key: object = "", context: dict[str, Any] | None = None) -> None:
+             key: object = "", context: dict[str, Any] | None = None,
+             tool_representation: str = "") -> None:
         nonlocal last_closed
         identity = str(call or key or line)
         event = trace_event(agent, session, kind, identity, value, record.get("timestamp"),
                             call=call, tool=tool, status=status, capture_full=capture_full)
         signature = event["source_sha256"]
         previous = seen.get((kind, identity))
-        if previous:
-            counts["duplicate_records" if previous == signature else "conflicting_records"] += 1
+        if previous is not None:
+            counts["duplicate_records" if previous["source_sha256"] == signature
+                   else "conflicting_records"] += 1
+            if kind in {"call", "result"}:
+                previous["tool_event_ambiguous"] = True
+                emit("tool_gap", "Repeated tool record identity", line, record)
             return
-        seen[kind, identity] = signature
         counts["truncated_events"] += event["truncated"]
-        events.append({**event, "line": line if line > 0 else None,
-                       "byte_offset": -line if line < 0 else None,
-                       **({"turn_context": context} if context is not None else {}),
-                       **({"native_turn_key": active_turn_key} if active_turn_key else {})})
+        event.update({"line": line if line > 0 else None,
+                      "byte_offset": -line if line < 0 else None,
+                      **({"turn_context": context} if context is not None else {}),
+                      **({"tool_representation": tool_representation}
+                         if tool_representation else {}),
+                      **({"native_turn_key": active_turn_key} if active_turn_key else {})})
+        seen[kind, identity] = event
+        events.append(event)
         if kind in {"call", "prompt"}:
             last_closed = False
 
@@ -311,7 +327,8 @@ def read_session(path: Path, agent: str, max_bytes: int = BYTE_LIMIT,
                 call_id = payload.get("call_id")
                 if sub in {"function_call", "custom_tool_call"}:
                     emit("call", payload.get("arguments", payload.get("input", "")),
-                         line, record, call=call_id, tool=payload.get("name"))
+                         line, record, call=call_id, tool=payload.get("name"),
+                         tool_representation="model_call")
                 elif sub in {"function_call_output", "custom_tool_call_output"}:
                     value = payload.get("output", "")
                     emit("result", value, line, record, call=call_id,
@@ -319,6 +336,12 @@ def read_session(path: Path, agent: str, max_bytes: int = BYTE_LIMIT,
                 elif sub == "message" and payload.get("role") in {"user", "assistant"}:
                     emit("prompt" if payload["role"] == "user" else "reply",
                          payload.get("content", ""), line, record, key=payload.get("id"))
+                elif sub in {"compaction", "context_compaction"}:
+                    emit("compaction", "context was compacted", line, record)
+                elif sub in _CODEX_UNCOUNTED_RESPONSE_TOOLS:
+                    emit("tool_gap", "Unsupported Codex tool record", line, record)
+            elif kind == "compacted":
+                emit("compaction", "context was compacted", line, record)
             elif kind == "event_msg":
                 item = dict_or_empty(payload.get("item"))
                 if sub == "task_started":
@@ -347,7 +370,7 @@ def read_session(path: Path, agent: str, max_bytes: int = BYTE_LIMIT,
                 elif sub == "item_completed" and item.get("type") == "CommandExecution":
                     identity = item.get("id") or f"command-{line}"
                     emit("call", item.get("command", ""), line, record,
-                         call=identity, tool="exec_command")
+                         call=identity, tool="exec_command", tool_representation="execution_item")
                     emit("result", {"exit_code": item.get("exit_code"),
                                    "output": item.get("aggregated_output", "")},
                          line, record, call=identity,
@@ -355,7 +378,8 @@ def read_session(path: Path, agent: str, max_bytes: int = BYTE_LIMIT,
                 elif sub == "item_completed" and item.get("type") == "McpToolCall":
                     identity = item.get("id") or f"mcp-{line}"
                     emit("call", item.get("arguments", {}), line, record, call=identity,
-                         tool=item.get("tool") or item.get("name") or "mcp")
+                         tool=item.get("tool") or item.get("name") or "mcp",
+                         tool_representation="execution_item")
                     error = item.get("status") == "failed"
                     emit("result", item.get("error") if error else item.get("result", ""),
                          line, record, call=identity,
@@ -366,8 +390,13 @@ def read_session(path: Path, agent: str, max_bytes: int = BYTE_LIMIT,
                          _codex_message_text(item) if item["type"] == "AgentMessage"
                          else item.get("content", item.get("text", "")), line, record,
                          key=item.get("id"))
-                elif sub == "item_completed" and item.get("type") == "ContextCompaction":
+                elif sub == "context_compacted" or (
+                        sub == "item_completed" and item.get("type") == "ContextCompaction"):
                     emit("compaction", "context was compacted", line, record, key=item.get("id"))
+                elif sub in {"web_search_end", "image_generation_end"} or (
+                        sub == "item_completed"
+                        and item.get("type") in _CODEX_UNCOUNTED_COMPLETED_ITEMS):
+                    emit("tool_gap", "Unsupported Codex tool record", line, record)
             continue
         session = str(record.get("sessionId") or session)
         cwd = str(record.get("cwd") or cwd)
@@ -416,6 +445,7 @@ def read_session(path: Path, agent: str, max_bytes: int = BYTE_LIMIT,
     calls = {e["call_id"] for e in events if e["kind"] == "call"}
     results = {e["call_id"] for e in events if e["kind"] == "result"}
     coverage: dict[str, Any] = dict(counts)
+    coverage["tool_events_checked"] = True
     for name in ("partial_tail", "byte_cap_reached"):
         coverage[name] = bool(counts[name])
     coverage.update(calls=len(calls), matched_results=len(calls & results),

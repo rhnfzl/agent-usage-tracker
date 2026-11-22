@@ -13,13 +13,16 @@ from typing import Any
 from ..config import AutError
 from ..event import parse_ts
 from .case_view import _attempt
+from .evidence import event_links
+from .judge import _attempt_coverage, _complete_attempt
 from .store import Store, digest, repository
 
 
 def validate_policy(policy: Any) -> None:
     if (not isinstance(policy, dict)
-            or set(policy) - {"require_turn_context"}
+            or set(policy) - {"require_turn_context", "coverage_basis"}
             != {"metric", "minimum_pairs", "minimum_improvement", "baseline_cases"}
+            or policy.get("coverage_basis", "full_case") not in ("full_case", "tool_events")
             or type(policy.get("require_turn_context", False)) is not bool
             or policy["metric"] not in ("tool_errors", "tool_calls")
             or type(policy["minimum_pairs"]) is not int or not 2 <= policy["minimum_pairs"] <= 200
@@ -41,11 +44,24 @@ def _sample(store: Store, case_id: str) -> dict[str, Any]:
     events = _attempt(session, case)
     stamps = [parse_ts(event.get("timestamp")) for event in events]
     times = [stamp.astimezone(timezone.utc) for stamp in stamps if stamp and stamp.tzinfo]
+    calls = sum(event["kind"] == "call" for event in events)
     results = [event for event in events if event["kind"] == "result"]
     known_errors = all(event.get("status") in ("success", "error") for event in results)
-    completed = bool(case["coverage"].get("complete") and not case.get("omitted_task_events")
-                     and len(times) == len(events) and session.get("session_id")
-                     and session.get("origin") not in {"automated", "subagent"})
+    representations = {event["tool_representation"] for event in events
+                       if event.get("tool_representation")}
+    has_timed_source = bool(len(times) == len(events) and session.get("session_id")
+                            and session.get("origin") not in {"automated", "subagent"})
+    checked = session.get("coverage", {}).get("tool_events_checked") is True
+    # A sampled case can omit events whose order and identities remain intact in its snapshot.
+    coverage = _attempt_coverage(events, case["coverage"])
+    tool_events_complete = (has_timed_source
+                            and checked and len(representations) <= 1
+                            and len({event.get("run_id") for event in events}) == 1
+                            and calls == len(results) == len(event_links(events))
+                            and _complete_attempt(events, coverage, require_text=False))
+    completed = bool(has_timed_source and case["coverage"].get("complete")
+                     and not case.get("omitted_task_events")
+                     and (not checked or tool_events_complete))
     context = events[-1].get("turn_context") if events[-1]["kind"] == "boundary" else None
     context_status = context["status"] if context else "legacy_session_labels"
     if context_status == "observed":
@@ -60,7 +76,8 @@ def _sample(store: Store, case_id: str) -> dict[str, Any]:
         "cwd": context.get("cwd") if context else session.get("cwd"),
         "model": context.get("model") if context else session.get("model"),
         "started": min(times) if times else None, "ended": max(times) if times else None,
-        "complete": completed, "tool_calls": sum(event["kind"] == "call" for event in events),
+        "complete": completed, "tool_events_complete": tool_events_complete, "tool_calls": calls,
+        "tool_representation": next(iter(representations)) if len(representations) == 1 else None,
         "tool_errors": sum(event.get("status") == "error" for event in results)
                        if known_errors else None,
     }
@@ -73,6 +90,12 @@ def _in_scope(cwd: str | None, scope: Path, project: str | None) -> bool:
     return path == scope or (project is not None and repository(path) == project)
 
 
+def _sufficient_coverage(sample: dict[str, Any], policy: dict[str, Any]) -> bool:
+    if policy.get("coverage_basis") == "tool_events":
+        return bool(sample["tool_events_complete"])
+    return bool(sample["complete"])
+
+
 def check_strict_baselines(store: Store, policy: dict[str, Any], scope: Path, before: datetime,
                            excluded_sessions: set[str]) -> None:
     scope = scope.resolve()
@@ -82,7 +105,7 @@ def check_strict_baselines(store: Store, policy: dict[str, Any], scope: Path, be
     for key in policy["baseline_cases"]:
         sample = _sample(store, key)
         source = digest(list(sample["identity"]))
-        if (sample["context_status"] != "observed" or not sample["complete"]
+        if (sample["context_status"] != "observed" or not _sufficient_coverage(sample, policy)
                 or sample["ended"] >= before or sample[policy["metric"]] is None
                 or source in excluded_sessions or source in sessions
                 or sample["content"] in contents or not _in_scope(sample["cwd"], scope, project)):
@@ -154,8 +177,8 @@ def observe(store: Store, study_id: str, spec: dict[str, Any]) -> dict[str, Any]
                 or len(sources) != 2 or len(content) != 2 or seen_sources & sources
                 or seen_content & content):
             reason = "reused_or_copied_evidence"
-        elif (left not in known or right in known or not before["complete"] or not after["complete"]
-              or before["ended"] >= frozen or after["started"] <= frozen
+        elif (left not in known or right in known or not _sufficient_coverage(before, policy)
+              or not _sufficient_coverage(after, policy) or before["ended"] >= frozen or after["started"] <= frozen
               or after["started"].date() <= adopted):
             reason = "missing_coverage_or_wrong_window"
         elif (contexts & {"missing", "ambiguous"}
@@ -166,6 +189,9 @@ def observe(store: Store, study_id: str, spec: dict[str, Any]) -> dict[str, Any]
               or before["identity"][0] != after["identity"][0]
               or not before["model"] or before["model"] != after["model"]):
             reason = "project_harness_or_model_labels_differ"
+        elif (before["tool_representation"] and after["tool_representation"]
+              and before["tool_representation"] != after["tool_representation"]):
+            reason = "tool_representations_differ"
         elif before[metric] is None or after[metric] is None:
             reason = "metric_unknown"
         seen_sources.update(sources)
@@ -177,6 +203,7 @@ def observe(store: Store, study_id: str, spec: dict[str, Any]) -> dict[str, Any]
         outcomes.append({**pair, "eligible": True, "baseline_value": before[metric],
                          "candidate_value": after[metric],
                          "reduction": before[metric] - after[metric],
+                         "uses_tool_events_only": not (before["complete"] and after["complete"]),
                          "basis": "recorded_turn_context" if contexts == {"observed"}
                          else "includes_session_labels"})
 
@@ -191,6 +218,9 @@ def observe(store: Store, study_id: str, spec: dict[str, Any]) -> dict[str, Any]
             comparison = "observed_increase"
     record = {"study_id": study_id, "adoption_id": adoption_id, "metric": metric,
               "comparison": comparison, "eligible_pairs": len(reductions),
+              "coverage_basis": policy.get("coverage_basis", "full_case"),
+              "tool_events_only_pairs": sum(row.get("uses_tool_events_only", False)
+                                           for row in outcomes),
               "excluded_pairs": len(pairs) - len(reductions), "exclusions": dict(counts),
               "recorded_turn_context_pairs": sum(row.get("basis") == "recorded_turn_context"
                                                    for row in outcomes),

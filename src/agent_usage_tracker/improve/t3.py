@@ -205,7 +205,7 @@ def _thread(db: sqlite3.Connection, path: Path, thread: str, cwd: str, since: fl
                         if kind == 'file_change' else value.get('input', ''))
                 emit('call', body, item, at, key, provider, call=call_id, tool=name)
                 item_state = value.get('status')
-                if kind in {'file_change', 'error'} or 'output' in value or item_state in TERMINAL:
+                if kind in {'file_change', 'error'} or item_state in TERMINAL:
                     # T3 omits the output key when a finished command printed nothing.
                     output = (value.get('failure') if kind == 'error' else
                               'File change reported ' + str(item_state)
@@ -213,7 +213,9 @@ def _thread(db: sqlite3.Connection, path: Path, thread: str, cwd: str, since: fl
                     failed = item_state in {'failed', 'error'}
                     if isinstance(output, dict):
                         failed = failed or output.get('isError') is True
-                    if kind in {'file_change', 'error'} or 'output' in value:
+                    if item_state in {'interrupted', 'cancelled'} and not failed:
+                        result = 'unknown'
+                    elif kind in {'file_change', 'error'} or 'output' in value:
                         result = result_status(_text(output), failed)
                     elif type(value.get('exitCode')) is int:
                         result = result_status({'exit_code': value['exitCode']}, failed)
@@ -222,6 +224,8 @@ def _thread(db: sqlite3.Connection, path: Path, thread: str, cwd: str, since: fl
                                   'success' if item_state == 'completed' else 'unknown')
                     emit('result', output, item, end, key, provider, call=call_id,
                          status=result)
+                else:
+                    coverage['projection_gaps'] += 1
             elif kind == 'assistant_message':
                 emit('reply', value.get('text', ''), item, end, key, provider)
                 if value.get('streaming'):
@@ -249,6 +253,7 @@ def _thread(db: sqlite3.Connection, path: Path, thread: str, cwd: str, since: fl
     calls = {e['call_id'] for e in events if e['kind'] == 'call'}
     results = {e['call_id'] for e in events if e['kind'] == 'result'}
     state: dict[str, Any] = dict(coverage)
+    state['tool_events_checked'] = True
     state['run_coverage'] = run_coverage
     state.update(calls=len(calls), matched_results=len(calls & results),
                  unmatched_calls=len(calls - results), orphan_results=len(results - calls),
