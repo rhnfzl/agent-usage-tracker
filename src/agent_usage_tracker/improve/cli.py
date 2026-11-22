@@ -146,7 +146,9 @@ def run(args: argparse.Namespace) -> None:
         store.read_only = False  # Refresh qualifications without rewriting existing support files.
         print(write(store, days=args.days, format=args.format), end="\n")
         return
-    store = Store(root)
+    preview = args.improve_cmd == "study" and (
+        args.study_cmd == "preflight" or args.study_cmd == "observe" and getattr(args, "preview", False))
+    store = Store(root, read_only=preview)
     if args.improve_cmd == "study":
         result = study_cli.run(args, store)
     elif args.improve_cmd == "desktop":

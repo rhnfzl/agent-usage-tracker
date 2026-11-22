@@ -587,8 +587,14 @@ def test_natural_work_observation_measures_only_eligible_pairs(
         {"baseline": old, "candidate": new, "family": "workspace setup"}
         for old, new in zip(baseline, candidate)]}))
     assert main(["improve", "--root", str(store.root), "study", "observe",
+                 "--study", key, "--spec-file", str(spec), "--preview"]) == 0
+    preview = json.loads(capsys.readouterr().out)
+    assert preview.pop("preview") is True
+    assert store.keys("study_observations") == []
+    assert main(["improve", "--root", str(store.root), "study", "observe",
                  "--study", key, "--spec-file", str(spec)]) == 0
     result = json.loads(capsys.readouterr().out)
+    assert {k: v for k, v in result.items() if k != "observation_id"} == preview
     assert result["comparison"] == "observed_decrease"
     assert result["eligible_pairs"] == 2
     assert result["recorded_turn_context_pairs"] == 2

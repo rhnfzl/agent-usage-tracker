@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 import re
 from collections import Counter
+from collections.abc import Callable
 from datetime import date, datetime, timezone
 from functools import lru_cache
 from pathlib import Path
@@ -18,7 +19,8 @@ from .evidence import event_links
 from .file_reads import observed_file_read
 from .judge import _attempt_coverage, _complete_attempt
 from .setup_git import COMMIT_ID, target_in_workspace, verify_setup
-from .store import Store, digest, repository
+from .store import Store, repository
+from .study_independence import ReservedEvidence, attempt_fingerprint, reserved_evidence, source_identities
 
 METRICS = ("tool_errors", "tool_calls", "codex_model_calls")
 COVERAGE_BASES = ("full_case", "tool_events")
@@ -108,8 +110,8 @@ def _sample_attempt(session: dict[str, Any], case: dict[str, Any],
     return {
         "context_status": context_status,
         "identity": (session["agent"], session.get("session_id")),
-        "content": digest([{key: event.get(key) for key in ("kind", "status", "text", "tool")}
-                           for event in events]),
+        "source_identities": source_identities(session),
+        "content": attempt_fingerprint(events),
         "cwd": context.get("cwd") if context else session.get("cwd"),
         "model": context.get("model") if context else session.get("model"),
         "setup_revision": context.get("session_start_revision")
@@ -170,37 +172,57 @@ def _is_revision(value: Any) -> bool:
     return isinstance(value, str) and bool(COMMIT_ID.fullmatch(value))
 
 
-def check_strict_baselines(store: Store, policy: dict[str, Any], scope: Path, before: datetime,
-                           excluded_sessions: set[str], proposal: dict[str, Any] | None = None) -> None:
-    scope = scope.resolve()
+def baseline_gate(policy: dict[str, Any], proposal: dict[str, Any], reserved: ReservedEvidence,
+                  before: datetime | None = None) -> Callable[[dict[str, Any]], str | None]:
+    scope = Path(proposal["scope"]).resolve()
     project = repository(scope)
-    sessions: set[str] = set()
+
+    @lru_cache(maxsize=200)
+    def in_scope(cwd: str) -> bool:
+        return _in_scope(cwd, scope, project)
+
+    @lru_cache(maxsize=200)
+    def matches_setup(revision: str) -> bool:
+        return verify_setup(proposal, revision, "before")["status"] == "verified"
+
+    def check(sample: dict[str, Any]) -> str | None:
+        if sample["source_identities"] & reserved.sources or sample["content"] in reserved.fingerprints:
+            return "reserved_study_evidence"
+        if issue := measurement_issue(sample, policy):
+            return issue
+        if before and sample["ended"] >= before:
+            return "after_cutoff"
+        if not in_scope(sample["cwd"]):
+            return "outside_proposal_project"
+        revision = sample["setup_revision"]
+        if policy.get("require_setup_revision") and (not _is_revision(revision) or not matches_setup(revision)):
+            return "setup_revision_unverified"
+        return None
+
+    return check
+
+
+def check_baselines(store: Store, policy: dict[str, Any], proposal: dict[str, Any],
+                    before: datetime, reserved: ReservedEvidence) -> None:
+    check = baseline_gate(policy, proposal, reserved, before)
+    sessions: set[tuple[str, str]] = set()
     contents: set[str] = set()
-    setup_matches = {}
     for key in policy["baseline_cases"]:
         sample = _sample(store, key)
-        source = digest(list(sample["identity"]))
-        if (sample["context_status"] != "observed" or measurement_issue(sample, policy)
-                or sample["ended"] >= before
-                or source in excluded_sessions or source in sessions
-                or sample["content"] in contents or not _in_scope(sample["cwd"], scope, project)):
+        if (check(sample) or key in reserved.case_ids
+                or sample["source_identities"] & sessions or sample["content"] in contents):
             continue
-        if policy.get("require_setup_revision"):
-            revision = sample["setup_revision"]
-            if not proposal or not _is_revision(revision):
-                continue
-            if revision not in setup_matches:
-                setup_matches[revision] = verify_setup(proposal, revision, "before")["status"] == "verified"
-            if not setup_matches[revision]:
-                continue
-        sessions.add(source)
+        sessions.update(sample["source_identities"])
         contents.add(sample["content"])
-    if len(sessions) < policy["minimum_pairs"]:
-        needed = " and verified setup revisions" if policy.get("require_setup_revision") else ""
-        raise AutError(f"improve: not enough eligible baseline cases with recorded turn context{needed}")
+    if len(contents) < policy["minimum_pairs"]:
+        needed = " with recorded turn context" if policy.get("require_turn_context") else ""
+        if policy.get("require_setup_revision"):
+            needed += " and verified setup revisions"
+        raise AutError(f"improve: not enough eligible baseline cases{needed}")
 
 
-def observe(store: Store, study_id: str, spec: dict[str, Any]) -> dict[str, Any]:
+def observe(store: Store, study_id: str, spec: dict[str, Any], *,
+            preview: bool = False) -> dict[str, Any]:
     study = store.get("studies", study_id)
     policy = study.get("observation_policy")
     if policy is None:
@@ -243,12 +265,7 @@ def observe(store: Store, study_id: str, spec: dict[str, Any]) -> dict[str, Any]
     scope = Path(proposal["scope"]).resolve()
     project = repository(scope)
     known = set(study["known_case_ids"])
-    discovery = set(study["discovery_cases"]) | set(study["control_cases"])
-    excluded_sources = set()
-    for key in discovery:
-        case = store.get("cases", key)
-        session = store.get("sessions", case["session_snapshot"])
-        excluded_sources.add((session["agent"], session.get("session_id")))
+    reserved = reserved_evidence(store, proposal, study["discovery_cases"], study["control_cases"])
     paired_baselines: set[str] = set()
     seen_cases: set[str] = set()
     seen_sources: set[tuple[str, str]] = set()
@@ -269,14 +286,15 @@ def observe(store: Store, study_id: str, spec: dict[str, Any]) -> dict[str, Any]
             raise AutError("improve: a case can appear only once in a comparison")
         seen_cases.update((left, right))
         before, after = _sample(store, left), _sample(store, right)
-        sources = {before["identity"], after["identity"]}
+        sources = before["source_identities"] | after["source_identities"]
         content = {before["content"], after["content"]}
         contexts = {before["context_status"], after["context_status"]}
         after_started = after["codex_model_started"] if metric == "codex_model_calls" else after["started"]
         reason = None
-        if (left in discovery or right in discovery or sources & excluded_sources
-                or len(sources) != 2 or len(content) != 2 or seen_sources & sources
-                or seen_content & content):
+        if (reserved.case_ids & {left, right} or sources & reserved.sources
+                or before["source_identities"] & after["source_identities"]
+                or len(content) != 2 or seen_sources & sources
+                or (seen_content | reserved.fingerprints) & content):
             reason = "reused_or_copied_evidence"
         elif (left not in known or right in known or not _sufficient_coverage(before, policy)
               or not _sufficient_coverage(after, policy) or before["ended"] >= frozen
@@ -355,5 +373,7 @@ def observe(store: Store, study_id: str, spec: dict[str, Any]) -> dict[str, Any]
               "causal_effect_established": False, "task_quality_verified": False,
               "attempt_setup_exposure_verified": False,
               "scope": "Operator-paired ordinary work with matching recorded context labels."}
+    if preview:
+        return {**record, "preview": True}
     key = store.put("study_observations", record)
     return {"observation_id": key, **record}

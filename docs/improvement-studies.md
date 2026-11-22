@@ -198,6 +198,19 @@ exclusions for each page. Add `--include-excluded` to see individual reasons.
 Follow `next_cursor` to continue the scan. Use `--before` with a timezone to exclude later work.
 The study checks source reuse, project and model compatibility, and any required setup evidence.
 
+Use the private study preflight to apply the proposed baseline rules before you freeze cases.
+It reserves discovery, control, and proposal-support evidence across recaptures and native mirrors.
+
+```bash
+aut improve study preflight --from-study STUDY_ID --audit AUDIT_ID \
+  --metric tool_errors --coverage-basis tool_events --require-turn-context --include-excluded
+```
+
+For a new study, use `--scope-file` with a JSON object containing `proposal_id`,
+`discovery_cases`, and `control_cases`. Set the same metric and setup requirements you plan
+to freeze. Preflight counts independent choices in preview order for the current page.
+Select comparable task families yourself, then freeze the cases you want to use.
+
 ```json
 "observation_policy": {
   "metric": "tool_errors",
@@ -227,9 +240,12 @@ same task family and matching recorded project, harness, and model labels. Use i
 ```
 
 ```sh
+aut improve study observe --study STUDY_ID --spec-file paired-observations.json --preview
 aut improve study observe --study STUDY_ID --spec-file paired-observations.json
 aut improve study assess --study STUDY_ID
 ```
+
+Preview checks the frozen policy and pair evidence without saving an observation.
 
 The comparison excludes incomplete cases, repeated evidence, mismatched setups, and cases outside
 the time window. Candidates must come from a UTC day after the recorded adoption date.
@@ -242,7 +258,7 @@ AUT can link those fields to completed turns in supported native Codex logs.
 T3 runs can use that context when at least two strong item references match one completed native
 Codex turn. Include the native snapshot when exporting a bundle that needs to show this context.
 Missing or conflicting records and attempts spanning several native turns exclude the pair.
-Strict policies require enough eligible baseline cases at creation, before adoption.
+Study creation requires enough eligible baseline cases before adoption.
 Legacy cases can still use session labels when the policy allows them.
 The report counts the pairs that used observed turn context separately.
 Submit an empty `pairs` list to record an inconclusive result while eligible follow-up is pending.

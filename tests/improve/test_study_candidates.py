@@ -65,3 +65,68 @@ def test_ordinary_work_preserves_grants_and_freezes_the_previewed_attempt(tmp_pa
         assert sample["tool_errors"] == item["metric_value"]
     outside = metadata.ordinary_work("tool_errors", "tool_events", before=stamp)
     assert outside["exclusions"] == {"after_cutoff": 3}
+
+
+def test_study_preflight_reserves_skill_evidence_and_linked_native_sessions(tmp_path, capsys):
+    from datetime import datetime, timezone
+
+    from agent_usage_tracker.improve.study_independence import reserved_evidence
+    from agent_usage_tracker.improve.study_observe import check_baselines
+
+    store = Store(tmp_path / "private")
+    scope = str(tmp_path / "scope")
+    snapshots = []
+
+    def add(agent, sid, text, links=()):
+        events = [
+            {"id": "start", "kind": "prompt", "text": text},
+            {"id": "end", "kind": "boundary", "text": "turn_complete",
+             "turn_context": {"status": "observed", "model": "model", "cwd": scope}},
+        ]
+        for event in events:
+            event.update(timestamp="2026-11-01T09:00:00Z", native_turn_key=sid)
+        key = store.put("sessions", {"agent": agent, "session_id": sid, "origin": "interactive",
+                                    "events": events, "coverage": {"tool_events_checked": True},
+                                    "native_sessions": links})
+        snapshots.append(key)
+        return key
+
+    discovery = add("codex", "discovery", "discovery prompt")
+    control = add("codex", "control", "control prompt")
+    supporting = add("codex", "support", "corroborating prompt")
+    add("codex", "hatched-copy", "discovery prompt")
+    add("t3", "linked-support", "different prompt", [["codex", "support"]])
+    first = add("t3", "first", "independent prompt one", [["codex", "shared-native"]])
+    alias = add("t3", "alias", "independent prompt two", [["codex", "shared-native"]])
+    second = add("codex", "second", "independent prompt three")
+    audit = store.put("audits", {"session_ids": snapshots, "coverage": {}})
+    discovery_case, control_case, supporting_case = (
+        freeze_case(store, audit, key, "end") for key in (discovery, control, supporting))
+    proposal = {"scope": scope, "case_id": discovery_case, "target": "skill.md",
+                "supporting_cases": [{"case_id": supporting_case}]}
+    proposal_id = store.put("proposals", proposal)
+    draft = {"proposal_id": proposal_id, "discovery_cases": [discovery_case],
+             "control_cases": [control_case]}
+    scope_file = tmp_path / "scope.json"
+    scope_file.write_text(json.dumps(draft))
+    store_before = {key: store.keys(key) for key in ("cases", "studies", "study_observations")}
+    args = ["improve", "--root", str(store.root), "study", "preflight",
+            "--scope-file", str(scope_file), "--audit", audit, "--include-excluded"]
+    assert main(args) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["exclusions"] == {"reserved_study_evidence": 5}
+    assert result["measurable_attempts"] == 3
+    assert result["independent_candidates_on_page"] == 2
+    assert {item["session_id"] for item in result["items"] if item["measurable"]} == {first, alias, second}
+    assert {key: store.keys(key) for key in store_before} == store_before
+
+    unique, duplicate, independent = (freeze_case(store, audit, key, "end")
+                                      for key in (first, alias, second))
+    reserved = reserved_evidence(store, proposal, [discovery_case], [control_case])
+    policy = {"metric": "tool_calls", "minimum_pairs": 2, "require_turn_context": True}
+    before = datetime(2026, 11, 2, tzinfo=timezone.utc)
+    with pytest.raises(AutError, match="eligible baseline"):
+        check_baselines(store, policy | {"baseline_cases": {unique: "task", duplicate: "task"}},
+                        proposal, before, reserved)
+    check_baselines(store, policy | {"baseline_cases": {unique: "task", independent: "task"}},
+                    proposal, before, reserved)

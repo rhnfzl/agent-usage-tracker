@@ -122,11 +122,11 @@ def _manifest(store: Store, value: dict[str, Any]) -> dict[str, Any]:
     proposal = store.get("proposals", value["proposal_id"])
     if proposal["case_id"] not in value["discovery_cases"]:
         raise AutError("improve: proposal must link discovery evidence")
-    if observation is not None and observation.get("require_turn_context"):
-        from .study_observe import check_strict_baselines
-        check_strict_baselines(store, observation, Path(proposal["scope"]),
-                               datetime.now(timezone.utc), {row["session"] for row in identities},
-                               proposal=proposal)
+    if observation is not None:
+        from .study_observe import check_baselines
+        from .study_independence import reserved_evidence
+        reserved = reserved_evidence(store, proposal, value["discovery_cases"], value["control_cases"])
+        check_baselines(store, observation, proposal, datetime.now(timezone.utc), reserved)
     trial = _spec(store, value["trial_spec_id"])
     if trial["kind"] == "command_check":
         from .trial import _acceptance_inputs
