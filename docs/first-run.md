@@ -1,40 +1,99 @@
 # First run
 
-AUT reads the logs your coding agents already save. You can try it and check local coverage before
-you choose a database or send any data.
+See usage from the coding agents you already run. Start with a report on the machine and
+user account where those agents save their logs. Local reporting needs no database,
+provider account, or model.
 
-## Start with a local report
+## Choose what you need
 
-With [uv](https://docs.astral.sh/uv/getting-started/installation/) installed, install the
-latest release to get the `aut` command:
+| I want to… | Start here |
+| --- | --- |
+| See what AUT shows | [Try the demo](#try-the-demo) with sample logs. |
+| See or export usage from my agents | [Run a local report](#run-a-local-report). |
+| Get help with my shell, agent profiles, or existing install | [Use the setup prompt](#set-up-with-a-coding-assistant). |
+| Keep session history across machines or use Grafana | [Connect your own database](#keep-history-in-your-own-database), then [schedule delivery](#schedule-delivery-to-your-own-sink) if you need it. |
+| Classify work or investigate recurring problems | See [local labels](local-labels.md) or the [private improvement workflow](improvement.md). |
+
+See [How I run AUT](how-i-run-aut.md) for one Apple silicon Mac setup with a
+self-hosted database, local labels, and proposal review.
+
+## Try the demo
+
+With [uv](https://docs.astral.sh/uv/getting-started/installation/) installed, run:
+
+```sh
+uvx agent-usage-tracker demo
+```
+
+Look for two sample records totaling 1,140 tokens. The demo uses synthetic logs in a
+temporary directory. It works even when your own agent logs are missing.
+
+## Run a local report
+
+If you already have a working `aut` command, use it. To install the released command
+with [uv](https://docs.astral.sh/uv/getting-started/installation/), run:
 
 ```sh
 uv tool install agent-usage-tracker
 ```
 
-Install from `git+https://github.com/rhnfzl/agent-usage-tracker` when you need a change on
-`main` before the next release.
+If the shell cannot find `aut`, run `uv tool dir --bin` and check that directory is on
+your shell's `PATH`. To run the report once without installing an `aut` command, replace
+`aut` with `uvx agent-usage-tracker`.
 
 ```sh
 aut setup
-aut demo
-aut setup --apply
-aut summary
-aut overview
+aut summary --period week --group-by agent
 ```
 
-`aut setup` previews the config path and checks local source metadata. Use `--json` for a
-receipt with separate settings, source observations and delivery state. A scan receipt
-describes locally emitted rows. The local queue can show pending rows, while delivery remains
-unverified until you check the sink. A missing source can mean that the agent has yet to log
-any work. Run `aut doctor --json` for the full private coverage report.
+`aut setup` previews the config path and shows which log sources it can find. A source marked
+`available` means AUT found the log location. Use the summary to check whether it contains usage.
+Use `aut setup --json` to see settings, local scan evidence, and delivery status as separate fields.
+A scan receipt records rows AUT produced locally. Check the receiving database to confirm delivery.
 
-`aut setup --apply` creates the starter config only when the file is missing. The starter
-uses local logs and leaves delivery off. The [config example](../config.example.toml) describes
-optional sources and transport settings. The demo uses sample logs in a temporary directory.
-It needs no provider account, database or previous setup.
+Look for a row from an agent you used during the report period. If it is missing:
 
-The overview opens a private loopback page. Choose a date range and group by agent, model
+- If the report has zero events, try `aut summary --period month` or choose dates that include your work.
+- If the source is missing, finish one session in the agent and rerun the report.
+  For a custom profile, WSL, or a remote machine, check where the agent actually saved its logs.
+- If the source is unreadable or still missing, use `aut doctor --json` to check the log paths
+  privately. See the [collector reference](reference.md#collectors) for supported paths and overrides.
+- Cursor CLI can show activity with unknown token counts. Use the
+  [collector reference](reference.md#collectors) to choose one Cursor token source.
+
+If you need a config file for custom settings, `aut setup --apply` creates a starter only
+when the file is missing. The starter uses local logs and leaves delivery off.
+See the [config example](../config.example.toml) for available settings.
+
+## Set up with a coding assistant
+
+Paste this into a coding assistant that can run commands on the machine with your logs.
+If it cannot access that machine, it can give you the commands to run yourself.
+
+```text
+Help me set up Agent Usage Tracker (AUT) for my existing workflow.
+Read https://github.com/rhnfzl/agent-usage-tracker/blob/main/docs/first-run.md.
+If you cannot open the link, ask me for the relevant steps from that page.
+
+Check my OS, shell, and whether this terminal is local, remote, WSL, or in a container.
+Check for aut and uv before suggesting an install. Reuse a working AUT install.
+If aut is available, use aut setup --json to preview the config and available log sources.
+Keep diagnostics brief. Do not print secrets, config contents, or session transcripts.
+Ask only for decisions you cannot infer, such as which agents I use or whether I want history across machines.
+
+Recommend one path that fits my goal. Default to a local report.
+Show me any install or config changes before applying them. Preserve my existing config,
+agent profiles, and timers. Add a database, scheduled delivery, or models only if I choose them.
+
+Verify the setup with aut summary --period week --group-by agent.
+Confirm which of my agents show records. If none appear, check the report dates and log location.
+If I have no logs yet, use the demo and tell me that it checks AUT with sample data.
+End with the command I can use next time and anything still unverified.
+```
+
+## Open the private browser overview
+
+Run `aut overview` to open a private page on this computer. Choose a date range and group by agent, model
 or project. It shows when usage was last seen and whether scan evidence is fresh. If an
 improvement store exists, the page links to its private report card. Use
 `aut overview --no-browser` to get the local URL and Ctrl-C to close the page.
@@ -69,13 +128,14 @@ for Claude Code statusline input and optional local notices.
 
 ## Keep history in your own database
 
-Install the PostgreSQL extra:
+Install the PostgreSQL extra. Keep the same install method you use for AUT:
 
 ```bash
 uv tool install "agent-usage-tracker[postgres]"
 ```
 
-Create `~/.config/agent-usage-tracker/config.toml` with your machine label and database connection:
+Run `aut setup --apply` if you need a config file. Add your machine label and database
+connection to the file shown by `aut setup`. Keep any existing source settings.
 
 ```toml
 machine = "laptop"

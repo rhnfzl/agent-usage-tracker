@@ -64,6 +64,9 @@ Build from the merged commit when preparing a deployment candidate.
 Check the bundle with `shasum -a 256 -c SHA256SUMS` from its output directory.
 Use the verified wheel with the [standalone runtime installer](improvement.md#install-a-stable-runtime) to stage an upgrade before switching a timer.
 
-To release, raise `__version__` in `src/agent_usage_tracker/__init__.py`, merge, and push the tag `v<version>`.
-The [release workflow](../.github/workflows/release.yml) builds it and publishes it to PyPI through trusted publishing.
+To release, raise `__version__` in `src/agent_usage_tracker/__init__.py` to a new `X.Y.Z` version and merge the PR.
+[Tag release](../.github/workflows/tag-release.yml) creates `v<version>` on the merged commit and starts
+[Release](../.github/workflows/release.yml) on that tag. The build checks that the tag matches the package version.
+Release publishes to PyPI through trusted publishing, then creates the GitHub Release for that tag.
+For a failed run, rerun the failed jobs from GitHub Actions.
 Use synthetic fixtures in public contributions. Keep session logs, personal labels, and private benchmarks out of commits.
