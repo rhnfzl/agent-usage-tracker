@@ -166,3 +166,55 @@ def test_code_tool_pins_bundle_for_life_of_connection(connection, tmp_path):
                 assert "text" not in direct.structuredContent
 
     asyncio.run(asyncio.wait_for(run(), timeout=15))
+
+
+def test_search_contract_across_cli_mcp_and_recipes(tmp_path):
+    pytest.importorskip("pydantic_monty")
+    store = Store(tmp_path / "private")
+    key = store.put("sessions", {"agent": "codex", "coverage": {"complete": True}, "events": [
+        {"id": "first", "kind": "prompt", "text": "password=fixture-secret"},
+        {"id": "second", "kind": "reply", "text": "password reset"},
+    ]})
+    audit = store.put("audits", {"session_ids": [key], "coverage": {}})
+    args = ["-m", "agent_usage_tracker.cli", "evidence", "--root", str(store.root),
+            "--audit", audit, "--content", "redacted"]
+    cli = [sys.executable, *args, "search", "--mode", "exact", "--query", "password",
+           "--limit", "1", "--session-id", key]
+    first = json.loads(subprocess.check_output(cli, text=True))
+    cursor = first["next_cursor"]
+    assert cursor
+    second = json.loads(subprocess.check_output([*cli, "--cursor", cursor], text=True))
+    assert [page["items"][0]["event_id"] for page in (first, second)] == ["first", "second"]
+    assert second["next_cursor"] is None
+    assert "[redacted]" in first["items"][0]["preview"]
+    assert "fixture-secret" not in json.dumps([first, second])
+
+    async def run():
+        async with stdio_client(StdioServerParameters(
+                command=sys.executable, args=[*args, "mcp", "--code"])) as streams:
+            async with ClientSession(*streams) as client:
+                await client.initialize()
+                catalog = await client.call_tool("code_catalog", {})
+                recipe_mode = catalog.structuredContent["operations"]["search"]["arguments"]["mode"]
+                assert recipe_mode["default"] == "exact"
+                tools = await client.list_tools()
+                search = next(tool for tool in tools.tools if tool.name == "search")
+                assert search.inputSchema["properties"]["mode"]["default"] == "auto"
+                filters = {"mode": "exact", "query": "password", "limit": 1, "session_id": key}
+                for page, expected in ((filters, first), ({**filters, "cursor": cursor}, second)):
+                    tool = await client.call_tool("search", page)
+                    assert tool.structuredContent == expected
+                source = """first = read("search", **params)
+second = read("search", cursor=first["data"]["next_cursor"], lead=first["receipt"], **params)
+[first["data"], second["data"]]
+"""
+                recipe = await client.call_tool("run_code", {"source": source, "params": filters})
+                assert recipe.structuredContent["result"] == [first, second]
+                assert recipe.structuredContent["reads"][0]["has_more"] is True
+                assert recipe.structuredContent["reads"][1]["has_more"] is False
+                implicit = await client.call_tool("run_code", {
+                    "source": source, "params": {name: value for name, value in filters.items() if name != "mode"},
+                })
+                assert implicit.structuredContent["result"] == [first, second]
+
+    asyncio.run(asyncio.wait_for(run(), timeout=15))

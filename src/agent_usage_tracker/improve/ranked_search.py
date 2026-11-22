@@ -8,14 +8,15 @@ import sqlite3
 from collections.abc import Callable, Iterable
 from pathlib import Path
 from threading import Lock
-from typing import Any, Literal
+from typing import Any, Literal, get_args
 from weakref import finalize
 
 from ..config import AutError
 from .semantic_search import Embedder, SemanticIndex, SemanticUnavailable
 
 SearchMode = Literal["auto", "exact", "ranked", "sessions", "semantic", "hybrid"]
-SEARCH_MODES: tuple[SearchMode, ...] = ("auto", "exact", "ranked", "sessions", "semantic", "hybrid")
+SEARCH_MODES: tuple[SearchMode, ...] = get_args(SearchMode)
+DEFAULT_SEARCH_MODE: SearchMode = "auto"
 
 MAX_EVENTS = 50_000
 MAX_BYTES = 64 * 1024 * 1024

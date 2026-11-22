@@ -16,10 +16,13 @@ from typing import Any, Literal, get_args, get_origin, get_type_hints
 from .. import __version__
 from ..config import AutError
 from .access import Evidence, READ_OPERATIONS
+from .ranked_search import SearchMode
 from .semantic_search import LocalEmbedder
 from .store import Store, canonical, digest
 
 CONTRACT = 1
+# Existing recipes use literal search when they omit the mode.
+RECIPE_SEARCH_MODE: SearchMode = "exact"
 MAX_SOURCE = 16_384
 MAX_PARAMS = 8_192
 MAX_SCOPES = 8
@@ -61,7 +64,7 @@ def catalog(*, with_model: bool = False) -> dict[str, Any]:
         for param in list(inspect.signature(method).parameters.values())[1:]:
             field = {"type": inspect.formatannotation(hints[param.name])}
             if param.default is not inspect.Parameter.empty:
-                field["default"] = "exact" if name == "search" and param.name == "mode" else param.default
+                field["default"] = RECIPE_SEARCH_MODE if name == "search" and param.name == "mode" else param.default
             fields[param.name] = field
         operations[name] = {"description": method.__doc__, "arguments": fields}
     return {"contract": CONTRACT, "operations": operations,
@@ -238,8 +241,7 @@ def _execute(source: str, params: dict[str, Any], specs: list[dict[str, Any]],
             raise AutError("investigation: invalid argument names for evidence operation") from exc
         if any(not _matches(value, hints[name]) for name, value in arguments.items()):
             raise AutError("investigation: invalid argument types for evidence operation")
-        # Existing recipe receipts used literal search when mode was omitted.
-        call_arguments = {"mode": "exact", **arguments} if operation == "search" else arguments
+        call_arguments = {"mode": RECIPE_SEARCH_MODE, **arguments} if operation == "search" else arguments
         data = method(**call_arguments)
         encoded = _bounded(data, MAX_DATA - data_bytes, "evidence data")
         data_bytes += len(encoded)

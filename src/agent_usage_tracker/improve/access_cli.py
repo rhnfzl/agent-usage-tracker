@@ -13,7 +13,7 @@ from ..config import AutError
 from ..label.core import data_dir
 from .access import MODES, Evidence
 from .evidence import BYTE_LIMIT
-from .ranked_search import SEARCH_MODES
+from .ranked_search import DEFAULT_SEARCH_MODE, SEARCH_MODES
 from .search_eval import evaluate
 from .store import Store, audit
 
@@ -58,11 +58,10 @@ def register(commands: Any) -> None:
     for arg in ("query", "agent", "kind", "status", "since", "until", "cursor", "tool", "workspace"):
         search.add_argument(f"--{arg}", default="")
     search.add_argument("--session-id", default="")
-    search.add_argument("--exclude-session", action="append", default=[])
+    search.add_argument("--exclude-session", dest="exclude_sessions", action="append", default=[])
     search.add_argument("--group-by-session", action="store_true")
     search.add_argument("--argument-path", help="JSON pointer into a recorded tool call")
-    search.add_argument("--mode", choices=SEARCH_MODES,
-                        default="auto")
+    search.add_argument("--mode", choices=SEARCH_MODES, default=DEFAULT_SEARCH_MODE)
     search.add_argument("--limit", type=int, default=20)
 
     evaluation = actions.add_parser("evaluate", help="measure search against a local labeled set")
@@ -250,10 +249,13 @@ def run(args: argparse.Namespace) -> None:
             value = {"audit_id": args.audit,
                      "cases": [evidence.case(row["case_id"]) for row in rows]}
         elif action == "search":
-            value = evidence.search(args.query, args.agent, args.kind, args.status, args.since,
-                                    args.until, args.cursor, args.limit, args.tool, args.workspace,
-                                    args.mode, args.session_id, args.exclude_session,
-                                    args.group_by_session, args.argument_path)
+            value = evidence.search(
+                query=args.query, agent=args.agent, kind=args.kind, status=args.status,
+                since=args.since, until=args.until, cursor=args.cursor, limit=args.limit,
+                tool=args.tool, workspace=args.workspace, mode=args.mode, session_id=args.session_id,
+                exclude_sessions=args.exclude_sessions, group_by_session=args.group_by_session,
+                argument_path=args.argument_path,
+            )
         elif action == "evaluate":
             value = evaluate(evidence, args.path, args.mode or ["auto", "exact", "ranked", "sessions"], args.limit)
         elif action == "event":
