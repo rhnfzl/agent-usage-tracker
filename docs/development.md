@@ -36,6 +36,30 @@ In GitHub's branch protection for `main`, require a pull request and the `CI req
 Require branches to be up to date before merging, and apply the rule to administrators.
 CI also runs on `main` to verify the landed commit.
 SQL integration tests require a scratch database on a TimescaleDB server and `psql`, through `AUT_TEST_PG_DSN` with a literal IP address and port; otherwise those tests skip.
+
+## Local preflight and packages
+
+Run these commands on macOS or Linux with `uv`, Docker Compose, `psql`, and `shasum` available.
+
+```bash
+./scripts/local-ci.sh quick
+./scripts/local-ci.sh check
+./scripts/local-ci.sh package HEAD
+```
+
+`quick` runs Ruff. `check` runs Ruff, mypy, the two suite time zones, the MCP suite, and the SQL and Compose checks.
+It uses a disposable TimescaleDB container on a random loopback port.
+The preflight defaults to Python 3.11. Set `AUT_CI_PYTHON` to test another supported version.
+For the Mac batch publisher, pass `./scripts/local-ci.sh quick` as `--light` and `./scripts/local-ci.sh check` as `--full`.
+GitHub still runs the required platform matrix for the pull request.
+
+`package` builds a wheel from the source distribution of the named commit.
+It checks both distributions, installs the wheel in isolation, and saves the artifacts under `dist/local-<short-commit>/`.
+The directory contains `SOURCE_COMMIT` and `SHA256SUMS` for deployment verification.
+Build from the merged commit when preparing a deployment candidate.
+Check the bundle with `shasum -a 256 -c SHA256SUMS` from its output directory.
+Use the verified wheel with the [standalone runtime installer](improvement.md#install-a-stable-runtime) to stage an upgrade before switching a timer.
+
 To release, raise `__version__` in `src/agent_usage_tracker/__init__.py`, merge, and push the tag `v<version>`.
 The [release workflow](../.github/workflows/release.yml) builds it and publishes it to PyPI through trusted publishing.
 Use synthetic fixtures in public contributions. Keep session logs, personal labels, and private benchmarks out of commits.
