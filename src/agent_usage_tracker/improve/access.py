@@ -45,6 +45,22 @@ def _page(start: int, limit: int, maximum: int = PAGE_SIZE) -> None:
         raise AutError(f"evidence: use a nonnegative offset and a limit of 1..{maximum}")
 
 
+def _exact_preview(text: str, needle: str) -> str | None:
+    folded = text.casefold()
+    match = folded.find(needle)
+    if match < 0:
+        return None
+    if len(folded) != len(text):
+        # A folded character can occupy several positions in the search text.
+        remaining = match
+        for match, character in enumerate(text):
+            remaining -= len(character.casefold())
+            if remaining < 0:
+                break
+    start = max(0, match - 80)
+    return text[start:start + 240]
+
+
 class Evidence:
     def __init__(self, content: str, store: Store | None = None, audit_id: str | None = None,
                  bundle: Path | None = None) -> None:
@@ -261,12 +277,11 @@ class Evidence:
                     continue
                 result = hit(key, row, event)
                 text = result.pop("text", "")
-                if needle and needle not in text.casefold():
-                    continue
                 if needle:
-                    found = text.casefold().find(needle)
-                    left = max(0, found - 80)
-                    result["preview"] = text[left:left + 240]
+                    preview = _exact_preview(text, needle)
+                    if preview is None:
+                        continue
+                    result["preview"] = preview
                 hits.append(result)
         return {"items": hits, "next_cursor": None, **self.describe()}
 

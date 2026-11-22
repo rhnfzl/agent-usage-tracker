@@ -10,6 +10,22 @@ def invoke(capsys, root, *args):
     return json.loads(capsys.readouterr().out)
 
 
+def test_exact_search_preview_keeps_casefolded_match(capsys, tmp_path):
+    store = Store(tmp_path / "private")
+    text = "ß" * 120 + " Straße failed" + " tail" * 150
+    session = store.put("sessions", {"agent": "codex", "coverage": {}, "events": [
+        {"id": "result", "kind": "result", "text": text},
+    ]})
+    audit = store.put("audits", {"session_ids": [session], "coverage": {}})
+
+    result = invoke(capsys, store.root, "--audit", audit, "--content", "redacted",
+                    "search", "--query", "STRASSE FAILED")
+
+    assert result["items"][0]["event_id"] == "result"
+    assert "Straße failed" in result["items"][0]["preview"]
+    assert "text" not in result["items"][0]
+
+
 def test_capture_search_content_modes_and_bundle(tmp_path, monkeypatch, capsys):
     home = tmp_path / "home"
     monkeypatch.setenv("HOME", str(home))

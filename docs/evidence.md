@@ -93,7 +93,8 @@ Set the client's MCP command to the absolute path to `aut`. Pass these arguments
 
 Use the same `--root` as capture if you use a custom store. Add `--content redacted` before
 `mcp` to mask text. The server exposes `describe`, `search`, `session`, `event`, `compare`,
-`commits`, and `case` with the same scope and results as the CLI. It provides read operations only.
+`commits`, `case`, and `ordinary_work` with the same scope and results as the CLI.
+It provides read operations only.
 
 An example prompt for the connected agent:
 
