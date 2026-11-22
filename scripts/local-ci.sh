@@ -141,6 +141,23 @@ check() {
         cat "$scratch/$stage.log"
     done
     [[ $failed == 0 ]] || die "local preflight failed"
+}
+
+monotonic_seconds() {
+    perl -MTime::HiRes=clock_gettime,CLOCK_MONOTONIC -e 'printf "%.9f\n", clock_gettime(CLOCK_MONOTONIC)'
+}
+
+check_with_budget() {
+    local start end
+    start=$(monotonic_seconds)
+    # The check owns its scratch directory. Its EXIT trap runs before we read the end time.
+    (check)
+    end=$(monotonic_seconds)
+    LC_ALL=C awk -v start="$start" -v end="$end" 'BEGIN {
+        elapsed = end - start
+        printf "Local preflight took %.3fs (limit 60s)\n", elapsed
+        exit (elapsed > 60)
+    }' || die "local preflight exceeded 60 seconds"
     echo "Local preflight passed"
 }
 
@@ -182,7 +199,7 @@ PY
 
 case ${1:-} in
     quick) run --with "ruff==$ruff_version" ruff check . ;;
-    check) check ;;
+    check) check_with_budget ;;
     package) package "${2:-HEAD}" ;;
     verify-dist)
         [[ $# == 3 ]] || die "usage: $0 verify-dist <tag> <dist>"

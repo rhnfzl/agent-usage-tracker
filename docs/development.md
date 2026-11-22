@@ -39,7 +39,7 @@ SQL integration tests require a scratch database on a TimescaleDB server and `ps
 
 ## Local preflight and packages
 
-Run these commands on macOS or Linux with `uv`, Docker Compose, `psql`, and `shasum` available.
+Run these commands on macOS or Linux with `uv`, Docker Compose, `psql`, and Perl with `shasum` available.
 
 ```bash
 ./scripts/local-ci.sh quick
@@ -53,7 +53,9 @@ Set `AUT_CI_WORKERS` to lower the worker count per time zone if the machine is b
 It uses a disposable TimescaleDB container on a random loopback port.
 The preflight defaults to Python 3.11. Set `AUT_CI_PYTHON` to test another supported version.
 For the Mac batch publisher, pass `./scripts/local-ci.sh quick` as `--light` and `./scripts/local-ci.sh check` as `--full`.
-GitHub still runs the required platform matrix for the pull request.
+The full local preflight fails above 60 seconds, including dependency setup and cleanup.
+It lets every check finish and reports the results before rejecting an over-budget run.
+GitHub still runs the required platform matrix for the pull request. That run has its own runner queue and timing.
 
 `package` builds a wheel from the source distribution of the named commit.
 It checks both distributions, installs the wheel in isolation, and saves the artifacts under `dist/local-<short-commit>/`.
