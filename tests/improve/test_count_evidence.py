@@ -69,6 +69,8 @@ def test_count_evidence_uses_full_snapshot_and_requires_complete_event_links(
     ("result_before_call", True, None),
     ("new_turn_without_close", True, None),
     ("unknown_origin", True, None),
+    ("steered", True, None),
+    ("duplicate_opening", True, 1),
 ])
 def test_count_evidence_checks_original_codex_records(tmp_path, extra, expected, model_calls):
     stamp = "2026-11-02T09:00:00Z"
@@ -99,6 +101,10 @@ def test_count_evidence_checks_original_codex_records(tmp_path, extra, expected,
         rows.append(("event_msg", {"type": "item_completed", "item": {"type": "FileChange"}}))
     elif extra == "compacted":
         rows.append(("compacted", {"message": "private compaction text"}))
+    elif extra == "steered":
+        rows.append(("event_msg", {"type": "user_message", "message": "Check a different task"}))
+    elif extra == "duplicate_opening":
+        rows.insert(4, rows[3])
     elif extra and extra not in {"result_before_call", "unknown_origin"}:
         rows.append(("response_item", {"type": extra}))
     rows.append(("event_msg", {"type": "task_complete", "turn_id": "turn"}))
@@ -115,9 +121,11 @@ def test_count_evidence_checks_original_codex_records(tmp_path, extra, expected,
     case = store.put("cases", _case_record(
         session, snapshot, session["coverage"], len(session["events"]) - 1, "selected", False))
     sample = _sample(store, case)
-    assert not sample["complete"]
+    assert sample["complete"] == (extra == "steered")
     assert sample["tool_events_complete"] == expected
     assert sample["codex_model_calls"] == model_calls
+    if extra == "steered":
+        assert sample["tool_calls"] == 0
     assert "private compaction text" not in str(session["events"])
     if extra == "mixed_representation":
         audit = store.put("audits", {"session_ids": [snapshot], "coverage": {}})

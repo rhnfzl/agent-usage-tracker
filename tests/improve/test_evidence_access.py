@@ -163,6 +163,39 @@ def test_checkpoint_commit_lookup_pages_within_the_selected_grant(tmp_path, caps
                  "commits", sha, "--source", "checkpoint"]) == 1
 
 
+def test_command_commit_lookup_and_bundles_preserve_content_grants(tmp_path, capsys):
+    store = Store(tmp_path / "private")
+    long_sha = "a" * 40
+    short_sha = "123abcd"
+    full = store.put("session_content", {
+        "result": {"text": f"[main {long_sha}] One\n[main {short_sha}] Two",
+                   "attachment_omitted": False},
+    })
+    session = store.put("sessions", {"agent": "codex", "coverage": {}, "full_content_id": full,
+                                    "events": [
+        {"id": "call", "kind": "call", "tool": "exec_command", "call_id": "commit",
+         "text": "git commit -m changes"},
+        {"id": "result", "kind": "result", "call_id": "commit", "status": "success",
+         "text": f"[main [redacted]] One\n[main {short_sha}] Two"},
+    ]})
+    audit = store.put("audits", {"session_ids": [session], "coverage": {}})
+    full_bundle = tmp_path / "full.json"
+    invoke(capsys, store.root, "--audit", audit, "export", str(full_bundle), session)
+    full_scope = ("--bundle", str(full_bundle))
+    assert invoke(capsys, store.root, *full_scope, "commits", long_sha)["items"]
+
+    for source in (("--audit", audit), full_scope):
+        for content in ("redacted", "metadata"):
+            scope = (*source, "--content", content)
+            assert invoke(capsys, store.root, *scope, "commits", long_sha[:7])["items"] == []
+            assert invoke(capsys, store.root, *scope, "commits", short_sha)["items"]
+            destination = tmp_path / f"{source[0][2:]}-{content}.json"
+            invoke(capsys, store.root, *scope, "export", str(destination), session)
+            assert long_sha not in destination.read_text()
+            short = invoke(capsys, store.root, "--bundle", str(destination), "commits", short_sha)
+            assert short["items"][0]["observed_sha"] == short_sha
+
+
 def test_freeze_selected_attempt_and_compare_without_a_judge(tmp_path, capsys):
     store = Store(tmp_path / "private")
     events = [

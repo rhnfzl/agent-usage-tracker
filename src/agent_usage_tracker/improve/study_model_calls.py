@@ -33,6 +33,16 @@ def native_count(session: dict[str, Any], events: list[dict[str, Any]], coverage
     count, started = receipt.get("count"), parse_ts(receipt.get("started_at"))
     if type(count) is not int or count < 1 or not started or not started.tzinfo:
         return None
+    # The receipt covers the whole turn, including work before the selected prompt.
+    opening = events[0].get("source_sha256", events[0].get("text"))
+    worked = False
+    for event in session["events"]:
+        if event.get("native_turn_key") != turn:
+            continue
+        kind = event["kind"]
+        if kind == "prompt" and (worked or event.get("source_sha256", event.get("text")) != opening):
+            return None
+        worked = worked or kind in {"call", "result", "reply"}
     for event in events:
         stamp = parse_ts(event.get("timestamp"))
         if not stamp or not stamp.tzinfo or stamp < started:

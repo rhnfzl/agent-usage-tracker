@@ -2,12 +2,17 @@ import json
 import os
 import subprocess
 
+import pytest
+
 from agent_usage_tracker.cli import main
 from agent_usage_tracker.improve.decide import accept, adopt
 from agent_usage_tracker.improve.store import Store
 
 
-def test_skill_proposal_needs_independent_success_and_stages_only_in_candidate(tmp_path, capsys):
+@pytest.mark.parametrize("shared_source", [None, "native", "two-t3-threads"])
+def test_skill_proposal_needs_independent_success_and_stages_only_in_candidate(
+    tmp_path, capsys, shared_source,
+):
     scope = tmp_path / "repo"
     scope.mkdir()
     subprocess.run(["git", "init", "-q", str(scope)], check=True)
@@ -21,8 +26,11 @@ def test_skill_proposal_needs_independent_success_and_stages_only_in_candidate(t
              "status": "success", "text": f"Verified {n}"},
             {"id": f"b{n}", "kind": "boundary", "text": "turn_complete"},
         ]
-        sessions.append(store.put("sessions", {"agent": "codex", "session_id": f"s{n}",
-            "cwd": str(scope), "events": events, "coverage": {"complete": True}}))
+        session = {"agent": "codex", "session_id": f"s{n}",
+                   "cwd": str(scope), "events": events, "coverage": {"complete": True}}
+        if shared_source and (n == 1 or shared_source == "two-t3-threads"):
+            session.update(agent="t3", session_id=f"t3:{n}", native_sessions=[["codex", "s0"]])
+        sessions.append(store.put("sessions", session))
         cases.append(store.put("cases", {"session_snapshot": sessions[-1], "events": events,
             "coverage": {"complete": True}, "omitted_task_events": 0}))
     audit = store.put("audits", {"session_ids": sessions, "coverage": {}})
@@ -36,8 +44,14 @@ def test_skill_proposal_needs_independent_success_and_stages_only_in_candidate(t
     capsys.readouterr()
 
     candidate = tmp_path / "candidate"
-    assert main([*args, "--proof", f"{cases[0]}:r0", "--proof", f"{cases[1]}:r1",
-                 "--candidate", str(candidate)]) == 0
+    result = main([*args, "--proof", f"{cases[0]}:r0", "--proof", f"{cases[1]}:r1",
+                   "--candidate", str(candidate)])
+    if shared_source:
+        assert result == 1
+        assert "repeated or copied attempts" in capsys.readouterr().err
+        assert not candidate.exists()
+        return
+    assert result == 0
     key = json.loads(capsys.readouterr().out)["proposal_id"]
     item = store.get("proposals", key)
     assert item["before_sha256"] is None

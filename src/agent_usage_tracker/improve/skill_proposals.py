@@ -10,7 +10,8 @@ from ..config import AutError
 from .case_view import _attempt
 from .outputs import commits_in
 from .proposals import matches_file, prepare, save_change
-from .store import Store, digest, repository
+from .store import Store, repository
+from .study_independence import attempt_fingerprint, source_identities
 
 SKILL_TARGET = re.compile(r"\.agents/skills/([a-z0-9]+(?:-[a-z0-9]+)*)/SKILL\.md")
 
@@ -61,12 +62,11 @@ def propose_skill(store: Store, audit_id: str, scope: Path, target: str,
                 or not any(event["kind"] == "call" and event.get("call_id") == call
                            for event in events[:events.index(observed[0])])):
             raise AutError("evidence: cite a matched successful result in a complete attempt")
-        identity = (session["agent"], session.get("session_id", ""))
-        signature = digest([{key: event.get(key) for key in ("kind", "text", "status", "tool")}
-                            for event in events])
-        if not identity[1] or identity in sources or signature in attempts:
+        identities = source_identities(session)
+        signature = attempt_fingerprint(events)
+        if not session.get("session_id") or sources.intersection(identities) or signature in attempts:
             raise AutError("evidence: repeated or copied attempts cannot corroborate a skill")
-        sources.add(identity)
+        sources.update(identities)
         attempts.add(signature)
         supporting.append({"case_id": case_id, "session_id": session_id, "event_id": event_id,
                            "commit_ids": commits_in(case, session)})

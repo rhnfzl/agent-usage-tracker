@@ -313,8 +313,6 @@ class Evidence:
     def commits(self, commit: str, offset: int = 0, limit: int = 30,
                 source: Literal["command", "checkpoint"] = "command") -> dict[str, Any]:
         """Find captured Git commit results or saved workspace checkpoints."""
-        from .outputs import commit_evidence
-
         _page(offset, limit)
         if source == "checkpoint":
             return self._checkpoint_commits(commit, offset, limit)
@@ -325,10 +323,7 @@ class Evidence:
         matched = 0
         for key in self.keys:
             row = self._read(key, include_text=self.content == "full")
-            commits = row.get("commits")
-            if commits is None:
-                commits = commit_evidence(row["events"], row.get("links"))
-            for link in commits:
+            for link in self._command_commits(row, row.get("links")):
                 observed = link["observed_sha"]
                 if not (commit.startswith(observed) or observed.startswith(commit)):
                     continue
@@ -341,6 +336,18 @@ class Evidence:
                         "observed_prefix" if commit.startswith(observed) else "query_prefix")
                 items.append({"session_id": key, **link, "match": kind})
         return {"items": items, "next_offset": None, **self.describe()}
+
+    def _command_commits(self, row: dict[str, Any], links: dict[str, str] | None
+                         ) -> Iterator[dict[str, str]]:
+        from .outputs import commit_evidence
+
+        recorded = row.get("commits")
+        if recorded is None:
+            recorded = commit_evidence(row["events"], links)
+        for link in recorded:
+            sha = link["observed_sha"]
+            if self.content == "full" or sha == redact(sha):
+                yield link
 
     def _checkpoint_commits(self, commit: str, offset: int, limit: int) -> dict[str, Any]:
         if self.content == "metadata":
@@ -454,8 +461,6 @@ class Evidence:
                                   supplemental=self.supplemental)
 
     def export(self, path: Path, ids: list[str]) -> dict[str, Any]:
-        from .outputs import commit_evidence
-
         if not ids or len(set(ids)) != len(ids):
             raise AutError("evidence: select distinct session IDs for export")
         sessions = {}
@@ -467,12 +472,9 @@ class Evidence:
             summary["related_sessions"] = [sid for sid in row["related_sessions"] if sid in ids]
             events = row["events"]
             links = row["links"] if self.bundled else event_links(events)
-            commits = row.get("commits")
-            if commits is None:
-                commits = list(commit_evidence(events, links))
             projected = {**summary, "events": [self._event(event, selected=included)
                                                for event in events],
-                         "links": links, "commits": commits}
+                         "links": links, "commits": list(self._command_commits(row, links))}
             size += len(canonical(projected).encode("utf-8"))
             if size > BUNDLE_LIMIT:
                 raise AutError("evidence: select fewer sessions for the 64 MiB bundle limit")
