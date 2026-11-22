@@ -6,8 +6,10 @@ import sqlite3
 
 import pytest
 
-from agent_usage_tracker.improve.judge import cases
+from agent_usage_tracker.improve.access import Evidence
+from agent_usage_tracker.improve.judge import cases, freeze_case
 from agent_usage_tracker.improve.store import Store, audit
+from agent_usage_tracker.improve.study_observe import _sample
 
 
 TABLES = {
@@ -130,6 +132,83 @@ def test_t3_identical_linked_native_files_share_one_supplement(tmp_path):
     _, result, sessions = capture(tmp_path, home, limit=1)
     assert len(sessions[0]['supplemental_sources']) == 1
     assert result['duplicates'] == 1
+    db.close()
+
+
+@pytest.mark.parametrize('mode', ['linked', 'one_item', 'split_turns', 'two_copies', 'reused_turn'])
+def test_t3_turn_context_requires_distinct_native_items_in_one_completed_turn(tmp_path, mode):
+    home = tmp_path / 'home'
+    db, _ = fixture_db(home)
+    add_run(db, provider='codex')
+    ref = {'driver': 'codex', 'strength': 'strong'}
+    item(db, 'r1', 'one', 'assistant_message', 3, text='first',
+         nativeItemRef={**ref, 'nativeId': 'first'})
+    item(db, 'r1', 'two', 'assistant_message', 4, text='second',
+         nativeItemRef={**ref, 'nativeId': 'second',
+                        'strength': 'weak' if mode == 'one_item' else 'strong'})
+    if mode == 'reused_turn':
+        add_run(db, 'r2', 'codex', 2)
+        db.execute("""UPDATE orchestration_v2_projection_provider_threads SET payload_json=?
+                      WHERE provider_thread_id='ptr2'""",
+                   (json.dumps({'nativeThreadRef': {**ref, 'nativeId': 'nativer1'}}),))
+        for name in ('first', 'second'):
+            item(db, 'r2', name, 'assistant_message', 3, text=name,
+                 nativeItemRef={**ref, 'nativeId': name})
+    db.commit()
+    folder = home / '.codex/sessions'
+    folder.mkdir(parents=True)
+    rows = [('session_meta', {'id': 'nativer1', 'source': 'cli'})]
+
+    def native_turn(turn_id, names):
+        rows.extend([
+            ('event_msg', {'type': 'task_started', 'turn_id': turn_id}),
+            ('turn_context', {'turn_id': turn_id, 'model': 'actual-model', 'cwd': str(tmp_path)}),
+        ])
+        for name in names:
+            rows.append(('event_msg', {'type': 'item_completed',
+                         'item': {'type': 'AgentMessage', 'id': name, 'text': name}}))
+        rows.append(('event_msg', {'type': 'task_complete', 'turn_id': turn_id}))
+
+    if mode == 'split_turns':
+        native_turn('native-turn', ['first'])
+        native_turn('other-turn', ['second'])
+    else:
+        native_turn('native-turn', ['first', 'second'])
+    raw = ''.join(json.dumps({'type': kind, 'timestamp': END, 'payload': payload}) + '\n'
+                  for kind, payload in rows)
+    (folder / 'rollout-native.jsonl').write_text(raw)
+    os.utime(folder / 'rollout-native.jsonl', (1_000_000_000, 1_000_000_000))
+    if mode == 'two_copies':
+        (folder / 'rollout-other.jsonl').write_text(raw.replace('actual-model', 'different-model'))
+        os.utime(folder / 'rollout-other.jsonl', (1_000_000_000, 1_000_000_000))
+    store, result, [session] = capture(tmp_path, home)
+    audit_id = result['audit_id']
+    key, = store.get('audits', audit_id)['session_ids']
+    boundary = next(event for event in session['events'] if event['kind'] == 'boundary')
+    sample = _sample(store, freeze_case(store, audit_id, key, boundary['id']))
+    if mode == 'linked':
+        assert sample['context_status'] == 'observed'
+        assert sample['model'] == 'actual-model'
+        assert sample['cwd'] == str(tmp_path)
+        assert sample['tool_events_complete']
+        view = Evidence('metadata', store=store, audit_id=audit_id)
+        context = view.event(key, boundary['id'])['turn_context']
+        assert context['source_session'] == session['supplemental_sources'][0]
+        assert context['matching_items'] == 2
+        assert 'model' not in context and 'cwd' not in context
+        view = Evidence('redacted', store=store, audit_id=audit_id)
+        for name, snapshots in [('single', [key]), ('with-source', [key, context['source_session']])]:
+            bundle = tmp_path / (name + '.json')
+            view.export(bundle, snapshots)
+            copied = Evidence('redacted', bundle=bundle).event(key, boundary['id'])['turn_context']
+            if name == 'single':
+                assert copied == {'status': 'missing'}
+            else:
+                assert copied['source_event'] == context['source_event']
+                assert copied['model'] == 'actual-model'
+    else:
+        assert sample['context_status'] != 'observed'
+        assert sample['model'] is None
     db.close()
 
 

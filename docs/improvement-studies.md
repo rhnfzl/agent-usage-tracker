@@ -223,6 +223,8 @@ task quality, cause, or the setup loaded for each attempt. The controlled trial 
 
 Set `require_turn_context` to require an observed model and workspace from both attempts.
 AUT can link those fields to completed turns in supported native Codex logs.
+T3 runs can use that context when at least two strong item references match one completed native
+Codex turn. Include the native snapshot when exporting a bundle that needs to show this context.
 Missing or conflicting records and attempts spanning several native turns exclude the pair.
 Strict policies require enough eligible baseline cases at creation, before adoption.
 Legacy cases can still use session labels when the policy allows them.

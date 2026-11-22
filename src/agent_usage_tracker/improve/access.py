@@ -103,12 +103,24 @@ class Evidence:
     def _label(self, value: str) -> str:
         return redact(value) if self.content == "redacted" else value
 
-    def _event(self, event: dict[str, Any], *, text: bool = True) -> dict[str, Any]:
+    def _event(self, event: dict[str, Any], *, text: bool = True,
+               selected: set[str] | None = None) -> dict[str, Any]:
         result = {field: event[field] for field in EVENT_METADATA if field in event}
         context = event.get("turn_context")
         if isinstance(context, dict) and context.get("status") in ("observed", "missing", "ambiguous"):
             visible = {"status": context["status"]}
-            if context["status"] == "observed":
+            source = context.get("source_session")
+            if source is not None and (not isinstance(source, str)
+                    or source not in self.keys and source not in self.supplemental
+                    or selected is not None and source not in selected):
+                visible["status"] = "missing"
+            if visible["status"] == "observed":
+                source_event, matching_items = context.get("source_event"), context.get("matching_items")
+                if (isinstance(source, str) and isinstance(source_event, str)
+                        and EVENT_ID.fullmatch(source_event) and type(matching_items) is int
+                        and matching_items >= 2):
+                    visible.update(source_session=source, source_event=source_event,
+                                   matching_items=matching_items)
                 record = context.get("record")
                 if isinstance(record, dict):
                     visible["record"] = {name: record[name] for name in ("line", "byte_offset")
@@ -347,6 +359,7 @@ class Evidence:
             raise AutError("evidence: select distinct session IDs for export")
         sessions = {}
         size = 0
+        included = set(ids)
         for key in ids:
             row = self._read(key)
             summary = self._summary(row)
@@ -356,7 +369,8 @@ class Evidence:
             commits = row.get("commits")
             if commits is None:
                 commits = list(commit_evidence(events, links))
-            projected = {**summary, "events": [self._event(event) for event in events],
+            projected = {**summary, "events": [self._event(event, selected=included)
+                                               for event in events],
                          "links": links, "commits": commits}
             size += len(canonical(projected).encode("utf-8"))
             if size > BUNDLE_LIMIT:

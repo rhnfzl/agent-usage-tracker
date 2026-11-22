@@ -184,8 +184,12 @@ def audit(store: Store, home: Path, *, days: int = 7, limit: int = 40,
     t3_rows, t3_counts = t3.snapshots(home, since=since, limit=limit,
                                     idle_s=idle_s, max_bytes=max_bytes, capture_full=capture_full)
     counts.update(t3_counts)
+    claims = Counter(native_id for row in t3_rows for driver, native_id in row["native_sessions"]
+                     if driver == "codex")
+    shared_native = {native_id for native_id, count in claims.items() if count > 1}
     mirrors: dict[tuple[str, str], str] = {}
     supplemental_sessions: set[str] = set()
+    linked_primaries: set[str] = set()
     supplement_reads = 0
     # App threads join provider handoffs; native mirrors remain referenced, not counted twice.
     candidates: list[tuple[float, str, Path | dict[str, Any]]] = [
@@ -208,7 +212,8 @@ def audit(store: Store, home: Path, *, days: int = 7, limit: int = 40,
             else:
                 evidence = read_session(candidate, agent, max_bytes=max_bytes, since_epoch=since,
                                         imports=imports, exclude_automated=True, recent=True,
-                                        capture_full=capture_full, track_workspaces=project is not None)
+                                        capture_full=capture_full, track_workspaces=project is not None,
+                                        track_native_items=agent == "codex" and bool(mirrors))
         except (OSError, ValueError, TypeError, OverflowError, sqlite3.DatabaseError, AutError):
             counts["unreadable_sources"] += 1
             continue
@@ -239,6 +244,8 @@ def audit(store: Store, home: Path, *, days: int = 7, limit: int = 40,
             primary["source_family_link"] = "Native linkage is not proof of equivalent coverage."
             updated_key = store.put("sessions", primary)
             sessions[sessions.index(primary_key)] = updated_key
+            linked_primaries.discard(primary_key)
+            linked_primaries.add(updated_key)
             mirrors = {pair: updated_key if key == primary_key else key
                        for pair, key in mirrors.items()}
             copies[("t3", primary["session_id"])] = [updated_key]
@@ -247,6 +254,7 @@ def audit(store: Store, home: Path, *, days: int = 7, limit: int = 40,
         if not evidence["events"]:
             counts["no_recent_evidence"] += 1
             continue
+        evidence.pop("native_item_turns", None)
         source = (agent, evidence["source"]["sha256"])
         if source in seen:
             counts["duplicates"] += 1
@@ -270,6 +278,18 @@ def audit(store: Store, home: Path, *, days: int = 7, limit: int = 40,
             counts[name] += coverage.get(name, 0)
         counts["error_results"] += sum(e["kind"] == "result" and e["status"] == "error"
                                        for e in evidence["events"])
+    for index, key in enumerate(sessions):
+        if key not in linked_primaries:
+            continue
+        row = store.get("sessions", key)
+        if not row.get("native_runs"):
+            continue
+        supplements = {sid: store.get("sessions", sid) for sid in row["supplemental_sources"]}
+        if corroborated := t3.link_native_context(row, supplements, shared_native):
+            counts["t3_corroborated_turns"] += corroborated
+            updated = store.put("sessions", row)
+            sessions[index] = updated
+            copies["t3", row["session_id"]] = [updated]
     ambiguous = sorted(key for group in copies.values() if len(group) > 1 for key in group)
     counts["complete_sessions"] = sum(store.get("sessions", key)["coverage"]["complete"]
                                      and key not in ambiguous for key in sessions)

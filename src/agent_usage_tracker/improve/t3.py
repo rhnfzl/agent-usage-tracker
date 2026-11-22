@@ -6,7 +6,7 @@ import hashlib
 import json
 import sqlite3
 import time
-from collections import Counter
+from collections import Counter, defaultdict
 from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
@@ -15,7 +15,7 @@ from typing import Any
 from ..collectors.activity_common import result_status
 from ..event import parse_ts
 from ..redact import redact
-from .evidence import TEXT_LIMIT, VERSION, _text
+from .evidence import TEXT_LIMIT, VERSION, _text, native_item_key
 
 MAX_ROWS = 20000
 HUMAN_SOURCES = {"web", "mobile"}
@@ -25,6 +25,59 @@ TERMINAL = {"completed", "failed", "error", "interrupted", "cancelled"}
 
 def _hash(value: Any) -> str:
     return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+
+
+def _strong_codex_id(ref: object) -> str | None:
+    if isinstance(ref, dict) and ref.get('driver') == 'codex' and ref.get('strength') == 'strong':
+        if isinstance(value := ref.get('nativeId'), str) and value:
+            return value
+    return None
+
+
+def link_native_context(session: dict[str, Any], supplements: dict[str, dict[str, Any]],
+                        shared_native: set[str]) -> int:
+    """Attach observed Codex context to T3 runs corroborated by distinct items."""
+    by_id: dict[str, list[tuple[str, dict[str, Any]]]] = defaultdict(list)
+    for key, source in supplements.items():
+        if source['agent'] == 'codex' and source['session_id'] not in shared_native:
+            by_id[source['session_id']].append((key, source))
+    matches: dict[str, tuple[str, str, dict[str, Any]]] = {}
+    targets: Counter[tuple[str, str]] = Counter()
+    for run, ref in session.get('native_runs', {}).items():
+        copies = by_id[ref['session_id']]
+        if len(copies) != 1:
+            continue
+        key, source = copies[0]
+        if any(source['coverage'].get(gap) for gap in ('malformed_records', 'unknown_copy_boundary')):
+            continue
+        item_turns = source.get('native_item_turns', {})
+        supports = [item_turns[item] for item in ref['items'] if item in item_turns]
+        turns = {turn for support in supports for turn in support}
+        if len(supports) < 2 or len(turns) != 1:
+            continue
+        turn = next(iter(turns))
+        boundaries = [event for event in source['events'] if event['kind'] == 'boundary'
+                      and event.get('native_turn_key') == turn]
+        if (len(boundaries) != 1 or boundaries[0]['text'] != 'turn_complete'
+                or boundaries[0].get('turn_context', {}).get('status') != 'observed'):
+            continue
+        boundary = boundaries[0]
+        context = {**boundary['turn_context'], 'source_session': key,
+                   'source_event': boundary['id'], 'matching_items': len(supports)}
+        matches[run] = key, turn, context
+        targets[key, turn] += 1
+
+    linked = 0
+    for event in session['events']:
+        match = matches.get(event['run_id'])
+        if match is not None:
+            key, turn, context = match
+            if targets[key, turn] == 1:
+                event['native_turn_key'] = turn
+                if event['kind'] == 'boundary':
+                    event['turn_context'] = context
+                    linked += 1
+    return linked
 
 
 def snapshots(home: Path, *, since: float, limit: int, idle_s: int,
@@ -139,6 +192,7 @@ def _thread(db: sqlite3.Connection, path: Path, thread: str, cwd: str, since: fl
     native: set[tuple[str, str]] = set()
     seen_providers: set[str] = set()
     run_coverage: dict[str, dict[str, Any]] = {}
+    native_runs: dict[str, dict[str, Any]] = {}
 
     def emit(kind: str, value: Any, record: dict[str, Any], timestamp: Any,
              run: str, provider: str, *, call: str = '', tool: str = '',
@@ -191,6 +245,11 @@ def _thread(db: sqlite3.Connection, path: Path, thread: str, cwd: str, since: fl
                 if message['value'].get('attachments') or message['value'].get('context'):
                     coverage['projection_gaps'] += 1
         run_items = [item for item in items if item['columns'][1] == key]
+        if provider == 'codex' and status == 'completed' and (native_id := _strong_codex_id(ref)):
+            native_items = {native_item_key(native_item) for item in run_items
+                            if (native_item := _strong_codex_id(item['value'].get('nativeItemRef')))}
+            if len(native_items) >= 2:
+                native_runs[key] = {'session_id': native_id, 'items': sorted(native_items)}
         if not run_items:
             coverage['projection_gaps'] += 1
         for item in run_items:
@@ -267,6 +326,7 @@ def _thread(db: sqlite3.Connection, path: Path, thread: str, cwd: str, since: fl
     return {'version': VERSION, 'agent': 't3', 'session_id': 't3:' + thread,
             'cwd': cwd, 'origin': 'interactive', 'model': None,
             'providers': sorted(seen_providers), 'native_sessions': sorted(native),
+            **({'native_runs': native_runs} if native_runs else {}),
             'instruction_exposure': {'status': 'unknown',
                 'reason': 'Project files alone do not prove past instruction delivery.'},
             'events': events, 'coverage': state,

@@ -47,6 +47,10 @@ def has_attachment(content: object) -> bool:
                                             in ATTACHMENT_TYPES for block in content)
 
 
+def native_item_key(value: str) -> str:
+    return hashlib.sha256(value.encode()).hexdigest()
+
+
 def trace_event(agent: str, session: str, kind: str, identity: str, value: object,
                 timestamp: object, *, call: object = "", tool: object = "",
                 status: str = "unknown", omitted_attachment: bool = False,
@@ -130,7 +134,8 @@ def read_session(path: Path, agent: str, max_bytes: int = BYTE_LIMIT,
                  since_epoch: float | None = None,
                  imports: dict[str, datetime] | None = None, *,
                  exclude_automated: bool = False, recent: bool = False,
-                 capture_full: bool = False, track_workspaces: bool = False) -> dict[str, Any] | None:
+                 capture_full: bool = False, track_workspaces: bool = False,
+                 track_native_items: bool = False) -> dict[str, Any] | None:
     if agent not in {"claude_code", "codex", "pi"} or max_bytes < 1:
         raise ValueError("choose a supported trace source and a positive byte limit")
     events: list[dict[str, Any]] = []
@@ -145,6 +150,7 @@ def read_session(path: Path, agent: str, max_bytes: int = BYTE_LIMIT,
     active_turn: str | None = None
     active_turn_key: str | None = None
     recorded_context: dict[str, Any] | None = None
+    item_turns: dict[str, set[str]] = {}
     used = 0
     ranges: list[list[int]] = []
     observation: dict[str, int] = {}
@@ -307,6 +313,14 @@ def read_session(path: Path, agent: str, max_bytes: int = BYTE_LIMIT,
             if kind not in {"session_meta", "turn_context"} and not in_window(record):
                 continue
             sub = payload.get("type")
+            if track_native_items and active_turn_key:
+                item_id = None
+                if kind == "event_msg" and sub == "item_completed":
+                    item_id = dict_or_empty(payload.get("item")).get("id")
+                elif kind == "response_item":
+                    item_id = payload.get("id") or payload.get("call_id")
+                if isinstance(item_id, str) and item_id:
+                    item_turns.setdefault(native_item_key(item_id), set()).add(active_turn_key)
             if kind == "turn_context":
                 model = payload.get("model") or model
                 context_model, context_cwd = payload.get("model"), payload.get("cwd")
@@ -458,6 +472,8 @@ def read_session(path: Path, agent: str, max_bytes: int = BYTE_LIMIT,
         "unknown_copy_boundary", "source_incomplete"))
     return {"version": VERSION, "agent": agent, "session_id": session, "cwd": cwd,
             "origin": origin, "model": model, "events": events, "coverage": coverage,
+            **({"native_item_turns": {key: sorted(turns) for key, turns in item_turns.items()}}
+               if item_turns else {}),
             **({"observed_workspaces": sorted(workspaces)} if track_workspaces else {}),
             "source": {"path": str(path), "sha256": digest.hexdigest(), "bytes": used,
                        "ranges": ranges,
