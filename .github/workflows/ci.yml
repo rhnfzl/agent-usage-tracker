@@ -88,8 +88,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - run: pip install -e ".[test,mcp]"
+      - run: pip install -e ".[test,mcp,code]"
       - run: pytest -q tests/improve/test_evidence_mcp.py
+      - run: pytest -q tests/improve/test_investigation.py tests/improve/test_session_observability.py
 
   lint:
     runs-on: ubuntu-latest

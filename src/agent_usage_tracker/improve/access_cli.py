@@ -25,7 +25,7 @@ def register(commands: Any) -> None:
     scope = parser.add_mutually_exclusive_group()
     scope.add_argument("--audit", help="freeze access to the selected audit ID")
     scope.add_argument("--bundle", type=Path, help="open a previously exported evidence bundle")
-    parser.add_argument("--content", choices=MODES, default="full",
+    parser.add_argument("--content", choices=MODES,
                         help="content available through this command or MCP connection")
     actions = parser.add_subparsers(dest="evidence_cmd", required=True)
 
@@ -34,6 +34,8 @@ def register(commands: Any) -> None:
     capture.add_argument("--limit", type=int, default=20)
     capture.add_argument("--idle-s", type=int, default=120)
     capture.add_argument("--project", type=Path)
+    capture.add_argument("--no-observe", action="store_true", help="keep this capture local")
+    actions.add_parser("observe", help="send the selected audit or bundle to session observability")
     capture.add_argument("--max-mib", type=int, default=BYTE_LIMIT // _MIB,
                          help="maximum MiB read per source (1..256, default: 16)")
     record = actions.add_parser("record-codex-turn", help="record Git context from a Codex prompt hook")
@@ -94,12 +96,31 @@ def register(commands: Any) -> None:
     export.add_argument("ids", nargs="+")
     mcp = actions.add_parser("mcp", help="serve the selected evidence through MCP")
     mcp.add_argument("--transport", choices=("stdio", "http"), default="stdio")
+    code = actions.add_parser("run-code", help="run a local evidence recipe")
+    code.add_argument("source", nargs="?", help="Python recipe path or - for stdin")
+    code.add_argument("--recipe", help="reuse the source from a saved run")
+    code.add_argument("--params", help="JSON object passed to the program")
+    code.add_argument("--save", action="store_true", help="save private recipe and replay record")
+    replay = actions.add_parser("replay-code", help="replay a saved investigation")
+    replay.add_argument("run_id")
+    actions.add_parser("code-catalog", help="list operations available to recipes")
+    mcp.add_argument("--code", action="store_true", help="enable programmable investigations")
+    for action in (code, replay, mcp):
+        action.add_argument("--include-audit", action="append", default=[])
+        action.add_argument("--include-bundle", action="append", type=Path, default=[])
     mcp.add_argument("--port", type=int, default=8765, help="loopback port for HTTP")
 
 
 def run(args: argparse.Namespace) -> None:
     root = args.root or Path(os.environ.get("AUT_IMPROVE_ROOT", str(data_dir() / "improve")))
     action = args.evidence_cmd
+    with_code = action in {"run-code", "replay-code", "code-catalog"} or (
+        action == "mcp" and args.code)
+    args.content = args.content or ("redacted" if with_code else "full")
+    if action == "code-catalog" or action in {"run-code", "replay-code"}:
+        value = _code(args, root)
+        print(json.dumps(value, sort_keys=True))
+        return
     if action == "record-codex-turn":
         if args.audit or args.bundle:
             raise AutError("evidence: the Codex turn hook uses a store, not an audit or bundle")
@@ -112,13 +133,24 @@ def run(args: argparse.Namespace) -> None:
             raise AutError("evidence: capture takes no scope and requires full or redacted content")
         if not 1 <= args.max_mib <= _MAX_CAPTURE_MIB:
             raise AutError("evidence: use a per-source capture budget of 1..256 MiB")
-        value = audit(Store(root), Path.home(), days=args.days, limit=args.limit,
+        writable = Store(root)
+        value = audit(writable, Path.home(), days=args.days, limit=args.limit,
                       idle_s=args.idle_s, project=args.project, capture_full=args.content == "full",
                       max_bytes=args.max_mib * _MIB)
+        if not args.no_observe and os.environ.get("AUT_SESSION_OBSERVABILITY_URL"):
+            from .session_observability import publish
+            try:
+                value["observability"] = publish(args.content, writable, value["audit_id"], None)
+            except AutError as exc:
+                value["observability"] = {"status": "failed", "error": str(exc)}
     else:
         if not (args.audit or args.bundle):
             raise AutError("evidence: select --audit ID or --bundle PATH")
         store = Store(root, read_only=True) if args.audit else None
+        if action == "observe":
+            from .session_observability import publish
+            print(json.dumps(publish(args.content, store, args.audit, args.bundle), sort_keys=True))
+            return
         evidence = Evidence(args.content, store, args.audit, args.bundle)
         if action == "mcp":
             try:
@@ -127,7 +159,14 @@ def run(args: argparse.Namespace) -> None:
                 if exc.name not in {"mcp", "anyio", "uvicorn", "starlette"}:
                     raise
                 raise AutError("evidence: install agent-usage-tracker[mcp] for MCP access") from exc
-            serve(evidence, args.transport, args.port)
+            scopes = None
+            if args.code:
+                from .investigation import scope_specs
+                scopes = scope_specs(root, args.content, args.audit, args.bundle,
+                                     args.include_audit, args.include_bundle)
+            elif args.include_audit or args.include_bundle:
+                raise AutError("investigation: additional scopes require mcp --code")
+            serve(evidence, args.transport, args.port, scopes)
             return
         if action == "propose-skill":
             if store is None:
@@ -178,3 +217,47 @@ def run(args: argparse.Namespace) -> None:
         else:
             value = evidence.describe()
     print(json.dumps(value, sort_keys=True))
+
+
+def _code(args: argparse.Namespace, root: Path) -> dict[str, Any]:
+    from .investigation import CONTRACT, MAX_SOURCE, catalog, run, scope_specs
+    from .store import digest
+
+    if args.evidence_cmd == "code-catalog":
+        return catalog()
+    if not (args.audit or args.bundle):
+        raise AutError("investigation: select --audit ID or --bundle PATH")
+    specs = scope_specs(root, args.content, args.audit, args.bundle,
+                        args.include_audit, args.include_bundle)
+    if args.evidence_cmd == "replay-code":
+        record = Store(root, read_only=True).get("investigation_runs", args.run_id)
+        if record["contract"] != CONTRACT:
+            raise AutError("investigation: saved recipe uses an unsupported operation contract")
+        value = run(record["source"], record["params"], specs, record["scopes"])
+        return {**value, "replayed": args.run_id, "matches": digest(value) == record["result_sha256"]}
+    if bool(args.source) == bool(args.recipe):
+        raise AutError("investigation: select a source path, stdin, or --recipe ID")
+    try:
+        params = json.loads(args.params) if args.params is not None else {}
+        if args.recipe:
+            recipe = Store(root, read_only=True).get("investigation_runs", args.recipe)
+            if recipe["contract"] != CONTRACT:
+                raise AutError("investigation: saved recipe uses an unsupported operation contract")
+            source = recipe["source"]
+            if args.params is None:
+                params = recipe["params"]
+        elif args.source == "-":
+            source = sys.stdin.buffer.read(MAX_SOURCE + 1).decode("utf-8")
+        else:
+            with Path(args.source).open("rb") as stream:
+                source = stream.read(MAX_SOURCE + 1).decode("utf-8")
+    except (ValueError, OSError, RecursionError) as exc:
+        raise AutError("investigation: provide UTF-8 source and valid JSON parameters") from exc
+    value = run(source, params, specs)
+    if args.save:
+        record = {"contract": CONTRACT, "source": source, "params": params,
+                  "scopes": value["scopes"], "result_sha256": digest(value),
+                  "reads": value["reads"], "aut_version": value["aut_version"],
+                  "runtime_version": value["runtime_version"]}
+        value["run_id"] = Store(root).put("investigation_runs", record)
+    return value

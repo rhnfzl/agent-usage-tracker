@@ -81,3 +81,29 @@ def test_installed_files_are_verified_without_relying_on_installer_archive_hashe
     target.write_bytes(b"value = 9\n")
     with pytest.raises(AutError, match="differs"):
         runtime._verify_wheel(wheel, library)
+
+
+def test_code_runtime_preserves_separate_release_identity(tmp_path, monkeypatch):
+    store = Store(tmp_path / "private")
+    wheel = tmp_path / "package.whl"
+    wheel.write_bytes(b"wheel")
+    root = tmp_path / "runtimes"
+    monkeypatch.setattr(runtime.shutil, "which", lambda _: "uv")
+    commands = []
+    monkeypatch.setattr(runtime.subprocess, "run", lambda argv, **_: commands.append(argv))
+
+    def check_output(argv, **kwargs):
+        if argv[1:3] == ["pip", "freeze"]:
+            return "pins\n"
+        release = next(path for path in (root / "releases").iterdir() if path.is_dir())
+        return json.dumps({"module": str(release / "site/agent_usage_tracker/__init__.py"),
+                           "library": str(release / "site"),
+                           "source": {"url": (release / wheel.name).as_uri()},
+                           "code_available": True, "version": "0.4.0"})
+
+    monkeypatch.setattr(runtime.subprocess, "check_output", check_output)
+    monkeypatch.setattr(runtime, "_verify_wheel", lambda *_: None)
+    installed = runtime.install(store, wheel, root, code=True)
+    assert installed["extras"] == ["label", "mcp", "code"]
+    assert installed["runtime"].endswith("-code")
+    assert commands[-1][-1].endswith("[label,mcp,code]")
