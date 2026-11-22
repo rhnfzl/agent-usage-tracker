@@ -195,6 +195,8 @@ aut evidence --audit AUDIT_ID --content redacted freeze-case SESSION_ID EVENT_ID
 
 Review the task family before freezing a case. The preview reports distinct sessions and coverage
 exclusions for each page. Add `--include-excluded` to see individual reasons.
+For incomplete T3 captures, the preview reports available projection gap counts by item kind.
+The counts identify missing evidence without exposing the item payloads.
 Follow `next_cursor` to continue the scan. Use `--before` with a timezone to exclude later work.
 The study checks source reuse, project and model compatibility, and any required setup evidence.
 

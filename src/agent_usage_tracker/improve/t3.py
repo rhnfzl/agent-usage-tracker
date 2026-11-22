@@ -30,6 +30,23 @@ _CHECKPOINT_TABLE = 'orchestration_v2_projection_checkpoints'
 _SCOPE_TABLE = 'orchestration_v2_projection_checkpoint_scopes'
 # Item states after which T3 will add no output.
 TERMINAL = {"completed", "failed", "error", "interrupted", "cancelled"}
+_UNSUPPORTED_GAP_KINDS = {
+    "notification", "run_interrupt_request", "run_interrupt_result", "subagent",
+    "system_notice", "todo_list", "user_input_request", "web_search",
+}
+_PROJECTION_GAP_KINDS = _UNSUPPORTED_GAP_KINDS | {
+    "prompt_context", "no_items", "unfinished_tool", "streaming_reply", "unsupported_item",
+}
+
+
+def projection_gaps(coverage: dict[str, Any], run_id: str | None) -> dict[str, int]:
+    runs = coverage.get("run_coverage")
+    run = runs.get(run_id) if isinstance(runs, dict) else None
+    gaps = run.get("projection_gaps") if isinstance(run, dict) else None
+    if not isinstance(gaps, dict):
+        return {}
+    return {kind: count for kind, count in gaps.items()
+            if kind in _PROJECTION_GAP_KINDS and type(count) is int and count > 0}
 
 
 def _hash(value: Any) -> str:
@@ -306,6 +323,7 @@ def _thread(db: sqlite3.Connection, path: Path, thread: str, cwd: str, since: fl
 
     for run in runs:
         before = coverage.copy()
+        gaps: Counter[str] = Counter()
         key, provider, provider_thread, status, requested, completed, proven = run['columns']
         prompt = human.get(run['value'].get('userMessageId'))
         if not proven:
@@ -333,7 +351,7 @@ def _thread(db: sqlite3.Connection, path: Path, thread: str, cwd: str, since: fl
                 emit('prompt', message['value'].get('text', ''), message,
                      message['columns'][3], key, provider)
                 if message['value'].get('attachments') or message['value'].get('context'):
-                    coverage['projection_gaps'] += 1
+                    gaps["prompt_context"] += 1
         run_items = [item for item in items if item['columns'][1] == key]
         if provider == 'codex' and status == 'completed' and (native_id := _strong_codex_id(ref)):
             native_items = {native_item_key(native_item) for item in run_items
@@ -341,7 +359,7 @@ def _thread(db: sqlite3.Connection, path: Path, thread: str, cwd: str, since: fl
             if len(native_items) >= 2:
                 native_runs[key] = {'session_id': native_id, 'items': sorted(native_items)}
         if not run_items:
-            coverage['projection_gaps'] += 1
+            gaps["no_items"] += 1
         for item in run_items:
             value = item['value']
             kind = value.get('type')
@@ -374,16 +392,16 @@ def _thread(db: sqlite3.Connection, path: Path, thread: str, cwd: str, since: fl
                     emit('result', output, item, end, key, provider, call=call_id,
                          status=result)
                 else:
-                    coverage['projection_gaps'] += 1
+                    gaps["unfinished_tool"] += 1
             elif kind == 'assistant_message':
                 emit('reply', value.get('text', ''), item, end, key, provider)
                 if value.get('streaming'):
-                    coverage['projection_gaps'] += 1
+                    gaps["streaming_reply"] += 1
             elif kind in {'compaction', 'handoff'}:
                 emit('compaction', 'Context changed: ' + kind, item, at, key, provider)
             elif kind not in {'reasoning', 'user_message', 'checkpoint'}:
                 # Secret and approval payloads are deliberately never normalized into text.
-                coverage['projection_gaps'] += 1
+                gaps[kind if kind in _UNSUPPORTED_GAP_KINDS else "unsupported_item"] += 1
         if status == 'completed' and completed:
             emit('boundary', 'turn_complete', run, completed, key, provider)
             checkpoint_id = run['value'].get('checkpointId')
@@ -400,10 +418,12 @@ def _thread(db: sqlite3.Connection, path: Path, thread: str, cwd: str, since: fl
                         checkpoints[key] = checkpoint
         else:
             coverage['incomplete_runs'] += 1
+        coverage['projection_gaps'] += sum(gaps.values())
         run_coverage[key] = {'source_incomplete': bool(coverage['byte_cap_reached']) or any(
             coverage[name] > before[name] for name in (
                 'projection_gaps', 'incomplete_runs', 'missing_timestamps')),
-                'missing_timestamps': coverage['missing_timestamps'] - before['missing_timestamps']}
+                'missing_timestamps': coverage['missing_timestamps'] - before['missing_timestamps'],
+                **({"projection_gaps": dict(gaps)} if gaps else {})}
     totals['t3_byte_capped_threads'] += bool(coverage['byte_cap_reached'])
     if not events:
         return None

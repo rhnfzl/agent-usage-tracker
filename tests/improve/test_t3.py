@@ -536,3 +536,20 @@ def test_t3_structured_command_exit_precedes_stdout(tmp_path):
     outcomes = {e['record_id']: e['status'] for e in sessions[0]['events'] if e['kind'] == 'result'}
     assert outcomes == {'cmdr1': 'error', 'nonzero': 'error', 'zero': 'success',
                         'cancelled': 'unknown', 'app-error': 'error'}
+
+
+def test_t3_work_preview_names_projection_gaps_without_revealing_payload(tmp_path):
+    home = tmp_path / 'home'
+    db, _ = fixture_db(home)
+    with db:
+        add_run(db)
+        item(db, 'r1', 'notice', 'system_notice', 3, message='private notice body')
+        item(db, 'r1', 'search', 'web_search', 4, patterns=['private query'])
+        item(db, 'r1', 'unavailable', 'custom_fixture_secret_type', 5, text='private text')
+    db.close()
+    store, capture_result, _ = capture(tmp_path, home)
+    view = Evidence('metadata', store, capture_result['audit_id'])
+    row, = view.ordinary_work('identical_tool_retries', 'tool_events', include_excluded=True)['items']
+    assert row['reason'] == 'measurement_coverage_incomplete'
+    assert row['projection_gaps'] == {'system_notice': 1, 'web_search': 1, 'unsupported_item': 1}
+    assert 'private' not in json.dumps(row) and 'custom_fixture_secret_type' not in json.dumps(row)
