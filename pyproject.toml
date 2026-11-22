@@ -38,7 +38,7 @@ merge = ["torch>=2.14", "peft>=0.21", "transformers>=5.17", "huggingface_hub>=1.
 mcp = ["mcp>=1.30,<2"]
 
 # Run the suite: pip install -e '.[test]' && pytest -q
-test = ["pytest"]
+test = ["pytest", "pytest-xdist==3.8.0"]
 
 [project.urls]
 Homepage = "https://github.com/rhnfzl/agent-usage-tracker"

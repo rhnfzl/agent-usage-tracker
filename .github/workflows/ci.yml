@@ -5,13 +5,21 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
+# A new PR run supersedes the previous one. Main pushes and manual reruns have separate groups.
+concurrency:
+  group: ci-${{ github.event_name }}-${{ github.run_attempt == '1' && github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' && github.run_attempt == '1' }}
+
 jobs:
   # The OS matrix is not decoration: the README claims macOS/Linux/Windows and the
   # collectors resolve agent log paths per-OS, so all three get exercised.
   test:
     name: test (${{ matrix.os }}, py${{ matrix.python-version }})
     runs-on: ${{ matrix.os }}
-    # macOS has taken about 8.5 min and was once cancelled at 15, so keep well above that.
+    # Keep room for slow macOS runners.
     timeout-minutes: 25
     strategy:
       fail-fast: false
@@ -29,11 +37,14 @@ jobs:
           - { os: ubuntu-latest, python-version: "3.13", tz: America/Los_Angeles }
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
       - run: pip install -e ".[test]"
-      - run: pytest -q
+      # Use a fixed worker count to leave capacity for tests that launch child processes.
+      - run: pytest -q -n 3 --dist worksteal --max-worker-restart=0 --durations=15
         env:
           TZ: ${{ matrix.tz }}
 
@@ -54,6 +65,8 @@ jobs:
       AUT_TEST_PG_DSN: postgresql://postgres:aut@127.0.0.1:5432/postgres
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -70,6 +83,8 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -81,6 +96,8 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -89,3 +106,20 @@ jobs:
       - run: pip install ruff==0.15.11 mypy==2.4.1
       - run: ruff check .
       - run: mypy
+
+  required:
+    name: CI required
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: [test, sink-sql, evidence-mcp, lint]
+    if: ${{ always() }}
+    steps:
+      - name: Require every validation job to pass
+        env:
+          TEST: ${{ needs.test.result }}
+          SINK_SQL: ${{ needs.sink-sql.result }}
+          EVIDENCE_MCP: ${{ needs.evidence-mcp.result }}
+          LINT: ${{ needs.lint.result }}
+        run: |
+          printf 'test=%s\nsink-sql=%s\nevidence-mcp=%s\nlint=%s\n' "$TEST" "$SINK_SQL" "$EVIDENCE_MCP" "$LINT"
+          test "$TEST" = success && test "$SINK_SQL" = success && test "$EVIDENCE_MCP" = success && test "$LINT" = success
