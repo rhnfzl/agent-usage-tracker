@@ -71,22 +71,23 @@ def serve(evidence: Evidence, transport: str, port: int,
         server.add_tool(_tool(operation), annotations=ToolAnnotations(
             readOnlyHint=True, destructiveHint=False, openWorldHint=False))
     if code_scopes is not None:
-        from .investigation import catalog, require_runtime, run
+        from .investigation import catalog, pin_scopes, require_runtime, run
 
         require_runtime()
         slots = BoundedSemaphore(2)
         scopes = code_scopes
+        pinned = pin_scopes(scopes, evidence)
 
         def code_catalog() -> dict[str, Any]:
             """List the evidence operations and arguments accepted by run_code."""
-            return {**catalog(), "scopes": [str(i) for i in range(1, len(scopes) + 1)]}
+            return {**catalog(), "scopes": pinned}
 
         def run_code(source: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
             """Run scoped Python using read(operation, scope='1', lead=None, **arguments)."""
             if not slots.acquire(blocking=False):
                 raise AutError("investigation: both execution slots are busy")
             try:
-                return run(source, params if params is not None else {}, scopes)
+                return run(source, params if params is not None else {}, scopes, pinned)
             finally:
                 slots.release()
 

@@ -130,7 +130,18 @@ def test_print_and_fresh_scope_recipe(evidence, tmp_path, capsys):
     assert observed["stdout"] == "observed\n"
     assert observed["result"] == 1
     assert main([*base, audits[1], "replay-code", observed["run_id"]]) == 1
-    assert "replay scope" in capsys.readouterr().err
+    assert "evidence scope" in capsys.readouterr().err
     assert main([*base, audits[1], "run-code", "--recipe", observed["run_id"]]) == 0
     updated = json.loads(capsys.readouterr().out)
     assert updated["result"] == 2
+
+
+
+def test_unicode_source_parameters_and_output(evidence, tmp_path, capsys):
+    pytest.importorskip("pydantic_monty")
+    store, audits, _ = evidence
+    recipe = tmp_path / "recipe.py"
+    recipe.write_text('"café " + params["place"]', encoding="utf-8")
+    assert main(["evidence", "--root", str(store.root), "--audit", audits[0],
+                 "run-code", str(recipe), "--params", '{"place":"東京"}']) == 0
+    assert json.loads(capsys.readouterr().out)["result"] == "café 東京"

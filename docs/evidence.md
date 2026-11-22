@@ -253,7 +253,8 @@ optionally pass new parameters.
 Install `agent-usage-tracker[mcp,code]` to use a recipe through MCP. Add `--code`
 to the server arguments after `mcp` and include any additional scopes there.
 The server adds `code_catalog` and `run_code(source, params)`. The client receives
-the result under the connection's grant. A client connected to a hosted model can
+the result under the connection's grant. Restart the MCP server to select a
+changed bundle. A client connected to a hosted model can
 forward that result. Session observability settings govern a separate delivery
 path.
 

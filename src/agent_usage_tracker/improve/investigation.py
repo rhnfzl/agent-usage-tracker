@@ -69,8 +69,8 @@ def scope_specs(root: Path, content: str, audit: str | None, bundle: Path | None
                *((None, path) for path in bundles)]
     if len(sources) > MAX_SCOPES:
         raise AutError(f"investigation: select at most {MAX_SCOPES} evidence scopes")
-    specs = [{"audit": key, "bundle": str(path.resolve()) if path else None,
-              "root": str(root.resolve()) if key else None, "content": content}
+    specs = [{"audit": key, "bundle": str(path.expanduser().resolve()) if path else None,
+              "root": str(root.expanduser().resolve()) if key else None, "content": content}
              for key, path in sources]
     if len({(row["audit"], row["bundle"]) for row in specs}) != len(specs):
         raise AutError("investigation: select distinct evidence scopes")
@@ -122,35 +122,59 @@ def run(source: str, params: dict[str, Any], specs: list[dict[str, Any]],
 
 
 def _references(operation: str, value: dict[str, Any]) -> list[dict[str, str]]:
-    references = []
-    session = value.get("session", {}).get("id") or value.get("session_id")
-    if operation == "event":
-        return [{"session_id": value["session_id"], "event_id": value["id"]}]
-    for item in value.get("items", []):
-        key = item.get("session_id") or item.get("session_snapshot") or session
-        event = item.get("event_id") or item.get("id") or item.get("result_event_id")
-        if isinstance(key, str) and isinstance(event, str):
-            references.append({"session_id": key, "event_id": event})
-    if operation == "case":
-        references.extend({"session_id": value["session_id"], "event_id": key}
-                          for key in value["event_ids"])
-    return references
+    references: dict[tuple[str, str], None] = {}
+
+    def include(session: Any, *events: Any) -> None:
+        if isinstance(session, str):
+            for event in events:
+                if isinstance(event, str):
+                    references[session, event] = None
+
+    if operation == "compare":
+        difference = value["first_tool_difference"] or {}
+        for side in ("baseline", "candidate"):
+            row = value[side]
+            tool = difference.get(side) or {}
+            include(row["id"], *row["error_event_ids"], tool.get("call_event_id"),
+                    tool.get("result_event_id"))
+    elif operation == "event":
+        include(value["session_id"], value["id"])
+    elif operation == "case":
+        include(value["session_id"], *value["event_ids"])
+    else:
+        session = value.get("session", {}).get("id")
+        for item in value.get("items", []):
+            key = item.get("session_id") or item.get("session_snapshot") or session
+            include(key, item.get("event_id") or item.get("id"), item.get("call_event_id"),
+                    item.get("result_event_id"))
+    return [{"session_id": session, "event_id": event} for session, event in references]
+
+
+def _open_scope(spec: dict[str, Any]) -> Evidence:
+    store = Store(Path(spec["root"]), read_only=True) if spec["root"] else None
+    bundle = Path(spec["bundle"]) if spec["bundle"] else None
+    return Evidence(spec["content"], store, spec["audit"], bundle)
+
+
+def _describe_scope(evidence: Evidence) -> dict[str, Any]:
+    return {**evidence.describe(), "bundle": digest(evidence.bundled) if evidence.bundled else None}
+
+
+def pin_scopes(specs: list[dict[str, Any]], primary: Evidence) -> dict[str, Any]:
+    scopes = {"1": _describe_scope(primary)}
+    for i, spec in enumerate(specs[1:], 2):
+        scopes[str(i)] = _describe_scope(_open_scope(spec))
+    return scopes
 
 
 def _execute(source: str, params: dict[str, Any], specs: list[dict[str, Any]],
              expected_scopes: dict[str, Any] | None) -> dict[str, Any]:
     from pydantic_monty import Monty, MontyError, MontyRuntimeError, MontySyntaxError
 
-    sources = {}
-    scopes = {}
-    for i, spec in enumerate(specs, 1):
-        store = Store(Path(spec["root"]), read_only=True) if spec["root"] else None
-        bundle = Path(spec["bundle"]) if spec["bundle"] else None
-        evidence = Evidence(spec["content"], store, spec["audit"], bundle)
-        sources[str(i)] = evidence
-        scopes[str(i)] = {**evidence.describe(), "bundle": digest(evidence.bundled) if bundle else None}
+    sources = {str(i): _open_scope(spec) for i, spec in enumerate(specs, 1)}
+    scopes = {alias: _describe_scope(evidence) for alias, evidence in sources.items()}
     if expected_scopes is not None and scopes != expected_scopes:
-        raise AutError("investigation: replay scope or content grant differs from the saved run")
+        raise AutError("investigation: evidence scope or content grant changed")
 
     reads: list[dict[str, Any]] = []
     printed: list[str] = []
@@ -221,11 +245,11 @@ def _execute(source: str, params: dict[str, Any], specs: list[dict[str, Any]],
 
 def worker() -> None:
     try:
-        request = json.load(sys.stdin)
+        request = json.load(sys.stdin.buffer)
         value = _execute(**request)
     except AutError as exc:
         value = {"error": str(exc)}
-    print(canonical(value))
+    sys.stdout.buffer.write(canonical(value).encode("utf-8") + b"\n")
 
 
 if __name__ == "__main__":
