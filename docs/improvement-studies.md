@@ -250,8 +250,27 @@ Preview checks the frozen policy and pair evidence without saving an observation
 The comparison excludes incomplete cases, repeated evidence, mismatched setups, and cases outside
 the time window. Candidates must come from a UTC day after the recorded adoption date.
 Unpaired baselines, too few eligible pairs, or a mean reduction within the threshold leave the result
-inconclusive. The result reports a decrease or increase in the measured count. It does not verify
-task quality, cause, or the setup loaded for each attempt. The controlled trial keeps its own result.
+inconclusive. The result reports a decrease or increase in the measured count.
+The controlled trial keeps its own result.
+
+### Require reviewed task acceptance
+
+Use one acceptance criterion per task family. Review each frozen baseline case against that
+criterion. Cite the captured reply or result that supports your review.
+
+```sh
+aut improve study review-case --case BASELINE_CASE_ID --family "fresh worktree setup" \
+  --criterion "The requested checks finish and the report identifies each result." \
+  --result accepted --cite RESULT_EVENT_ID
+```
+
+Add `baseline_reviews` to the observation policy. Map each baseline case ID to its accepted
+review ID before you freeze the study. Use the same wording to review each fresh candidate.
+Include the returned ID as `candidate_review_id` in its observation pair.
+
+A missing, rejected, or unknown candidate review leaves the comparison inconclusive. The report
+retains the review IDs and outcome counts. Review records capture the operator's decision against
+the stated criterion. This step makes no model calls.
 
 Set `require_turn_context` to require an observed model and workspace from both attempts.
 AUT can link those fields to completed turns in supported native Codex logs.

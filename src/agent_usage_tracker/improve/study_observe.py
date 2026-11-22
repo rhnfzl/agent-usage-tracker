@@ -21,6 +21,7 @@ from .judge import _attempt_coverage, _complete_attempt
 from .setup_git import COMMIT_ID, target_in_workspace, verify_setup
 from .store import Store, repository
 from .study_independence import ReservedEvidence, attempt_fingerprint, reserved_evidence, source_identities
+from .study_reviews import baseline_reviews, read_review
 from .turn_revisions import details as turn_revision_details
 
 METRICS = ("tool_errors", "tool_calls", "codex_model_calls")
@@ -39,7 +40,7 @@ def validate_measurement(policy: dict[str, Any]) -> None:
 def validate_policy(policy: Any) -> None:
     if (not isinstance(policy, dict)
             or set(policy) - {"require_turn_context", "coverage_basis", "require_setup_revision",
-                              "require_approved_file_read", "require_worktree_setup"}
+                              "require_approved_file_read", "require_worktree_setup", "baseline_reviews"}
             != {"metric", "minimum_pairs", "minimum_improvement", "baseline_cases"}
             or type(policy.get("require_setup_revision", False)) is not bool
             or policy.get("require_setup_revision") and not policy.get("require_turn_context")
@@ -59,6 +60,12 @@ def validate_policy(policy: Any) -> None:
                    or not isinstance(family, str) or not family.strip() or len(family) > 200
                    for key, family in baseline.items())):
         raise AutError("improve: freeze distinct baseline case IDs and their task families")
+    if "baseline_reviews" in policy:
+        reviews = policy["baseline_reviews"]
+        if (not isinstance(reviews, dict) or set(reviews) != set(baseline)
+                or any(not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value)
+                       for value in reviews.values())):
+            raise AutError("improve: freeze one acceptance review ID for each baseline case")
 
 
 def _sample(store: Store, case_id: str) -> dict[str, Any]:
@@ -229,6 +236,7 @@ def baseline_gate(policy: dict[str, Any], proposal: dict[str, Any], reserved: Re
 
 def check_baselines(store: Store, policy: dict[str, Any], proposal: dict[str, Any],
                     before: datetime, reserved: ReservedEvidence) -> None:
+    baseline_reviews(store, policy, before)
     check = baseline_gate(policy, proposal, reserved, before)
     sessions: set[tuple[str, str]] = set()
     contents: set[str] = set()
@@ -269,6 +277,7 @@ def observe(store: Store, study_id: str, spec: dict[str, Any], *,
     if adopted <= frozen.astimezone(timezone.utc).date():
         raise AutError("improve: the recorded adoption day must follow the policy day")
     baseline = policy["baseline_cases"]
+    frozen_reviews = baseline_reviews(store, policy, frozen)
     pairs = spec["pairs"]
     if not isinstance(pairs, list) or len(pairs) > 200:
         raise AutError("improve: supply up to 200 matched pairs")
@@ -299,11 +308,13 @@ def observe(store: Store, study_id: str, spec: dict[str, Any], *,
     seen_sources: set[tuple[str, str]] = set()
     seen_content: set[str] = set()
     counts: Counter[str] = Counter()
+    acceptance: Counter[str] = Counter()
     outcomes = []
     metric = policy["metric"]
 
     for pair in pairs:
-        fields(pair, "baseline candidate family")
+        has_review = bool(frozen_reviews and isinstance(pair, dict) and "candidate_review_id" in pair)
+        fields(pair, "baseline candidate family" + (" candidate_review_id" if has_review else ""))
         left, right, family = (pair[key] for key in ("baseline", "candidate", "family"))
         if not all(isinstance(value, str) and value.strip() for value in (left, right, family)):
             raise AutError("improve: each pair needs two case IDs and a task family")
@@ -314,6 +325,22 @@ def observe(store: Store, study_id: str, spec: dict[str, Any], *,
             raise AutError("improve: a case can appear only once in a comparison")
         seen_cases.update((left, right))
         before, after = _sample(store, left), _sample(store, right)
+        review_fields = {}
+        review_issue = None
+        if frozen_reviews:
+            result = "missing"
+            if has_review:
+                review = read_review(store, pair["candidate_review_id"], right, family)
+                if review["criterion"] != frozen_reviews[left]["criterion"]:
+                    raise AutError("improve: candidate review must use the frozen acceptance criterion")
+                if datetime.fromisoformat(review["reviewed_at"]) <= frozen:
+                    raise AutError("improve: candidate review must follow the frozen policy")
+                result = review["result"]
+            acceptance[result] += 1
+            review_fields = {"baseline_review_id": policy["baseline_reviews"][left],
+                             "candidate_acceptance": result}
+            review_issue = {"missing": "task_review_missing", "unknown": "task_acceptance_unknown",
+                            "rejected": "task_not_accepted"}.get(result)
         sources = before["source_identities"] | after["source_identities"]
         content = {before["content"], after["content"]}
         contexts = {before["context_status"], after["context_status"]}
@@ -350,6 +377,8 @@ def observe(store: Store, study_id: str, spec: dict[str, Any], *,
             reason = "worktree_setup_unverified"
         elif before[metric] is None or after[metric] is None:
             reason = "metric_unknown"
+        elif review_issue:
+            reason = review_issue
         approved_read = None
         if require_read and reason is None:
             source = after["read_origin"]
@@ -366,9 +395,9 @@ def observe(store: Store, study_id: str, spec: dict[str, Any], *,
         seen_content.update(content)
         if reason:
             counts[reason] += 1
-            outcomes.append({**pair, "eligible": False, "reason": reason})
+            outcomes.append({**pair, **review_fields, "eligible": False, "reason": reason})
             continue
-        outcomes.append({**pair, "eligible": True, "baseline_value": before[metric],
+        outcomes.append({**pair, **review_fields, "eligible": True, "baseline_value": before[metric],
                          "candidate_value": after[metric],
                          "reduction": before[metric] - after[metric],
                          "uses_tool_events_only": policy.get("coverage_basis") == "tool_events"
@@ -383,7 +412,9 @@ def observe(store: Store, study_id: str, spec: dict[str, Any], *,
     reduction = mean(reductions) if reductions else None
     comparison = "inconclusive"
     unpaired = sorted(set(baseline) - paired_baselines)
-    if not unpaired and len(reductions) >= policy["minimum_pairs"] and reduction is not None:
+    all_accepted = bool(frozen_reviews and not unpaired and acceptance["accepted"] == len(baseline))
+    if (not unpaired and (not frozen_reviews or all_accepted) and len(reductions) >= policy["minimum_pairs"]
+            and reduction is not None):
         if reduction > policy["minimum_improvement"]:
             comparison = "observed_decrease"
         elif reduction < -policy["minimum_improvement"]:
@@ -402,6 +433,8 @@ def observe(store: Store, study_id: str, spec: dict[str, Any], *,
               **({"worktree_setup_verified_pairs": len(reductions)} if require_worktree else {}),
               "approved_file_read_pairs": sum("approved_file_read" in row for row in outcomes),
               **({"adoption_commit_setup": adoption_setup} if require_setup else {}),
+              **({"task_acceptance": {"basis": "operator_review", "all_cases_accepted": all_accepted,
+                                     "candidate_results": dict(acceptance)}} if frozen_reviews else {}),
               "unpaired_baseline_ids": unpaired, "mean_reduction": reduction, "pairs": outcomes,
               "causal_effect_established": False, "task_quality_verified": False,
               "attempt_setup_exposure_verified": False,

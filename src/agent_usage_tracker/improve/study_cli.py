@@ -15,6 +15,7 @@ from .store import Store, digest
 from .studies import assess, create, shortlist
 from .study_followup import followup, transfer
 from .study_observe import COVERAGE_BASES, METRICS
+from .study_reviews import RESULTS, record_review
 
 
 def register(subparsers: Any) -> None:
@@ -28,6 +29,12 @@ def register(subparsers: Any) -> None:
                         help="freeze a trusted trial file with a policy that omits trial_spec_id")
     action = actions.add_parser("assess", help="report each stored proof stage")
     action.add_argument("--study", required=True)
+    review = actions.add_parser("review-case", help="record the operator's acceptance review of an attempt")
+    review.add_argument("--case", required=True)
+    review.add_argument("--family", required=True)
+    review.add_argument("--criterion", required=True)
+    review.add_argument("--result", choices=RESULTS, required=True)
+    review.add_argument("--cite", action="append", default=[], metavar="EVENT_ID")
     action = actions.add_parser("preflight", help="find unused baseline candidates for a prospective study")
     source = action.add_mutually_exclusive_group(required=True)
     source.add_argument("--from-study", help="reuse a study's proposal, discovery and control evidence")
@@ -99,6 +106,8 @@ def run(args: argparse.Namespace, store: Store) -> dict[str, Any]:
         return shortlist(store, args.audit)
     if args.study_cmd == "assess":
         return assess(store, args.study)
+    if args.study_cmd == "review-case":
+        return record_review(store, args.case, args.family, args.criterion, args.result, args.cite)
     if args.study_cmd == "preflight":
         return _preflight(args, store)
     if args.study_cmd == "run":

@@ -642,6 +642,118 @@ def test_natural_work_observation_measures_only_eligible_pairs(
     assert set(no_work["unpaired_baseline_ids"]) == set(baseline)
 
 
+def test_reviewed_ordinary_work_requires_accepted_outcomes_for_the_frozen_cohort(
+    tmp_path, monkeypatch, capsys,
+):
+    import json
+    from datetime import datetime, timezone
+
+    from agent_usage_tracker.cli import main
+    from agent_usage_tracker.improve import studies, study_reviews
+    from agent_usage_tracker.improve.judge import freeze_case
+    from agent_usage_tracker.improve.study_observe import observe
+
+    class Clock(datetime):
+        current = datetime(2025, 2, 28, 12, tzinfo=timezone.utc)
+
+        @classmethod
+        def now(cls, tz=None):
+            return cls.current
+
+    monkeypatch.setattr(studies, "datetime", Clock)
+    monkeypatch.setattr(study_reviews, "datetime", Clock)
+    store, spec = fixture(tmp_path)
+    project = tmp_path / "project"
+    project.mkdir()
+    proposal = store.get("proposals", spec["proposal_id"])
+    spec["proposal_id"] = store.put("proposals", proposal | {"scope": str(project)})
+    family = "workspace setup"
+    criterion = "The requested checks finish and the report identifies each result."
+
+    def add(name, when, error=False):
+        events = [
+            {"id": "prompt", "kind": "prompt", "text": "Check workspace " + name},
+            {"id": "call", "kind": "call", "call_id": "cmd", "text": "verify"},
+            {"id": "result", "kind": "result", "call_id": "cmd",
+             "status": "error" if error else "success", "text": "First check"},
+            {"id": "reply", "kind": "reply", "text": "Report for " + name},
+            {"id": "end", "kind": "boundary", "text": "turn_complete"},
+        ]
+        for event in events:
+            event["timestamp"] = when
+        coverage = {"complete": True, "tool_events_checked": True, "calls": 1, "matched_results": 1}
+        snapshot = store.put("sessions", {"agent": "pi", "session_id": name, "origin": "interactive",
+            "model": "same", "cwd": str(project), "events": events, "coverage": coverage})
+        audit = store.put("audits", {"session_ids": [snapshot]})
+        return freeze_case(store, audit, snapshot, "end")
+
+    baseline = [add(f"baseline-{n}", "2025-02-27T12:00:00Z", error=True) for n in range(3)]
+    review_cmd = ["improve", "--root", str(store.root), "study", "review-case"]
+
+    def review(case, result="accepted", same_criterion=criterion):
+        assert main([*review_cmd, "--case", case, "--family", family,
+                     "--criterion", same_criterion, "--result", result, "--cite", "reply"]) == 0
+        return json.loads(capsys.readouterr().out)["review_id"]
+
+    assert main([*review_cmd, "--case", baseline[0], "--family", family,
+                 "--criterion", criterion, "--result", "accepted", "--cite", "outside"]) == 1
+    capsys.readouterr()
+    reviews = {case: review(case) for case in baseline}
+    observation = {
+        "metric": "tool_errors", "minimum_pairs": 2, "minimum_improvement": 0,
+        "baseline_cases": dict.fromkeys(baseline, family), "baseline_reviews": reviews,
+    }
+    different = review(baseline[2], same_criterion="Only the first check needs to finish.")
+    with pytest.raises(AutError, match="one frozen acceptance criterion"):
+        create(store, spec | {"observation_policy": observation | {
+            "baseline_reviews": reviews | {baseline[2]: different},
+        }})
+    with pytest.raises(AutError, match="already accepted"):
+        create(store, spec | {"observation_policy": observation | {
+            "baseline_reviews": reviews | {baseline[2]: review(baseline[2], result="rejected")},
+        }})
+    Clock.current = datetime(2025, 2, 28, 13, tzinfo=timezone.utc)
+    study = create(store, spec | {"observation_policy": observation})["study_id"]
+    adoption = store.put("adoptions", {"proposal_id": spec["proposal_id"],
+        "adopted_at": "2025-03-01", "commit": "a" * 40})
+    Clock.current = datetime(2025, 3, 3, 13, tzinfo=timezone.utc)
+    candidate = [add(f"candidate-{n}", "2025-03-03T12:00:00Z") for n in range(3)]
+    pairs = [{"baseline": old, "candidate": new, "family": family,
+              "candidate_review_id": review(new)} for old, new in zip(baseline, candidate)]
+
+    result = observe(store, study, {"adoption_id": adoption, "pairs": pairs})
+    assert result["comparison"] == "observed_decrease"
+    assert result["task_acceptance"] == {"basis": "operator_review", "all_cases_accepted": True,
+                                         "candidate_results": {"accepted": 3}}
+    assert result["pairs"][0]["baseline_review_id"] == reviews[baseline[0]]
+    assert result["pairs"][0]["candidate_review_id"] == pairs[0]["candidate_review_id"]
+    assert not result["causal_effect_established"]
+
+    rejected = observe(store, study, {"adoption_id": adoption, "pairs": [*pairs[:2], pairs[2] | {
+        "candidate_review_id": review(candidate[2], result="rejected"),
+    }]}, preview=True)
+    assert rejected["comparison"] == "inconclusive"
+    assert rejected["eligible_pairs"] == 2
+    assert rejected["exclusions"] == {"task_not_accepted": 1}
+    assert rejected["task_acceptance"]["candidate_results"] == {"accepted": 2, "rejected": 1}
+    unknown = observe(store, study, {"adoption_id": adoption, "pairs": [*pairs[:2], pairs[2] | {
+        "candidate_review_id": review(candidate[2], result="unknown"),
+    }]}, preview=True)
+    assert unknown["comparison"] == "inconclusive"
+    assert unknown["exclusions"] == {"task_acceptance_unknown": 1}
+
+    missing = observe(store, study, {"adoption_id": adoption, "pairs": [
+        *pairs[:2], {name: value for name, value in pairs[2].items() if name != "candidate_review_id"},
+    ]}, preview=True)
+    assert missing["comparison"] == "inconclusive"
+    assert missing["exclusions"] == {"task_review_missing": 1}
+    with pytest.raises(AutError, match="frozen acceptance criterion"):
+        observe(store, study, {"adoption_id": adoption, "pairs": [pairs[0] | {
+            "candidate_review_id": review(candidate[0], same_criterion="Only print a report."),
+        }]})
+    assert len(store.keys("study_observations")) == 1
+
+
 @pytest.mark.parametrize("read_mode", [None, "native", "mirrored"])
 def test_strict_observation_checks_adoption_and_session_setup_revisions(tmp_path, monkeypatch, read_mode):
     import hashlib
