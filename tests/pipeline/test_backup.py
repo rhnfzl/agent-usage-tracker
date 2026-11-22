@@ -79,6 +79,7 @@ def test_backup_runs_restic_with_the_default_paths_and_records_last_ok(world, ca
     for p in ("conf", "share/aut", "state"):              # config, label state + gold, the salt
         assert str(tmp / p) in args
     assert args[args.index("--exclude") + 1] == str(tmp / "share" / "aut" / "label" / "models")
+    assert str(tmp / "share" / "aut" / "improve" / "session_content") in args
     assert datetime.fromisoformat(_status(tmp)["last_ok"]) > datetime.now(timezone.utc) - \
         timedelta(minutes=1)
     out = capsys.readouterr()

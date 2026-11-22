@@ -9,6 +9,9 @@ command sends advisory counts and operator-written adoption markers to the priva
 policies, independent references and fresh follow-up. They report bounded supported, rejected or
 inconclusive effects without turning model estimates into general productivity claims.
 
+For interactive analysis from a coding agent, use the [CLI and MCP evidence workflow](evidence.md).
+It can freeze the specific attempt around a selected event for a proposal or study.
+
 ## Freeze evidence
 
 ```bash
@@ -517,6 +520,10 @@ so `--title` is required. The title is human-written, one line, at most 120 char
 meant for the sink (a later `publish-improve` step); targets, commit and note stay private.
 `benefit_claim` is always false. The same proposal and commit (or, without a proposal, the same
 title and commit) is one adoption, even when the command runs again on a later day.
+
+For a linked proposal, AUT checks the target file in the locally available commit.
+The result records whether the committed bytes match the proposal, differ, or are unavailable.
+The command records the operator's declaration in each case.
 
 ## Compare baseline and candidate
 

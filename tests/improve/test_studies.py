@@ -139,6 +139,27 @@ def test_shortlist_deduplicates_events_across_snapshots(tmp_path):
     assert len(result['incidents'][0]['snapshots']) == 2
 
 
+def test_shortlist_counts_recurrence_by_source_and_skips_empty_error_reports(tmp_path):
+    from agent_usage_tracker.improve.studies import shortlist
+
+    store = Store(tmp_path / 'store')
+    snapshots = []
+    for session, reports in [
+        ('first', ['', '{"exit_code":1,"output":""}', 'permission denied', 'permission denied']),
+        ('second', ['', '{"exit_code":1,"output":""}', 'permission denied']),
+    ]:
+        events = [{'id': str(i), 'kind': 'result', 'status': 'error', 'text': report}
+                  for i, report in enumerate(reports)]
+        snapshots.append(store.put('sessions', {'agent': 'codex', 'session_id': session,
+                                                'events': events}))
+    audit = store.put('audits', {'session_ids': snapshots})
+    result = shortlist(store, audit)
+    assert len(result['incidents']) == 7
+    assert sum(incident['signal'] is None for incident in result['incidents']) == 4
+    assert list(result['signal_counts'].values()) == [3]
+    assert list(result['signal_session_counts'].values()) == [2]
+
+
 def followup_fixture(tmp_path):
     from agent_usage_tracker.improve.proposals import file_digest
     store, study = fixture(tmp_path)
@@ -452,3 +473,474 @@ def test_byte_offsets_do_not_establish_study_or_followup_independence(tmp_path):
     follow_spec['trial_case_evidence'] = {'fresh': [copied_id]}
     with pytest.raises(AutError, match='copied|source event'):
         followup(store, sid, follow_spec)
+
+
+def test_study_freezes_absence_when_proposal_adds_a_skill(tmp_path):
+    from agent_usage_tracker.improve.proposals import file_digest
+    from agent_usage_tracker.improve.studies import run
+
+    store, study = fixture(tmp_path)
+    trial = store.get("trial_specs", study["trial_spec_id"])
+    source = tmp_path / "source"
+    source.mkdir()
+    target = ".agents/skills/check/SKILL.md"
+    candidate = Path(trial["directories"]["candidate"]) / target
+    candidate.parent.mkdir(parents=True)
+    candidate.write_text("Verified instructions", encoding="utf-8")
+    expected = file_digest(candidate)
+    proposal = store.get("proposals", study["proposal_id"])
+    proposal.update(scope=str(source), target=target, before_sha256=None, after_sha256=expected)
+    study["proposal_id"] = store.put("proposals", proposal)
+    acceptance = tmp_path / "accept.py"
+    acceptance.write_text(f"from pathlib import Path\nassert Path({target!r}).is_file()\n")
+    trial["files"] = {"baseline": {target: None}, "candidate": {target: expected}}
+    trial["cases"][0].update(argv=[sys.executable, str(acceptance)],
+                             acceptance_files={str(acceptance): file_digest(acceptance)})
+    study["trial_spec_id"] = store.put("trial_specs", trial)
+    key = create(store, study)["study_id"]
+    assert run(store, key, execute=True)["trial"]["accepted"] == {"baseline": 0, "candidate": 1}
+    assert not (source / target).exists()
+    baseline = Path(trial["directories"]["baseline"]) / target
+    baseline.parent.mkdir(parents=True)
+    baseline.write_text("Contaminated baseline")
+    with pytest.raises(AutError, match="baseline.*hash"):
+        run(store, key)
+
+
+@pytest.mark.parametrize("coverage_basis", ["full_case", "tool_events", "codex_model_calls"])
+def test_natural_work_observation_measures_only_eligible_pairs(
+    tmp_path, monkeypatch, capsys, coverage_basis,
+):
+    import json
+    from datetime import datetime, timezone
+
+    from agent_usage_tracker.cli import main
+    from agent_usage_tracker.improve import studies
+
+    class PolicyClock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2025, 2, 28, 12, tzinfo=timezone.utc)
+
+    monkeypatch.setattr(studies, "datetime", PolicyClock)
+    store, policy = fixture(tmp_path)
+    project = tmp_path / "source"
+    project.mkdir()
+    proposal = store.get("proposals", policy["proposal_id"])
+    proposal["scope"] = str(project)
+    policy["proposal_id"] = store.put("proposals", proposal)
+
+    def add(name, timestamp, errors, complete=True, model="one", native_started=None):
+        events = [{"id": "p", "kind": "prompt", "text": name, "timestamp": timestamp}]
+        for n in range(2):
+            events.extend([
+                {"id": f"c{n}", "kind": "call", "call_id": str(n),
+                 "text": name, "timestamp": timestamp},
+                {"id": f"r{n}", "kind": "result", "call_id": str(n),
+                 "status": "error" if n < errors else "success", "timestamp": timestamp},
+            ])
+        context = {"status": "observed", "model": model, "cwd": str(project)}
+        events.append({"id": "end", "kind": "boundary", "text": "turn_complete",
+                       "timestamp": timestamp, "turn_context": context})
+        for event in events:
+            event["native_turn_key"] = name
+        coverage = {"complete": complete, "source_incomplete": not complete,
+                    "tool_events_checked": True}
+        if coverage_basis == "tool_events":
+            events[2]["truncated"] = True
+            coverage["complete"] = False
+        if coverage_basis == "codex_model_calls":
+            events[1]["tool_representation"] = "model_call"
+            events[3]["tool_representation"] = "execution_item"
+            events[-1]["codex_model_call_receipt"] = {
+                "count": 1 + errors, "started_at": native_started or timestamp,
+                "thread_origin": "interactive",
+            }
+            coverage["complete"] = False
+        agent = "codex" if coverage_basis == "codex_model_calls" else "pi"
+        snapshot = store.put("sessions", {"agent": agent, "session_id": name, "model": "one",
+            "cwd": str(project), "origin": "interactive", "events": events, "coverage": coverage})
+        return store.put("cases", {"session_snapshot": snapshot, "events": events,
+            "coverage": coverage, "omitted_task_events": 0})
+
+    baseline = [add("old" + str(n), "2025-02-27T12:00:00+00:00", 1) for n in range(3)]
+    policy["observation_policy"] = {
+        "metric": "codex_model_calls" if coverage_basis == "codex_model_calls" else "tool_errors",
+        "minimum_pairs": 2, "minimum_improvement": 0, "require_turn_context": True,
+        "baseline_cases": {case_id: "workspace setup" for case_id in baseline},
+    }
+    if coverage_basis != "codex_model_calls":
+        policy["observation_policy"]["coverage_basis"] = coverage_basis
+    invalid = add("incomplete-baseline", "2025-02-27T12:00:00+00:00", 1, complete=False)
+    too_few = policy["observation_policy"] | {"baseline_cases": {
+        baseline[0]: "workspace setup", invalid: "workspace setup",
+    }}
+    with pytest.raises(AutError, match="eligible baseline"):
+        create(store, policy | {"observation_policy": too_few})
+    key = create(store, policy)["study_id"]
+    adoption = store.put("adoptions", {"proposal_id": policy["proposal_id"],
+        "adopted_at": "2025-03-01", "commit": "a" * 40})
+    candidate = [add("new" + str(n), "2025-03-03T12:00:00+00:00", 0, complete=n < 2)
+                 for n in range(3)]
+    spec = tmp_path / "observations.json"
+    spec.write_text(json.dumps({"adoption_id": adoption, "pairs": [
+        {"baseline": old, "candidate": new, "family": "workspace setup"}
+        for old, new in zip(baseline, candidate)]}))
+    assert main(["improve", "--root", str(store.root), "study", "observe",
+                 "--study", key, "--spec-file", str(spec), "--preview"]) == 0
+    preview = json.loads(capsys.readouterr().out)
+    assert preview.pop("preview") is True
+    assert store.keys("study_observations") == []
+    assert main(["improve", "--root", str(store.root), "study", "observe",
+                 "--study", key, "--spec-file", str(spec)]) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert {k: v for k, v in result.items() if k != "observation_id"} == preview
+    assert result["comparison"] == "observed_decrease"
+    assert result["eligible_pairs"] == 2
+    assert result["recorded_turn_context_pairs"] == 2
+    assert result["coverage_basis"] == coverage_basis
+    assert result["tool_events_only_pairs"] == (2 if coverage_basis == "tool_events" else 0)
+    assert result["excluded_pairs"] == 1
+    assert result["mean_reduction"] == 1
+    assert not result["causal_effect_established"]
+    assert not result["task_quality_verified"]
+    spec.write_text(json.dumps({"adoption_id": None, "pairs": []}))
+    assert main(["improve", "--root", str(store.root), "study", "observe",
+                 "--study", key, "--spec-file", str(spec)]) == 1
+    capsys.readouterr()
+    report = assess(store, key)
+    assert report["stages"]["observations"][0]["observation_id"] == result["observation_id"]
+    assert not report["improvement_established"]
+
+    different_model = add("different-turn-model", "2025-03-03T12:00:00+00:00", 0, model="two")
+    spec.write_text(json.dumps({"adoption_id": adoption, "pairs": [
+        {"baseline": baseline[0], "candidate": different_model, "family": "workspace setup"},
+    ]}))
+    command = ["improve", "--root", str(store.root), "study", "observe",
+               "--study", key, "--spec-file", str(spec)]
+    assert main(command) == 0
+    mismatch = json.loads(capsys.readouterr().out)
+    assert mismatch["comparison"] == "inconclusive"
+    assert mismatch["exclusions"] == {"project_harness_or_model_labels_differ": 1}
+
+    if coverage_basis == "codex_model_calls":
+        old_turn = add("already-open", "2025-03-02T10:00:00+00:00", 0,
+                       native_started="2025-03-01T10:00:00+00:00")
+        spec.write_text(json.dumps({"adoption_id": adoption, "pairs": [
+            {"baseline": baseline[0], "candidate": old_turn, "family": "workspace setup"},
+        ]}))
+        assert main(command) == 0
+        assert json.loads(capsys.readouterr().out)["exclusions"] == {
+            "missing_coverage_or_wrong_window": 1,
+        }
+
+    spec.write_text(json.dumps({"adoption_id": adoption, "pairs": []}))
+    assert main(command) == 0
+    no_work = json.loads(capsys.readouterr().out)
+    assert no_work["comparison"] == "inconclusive"
+    assert no_work["eligible_pairs"] == 0
+    assert set(no_work["unpaired_baseline_ids"]) == set(baseline)
+
+
+def test_reviewed_ordinary_work_requires_accepted_outcomes_for_the_frozen_cohort(
+    tmp_path, monkeypatch, capsys,
+):
+    import json
+    from datetime import datetime, timezone
+
+    from agent_usage_tracker.cli import main
+    from agent_usage_tracker.improve import studies, study_reviews
+    from agent_usage_tracker.improve.judge import freeze_case
+    from agent_usage_tracker.improve.study_observe import observe
+
+    class Clock(datetime):
+        current = datetime(2025, 2, 28, 12, tzinfo=timezone.utc)
+
+        @classmethod
+        def now(cls, tz=None):
+            return cls.current
+
+    monkeypatch.setattr(studies, "datetime", Clock)
+    monkeypatch.setattr(study_reviews, "datetime", Clock)
+    store, spec = fixture(tmp_path)
+    project = tmp_path / "project"
+    project.mkdir()
+    proposal = store.get("proposals", spec["proposal_id"])
+    spec["proposal_id"] = store.put("proposals", proposal | {"scope": str(project)})
+    family = "workspace setup"
+    criterion = "The requested checks finish and the report identifies each result."
+
+    def add(name, when, error=False):
+        events = [
+            {"id": "prompt", "kind": "prompt", "text": "Check workspace " + name},
+            {"id": "call", "kind": "call", "call_id": "cmd", "text": "verify"},
+            {"id": "result", "kind": "result", "call_id": "cmd",
+             "status": "error" if error else "success", "text": "First check"},
+            {"id": "reply", "kind": "reply", "text": "Report for " + name},
+            {"id": "end", "kind": "boundary", "text": "turn_complete"},
+        ]
+        for event in events:
+            event["timestamp"] = when
+        coverage = {"complete": True, "tool_events_checked": True, "calls": 1, "matched_results": 1}
+        snapshot = store.put("sessions", {"agent": "pi", "session_id": name, "origin": "interactive",
+            "model": "same", "cwd": str(project), "events": events, "coverage": coverage})
+        audit = store.put("audits", {"session_ids": [snapshot]})
+        return freeze_case(store, audit, snapshot, "end")
+
+    baseline = [add(f"baseline-{n}", "2025-02-27T12:00:00Z", error=True) for n in range(3)]
+    review_cmd = ["improve", "--root", str(store.root), "study", "review-case"]
+
+    def review(case, result="accepted", same_criterion=criterion):
+        assert main([*review_cmd, "--case", case, "--family", family,
+                     "--criterion", same_criterion, "--result", result, "--cite", "reply"]) == 0
+        return json.loads(capsys.readouterr().out)["review_id"]
+
+    assert main([*review_cmd, "--case", baseline[0], "--family", family,
+                 "--criterion", criterion, "--result", "accepted", "--cite", "outside"]) == 1
+    capsys.readouterr()
+    reviews = {case: review(case) for case in baseline}
+    observation = {
+        "metric": "tool_errors", "minimum_pairs": 2, "minimum_improvement": 0,
+        "baseline_cases": dict.fromkeys(baseline, family), "baseline_reviews": reviews,
+    }
+    different = review(baseline[2], same_criterion="Only the first check needs to finish.")
+    with pytest.raises(AutError, match="one frozen acceptance criterion"):
+        create(store, spec | {"observation_policy": observation | {
+            "baseline_reviews": reviews | {baseline[2]: different},
+        }})
+    with pytest.raises(AutError, match="already accepted"):
+        create(store, spec | {"observation_policy": observation | {
+            "baseline_reviews": reviews | {baseline[2]: review(baseline[2], result="rejected")},
+        }})
+    Clock.current = datetime(2025, 2, 28, 13, tzinfo=timezone.utc)
+    study = create(store, spec | {"observation_policy": observation})["study_id"]
+    adoption = store.put("adoptions", {"proposal_id": spec["proposal_id"],
+        "adopted_at": "2025-03-01", "commit": "a" * 40})
+    Clock.current = datetime(2025, 3, 3, 13, tzinfo=timezone.utc)
+    candidate = [add(f"candidate-{n}", "2025-03-03T12:00:00Z") for n in range(3)]
+    pairs = [{"baseline": old, "candidate": new, "family": family,
+              "candidate_review_id": review(new)} for old, new in zip(baseline, candidate)]
+
+    result = observe(store, study, {"adoption_id": adoption, "pairs": pairs})
+    assert result["comparison"] == "observed_decrease"
+    assert result["task_acceptance"] == {"basis": "operator_review", "all_cases_accepted": True,
+                                         "candidate_results": {"accepted": 3}}
+    assert result["pairs"][0]["baseline_review_id"] == reviews[baseline[0]]
+    assert result["pairs"][0]["candidate_review_id"] == pairs[0]["candidate_review_id"]
+    assert not result["causal_effect_established"]
+
+    rejected = observe(store, study, {"adoption_id": adoption, "pairs": [*pairs[:2], pairs[2] | {
+        "candidate_review_id": review(candidate[2], result="rejected"),
+    }]}, preview=True)
+    assert rejected["comparison"] == "inconclusive"
+    assert rejected["eligible_pairs"] == 2
+    assert rejected["exclusions"] == {"task_not_accepted": 1}
+    assert rejected["task_acceptance"]["candidate_results"] == {"accepted": 2, "rejected": 1}
+    unknown = observe(store, study, {"adoption_id": adoption, "pairs": [*pairs[:2], pairs[2] | {
+        "candidate_review_id": review(candidate[2], result="unknown"),
+    }]}, preview=True)
+    assert unknown["comparison"] == "inconclusive"
+    assert unknown["exclusions"] == {"task_acceptance_unknown": 1}
+
+    missing = observe(store, study, {"adoption_id": adoption, "pairs": [
+        *pairs[:2], {name: value for name, value in pairs[2].items() if name != "candidate_review_id"},
+    ]}, preview=True)
+    assert missing["comparison"] == "inconclusive"
+    assert missing["exclusions"] == {"task_review_missing": 1}
+    with pytest.raises(AutError, match="frozen acceptance criterion"):
+        observe(store, study, {"adoption_id": adoption, "pairs": [pairs[0] | {
+            "candidate_review_id": review(candidate[0], same_criterion="Only print a report."),
+        }]})
+    assert len(store.keys("study_observations")) == 1
+
+
+@pytest.mark.parametrize("read_mode", [None, "native", "mirrored", "mirrored_count"])
+def test_strict_observation_checks_adoption_and_session_setup_revisions(tmp_path, monkeypatch, read_mode):
+    import hashlib
+    import json
+    import subprocess
+    from datetime import datetime, timezone
+
+    from agent_usage_tracker.improve import decide, studies
+    from agent_usage_tracker.improve.evidence import native_item_key, read_session
+    from agent_usage_tracker.improve.judge import freeze_case
+    from agent_usage_tracker.improve.proposals import prepare
+    from agent_usage_tracker.improve.store import digest
+    from agent_usage_tracker.improve.study_observe import observe
+    from agent_usage_tracker.improve.t3 import link_native_context
+
+    class PolicyClock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2025, 2, 28, 12, tzinfo=timezone.utc)
+
+    monkeypatch.setattr(studies, "datetime", PolicyClock)
+    mirrored = read_mode in {"mirrored", "mirrored_count"}
+    measure_count = read_mode == "mirrored_count"
+    store, policy = fixture(tmp_path)
+    source = tmp_path / "source"
+    source.mkdir()
+
+    def git(*args):
+        return subprocess.check_output(["git", "-C", str(source), "-c", "user.name=T",
+                                        "-c", "user.email=t@x", "-c", "commit.gpgsign=false",
+                                        *args], text=True).strip()
+
+    target = source / "setup"
+    git("init", "-q", "-b", "main")
+    target.write_text("before")
+    git("add", "setup")
+    git("commit", "-qm", "baseline")
+    old = git("rev-parse", "HEAD")
+    proposal = prepare(store, policy["discovery_cases"][0], source, target, "before", "after",
+                       extra={"title": "Update setup"})
+    decide.accept(store, proposal)
+    target.write_text("after")
+    git("add", "setup")
+    git("commit", "-qm", "candidate")
+    new = git("rev-parse", "HEAD")
+    policy["proposal_id"] = proposal
+
+    def add(name, phase, revision, exit_code, returned="after", read_turn=None, worktree_content=None):
+        stamp = "2025-02-27T12:00:00Z" if phase == "baseline" else "2025-03-03T12:00:00Z"
+        cwd = str(source)
+        rows = [
+            ("session_meta", {"id": name, "source": "cli", "cwd": cwd,
+                              **({"git": {"commit_hash": revision}} if not mirrored else {})}),
+            ("event_msg", {"type": "task_started", "turn_id": name}),
+            ("turn_context", {"turn_id": name, "model": "one", "cwd": cwd}),
+            ("event_msg", {"type": "item_completed", "item": {"type": "UserMessage",
+                          "id": "prompt", "content": "Check " + name}}),
+            ("event_msg", {"type": "item_completed", "item": {"type": "CommandExecution",
+                          "id": "run", "command": "check", "exit_code": exit_code}}),
+            ("event_msg", {"type": "task_complete", "turn_id": name}),
+        ]
+        if read_mode and phase == "candidate":
+            rows.insert(-1, ("event_msg", {"type": "item_completed", "item": {
+                "type": "CommandExecution", "id": "read-setup", "command": "cat setup",
+                "exit_code": 0, "cwd": cwd, "aggregated_output": returned,
+            }, "turn_id": read_turn or name}))
+        if measure_count:
+            for index in range(2 if phase == "baseline" else 1):
+                call = f"request-{index}"
+                rows[-1:-1] = [
+                    ("response_item", {"type": "function_call", "name": "check", "call_id": call}),
+                    ("response_item", {"type": "function_call_output", "output": "done", "call_id": call}),
+                ]
+        path = tmp_path / (name + ".jsonl")
+        path.write_text("".join(json.dumps({"type": kind, "payload": payload, "timestamp": stamp})
+                                + "\n" for kind, payload in rows))
+        def lookup_revision(session, turn):
+            from agent_usage_tracker.improve.file_reads import path_fingerprint
+
+            assert session == turn == name
+            workspace_text = worktree_content or ("before" if phase == "baseline" else "after")
+            return {"workspace_sha256": path_fingerprint(source), "commit": revision,
+                    "recorded_at": stamp, "setup_files": {
+                        path_fingerprint(source / "setup"): hashlib.sha256(workspace_text.encode()).hexdigest(),
+                    }}
+
+        row = read_session(path, "codex", track_native_items=mirrored,
+                           turn_revision=lookup_revision if mirrored else None)
+        if mirrored:
+            native = store.put("sessions", row)
+            app = {
+                **row, "agent": "t3", "session_id": "t3:" + name,
+                "supplemental_sources": [native],
+                "native_runs": {name: {"session_id": name, "items": [
+                    native_item_key("prompt"), native_item_key("run"),
+                ]}},
+                "events": [{**event, "run_id": name} for event in row["events"]],
+            }
+            for event in app["events"]:
+                for key in ("native_turn_key", "turn_context", "native_file_read", "codex_model_call_receipt"):
+                    event.pop(key, None)
+                if event["kind"] == "prompt":
+                    event["source_sha256"] = digest(event["text"])
+            assert link_native_context(app, {native: row}, set()) == 1
+            assert app["events"][-1]["turn_context"]["turn_start_revision"]["commit"] == revision
+            row = app
+        snapshot = store.put("sessions", row)
+        audit = store.put("audits", {"session_ids": [snapshot],
+                                    "supplemental_session_ids": row.get("supplemental_sources", [])})
+        return freeze_case(store, audit, snapshot, row["events"][-1]["id"])
+
+    baseline = [add("base-" + str(n), "baseline", old, 1) for n in range(2)]
+    policy["observation_policy"] = {
+        "metric": "codex_model_calls" if measure_count else "tool_errors",
+        "require_turn_context": True, "require_setup_revision": True,
+        "minimum_pairs": 2, "minimum_improvement": 0,
+        "baseline_cases": {case: "setup" for case in baseline},
+    }
+    if read_mode:
+        policy["observation_policy"]["require_approved_file_read"] = True
+    if mirrored:
+        policy["observation_policy"]["require_worktree_setup"] = True
+    wrong = add("baseline-with-candidate", "baseline", new, 0)
+    with pytest.raises(AutError, match="verified setup revisions"):
+        create(store, policy | {"observation_policy": policy["observation_policy"] |
+                                {"baseline_cases": {baseline[0]: "setup", wrong: "setup"}}})
+    key = create(store, policy)["study_id"]
+    adopted = decide.adopt(store, proposal, commit=new, adopted_at="2025-03-01")
+    wrongly_adopted = decide.adopt(store, proposal, commit=old, adopted_at="2025-03-01")
+    candidates = [add("candidate-" + str(n), "candidate", new, 0) for n in range(2)]
+    pairs = [{"baseline": b, "candidate": c, "family": "setup"}
+             for b, c in zip(baseline, candidates)]
+    observed = observe(store, key, {"adoption_id": adopted["adoption_id"], "pairs": pairs})
+    assert observed["comparison"] == "observed_decrease"
+    assert observed["setup_revision_verified_pairs"] == 2
+    assert observed["approved_file_read_pairs"] == (2 if read_mode else 0)
+    if mirrored:
+        assert observed["worktree_setup_verified_pairs"] == 2
+        for pair in observed["pairs"]:
+            native_source = store.get("sessions", pair["approved_file_read"]["session_snapshot"])
+            assert native_source["agent"] == "codex"
+            if measure_count:
+                assert (pair["baseline_value"], pair["candidate_value"]) == (2, 1)
+                for condition, expected in (("baseline", 2), ("candidate", 1)):
+                    proof = pair[f"{condition}_metric_evidence"]
+                    metric_source = store.get("sessions", proof["session_id"])
+                    boundary = next(event for event in metric_source["events"] if event["id"] == proof["event_id"])
+                    assert boundary["codex_model_call_receipt"]["count"] == expected
+        changed = add("dirty-worktree", "candidate", new, 0, worktree_content="local changes")
+        dirty = observe(store, key, {"adoption_id": adopted["adoption_id"], "pairs": [
+            pairs[0], {**pairs[1], "candidate": changed},
+        ]}, preview=True)
+        assert dirty["exclusions"] == {"worktree_setup_unverified": 1}
+        assert dirty["worktree_setup_verified_pairs"] == 1
+        assert dirty["comparison"] == "inconclusive"
+    assert observed["adoption_commit_setup"] == {"status": "verified", "revision": new}
+    assert not observed["attempt_setup_exposure_verified"]
+    excluded = observe(store, key, {"adoption_id": wrongly_adopted["adoption_id"], "pairs": pairs})
+    assert excluded["exclusions"] == {"adoption_commit_unverified": 2}
+    assert excluded["comparison"] == "inconclusive"
+    stale = add("stale-candidate", "candidate", old, 0)
+    pairs[0]["candidate"] = stale
+    excluded = observe(store, key, {"adoption_id": adopted["adoption_id"], "pairs": pairs})
+    assert excluded["exclusions"] == {"setup_revision_unverified": 1}
+    assert excluded["comparison"] == "inconclusive"
+    if read_mode:
+        for label, args in (("wrong-read", {"returned": "different bytes"}),
+                            ("other-turn", {"read_turn": "earlier"})):
+            pairs[0]["candidate"] = add(label, "candidate", new, 0, **args)
+            excluded = observe(store, key, {"adoption_id": adopted["adoption_id"], "pairs": pairs})
+            assert excluded["exclusions"] == {"approved_file_read_unverified": 1}
+            assert excluded["comparison"] == "inconclusive"
+
+
+def test_create_can_freeze_a_trusted_trial_file_with_the_policy(tmp_path, capsys):
+    import json
+
+    from agent_usage_tracker.cli import main
+
+    store, spec = fixture(tmp_path)
+    trial_id = spec.pop("trial_spec_id")
+    trial = tmp_path / "trial.json"
+    trial.write_text(json.dumps(store.get("trial_specs", trial_id)))
+    policy = tmp_path / "policy.json"
+    policy.write_text(json.dumps(spec))
+    assert main(["improve", "--root", str(store.root), "study", "create",
+                 "--spec-file", str(policy), "--trial-spec-file", str(trial)]) == 0
+    study_id = json.loads(capsys.readouterr().out)["study_id"]
+    assert store.get("studies", study_id)["trial_spec_id"] == trial_id
+    assert not store.keys("trial_results")

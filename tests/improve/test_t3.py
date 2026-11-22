@@ -1,13 +1,18 @@
 """T3 app requests stay linked when the provider changes."""
 
+import base64
+import hashlib
 import json
 import os
 import sqlite3
+import subprocess
 
 import pytest
 
-from agent_usage_tracker.improve.judge import cases
+from agent_usage_tracker.improve.access import Evidence
+from agent_usage_tracker.improve.judge import cases, freeze_case
 from agent_usage_tracker.improve.store import Store, audit
+from agent_usage_tracker.improve.study_observe import _sample
 
 
 TABLES = {
@@ -90,6 +95,43 @@ def test_t3_human_work_and_provider_switch_are_one_session(tmp_path):
     db.close()
 
 
+@pytest.mark.parametrize('use_linked_worktree', [False, True])
+def test_t3_project_filter_precedes_thread_limit(tmp_path, use_linked_worktree):
+    home = tmp_path / 'home'
+    db, _ = fixture_db(home)
+    project = tmp_path / 'project'
+    worktree = tmp_path / 'linked'
+    outside = tmp_path / 'outside'
+    for folder in (project, outside):
+        subprocess.run(['git', 'init', '-q', str(folder)], check=True)
+    subprocess.run(['git', '-C', str(project), '-c', 'user.name=Test', '-c',
+                    'user.email=test@example.test', 'commit', '--allow-empty', '-qm', 'start'],
+                   check=True)
+    subprocess.run(['git', '-C', str(project), 'worktree', 'add', '--detach', '-q',
+                    str(worktree)], check=True)
+
+    with db:
+        add_run(db)
+        db.execute('UPDATE projection_projects SET workspace_root=?', (str(project),))
+        thread_path = str(worktree) if use_linked_worktree else None
+        db.execute('UPDATE orchestration_v2_projection_threads SET payload_json=?',
+                   (json.dumps({'worktreePath': thread_path}),))
+        db.execute('INSERT INTO orchestration_v2_projection_threads VALUES (?,?,?,?)',
+                   ('other', 'p', '2026-01-02T10:00:00Z',
+                    json.dumps({'worktreePath': str(outside)})))
+        db.execute('INSERT INTO orchestration_v2_projection_messages VALUES (?,?,?,?,?,?)',
+                   ('outside-prompt', 'other', 'outside-run', 'user', START,
+                    json.dumps({'createdBy': 'user'})))
+    db.close()
+
+    _, result, sessions = capture(tmp_path, home, project=project, limit=1)
+
+    assert [session['session_id'] for session in sessions] == ['t3:app']
+    assert sessions[0]['cwd'] == (thread_path or str(project))
+    assert result['other_projects'] == 1
+    assert 't3_unread_threads' not in result
+
+
 @pytest.mark.parametrize('limit', [1, 30])
 def test_t3_native_mirror_is_not_another_observation(tmp_path, limit):
     home = tmp_path / 'home'
@@ -133,6 +175,110 @@ def test_t3_identical_linked_native_files_share_one_supplement(tmp_path):
     db.close()
 
 
+@pytest.mark.parametrize('mode', [
+    'linked', 'one_item', 'split_turns', 'two_copies', 'reused_turn', 'wrong_prompt', 'late_native', 'steered',
+    'native_steered',
+])
+def test_t3_turn_context_requires_distinct_native_items_in_one_completed_turn(tmp_path, mode):
+    home = tmp_path / 'home'
+    db, _ = fixture_db(home)
+    add_run(db, provider='codex')
+    ref = {'driver': 'codex', 'strength': 'strong'}
+    item(db, 'r1', 'one', 'assistant_message', 3, text='first',
+         nativeItemRef={**ref, 'nativeId': 'first'})
+    item(db, 'r1', 'two', 'assistant_message', 4, text='second',
+         nativeItemRef={**ref, 'nativeId': 'second',
+                        'strength': 'weak' if mode == 'one_item' else 'strong'})
+    if mode == 'steered':
+        db.execute('INSERT INTO orchestration_v2_projection_messages VALUES (?,?,?,?,?,?)',
+            ('steer', 'app', 'r1', 'user', '2026-01-01T10:00:01Z',
+             json.dumps({'text': 'Change the task', 'createdBy': 'user', 'creationSource': 'web'})))
+    if mode == 'reused_turn':
+        add_run(db, 'r2', 'codex', 2)
+        db.execute("""UPDATE orchestration_v2_projection_provider_threads SET payload_json=?
+                      WHERE provider_thread_id='ptr2'""",
+                   (json.dumps({'nativeThreadRef': {**ref, 'nativeId': 'nativer1'}}),))
+        for name in ('first', 'second'):
+            item(db, 'r2', name, 'assistant_message', 3, text=name,
+                 nativeItemRef={**ref, 'nativeId': name})
+    db.commit()
+    folder = home / '.codex/sessions'
+    folder.mkdir(parents=True)
+    rows = [('session_meta', {'id': 'nativer1', 'source': 'cli'})]
+
+    def native_turn(turn_id, names):
+        rows.extend([
+            ('event_msg', {'type': 'task_started', 'turn_id': turn_id}),
+            ('turn_context', {'turn_id': turn_id, 'model': 'actual-model', 'cwd': str(tmp_path)}),
+            ('event_msg', {'type': 'user_message',
+                           'message': 'Another request' if mode == 'wrong_prompt' else 'Fix the checks'}),
+            ('response_item', {'type': 'function_call', 'call_id': 'tool-'+turn_id, 'name': 'exec_command'}),
+            ('response_item', {'type': 'function_call_output', 'call_id': 'tool-'+turn_id, 'output': 'result'}),
+        ])
+        for name in names:
+            rows.append(('event_msg', {'type': 'item_completed',
+                         'item': {'type': 'AgentMessage', 'id': name, 'text': name}}))
+        if mode == 'native_steered':
+            rows.append(('event_msg', {'type': 'user_message', 'message': 'Change the task'}))
+        rows.append(('event_msg', {'type': 'task_complete', 'turn_id': turn_id}))
+
+    if mode == 'split_turns':
+        native_turn('native-turn', ['first'])
+        native_turn('other-turn', ['second'])
+    else:
+        native_turn('native-turn', ['first', 'second'])
+    stamp = '2026-01-01T10:00:11Z' if mode == 'late_native' else END
+    raw = ''.join(json.dumps({'type': kind, 'timestamp': stamp, 'payload': payload}) + '\n'
+                  for kind, payload in rows)
+    (folder / 'rollout-native.jsonl').write_text(raw)
+    os.utime(folder / 'rollout-native.jsonl', (1_000_000_000, 1_000_000_000))
+    if mode == 'two_copies':
+        (folder / 'rollout-other.jsonl').write_text(raw.replace('actual-model', 'different-model'))
+        os.utime(folder / 'rollout-other.jsonl', (1_000_000_000, 1_000_000_000))
+    store, result, [session] = capture(tmp_path, home)
+    audit_id = result['audit_id']
+    key, = store.get('audits', audit_id)['session_ids']
+    boundary = next(event for event in session['events'] if event['kind'] == 'boundary')
+    sample = _sample(store, freeze_case(store, audit_id, key, boundary['id']), use_native_model_calls=True)
+    if mode in {'linked', 'wrong_prompt', 'late_native', 'steered', 'native_steered'}:
+        assert sample['context_status'] == 'observed'
+        assert sample['model'] == 'actual-model'
+        assert sample['cwd'] == str(tmp_path)
+        assert sample['tool_events_complete'] == (mode != 'steered')
+        view = Evidence('metadata', store=store, audit_id=audit_id)
+        context = view.event(key, boundary['id'])['turn_context']
+        assert context['source_session'] == session['supplemental_sources'][0]
+        assert context['matching_items'] == 2
+        assert 'model' not in context and 'cwd' not in context
+        results = view.ordinary_work(metric='codex_model_calls', require_turn_context=True)
+        if mode == 'linked':
+            assert sample['codex_model_calls'] == 1
+            receipt = results['items'][0]['metric_evidence']
+            assert receipt == {'session_id': context['source_session'], 'event_id': context['source_event']}
+            assert results['items'][0]['metric_value'] == 1
+            assert view.event(receipt['session_id'], receipt['event_id'])['codex_model_call_receipt']['count'] == 1
+            restricted = store.put('audits', {'session_ids': [key], 'coverage': {}})
+            without_source = Evidence('metadata', store=store, audit_id=restricted)
+            assert without_source.ordinary_work(metric='codex_model_calls', require_turn_context=True)['items'] == []
+        else:
+            assert sample['codex_model_calls'] is None
+            assert results['items'] == []
+        view = Evidence('redacted', store=store, audit_id=audit_id)
+        for name, snapshots in [('single', [key]), ('with-source', [key, context['source_session']])]:
+            bundle = tmp_path / (name + '.json')
+            view.export(bundle, snapshots)
+            copied = Evidence('redacted', bundle=bundle).event(key, boundary['id'])['turn_context']
+            if name == 'single':
+                assert copied == {'status': 'missing'}
+            else:
+                assert copied['source_event'] == context['source_event']
+                assert copied['model'] == 'actual-model'
+    else:
+        assert sample['context_status'] != 'observed'
+        assert sample['model'] is None
+    db.close()
+
+
 def test_t3_automation_does_not_become_human_work(tmp_path):
     home = tmp_path / 'home'
     db, _ = fixture_db(home)
@@ -141,6 +287,77 @@ def test_t3_automation_does_not_become_human_work(tmp_path):
     _, result, sessions = capture(tmp_path, home)
     assert sessions == []
     assert result['t3_automated_runs'] == 1
+
+
+@pytest.mark.parametrize('mode', [
+    'valid', 'pre_run', 'wrong_scope', 'wrong_ordinal', 'missing_ref', 'wrong_run', 'wrong_ref',
+])
+def test_t3_freezes_only_its_ready_end_of_run_git_checkpoint(tmp_path, mode):
+    home, repo = tmp_path / 'home', tmp_path / 'project'
+    repo.mkdir()
+
+    def git(*args):
+        return subprocess.check_output(['git', '-C', str(repo), '-c', 'user.name=Test',
+                                       '-c', 'user.email=test@example.test', '-c', 'commit.gpgsign=false',
+                                       '-c', 'core.hooksPath=/dev/null', *args], text=True).strip()
+
+    git('init', '-q')
+    git('commit', '-qm', 'checkpoint contents', '--allow-empty')
+    commit = git('rev-parse', 'HEAD')
+    scope_hash = hashlib.sha256(b'other' if mode == 'wrong_ref' else b'scope').hexdigest()[:32]
+    key = base64.urlsafe_b64encode(scope_hash.encode()).decode().rstrip('=')
+    ref = f'refs/t3/orchestration-v2/checkpoints/{key}/ordinal/1'
+    if mode != 'missing_ref':
+        git('update-ref', ref, commit)
+    db, _ = fixture_db(home)
+    db.execute('UPDATE projection_projects SET workspace_root=?', (str(repo),))
+    add_run(db)
+    payload = db.execute('SELECT payload_json FROM orchestration_v2_projection_runs').fetchone()[0]
+    db.execute('UPDATE orchestration_v2_projection_runs SET payload_json=?',
+               (json.dumps({**json.loads(payload), 'checkpointId': 'checkpoint', 'ordinal': 1}),))
+    db.execute('''CREATE TABLE orchestration_v2_projection_checkpoint_scopes
+                  (scope_id TEXT, thread_id TEXT, kind TEXT, payload_json TEXT)''')
+    db.execute('''CREATE TABLE orchestration_v2_projection_checkpoints
+                  (checkpoint_id TEXT, thread_id TEXT, run_id TEXT, scope_id TEXT,
+                   app_run_ordinal INTEGER, ordinal_within_scope INTEGER,
+                   status TEXT, captured_at TEXT, payload_json TEXT)''')
+    db.execute('INSERT INTO orchestration_v2_projection_checkpoint_scopes VALUES (?,?,?,?)',
+               ('scope', 'app', 'root_run',
+                json.dumps({'cwd': str(tmp_path if mode == 'wrong_scope' else repo)})))
+    db.execute('INSERT INTO orchestration_v2_projection_checkpoints VALUES (?,?,?,?,?,?,?,?,?)',
+               ('checkpoint', 'app', 'other' if mode == 'wrong_run' else 'r1', 'scope', 1,
+                2 if mode == 'wrong_ordinal' else 1, 'ready', START if mode == 'pre_run' else END,
+                json.dumps({'ref': ref})))
+    db.commit()
+    db.close()
+
+    store, capture_result, [session] = capture(tmp_path, home, project=repo)
+    audit_id = capture_result['audit_id']
+    snapshot, = store.get('audits', audit_id)['session_ids']
+    boundary = next(event for event in session['events'] if event['kind'] == 'boundary')
+    if mode != 'valid':
+        assert 'workspace_checkpoint' not in boundary
+        assert not capture_result.get('t3_workspace_checkpoints')
+        return
+    assert capture_result['t3_workspace_checkpoints'] == 1
+    view = Evidence('redacted', store=store, audit_id=audit_id)
+    checkpoint = view.event(snapshot, boundary['id'])['workspace_checkpoint']
+    assert checkpoint == {'commit': commit, 'captured_at': '2026-01-01T10:00:10+00:00', 'ref': ref}
+    metadata = Evidence('metadata', store=store, audit_id=audit_id)
+    assert metadata.describe()['coverage']['t3_workspace_checkpoints'] == 1
+    assert metadata.event(snapshot, boundary['id'])['workspace_checkpoint'] == {
+        'captured_at': checkpoint['captured_at'],
+    }
+    bundle = tmp_path / 'selected.json'
+    metadata.export(bundle, [snapshot])
+    assert commit not in bundle.read_text()
+    assert Evidence('full', bundle=bundle).event(snapshot, boundary['id'])['workspace_checkpoint'] == {
+        'captured_at': checkpoint['captured_at'],
+    }
+    git('commit', '-qm', 'another commit', '--allow-empty')
+    git('update-ref', ref, git('rev-parse', 'HEAD'))
+    assert view.event(snapshot, boundary['id'])['workspace_checkpoint'] == checkpoint
+    assert _sample(store, freeze_case(store, audit_id, snapshot, boundary['id']))['setup_revision'] is None
     db.close()
 
 
@@ -155,12 +372,14 @@ def test_t3_reads_committed_wal_rows(tmp_path):
     db.close()
 
 
-def test_t3_missing_output_and_projection_loss_remain_incomplete(tmp_path):
+@pytest.mark.parametrize('output', [{}, {'output': 'partial output'}])
+def test_t3_missing_output_and_projection_loss_remain_incomplete(tmp_path, output):
     home = tmp_path / 'home'
     db, _ = fixture_db(home)
     add_run(db)
     db.execute("DELETE FROM orchestration_v2_projection_turn_items WHERE type='command_execution'")
-    item(db, 'r1', 'incomplete', 'command_execution', 1, input='pytest', status='running')
+    item(db, 'r1', 'incomplete', 'command_execution', 1,
+         input='pytest', status='running', **output)
     db.commit()
     store, result, sessions = capture(tmp_path, home)
     assert sessions[0]['coverage']['unmatched_calls'] == 1
@@ -175,6 +394,7 @@ def test_t3_missing_output_and_projection_loss_remain_incomplete(tmp_path):
     ('command_execution', {'status': 'failed', 'exitCode': 0}, 'error'),
     ('dynamic_tool', {'status': 'completed'}, 'success'),
     ('command_execution', {'status': 'interrupted'}, 'unknown'),
+    ('command_execution', {'status': 'cancelled', 'output': 'partial output'}, 'unknown'),
 ])
 def test_t3_finished_item_without_output_still_has_a_result(tmp_path, kind, fields, expected):
     home = tmp_path / 'home'

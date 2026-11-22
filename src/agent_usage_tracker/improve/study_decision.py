@@ -82,8 +82,10 @@ def measure(store: Store, spec_id: str, metric: str, policy: dict[str, Any],
                 regressions.append({"repeat": repeat, "case_id": case["id"]})
             if set(observed) == {"baseline", "candidate"}:
                 deltas.append(observed["candidate"] - observed["baseline"])
-    protected = bool(all(spec.get("files", {}).get(condition, {}).get(proposal["target"])
-                     == proposal[f"{name}_sha256"]
+    files = spec.get("files", {})
+    target = proposal["target"]
+    protected = bool(all(target in files.get(condition, {})
+                     and files[condition][target] == proposal[f"{name}_sha256"]
                      for condition, name in (("baseline", "before"), ("candidate", "after")))
                      and all(case.get("acceptance_files") and (
                          spec["kind"] != "command_check" or pinned_command_entrypoint(case))

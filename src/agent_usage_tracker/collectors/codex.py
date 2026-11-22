@@ -157,6 +157,8 @@ def run_origin(p: dict[str, Any]) -> RunOrigin:
     several-fold, and since the showcase reports agent_turns_per_human_turn, an inflated
     denominator silently understates leverage."""
     src, orig = p.get("source"), p.get("originator")
+    if p.get("thread_source") == "subagent":
+        return "subagent"
     if isinstance(src, dict):
         return "subagent" if "subagent" in src else "unknown"
     if (src in _PROGRAM_SOURCES or p.get("thread_source") == "automation"

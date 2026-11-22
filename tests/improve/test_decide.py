@@ -240,6 +240,33 @@ def test_adopting_a_proposal_needs_an_accept_and_copies_its_fields(store, tmp_pa
     assert decide.group_status(store)["g"] == "adopted"
 
 
+def test_adoption_verifies_the_committed_bytes_independently_of_the_worktree(store, tmp_path):
+    source = repo(tmp_path)
+    git(source, "config", "core.autocrlf", "false")
+    rules = source / "config [local]" / "rules.md"
+    rules.parent.mkdir()
+    rules.write_bytes(b"Use the old command.\r\n")
+    git(source, "add", "--", rules.relative_to(source).as_posix())
+    git(source, "commit", "-qm", "old rules")
+    old = git(source, "rev-parse", "HEAD")
+    case = store.put("cases", {"events": [{"id": "e", "kind": "result"}]})
+    key = prepare(store, case, rules.parent, rules, "old", "new", extra={"title": "Update rules"})
+    decide.accept(store, key)
+    declared = decide.adopt(store, key, commit=old)
+    assert declared["commit_setup"] == {"status": "different", "revision": old}
+
+    rules.write_bytes(b"Use the new command.\r\n")
+    git(source, "add", "--", rules.relative_to(source).as_posix())
+    git(source, "commit", "-qm", "new rules")
+    new = git(source, "rev-parse", "HEAD")
+    rules.write_bytes(b"Another local edit")
+    adopted = decide.adopt(store, key, commit=new[:10])
+    assert adopted["commit_setup"] == {"status": "verified", "revision": new}
+    assert store.get("adoptions", adopted["adoption_id"])["commit_setup"] == adopted["commit_setup"]
+    assert decide.adopt(store, key, commit=new) == adopted | {"status": "unchanged"}
+    assert rules.read_bytes() == b"Another local edit"
+
+
 def test_an_accepted_group_waits_for_its_merge_and_is_not_open(store, tmp_path):
     _, key = proposal(store, tmp_path, group_key="g")
     decide.accept(store, key)

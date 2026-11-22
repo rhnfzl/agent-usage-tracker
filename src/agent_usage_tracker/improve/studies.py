@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
@@ -9,7 +10,7 @@ import time
 from typing import Any
 
 from ..config import AutError
-from .proposals import file_digest
+from .proposals import matches_file
 from .store import Store, digest
 from .study_decision import measure, observed_experiment
 from .trial import _frozen_files, _spec, pinned_command_entrypoint, run_trial
@@ -32,10 +33,27 @@ def identity(store: Store, case_id: str) -> dict[str, str]:
     case = store.get("cases", case_id)
     session = store.get("sessions", case["session_snapshot"])
     # Copies can change event ids, line numbers and snapshot coverage without changing the task.
-    content = [{k: v for k, v in event.items() if k not in {"id", "line", "byte_offset", "timestamp"}}
-               for event in case["events"]]
+    ignored = {"id", "line", "byte_offset", "timestamp", "turn_context", "native_turn_key"}
+    content = [{k: v for k, v in event.items() if k not in ignored} for event in case["events"]]
     return {"session": digest([session["agent"], session["session_id"]]),
             "content": digest(content), "evidence": evidence_key(case)}
+
+
+def _failure_signal(event: dict[str, Any]) -> str | None:
+    raw = event.get("text")
+    if not isinstance(raw, str) or not (text := raw.strip()):
+        return None
+    if text.startswith("{"):
+        try:
+            value = json.loads(text)
+        except (ValueError, RecursionError):
+            value = None
+        if isinstance(value, dict) and set(value) <= {
+            "exit_code", "exitCode", "output", "aggregated_output",
+        } and all(value.get(key) is None or isinstance(value[key], str) and not value[key].strip()
+                  for key in ("output", "aggregated_output")):
+            return None
+    return digest([event.get("tool"), text])
 
 
 def shortlist(store: Store, audit_id: str) -> dict[str, Any]:
@@ -55,14 +73,24 @@ def shortlist(store: Store, audit_id: str) -> dict[str, Any]:
                 continue
             incidents[key] = {"incident_id": key, "source_session": source,
                 "event_id": event["id"], "snapshots": [snapshot],
-                "signal": digest([event.get("tool"), event.get("text")])}
-    counts = Counter(row["signal"] for row in incidents.values())
+                "signal": _failure_signal(event)}
+    signals = [(row["signal"], row["source_session"]) for row in incidents.values()
+               if row["signal"] is not None]
+    counts = Counter(signal for signal, _ in signals)
+    session_counts = Counter(signal for signal, _ in set(signals))
     return {"audit_id": audit_id, "distinct_source_sessions": len(sessions),
             "incidents": list(incidents.values()), "signal_counts": dict(counts),
+            "signal_session_counts": dict(session_counts),
             "scope": "Error groups are investigation signals, not causal findings."}
 
 
 def _manifest(store: Store, value: dict[str, Any]) -> dict[str, Any]:
+    observation = None
+    if isinstance(value, dict) and "observation_policy" in value:
+        from .study_observe import validate_policy
+        observation = value["observation_policy"]
+        validate_policy(observation)
+        value = {name: field for name, field in value.items() if name != "observation_policy"}
     fields(value, "version discovery_cases control_cases task_families proposal_id trial_spec_id "
            "primary_metric quality_constraints budget_s provenance reference_result_ids cost_inputs "
            "decision_policy")
@@ -74,6 +102,10 @@ def _manifest(store: Store, value: dict[str, Any]) -> dict[str, Any]:
     ids = value["discovery_cases"] + value["control_cases"]
     if len(ids) != len(set(ids)):
         raise AutError("improve: duplicate study case")
+    if observation is not None:
+        baseline = set(observation["baseline_cases"])
+        if baseline & set(ids) or not baseline <= set(store.keys("cases")):
+            raise AutError("improve: observation baselines must already exist outside discovery and controls")
     families = value["task_families"]
     if not isinstance(families, dict) or not set(ids) <= set(families) or any(
             not isinstance(v, str) or not v.strip() for v in families.values()):
@@ -90,6 +122,11 @@ def _manifest(store: Store, value: dict[str, Any]) -> dict[str, Any]:
     proposal = store.get("proposals", value["proposal_id"])
     if proposal["case_id"] not in value["discovery_cases"]:
         raise AutError("improve: proposal must link discovery evidence")
+    if observation is not None:
+        from .study_observe import check_baselines
+        from .study_independence import reserved_evidence
+        reserved = reserved_evidence(store, proposal, value["discovery_cases"], value["control_cases"])
+        check_baselines(store, observation, proposal, datetime.now(timezone.utc), reserved)
     trial = _spec(store, value["trial_spec_id"])
     if trial["kind"] == "command_check":
         from .trial import _acceptance_inputs
@@ -164,8 +201,8 @@ def run(store: Store, study_id: str, *, execute: bool = False) -> dict[str, Any]
         target = root / relative
         expected = proposal[f"{name}_sha256"]
         if (target.resolve() != target or not target.is_relative_to(root)
-                or files.get(condition, {}).get(relative) != expected
-                or not target.is_file() or file_digest(target) != expected):
+                or relative not in files.get(condition, {})
+                or files[condition][relative] != expected or not matches_file(target, expected)):
             raise AutError("improve: study baseline or candidate hash does not match the proposal")
         _frozen_files(trial, condition, root)
     if observed_experiment(store, spec_id, allow_resume=True):
@@ -297,6 +334,8 @@ def assess(store: Store, study_id: str) -> dict[str, Any]:
                  if (row := store.get("study_followups", key))["study_id"] == study_id]
     transfers = [{"transfer_id": key, **row} for key in store.keys("study_transfers")
                  if (row := store.get("study_transfers", key))["study_id"] == study_id]
+    observations = [{"observation_id": key, **row} for key in store.keys("study_observations")
+                    if (row := store.get("study_observations", key))["study_id"] == study_id]
     decision = measure(store, study["trial_spec_id"], study["primary_metric"],
                        study["decision_policy"], proposal)
     fresh_followup = any(row["freshness"]["work_after_policy_verified"] and
@@ -310,7 +349,7 @@ def assess(store: Store, study_id: str) -> dict[str, Any]:
         "stages": {"discovery": {
         "cases": len(study["discovery_cases"]), "controls": len(study["control_cases"])},
         "references": references(store, study), "trial": trial,
-        "followup": followups, "transfer": transfers},
+        "followup": followups, "transfer": transfers, "observations": observations},
         "provenance": study["provenance"], "cost_inputs": study["cost_inputs"],
         "observed_cost": {"trial_elapsed_s": trial["elapsed_s"]},
         "primary_metric": study["primary_metric"],

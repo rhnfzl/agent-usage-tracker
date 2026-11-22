@@ -39,11 +39,14 @@ def _attempt_coverage(attempt: list[dict[str, Any]], coverage: dict[str, Any]) -
         local["missing_timestamps"] = sum(
             runs.get(run, {}).get("missing_timestamps", 1)
             for run in {event.get("run_id") for event in attempt})
+    native_turns = {event.get("native_turn_key") for event in attempt}
+    if len(native_turns) > 1:
+        local["source_incomplete"] = True
     return local
 
 
 def _complete_attempt(attempt: list[dict[str, Any]], coverage: dict[str, Any], *,
-                      legacy_complete: bool = False) -> bool:
+                      legacy_complete: bool = False, require_text: bool = True) -> bool:
     calls = {event.get("call_id") for event in attempt if event["kind"] == "call"}
     results = {event.get("call_id") for event in attempt if event["kind"] == "result"}
     closed = bool(attempt and attempt[-1]["kind"] == "boundary"
@@ -51,9 +54,70 @@ def _complete_attempt(attempt: list[dict[str, Any]], coverage: dict[str, Any], *
     return bool((closed or legacy_complete) and not any(coverage.get(name) for name in (
         "malformed_records", "conflicting_records", "missing_timestamps", "divergent_copy",
         "source_incomplete"))
-        and not any(event.get("truncated") or event["kind"] == "compaction" for event in attempt)
+        and not any(event["kind"] in {"compaction", "tool_gap"} or event.get("tool_event_ambiguous")
+                    or (require_text and event.get("truncated"))
+                    for event in attempt)
         and calls == results and not (calls & {"", None})
         and (attempt[0]["kind"] == "prompt" or legacy_complete))
+
+
+def _case_record(session: dict[str, Any], sid: str, coverage: dict[str, Any], index: int,
+                 trigger: str, legacy_complete: bool) -> dict[str, Any]:
+    events = session["events"]
+    boundary_start = max((i + 1 for i in range(index)
+                          if events[i]["kind"] == "boundary"), default=0)
+    start = max((i for i in range(boundary_start, index + 1)
+                 if events[i]["kind"] == "prompt"), default=boundary_start)
+    end = next((i if events[i]["kind"] == "prompt" else i + 1
+                for i in range(index, len(events))
+                if i > start and events[i]["kind"] in {"prompt", "boundary"}), len(events))
+    return _record_attempt(session, sid, coverage, events[start:end], index - start,
+                           trigger, legacy_complete)
+
+
+def _record_attempt(session: dict[str, Any], sid: str, coverage: dict[str, Any],
+                    attempt: list[dict[str, Any]], anchor: int, trigger: str,
+                    legacy_complete: bool) -> dict[str, Any]:
+    if len(attempt) <= 40 and sum(len(e.get("text", "")) for e in attempt) <= 24000:
+        selected = set(range(len(attempt)))
+    else:
+        selected = {0, *range(max(0, anchor - 4), min(len(attempt), anchor + 5))}
+    replies = [i for i in range(anchor, len(attempt)) if attempt[i]["kind"] == "reply"]
+    if replies:
+        selected.add(replies[-1])
+    window = [attempt[i] for i in sorted(selected)]
+    local_coverage = dict(_attempt_coverage(attempt, coverage),
+                          session_complete=coverage.get("complete", False))
+    local_coverage["complete"] = _complete_attempt(
+        attempt, local_coverage, legacy_complete=legacy_complete)
+    case = {"version": VERSION, "session_snapshot": sid,
+            "agent": session["agent"], "origin": session["origin"],
+            "trigger": trigger,
+            "events": window, "coverage": local_coverage,
+            "scope": "one observed user attempt; prior goals and hidden context are unavailable",
+            "omitted_task_events": len(attempt) - len(window),
+            "sampling": "bounded failure/control sample; not a prevalence estimate"}
+    return case
+
+
+def freeze_case(store: Store, audit_id: str, session_id: str, event_id: str) -> str:
+    manifest = store.get("audits", audit_id)
+    if session_id not in manifest["session_ids"]:
+        raise AutError("evidence: case creation requires a primary audit session")
+    session = store.get("sessions", session_id)
+    events = session["events"]
+    index = next((i for i, event in enumerate(events) if event["id"] == event_id), None)
+    if index is None:
+        raise AutError("evidence: event is missing from this session")
+    coverage = dict(session["coverage"])
+    if session_id in manifest.get("ambiguous_session_ids", []):
+        coverage.update(complete=False, divergent_copy=True)
+    event = events[index]
+    trigger = ("error_result" if event["kind"] == "result" and event.get("status") == "error"
+               else "selected_attempt")
+    legacy_complete = session.get("version", 0) < 4 and coverage.get("complete", False)
+    return store.put("cases", _case_record(session, session_id, coverage, index,
+                                           trigger, legacy_complete))
 
 
 def cases(store: Store, audit_id: str, *, limit: int = 30) -> list[dict[str, Any]]:
@@ -96,33 +160,7 @@ def cases(store: Store, audit_id: str, *, limit: int = 30) -> list[dict[str, Any
         if not indices and events:
             indices.append((len(events) - 1, "control"))
         for index, trigger in indices:
-            boundary_start = max((i + 1 for i in range(index)
-                                  if events[i]["kind"] == "boundary"), default=0)
-            start = max((i for i in range(boundary_start, index + 1)
-                         if events[i]["kind"] == "prompt"), default=boundary_start)
-            end = next((i if events[i]["kind"] == "prompt" else i + 1
-                        for i in range(index, len(events))
-                        if i > start and events[i]["kind"] in {"prompt", "boundary"}), len(events))
-            attempt = events[start:end]
-            if len(attempt) <= 40 and sum(len(e.get("text", "")) for e in attempt) <= 24000:
-                selected = set(range(start, end))
-            else:
-                selected = {start, *range(max(start, index - 4), min(end, index + 5))}
-            replies = [i for i in range(index, end) if events[i]["kind"] == "reply"]
-            if replies:
-                selected.add(replies[-1])
-            window = [events[i] for i in sorted(selected)]
-            local_coverage = dict(_attempt_coverage(attempt, coverage),
-                                  session_complete=coverage.get("complete", False))
-            local_coverage["complete"] = _complete_attempt(
-                attempt, local_coverage, legacy_complete=legacy_complete)
-            case = {"version": VERSION, "session_snapshot": sid,
-                    "agent": session["agent"], "origin": session["origin"],
-                    "trigger": trigger,
-                    "events": window, "coverage": local_coverage,
-                    "scope": "one observed user attempt; prior goals and hidden context are unavailable",
-                    "omitted_task_events": end - start - len(window),
-                    "sampling": "bounded failure/control sample; not a prevalence estimate"}
+            case = _case_record(session, sid, coverage, index, trigger, legacy_complete)
             key = store.put("cases", case)
             if key in seen:
                 continue

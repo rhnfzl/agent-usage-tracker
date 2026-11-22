@@ -7,6 +7,7 @@ import os
 import re
 import subprocess
 import time
+from collections.abc import Iterator
 from datetime import datetime, timedelta, timezone
 from threading import Thread
 from typing import Any
@@ -19,6 +20,7 @@ from ..outcome_git import default_ref
 from ..redact import redact
 from ..state import _locked
 from .case_view import _attempt
+from .evidence import event_links
 from .rubric import _shell_text
 from .store import Store
 
@@ -41,21 +43,26 @@ def _result(event: dict[str, Any]) -> str:
     return text_of(value) if isinstance(value, list) else str(text)
 
 
-def commits_in(case: dict[str, Any], session: dict[str, Any]) -> list[str]:
-    events = _attempt(session, case)
-    found: list[str] = []
-    for index, call in enumerate(events):
-        if call["kind"] != "call" or not call.get("call_id"):
+def commit_evidence(events: list[dict[str, Any]], links: dict[str, str] | None = None
+                    ) -> Iterator[dict[str, str]]:
+    paired = event_links(events) if links is None else links
+    by_id = {event["id"]: event for event in events}
+    for call in events:
+        call_id = call["id"]
+        result_id = paired.get(call_id)
+        if result_id is None:
             continue
+        result = by_id[result_id]
         matched = commit_call(_command(call))
-        if matched is None:
-            continue
-        result = next((e for e in events[index + 1:] if e["kind"] == "result"
-                       and e.get("call_id") == call["call_id"]), None)
-        if result:
-            found.extend(sha[:7] for sha in commit_shas(_result(result),
-                         err=result.get("status") == "error", before=matched[1]))
-    return list(dict.fromkeys(found))
+        if matched is not None:
+            for sha in commit_shas(_result(result), err=result.get("status") == "error",
+                                   before=matched[1]):
+                yield {"call_event_id": call_id, "result_event_id": result_id, "observed_sha": sha}
+
+
+def commits_in(case: dict[str, Any], session: dict[str, Any]) -> list[str]:
+    return list(dict.fromkeys(row["observed_sha"][:7]
+                              for row in commit_evidence(_attempt(session, case))))
 
 
 def _git(cwd: str, deadline: float, *args: str) -> tuple[str, bool]:

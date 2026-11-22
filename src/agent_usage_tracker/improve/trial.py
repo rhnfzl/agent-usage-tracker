@@ -21,7 +21,7 @@ from typing import Any
 from ..config import AutError
 from ..redact import redact
 from ..state import _locked
-from .proposals import file_digest
+from .proposals import file_digest, matches_file
 from .store import Store, digest
 
 
@@ -217,8 +217,10 @@ def _agent_run(store: Store, spec: dict[str, Any], case: dict[str, Any], conditi
         src, target = (source / name).resolve(), workspace / name
         if not src.is_relative_to(source) or not target.resolve().is_relative_to(workspace):
             raise AutError("improve: agent fixture path escapes its workspace")
-        if file_digest(src) != expected:
+        if not matches_file(source / name, expected):
             raise AutError("improve: agent fixture changed")
+        if expected is None:
+            continue
         target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         shutil.copyfile(src, target)
         target.chmod(src.stat().st_mode & 0o700)
@@ -259,7 +261,13 @@ def _frozen_files(spec: dict[str, Any], condition: str, root: Path) -> None:
     for relative, expected in spec.get("files", {}).get(condition, {}).items():
         path = root / relative
         target = path.resolve()
-        if not target.is_relative_to(root) or not target.is_file():
+        if not target.is_relative_to(root) or (expected is None and path != target):
+            raise AutError("improve: trial input changed; previous results are preserved")
+        if expected is None:
+            if not matches_file(path, None):
+                raise AutError("improve: trial input changed; previous results are preserved")
+            continue
+        if not target.is_file():
             raise AutError("improve: trial input changed; previous results are preserved")
         if spec["kind"] == "command_check" and any(c.get("acceptance_files") for c in spec["cases"]) \
                 and (path != target or target.stat().st_nlink > 1):

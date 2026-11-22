@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from ..config import AutError
-from .proposals import file_digest
+from .proposals import matches_file
 from .store import Store
 from .studies import fields, identity, strings
 from .study_decision import experiment_identity, observed_experiment
@@ -98,8 +98,11 @@ def followup(store: Store, study_id: str, spec: dict[str, Any], *,
         relative = proposal["target"]
         for condition, expected in (("baseline", proposal["before_sha256"]),
                                     ("candidate", proposal["after_sha256"])):
-            path = Path(trial["directories"][condition]) / relative
-            if trial["files"][condition].get(relative) != expected or file_digest(path) != expected:
+            root = Path(trial["directories"][condition]).resolve()
+            path = root / relative
+            files = trial["files"][condition]
+            if (path.resolve() != path or not path.is_relative_to(root) or relative not in files
+                    or files[relative] != expected or not matches_file(path, expected)):
                 raise AutError("improve: follow-up candidate exposure is not hash-pinned")
         if experiment_identity(store, spec["trial_spec_id"]) == experiment_identity(
                 store, study["trial_spec_id"]):
