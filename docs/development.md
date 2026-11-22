@@ -48,6 +48,8 @@ Run these commands on macOS or Linux with `uv`, Docker Compose, `psql`, and `sha
 ```
 
 `quick` runs Ruff. `check` runs Ruff, mypy, the two suite time zones, the MCP suite, and the SQL and Compose checks.
+These checks run concurrently. The preflight reserves cores for other checks and uses up to six pytest workers per time zone.
+Set `AUT_CI_WORKERS` to lower the worker count per time zone if the machine is busy.
 It uses a disposable TimescaleDB container on a random loopback port.
 The preflight defaults to Python 3.11. Set `AUT_CI_PYTHON` to test another supported version.
 For the Mac batch publisher, pass `./scripts/local-ci.sh quick` as `--light` and `./scripts/local-ci.sh check` as `--full`.
