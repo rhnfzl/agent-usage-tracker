@@ -1,10 +1,13 @@
 name: Release
 
-# Push a tag such as v0.2.0 to publish that version to PyPI. A version cannot be uploaded twice,
-# so bump __version__ in src/agent_usage_tracker/__init__.py first; the build stops on a mismatch.
+# Publish from a version tag after the version bump merges to main.
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
+
+concurrency:
+  group: release-${{ github.ref }}
 
 permissions:
   contents: read
@@ -17,8 +20,13 @@ jobs:
         with:
           fetch-depth: 0  # all branches, for the main check below
       # Only merged code is published: a tag pushed on a feature branch stops here.
-      - name: the tag is on main
-        run: git merge-base --is-ancestor "$GITHUB_SHA" origin/main || { echo "$GITHUB_REF_NAME is not on main"; exit 1; }
+      - name: Verify the ref is a tag on main
+        run: |
+          test "$GITHUB_REF_TYPE" = tag || { echo "Run Release on a version tag."; exit 1; }
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main || {
+            echo "$GITHUB_REF_NAME is not on main"
+            exit 1
+          }
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -46,3 +54,21 @@ jobs:
           path: dist/
       # Pinned by commit: this job can mint a PyPI upload token.
       - uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
+
+  github-release:
+    needs: publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - name: Publish release notes for the existing tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null; then
+            echo "GitHub Release $GITHUB_REF_NAME already exists."
+          else
+            gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes
+          fi
