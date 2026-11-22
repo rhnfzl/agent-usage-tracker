@@ -20,7 +20,7 @@ from ..config import AutError
 from ..event import CollectorUnavailable
 from ..git_safe import git_argv, git_env
 from ..state import _locked, atomic_write_text
-from .evidence import read_session
+from .evidence import BYTE_LIMIT, read_session
 from . import cursor_evidence, t3
 from .turn_revisions import RECORD_KIND, lookup as lookup_turn_revision
 
@@ -143,7 +143,7 @@ def _save_session(store: Store, evidence: dict[str, Any]) -> str:
 
 def audit(store: Store, home: Path, *, days: int = 7, limit: int = 40,
           project: Path | None = None, idle_s: int = 120,
-          since_epoch: float | None = None, max_bytes: int = 16 * 1024 * 1024,
+          since_epoch: float | None = None, max_bytes: int = BYTE_LIMIT,
           capture_full: bool = False) -> dict[str, Any]:
     if not 1 <= days <= 90 or not 1 <= limit <= 200 or idle_s < 0:
         raise AutError("improve: days must be 1..90 and session limit 1..200")

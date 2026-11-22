@@ -12,7 +12,11 @@ from typing import Any
 from ..config import AutError
 from ..label.core import data_dir
 from .access import MODES, Evidence
+from .evidence import BYTE_LIMIT
 from .store import Store, audit
+
+_MIB = 1024 * 1024
+_MAX_CAPTURE_MIB = 256
 
 
 def register(commands: Any) -> None:
@@ -30,6 +34,8 @@ def register(commands: Any) -> None:
     capture.add_argument("--limit", type=int, default=20)
     capture.add_argument("--idle-s", type=int, default=120)
     capture.add_argument("--project", type=Path)
+    capture.add_argument("--max-mib", type=int, default=BYTE_LIMIT // _MIB,
+                         help="maximum MiB read per source (1..256, default: 16)")
     record = actions.add_parser("record-codex-turn", help="record Git context from a Codex prompt hook")
     record.add_argument("--project", type=Path, required=True)
     record.add_argument("--setup-file", action="append", default=[], metavar="PROJECT_PATH",
@@ -103,8 +109,11 @@ def run(args: argparse.Namespace) -> None:
     if action == "capture":
         if args.audit or args.bundle or args.content == "metadata":
             raise AutError("evidence: capture takes no scope and requires full or redacted content")
+        if not 1 <= args.max_mib <= _MAX_CAPTURE_MIB:
+            raise AutError("evidence: use a per-source capture budget of 1..256 MiB")
         value = audit(Store(root), Path.home(), days=args.days, limit=args.limit,
-                      idle_s=args.idle_s, project=args.project, capture_full=args.content == "full")
+                      idle_s=args.idle_s, project=args.project, capture_full=args.content == "full",
+                      max_bytes=args.max_mib * _MIB)
     else:
         if not (args.audit or args.bundle):
             raise AutError("evidence: select --audit ID or --bundle PATH")

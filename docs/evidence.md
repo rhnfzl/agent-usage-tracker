@@ -40,6 +40,10 @@ Cursor CLI, and T3 Code sources and preserves their coverage limits. It skips re
 sources by default. Session and event IDs refer to frozen evidence. A fresh capture can include
 new events and produce a new ID.
 
+If a session reports a byte cap, capture the project again with a larger per-source budget.
+For example, use `aut evidence --content redacted capture --project /path/to/repo --max-mib 64`.
+The default is 16 MiB. The audit records the budget and reports any remaining capture gaps.
+
 ## Choose what the client can read
 
 Put `--content` before the operation, for example

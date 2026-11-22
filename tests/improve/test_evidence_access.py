@@ -55,6 +55,49 @@ def test_capture_search_content_modes_and_bundle(tmp_path, monkeypatch, capsys):
     assert main(["evidence", "--root", str(root), *scope, "session", "0" * 64]) == 1
 
 
+def test_larger_capture_budget_recovers_a_clipped_prompt_under_a_new_scope(tmp_path, monkeypatch, capsys):
+    from agent_usage_tracker.improve import store as evidence_store
+
+    monkeypatch.setattr(evidence_store.codex, "imported_until", lambda _: {})
+    monkeypatch.setattr(evidence_store.claude_code, "main_session_files", lambda _: [])
+    monkeypatch.setattr(evidence_store.pi, "session_files", lambda _: [])
+    monkeypatch.setattr(evidence_store.cursor_cli, "chat_stores", lambda _: [])
+    monkeypatch.setattr(evidence_store.t3, "snapshots", lambda *a, **kw: ([], {}))
+    log = tmp_path / "rollout.jsonl"
+    monkeypatch.setattr(evidence_store.codex, "session_files", lambda _: [str(log)])
+    stamp = datetime.now(timezone.utc).isoformat()
+    records = [
+        ("session_meta", {"id": "source", "source": "cli", "cwd": str(tmp_path)}),
+        ("event_msg", {"type": "task_started", "turn_id": "real-turn"}),
+        ("turn_context", {"turn_id": "real-turn", "model": "model", "cwd": str(tmp_path)}),
+        ("event_msg", {"type": "user_message", "message": "Recover the opening prompt"}),
+        ("fixture_padding", {"padding": "x" * (1024 * 1024 + 1024)}),
+        ("event_msg", {"type": "agent_message", "message": "Finished"}),
+        ("event_msg", {"type": "task_complete", "turn_id": "real-turn"}),
+    ]
+    log.write_text("".join(json.dumps({"type": kind, "timestamp": stamp, "payload": payload}) + "\n"
+                           for kind, payload in records), encoding="utf-8")
+    root = tmp_path / "private"
+    capture = ("--content", "redacted", "capture", "--idle-s", "0", "--max-mib")
+    assert main(["evidence", "--root", str(root), *capture, "257"]) == 1
+    assert not root.exists()
+    capsys.readouterr()
+    clipped = invoke(capsys, root, *capture, "1")["audit_id"]
+    wider = invoke(capsys, root, *capture, "2")["audit_id"]
+    store = Store(root, read_only=True)
+    assert store.get("audits", wider)["source_policy"]["max_bytes"] == 2 * 1024 * 1024
+    assert invoke(capsys, root, "--audit", clipped, "search", "--query", "opening prompt")["items"] == []
+    recovered = invoke(capsys, root, "--audit", wider, "search", "--query", "opening prompt")
+    assert len(recovered["items"]) == 1
+    assert recovered["items"][0]["kind"] == "prompt"
+    original_session = store.get("audits", clipped)["session_ids"][0]
+    recovered_session = recovered["items"][0]["session_id"]
+    assert recovered_session != original_session
+    assert store.get("sessions", recovered_session)["session_id"] == store.get("sessions", original_session)["session_id"]
+    assert store.keys("session_content") == []
+    assert invoke(capsys, root, "--audit", clipped, "--content", "metadata", "describe")["coverage"]["byte_cap_reached"] == 1
+
+
 def test_compare_uses_observed_events_and_audit_scope(tmp_path, capsys):
     store = Store(tmp_path / "private")
 
