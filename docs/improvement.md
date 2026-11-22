@@ -9,6 +9,9 @@ command sends advisory counts and operator-written adoption markers to the priva
 policies, independent references and fresh follow-up. They report bounded supported, rejected or
 inconclusive effects without turning model estimates into general productivity claims.
 
+For interactive analysis from a coding agent, use the [CLI and MCP evidence workflow](evidence.md).
+It can freeze the specific attempt around a selected event for a proposal or study.
+
 ## Freeze evidence
 
 ```bash

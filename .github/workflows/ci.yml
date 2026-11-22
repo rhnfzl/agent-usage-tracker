@@ -65,6 +65,17 @@ jobs:
           AUT_PG_ADMIN_PASSWORD=x AUT_WRITER_PASSWORD=x AUT_RO_PASSWORD=x
           AUT_GRAFANA_ADMIN_PASSWORD=x AUT_TZ=UTC docker compose config --quiet
 
+  evidence-mcp:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -e ".[test,mcp]"
+      - run: pytest -q tests/improve/test_evidence_mcp.py
+
   lint:
     runs-on: ubuntu-latest
     timeout-minutes: 10

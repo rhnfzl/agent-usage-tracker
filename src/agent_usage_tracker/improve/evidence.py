@@ -41,7 +41,8 @@ def has_attachment(content: object) -> bool:
 
 def trace_event(agent: str, session: str, kind: str, identity: str, value: object,
                 timestamp: object, *, call: object = "", tool: object = "",
-                status: str = "unknown", omitted_attachment: bool = False) -> dict[str, Any]:
+                status: str = "unknown", omitted_attachment: bool = False,
+                capture_full: bool = False) -> dict[str, Any]:
     raw = _text(value)
     omitted_attachment = omitted_attachment or has_attachment(value)
     if omitted_attachment:
@@ -49,10 +50,11 @@ def trace_event(agent: str, session: str, kind: str, identity: str, value: objec
     signature = hashlib.sha256(json.dumps({"text": raw, "status": status,
         "tool": str(tool or "")}, sort_keys=True).encode()).hexdigest()
     cleaned = redact(raw)
+    content = {"raw_text": raw, "attachment_omitted": omitted_attachment} if capture_full else {}
     return {"id": hashlib.sha256(f"{agent}|{session}|{kind}|{identity}".encode()).hexdigest()[:32],
             "kind": kind, "timestamp": timestamp, "text": cleaned[:TEXT_LIMIT],
             "truncated": omitted_attachment or len(cleaned) > TEXT_LIMIT, "source_sha256": signature,
-            "call_id": str(call or ""), "tool": str(tool or ""), "status": status}
+            "call_id": str(call or ""), "tool": str(tool or ""), "status": status, **content}
 
 
 def _codex_message_text(item: dict[str, Any]) -> str:
@@ -119,10 +121,12 @@ def _recent_records(path: Path, budget: int,
 def read_session(path: Path, agent: str, max_bytes: int = BYTE_LIMIT,
                  since_epoch: float | None = None,
                  imports: dict[str, datetime] | None = None, *,
-                 exclude_automated: bool = False, recent: bool = False) -> dict[str, Any] | None:
+                 exclude_automated: bool = False, recent: bool = False,
+                 capture_full: bool = False, track_workspaces: bool = False) -> dict[str, Any] | None:
     if agent not in {"claude_code", "codex", "pi"} or max_bytes < 1:
         raise ValueError("choose a supported trace source and a positive byte limit")
     events: list[dict[str, Any]] = []
+    workspaces: set[str] = set()
     seen: dict[tuple[str, str], str] = {}
     counts: Counter[str] = Counter()
     digest = hashlib.sha256()
@@ -156,7 +160,7 @@ def read_session(path: Path, agent: str, max_bytes: int = BYTE_LIMIT,
         nonlocal last_closed
         identity = str(call or key or line)
         event = trace_event(agent, session, kind, identity, value, record.get("timestamp"),
-                            call=call, tool=tool, status=status)
+                            call=call, tool=tool, status=status, capture_full=capture_full)
         signature = event["source_sha256"]
         previous = seen.get((kind, identity))
         if previous:
@@ -199,6 +203,10 @@ def read_session(path: Path, agent: str, max_bytes: int = BYTE_LIMIT,
             counts["malformed_records"] += 1
             continue
         kind = record.get("type")
+        if track_workspaces:
+            context = dict_or_empty(record.get("payload")) if agent == "codex" else record
+            if (workspace := context.get("cwd")) and isinstance(workspace, str):
+                workspaces.add(workspace)
         if agent == "pi":
             if line == 1:
                 if kind != "session" or not isinstance(record.get("id"), str):
@@ -389,6 +397,7 @@ def read_session(path: Path, agent: str, max_bytes: int = BYTE_LIMIT,
         "unknown_copy_boundary", "source_incomplete"))
     return {"version": VERSION, "agent": agent, "session_id": session, "cwd": cwd,
             "origin": origin, "model": model, "events": events, "coverage": coverage,
+            **({"observed_workspaces": sorted(workspaces)} if track_workspaces else {}),
             "source": {"path": str(path), "sha256": digest.hexdigest(), "bytes": used,
                        "ranges": ranges,
                        "size": observation["size"] if recent else path.stat().st_size}}

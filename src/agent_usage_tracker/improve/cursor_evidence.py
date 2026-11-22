@@ -18,7 +18,7 @@ from ..event import parse_ts
 from .evidence import VERSION, has_attachment, trace_event
 
 
-def read(path: Path, since: float, max_bytes: int) -> dict[str, Any] | None:
+def read(path: Path, since: float, max_bytes: int, *, capture_full: bool = False) -> dict[str, Any] | None:
     with closing(sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=1)) as db:
         db.setlimit(sqlite3.SQLITE_LIMIT_LENGTH, max_bytes)
         db.execute("PRAGMA query_only=ON")
@@ -66,7 +66,7 @@ def read(path: Path, since: float, max_bytes: int) -> dict[str, Any] | None:
                 return
             seen.add(identity)
             events.append({**trace_event("cursor_cli", session, kind, identity[1], value,
-                                         timestamp, **kwargs),
+                                         timestamp, capture_full=capture_full, **kwargs),
                            "table": "blobs", "record_id": record_id})
 
         sequence = blob(root)

@@ -28,7 +28,7 @@ def _hash(value: Any) -> str:
 
 
 def snapshots(home: Path, *, since: float, limit: int, idle_s: int,
-              max_bytes: int) -> tuple[list[dict[str, Any]], Counter[str]]:
+              max_bytes: int, capture_full: bool = False) -> tuple[list[dict[str, Any]], Counter[str]]:
     path = home / ".t3/userdata/statev2.sqlite"
     counts: Counter[str] = Counter()
     if not path.exists():
@@ -67,7 +67,7 @@ def snapshots(home: Path, *, since: float, limit: int, idle_s: int,
                     raise ValueError('invalid thread metadata')
                 metadata_bytes = len(payload.encode())
                 result = _thread(db, path, thread, meta.get('worktreePath') or cwd or '',
-                                 since, max_bytes - metadata_bytes, counts)
+                                 since, max_bytes - metadata_bytes, counts, capture_full=capture_full)
                 if result:
                     result['source']['bytes'] += metadata_bytes
                     result['source']['metadata_sha256'] = _hash(meta)
@@ -78,7 +78,7 @@ def snapshots(home: Path, *, since: float, limit: int, idle_s: int,
 
 
 def _thread(db: sqlite3.Connection, path: Path, thread: str, cwd: str, since: float,
-            max_bytes: int, totals: Counter[str]) -> dict[str, Any] | None:
+            max_bytes: int, totals: Counter[str], *, capture_full: bool = False) -> dict[str, Any] | None:
     coverage: Counter[str] = Counter()
     captured: list[dict[str, Any]] = []
     events: list[dict[str, Any]] = []
@@ -157,7 +157,8 @@ def _thread(db: sqlite3.Connection, path: Path, thread: str, cwd: str, since: fl
                        'timestamp': stamp.isoformat(), 'text': text[:TEXT_LIMIT],
                        'truncated': clipped, 'source_sha256': _hash(raw),
                        'call_id': call, 'tool': tool, 'status': status,
-                       'run_id': run, 'provider': provider})
+                       'run_id': run, 'provider': provider,
+                       **({'raw_text': raw} if capture_full else {})})
 
     for run in runs:
         before = coverage.copy()

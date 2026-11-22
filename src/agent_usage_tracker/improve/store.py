@@ -11,6 +11,7 @@ import subprocess
 import time
 from collections import Counter
 from datetime import datetime, timezone
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -129,9 +130,20 @@ def _source_session(path: Path, agent: str, budget: int) -> str | None:
         return None
 
 
+def _save_session(store: Store, evidence: dict[str, Any]) -> str:
+    # Keep full text out of snapshots consumed by judges, views, and draft adapters.
+    content = {event["id"]: {"text": event.pop("raw_text"),
+                             "attachment_omitted": event.pop("attachment_omitted", False)}
+               for event in evidence["events"] if "raw_text" in event}
+    if content:
+        evidence["full_content_id"] = store.put("session_content", content)
+    return store.put("sessions", evidence)
+
+
 def audit(store: Store, home: Path, *, days: int = 7, limit: int = 40,
           project: Path | None = None, idle_s: int = 120,
-          since_epoch: float | None = None, max_bytes: int = 16 * 1024 * 1024) -> dict[str, Any]:
+          since_epoch: float | None = None, max_bytes: int = 16 * 1024 * 1024,
+          capture_full: bool = False) -> dict[str, Any]:
     if not 1 <= days <= 90 or not 1 <= limit <= 200 or idle_s < 0:
         raise AutError("improve: days must be 1..90 and session limit 1..200")
     now = time.time()
@@ -165,13 +177,15 @@ def audit(store: Store, home: Path, *, days: int = 7, limit: int = 40,
     seen: set[tuple[str, str]] = set()
     identities: dict[tuple[str, str], str] = {}
     copies: dict[tuple[str, str], list[str]] = {}
-    project_repo = repository(project) if project else None
+    project_identity = lru_cache(maxsize=256)(repository)
+    project_repo = project_identity(project) if project else None
     if project and project_repo is None:
         raise AutError("improve: project must be a readable local Git repository")
     t3_rows, t3_counts = t3.snapshots(home, since=since, limit=limit,
-                                    idle_s=idle_s, max_bytes=max_bytes)
+                                    idle_s=idle_s, max_bytes=max_bytes, capture_full=capture_full)
     counts.update(t3_counts)
     mirrors: dict[tuple[str, str], str] = {}
+    supplemental_sessions: set[str] = set()
     supplement_reads = 0
     # App threads join provider handoffs; native mirrors remain referenced, not counted twice.
     candidates: list[tuple[float, str, Path | dict[str, Any]]] = [
@@ -190,15 +204,24 @@ def audit(store: Store, home: Path, *, days: int = 7, limit: int = 40,
             if isinstance(candidate, dict):
                 evidence = candidate
             elif agent == "cursor_cli":
-                evidence = cursor_evidence.read(candidate, since, max_bytes)
+                evidence = cursor_evidence.read(candidate, since, max_bytes, capture_full=capture_full)
             else:
                 evidence = read_session(candidate, agent, max_bytes=max_bytes, since_epoch=since,
-                                        imports=imports, exclude_automated=True, recent=True)
+                                        imports=imports, exclude_automated=True, recent=True,
+                                        capture_full=capture_full, track_workspaces=project is not None)
         except (OSError, ValueError, TypeError, OverflowError, sqlite3.DatabaseError, AutError):
             counts["unreadable_sources"] += 1
             continue
         if evidence is None:
             counts["automated_sources"] += 1
+            continue
+        if evidence["origin"] in {"subagent", "automated"}:
+            counts["automated_sources"] += 1
+            continue
+        workspaces = evidence.pop("observed_workspaces", []) or [evidence["cwd"]]
+        if project and any(not cwd or not Path(cwd).is_absolute()
+                           or project_identity(Path(cwd)) != project_repo for cwd in workspaces):
+            counts["other_projects"] += 1
             continue
         if (agent, evidence["session_id"]) in mirrors:
             source = (agent, evidence["source"]["sha256"])
@@ -207,7 +230,8 @@ def audit(store: Store, home: Path, *, days: int = 7, limit: int = 40,
                 continue
             seen.add(source)
             primary_key = mirrors[(agent, evidence["session_id"])]
-            supplement = store.put("sessions", evidence)
+            supplement = _save_session(store, evidence)
+            supplemental_sessions.add(supplement)
             primary = store.get("sessions", primary_key)
             linked = set(primary.get("supplemental_sources", []))
             linked.add(supplement)
@@ -220,14 +244,8 @@ def audit(store: Store, home: Path, *, days: int = 7, limit: int = 40,
             copies[("t3", primary["session_id"])] = [updated_key]
             counts["t3_native_mirrors"] += 1
             continue
-        if evidence["origin"] in {"subagent", "automated"}:
-            counts["automated_sources"] += 1
-            continue
         if not evidence["events"]:
             counts["no_recent_evidence"] += 1
-            continue
-        if project and (not evidence["cwd"] or repository(Path(evidence["cwd"])) != project_repo):
-            counts["other_projects"] += 1
             continue
         source = (agent, evidence["source"]["sha256"])
         if source in seen:
@@ -240,7 +258,7 @@ def audit(store: Store, home: Path, *, days: int = 7, limit: int = 40,
             evidence["coverage"]["complete"] = False
             counts["divergent_copies"] += 1
         identities[identity] = source[1]
-        key = store.put("sessions", evidence)
+        key = _save_session(store, evidence)
         sessions.append(key)
         if agent == "t3":
             mirrors.update((tuple(pair), key) for pair in evidence.get("native_sessions", []))
@@ -262,6 +280,8 @@ def audit(store: Store, home: Path, *, days: int = 7, limit: int = 40,
                                   "idle_s": idle_s, "agents": ["t3", *(name for name, _ in native_sources)],
                                   "additional_native_reads": 2 * limit,
                                   "preference": "T3 app thread before native provider mirrors"}}
+    if supplemental_sessions:
+        manifest["supplemental_session_ids"] = sorted(supplemental_sessions)
     key = store.put("audits", manifest)
     store.append("audit", audit_id=key, sessions=len(sessions), coverage=dict(counts))
     return {"audit_id": key, "sessions": len(sessions), **counts}
