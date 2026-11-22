@@ -362,6 +362,21 @@ class Evidence:
                 "coverage": _coverage(case["coverage"]),
                 "omitted_task_events": case.get("omitted_task_events", 0)}
 
+    def ordinary_work(self, metric: Literal["tool_calls", "tool_errors", "codex_model_calls"] = "tool_calls",
+                      coverage_basis: Literal["full_case", "tool_events"] | None = None,
+                      require_turn_context: bool = False, agent: str = "", before: str = "",
+                      include_excluded: bool = False, cursor: str = "", limit: int = 30) -> dict[str, Any]:
+        """Find completed attempts with measurable evidence and return references to freeze as cases."""
+        _page(0, limit)
+        if self.store is None:
+            raise AutError("evidence: ordinary-work selection requires a private audit")
+        from .study_candidates import ordinary_work_page
+        policy: dict[str, Any] = {"metric": metric, "require_turn_context": require_turn_context}
+        if coverage_basis is not None:
+            policy["coverage_basis"] = coverage_basis
+        return ordinary_work_page(self.store, self.describe(), self.keys, self.ambiguous, policy,
+                                  agent, before, include_excluded, cursor, limit, self._label)
+
     def export(self, path: Path, ids: list[str]) -> dict[str, Any]:
         from .outputs import commit_evidence
 

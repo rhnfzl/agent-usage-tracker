@@ -20,25 +20,33 @@ from .judge import _attempt_coverage, _complete_attempt
 from .setup_git import COMMIT_ID, target_in_workspace, verify_setup
 from .store import Store, digest, repository
 
+METRICS = ("tool_errors", "tool_calls", "codex_model_calls")
+COVERAGE_BASES = ("full_case", "tool_events")
+
+
+def validate_measurement(policy: dict[str, Any]) -> None:
+    if (policy.get("coverage_basis", "full_case") not in COVERAGE_BASES
+            or type(policy.get("require_turn_context", False)) is not bool
+            or policy.get("metric") not in METRICS
+            or policy["metric"] == "codex_model_calls" and (
+                not policy.get("require_turn_context") or "coverage_basis" in policy)):
+        raise AutError("improve: invalid ordinary-work observation policy")
+
 
 def validate_policy(policy: Any) -> None:
     if (not isinstance(policy, dict)
             or set(policy) - {"require_turn_context", "coverage_basis", "require_setup_revision",
                               "require_approved_file_read"}
             != {"metric", "minimum_pairs", "minimum_improvement", "baseline_cases"}
-            or policy.get("coverage_basis", "full_case") not in ("full_case", "tool_events")
-            or type(policy.get("require_turn_context", False)) is not bool
             or type(policy.get("require_setup_revision", False)) is not bool
             or policy.get("require_setup_revision") and not policy.get("require_turn_context")
             or type(policy.get("require_approved_file_read", False)) is not bool
             or policy.get("require_approved_file_read") and not policy.get("require_turn_context")
-            or policy["metric"] not in ("tool_errors", "tool_calls", "codex_model_calls")
-            or policy["metric"] == "codex_model_calls" and (
-                not policy.get("require_turn_context") or "coverage_basis" in policy)
             or type(policy["minimum_pairs"]) is not int or not 2 <= policy["minimum_pairs"] <= 200
             or type(policy["minimum_improvement"]) not in (float, int)
             or not 0 <= policy["minimum_improvement"] < math.inf):
         raise AutError("improve: invalid ordinary-work observation policy")
+    validate_measurement(policy)
 
     baseline = policy["baseline_cases"]
     if (not isinstance(baseline, dict) or not policy["minimum_pairs"] <= len(baseline) <= 200
@@ -51,7 +59,11 @@ def validate_policy(policy: Any) -> None:
 def _sample(store: Store, case_id: str) -> dict[str, Any]:
     case = store.get("cases", case_id)
     session = store.get("sessions", case["session_snapshot"])
-    events = _attempt(session, case)
+    return _sample_attempt(session, case, _attempt(session, case))
+
+
+def _sample_attempt(session: dict[str, Any], case: dict[str, Any],
+                    events: list[dict[str, Any]]) -> dict[str, Any]:
     stamps = [parse_ts(event.get("timestamp")) for event in events]
     times = [stamp.astimezone(timezone.utc) for stamp in stamps if stamp and stamp.tzinfo]
     calls = sum(event["kind"] == "call" for event in events)
@@ -140,6 +152,20 @@ def _sufficient_coverage(sample: dict[str, Any], policy: dict[str, Any]) -> bool
     return bool(sample["complete"])
 
 
+def measurement_issue(sample: dict[str, Any], policy: dict[str, Any]) -> str | None:
+    context = sample["context_status"]
+    if context in {"missing", "ambiguous"} or policy.get("require_turn_context") and context != "observed":
+        return "turn_context_unverified"
+    if not _sufficient_coverage(sample, policy):
+        return "measurement_coverage_incomplete"
+    if sample[policy["metric"]] is None:
+        return "metric_unknown"
+    if (not isinstance(sample["model"], str) or not sample["model"]
+            or not isinstance(sample["cwd"], str) or not Path(sample["cwd"]).is_absolute()):
+        return "setup_labels_unverified"
+    return None
+
+
 def _is_revision(value: Any) -> bool:
     return isinstance(value, str) and bool(COMMIT_ID.fullmatch(value))
 
@@ -154,8 +180,8 @@ def check_strict_baselines(store: Store, policy: dict[str, Any], scope: Path, be
     for key in policy["baseline_cases"]:
         sample = _sample(store, key)
         source = digest(list(sample["identity"]))
-        if (sample["context_status"] != "observed" or not _sufficient_coverage(sample, policy)
-                or sample["ended"] >= before or sample[policy["metric"]] is None
+        if (sample["context_status"] != "observed" or measurement_issue(sample, policy)
+                or sample["ended"] >= before
                 or source in excluded_sessions or source in sessions
                 or sample["content"] in contents or not _in_scope(sample["cwd"], scope, project)):
             continue

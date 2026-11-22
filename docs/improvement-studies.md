@@ -184,6 +184,20 @@ pilot remain unverified until independently observed outside these declarations.
 If you want a comparison from ordinary sessions, add an observation policy when you create the
 study. Freeze the baseline cases first. Keep them separate from discovery and control cases.
 
+Use `ordinary-work` to find measurable attempts in a private audit. The CLI and MCP use the same
+coverage checks and return the prompt and completed-turn references.
+
+```bash
+aut evidence --audit AUDIT_ID --content redacted ordinary-work \
+  --metric tool_errors --coverage-basis tool_events --require-turn-context
+aut evidence --audit AUDIT_ID --content redacted freeze-case SESSION_ID EVENT_ID
+```
+
+Review the task family before freezing a case. The preview reports distinct sessions and coverage
+exclusions for each page. Add `--include-excluded` to see individual reasons.
+Follow `next_cursor` to continue the scan. Use `--before` with a timezone to exclude later work.
+The study checks source reuse, project and model compatibility, and any required setup evidence.
+
 ```json
 "observation_policy": {
   "metric": "tool_errors",

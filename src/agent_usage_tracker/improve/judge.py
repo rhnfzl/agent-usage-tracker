@@ -71,15 +71,21 @@ def _case_record(session: dict[str, Any], sid: str, coverage: dict[str, Any], in
     end = next((i if events[i]["kind"] == "prompt" else i + 1
                 for i in range(index, len(events))
                 if i > start and events[i]["kind"] in {"prompt", "boundary"}), len(events))
-    attempt = events[start:end]
+    return _record_attempt(session, sid, coverage, events[start:end], index - start,
+                           trigger, legacy_complete)
+
+
+def _record_attempt(session: dict[str, Any], sid: str, coverage: dict[str, Any],
+                    attempt: list[dict[str, Any]], anchor: int, trigger: str,
+                    legacy_complete: bool) -> dict[str, Any]:
     if len(attempt) <= 40 and sum(len(e.get("text", "")) for e in attempt) <= 24000:
-        selected = set(range(start, end))
+        selected = set(range(len(attempt)))
     else:
-        selected = {start, *range(max(start, index - 4), min(end, index + 5))}
-    replies = [i for i in range(index, end) if events[i]["kind"] == "reply"]
+        selected = {0, *range(max(0, anchor - 4), min(len(attempt), anchor + 5))}
+    replies = [i for i in range(anchor, len(attempt)) if attempt[i]["kind"] == "reply"]
     if replies:
         selected.add(replies[-1])
-    window = [events[i] for i in sorted(selected)]
+    window = [attempt[i] for i in sorted(selected)]
     local_coverage = dict(_attempt_coverage(attempt, coverage),
                           session_complete=coverage.get("complete", False))
     local_coverage["complete"] = _complete_attempt(
@@ -89,7 +95,7 @@ def _case_record(session: dict[str, Any], sid: str, coverage: dict[str, Any], in
             "trigger": trigger,
             "events": window, "coverage": local_coverage,
             "scope": "one observed user attempt; prior goals and hidden context are unavailable",
-            "omitted_task_events": end - start - len(window),
+            "omitted_task_events": len(attempt) - len(window),
             "sampling": "bounded failure/control sample; not a prevalence estimate"}
     return case
 

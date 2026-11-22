@@ -66,6 +66,15 @@ def register(commands: Any) -> None:
     skill.add_argument("--candidate", type=Path)
     case = actions.add_parser("case", help="resolve a saved improvement case to evidence references")
     case.add_argument("case_id")
+    ordinary = actions.add_parser("ordinary-work", help="find attempts that can supply study measurements")
+    from .study_observe import COVERAGE_BASES, METRICS
+    ordinary.add_argument("--metric", choices=METRICS, default="tool_calls")
+    ordinary.add_argument("--coverage-basis", choices=COVERAGE_BASES)
+    ordinary.add_argument("--require-turn-context", action="store_true")
+    ordinary.add_argument("--include-excluded", action="store_true")
+    for option in ("agent", "before", "cursor"):
+        ordinary.add_argument(f"--{option}", default="")
+    ordinary.add_argument("--limit", type=int, default=30)
     freeze = actions.add_parser("freeze-cases", help="save observed failures and controls as improvement cases")
     freeze.add_argument("--limit", type=int, default=30)
     export = actions.add_parser("export", help="write a private bundle of explicitly selected sessions")
@@ -139,6 +148,9 @@ def run(args: argparse.Namespace) -> None:
             value = evidence.compare(args.baseline, args.candidate, args.cases)
         elif action == "case":
             value = evidence.case(args.case_id)
+        elif action == "ordinary-work":
+            value = evidence.ordinary_work(args.metric, args.coverage_basis, args.require_turn_context,
+                                           args.agent, args.before, args.include_excluded, args.cursor, args.limit)
         elif action == "export":
             value = evidence.export(args.path, args.ids)
         else:
