@@ -19,7 +19,7 @@ from ..state import parse_record
 
 TEXT_LIMIT = 6000
 BYTE_LIMIT = 16 * 1024 * 1024
-VERSION = 8
+VERSION = 9
 ATTACHMENT_TYPES = ("image", "file", "document", "audio", "video", "resource")
 _CODEX_UNCOUNTED_RESPONSE_TOOLS = {
     "web_search_call", "image_generation_call", "local_shell_call",
@@ -29,6 +29,40 @@ _CODEX_UNCOUNTED_COMPLETED_ITEMS = {
     "CollabAgentToolCall", "Extension", "FileChange", "FunctionCallOutput",
     "ImageGeneration", "ImageView", "WebSearch",
 }
+_CODEX_MODEL_CALLS = {"function_call": "function_call_output",
+                      "custom_tool_call": "custom_tool_call_output"}
+_CODEX_MODEL_RESULTS = frozenset(_CODEX_MODEL_CALLS.values())
+
+
+class _CodexModelCalls:
+    """Count a single opened turn using its raw model requests and outputs."""
+
+    def __init__(self, started: datetime) -> None:
+        self.requests: dict[str, str | None] = {}
+        self.started = self.last = started
+        self.valid = True
+
+    def record(self, kind: str, call_id: Any, timestamp: Any) -> None:
+        stamp = parse_ts(timestamp)
+        if (not isinstance(call_id, str) or not call_id or not stamp or not stamp.tzinfo
+                or stamp < self.last):
+            self.valid = False
+            return
+        self.last = stamp
+        if kind in _CODEX_MODEL_CALLS and call_id not in self.requests:
+            self.requests[call_id] = _CODEX_MODEL_CALLS[kind]
+        elif kind in _CODEX_MODEL_RESULTS and self.requests.get(call_id) == kind:
+            self.requests[call_id] = None
+        else:
+            self.valid = False
+
+    def receipt(self, timestamp: Any) -> dict[str, Any] | None:
+        ended = parse_ts(timestamp)
+        if (self.valid and ended and ended.tzinfo and ended >= self.last and self.requests
+                and all(result is None for result in self.requests.values())):
+            return {"count": len(self.requests), "started_at": self.started.isoformat(),
+                    "thread_origin": "interactive"}
+        return None
 
 
 def _text(value: object) -> str:
@@ -150,6 +184,8 @@ def read_session(path: Path, agent: str, max_bytes: int = BYTE_LIMIT,
     active_turn: str | None = None
     active_turn_key: str | None = None
     recorded_context: dict[str, Any] | None = None
+    seen_native_turns: set[str] = set()
+    model_calls: _CodexModelCalls | None = None
     item_turns: dict[str, set[str]] = {}
     used = 0
     ranges: list[list[int]] = []
@@ -174,7 +210,8 @@ def read_session(path: Path, agent: str, max_bytes: int = BYTE_LIMIT,
     def emit(kind: str, value: object, line: int, record: dict[str, Any], *,
              call: object = "", tool: object = "", status: str = "unknown",
              key: object = "", context: dict[str, Any] | None = None,
-             tool_representation: str = "") -> None:
+             tool_representation: str = "",
+             codex_model_call_receipt: dict[str, Any] | None = None) -> None:
         nonlocal last_closed
         identity = str(call or key or line)
         event = trace_event(agent, session, kind, identity, value, record.get("timestamp"),
@@ -194,6 +231,8 @@ def read_session(path: Path, agent: str, max_bytes: int = BYTE_LIMIT,
                       **({"turn_context": context} if context is not None else {}),
                       **({"tool_representation": tool_representation}
                          if tool_representation else {}),
+                      **({"codex_model_call_receipt": codex_model_call_receipt}
+                         if codex_model_call_receipt is not None else {}),
                       **({"native_turn_key": active_turn_key} if active_turn_key else {})})
         seen[kind, identity] = event
         events.append(event)
@@ -302,15 +341,19 @@ def read_session(path: Path, agent: str, max_bytes: int = BYTE_LIMIT,
                     copied_until = ordinal if isinstance(ordinal, int) else 0
             if unknown_copy_boundary or (line < 0 and copied_until):
                 counts["unknown_copy_boundary"] += 1
+                model_calls = None
                 continue
             if 0 < line <= copied_until:
                 counts["copied_records"] += 1
+                model_calls = None
                 continue
             if kind not in {"session_meta", "turn_context"} \
                     and codex.imported_record(record, (imports or {}).get(session)):
                 counts["imported_records"] += 1
+                model_calls = None
                 continue
             if kind not in {"session_meta", "turn_context"} and not in_window(record):
+                model_calls = None
                 continue
             sub = payload.get("type")
             if track_native_items and active_turn_key:
@@ -339,11 +382,13 @@ def read_session(path: Path, agent: str, max_bytes: int = BYTE_LIMIT,
                         recorded_context = {"status": "ambiguous"}
             elif kind == "response_item":
                 call_id = payload.get("call_id")
-                if sub in {"function_call", "custom_tool_call"}:
+                if model_calls is not None and (sub in _CODEX_MODEL_CALLS or sub in _CODEX_MODEL_RESULTS):
+                    model_calls.record(sub, call_id, record.get("timestamp"))
+                if sub in _CODEX_MODEL_CALLS:
                     emit("call", payload.get("arguments", payload.get("input", "")),
                          line, record, call=call_id, tool=payload.get("name"),
                          tool_representation="model_call")
-                elif sub in {"function_call_output", "custom_tool_call_output"}:
+                elif sub in _CODEX_MODEL_RESULTS:
                     value = payload.get("output", "")
                     emit("result", value, line, record, call=call_id,
                          status=result_status(value))
@@ -351,10 +396,12 @@ def read_session(path: Path, agent: str, max_bytes: int = BYTE_LIMIT,
                     emit("prompt" if payload["role"] == "user" else "reply",
                          payload.get("content", ""), line, record, key=payload.get("id"))
                 elif sub in {"compaction", "context_compaction"}:
+                    model_calls = None
                     emit("compaction", "context was compacted", line, record)
                 elif sub in _CODEX_UNCOUNTED_RESPONSE_TOOLS:
                     emit("tool_gap", "Unsupported Codex tool record", line, record)
             elif kind == "compacted":
+                model_calls = None
                 emit("compaction", "context was compacted", line, record)
             elif kind == "event_msg":
                 item = dict_or_empty(payload.get("item"))
@@ -364,6 +411,13 @@ def read_session(path: Path, agent: str, max_bytes: int = BYTE_LIMIT,
                     active_turn_key = (hashlib.sha256(active_turn.encode()).hexdigest()[:32]
                                        if active_turn else None)
                     recorded_context = None
+                    started = parse_ts(record.get("timestamp"))
+                    model_calls = None
+                    if (origin == "interactive" and active_turn and started and started.tzinfo
+                            and active_turn not in seen_native_turns):
+                        model_calls = _CodexModelCalls(started)
+                    if active_turn:
+                        seen_native_turns.add(active_turn)
                 elif sub == "user_message":
                     message = payload.get("message", "")
                     if codex.is_scheduled_automation(message):
@@ -378,9 +432,13 @@ def read_session(path: Path, agent: str, max_bytes: int = BYTE_LIMIT,
                     if completed_turn or active_turn:
                         completed_context = recorded_context if active_turn == completed_turn else None
                         completed_context = completed_context or {"status": "missing"}
+                    receipt = (model_calls.receipt(record.get("timestamp"))
+                               if model_calls is not None and last_closed and completed_context
+                               and completed_context["status"] == "observed" else None)
                     emit("boundary", "turn_complete" if last_closed else "turn_aborted",
-                         line, record, context=completed_context)
+                         line, record, context=completed_context, codex_model_call_receipt=receipt)
                     active_turn, active_turn_key, recorded_context = None, None, None
+                    model_calls = None
                 elif sub == "item_completed" and item.get("type") == "CommandExecution":
                     identity = item.get("id") or f"command-{line}"
                     emit("call", item.get("command", ""), line, record,
@@ -406,6 +464,7 @@ def read_session(path: Path, agent: str, max_bytes: int = BYTE_LIMIT,
                          key=item.get("id"))
                 elif sub == "context_compacted" or (
                         sub == "item_completed" and item.get("type") == "ContextCompaction"):
+                    model_calls = None
                     emit("compaction", "context was compacted", line, record, key=item.get("id"))
                 elif sub in {"web_search_end", "image_generation_end"} or (
                         sub == "item_completed"

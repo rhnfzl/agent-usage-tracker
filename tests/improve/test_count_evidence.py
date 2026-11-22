@@ -2,6 +2,7 @@ import json
 
 import pytest
 
+from agent_usage_tracker.improve.access import Evidence
 from agent_usage_tracker.improve.evidence import read_session
 from agent_usage_tracker.improve.judge import _case_record
 from agent_usage_tracker.improve.store import Store
@@ -53,22 +54,29 @@ def test_count_evidence_uses_full_snapshot_and_requires_complete_event_links(
         assert sample["tool_calls"] == sample["tool_errors"] == 1
 
 
-@pytest.mark.parametrize(("extra", "expected"), [
-    (None, True),
-    ("repeated", False),
-    ("web_search_call", False),
-    ("local_shell_call", False),
-    ("tool_search_output", False),
-    ("mixed_representation", False),
-    ("uncounted_item", False),
-    ("compacted", False),
+@pytest.mark.parametrize(("extra", "expected", "model_calls"), [
+    (None, True, 1),
+    ("repeated", False, None),
+    ("web_search_call", False, 1),
+    ("local_shell_call", False, 1),
+    ("tool_search_output", False, 1),
+    ("mixed_representation", False, 1),
+    ("same_id_execution", False, 1),
+    ("uncounted_item", False, 1),
+    ("compacted", False, None),
+    ("wrong_result_type", True, None),
+    ("orphan", False, None),
+    ("result_before_call", True, None),
+    ("new_turn_without_close", True, None),
+    ("unknown_origin", True, None),
 ])
-def test_count_evidence_checks_original_codex_records(tmp_path, extra, expected):
+def test_count_evidence_checks_original_codex_records(tmp_path, extra, expected, model_calls):
     stamp = "2026-11-02T09:00:00Z"
     call = {"type": "function_call", "call_id": "tool", "name": "run", "arguments": "{}"}
     result = {"type": "function_call_output", "call_id": "tool", "output": "output line\n" * 1000}
     rows = [
-        ("session_meta", {"id": "native", "cwd": str(tmp_path), "originator": "codex_cli_rs"}),
+        ("session_meta", {"id": "native", "cwd": str(tmp_path),
+                          "source": "unknown" if extra == "unknown_origin" else "cli"}),
         ("event_msg", {"type": "task_started", "turn_id": "turn"}),
         ("turn_context", {"turn_id": "turn", "model": "model", "cwd": str(tmp_path)}),
         ("event_msg", {"type": "user_message", "message": "Check"}),
@@ -77,18 +85,27 @@ def test_count_evidence_checks_original_codex_records(tmp_path, extra, expected)
     ]
     if extra == "repeated":
         rows.extend([("response_item", call), ("response_item", result)])
-    elif extra == "mixed_representation":
+    elif extra in {"mixed_representation", "same_id_execution"}:
         rows.append(("event_msg", {"type": "item_completed", "item": {
-            "type": "CommandExecution", "id": "other", "exit_code": 0}}))
+            "type": "CommandExecution", "id": "tool" if extra == "same_id_execution" else "other",
+            "exit_code": 0}}))
+    elif extra == "wrong_result_type":
+        rows[-1] = ("response_item", dict(result, type="custom_tool_call_output"))
+    elif extra == "orphan":
+        rows.append(("response_item", dict(result, call_id="orphan")))
+    elif extra == "new_turn_without_close":
+        rows.append(("event_msg", {"type": "task_started", "turn_id": "turn"}))
     elif extra == "uncounted_item":
         rows.append(("event_msg", {"type": "item_completed", "item": {"type": "FileChange"}}))
     elif extra == "compacted":
         rows.append(("compacted", {"message": "private compaction text"}))
-    elif extra:
+    elif extra and extra not in {"result_before_call", "unknown_origin"}:
         rows.append(("response_item", {"type": extra}))
     rows.append(("event_msg", {"type": "task_complete", "turn_id": "turn"}))
     path = tmp_path / "codex.jsonl"
-    path.write_text("".join(json.dumps({"type": kind, "timestamp": stamp, "payload": payload})
+    path.write_text("".join(json.dumps({"type": kind, "timestamp":
+                            "2026-11-02T08:59:59Z" if extra == "result_before_call" and payload is result
+                            else stamp, "payload": payload})
                             + "\n" for kind, payload in rows))
     session = read_session(path, "codex")
     assert session is not None
@@ -100,4 +117,11 @@ def test_count_evidence_checks_original_codex_records(tmp_path, extra, expected)
     sample = _sample(store, case)
     assert not sample["complete"]
     assert sample["tool_events_complete"] == expected
+    assert sample["codex_model_calls"] == model_calls
     assert "private compaction text" not in str(session["events"])
+    if extra == "mixed_representation":
+        audit = store.put("audits", {"session_ids": [snapshot], "coverage": {}})
+        evidence = Evidence("metadata", store=store, audit_id=audit)
+        row = evidence.event(snapshot, session["events"][-1]["id"])
+        assert row["codex_model_call_receipt"] == {"count": 1, "started_at": "2026-11-02T09:00:00+00:00"}
+        assert "text" not in row

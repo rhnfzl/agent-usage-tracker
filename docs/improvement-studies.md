@@ -241,3 +241,12 @@ exclude a pair. A Codex turn that mixes model calls with execution items can cou
 AUT excludes those turns and pairs where the two attempts use different known representations.
 The report counts the pairs that qualify through tool events alone.
 The default `full_case` basis also requires a complete review sample.
+
+Choose `metric: "codex_model_calls"` with `require_turn_context: true` to count Codex function
+and custom tool requests. Omit `coverage_basis` for this metric. AUT counts raw requests from
+the native turn start, and requires one matching output of the same type for each request.
+Execution records, built-in search, and other tool types are outside this metric.
+Inspect the count and start time on the boundary event through the CLI or MCP.
+The study checks capture coverage and requires an interactive native Codex session.
+An old capture or a turn without a complete request stream provides no count.
+The observation window uses the recorded native turn start.

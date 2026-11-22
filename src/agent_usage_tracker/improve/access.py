@@ -106,6 +106,12 @@ class Evidence:
     def _event(self, event: dict[str, Any], *, text: bool = True,
                selected: set[str] | None = None) -> dict[str, Any]:
         result = {field: event[field] for field in EVENT_METADATA if field in event}
+        receipt = event.get("codex_model_call_receipt")
+        if event["kind"] == "boundary" and isinstance(receipt, dict):
+            count = receipt.get("count")
+            started = parse_ts(receipt.get("started_at"))
+            if type(count) is int and count > 0 and started and started.tzinfo:
+                result["codex_model_call_receipt"] = {"count": count, "started_at": started.isoformat()}
         context = event.get("turn_context")
         if isinstance(context, dict) and context.get("status") in ("observed", "missing", "ambiguous"):
             visible = {"status": context["status"]}

@@ -24,7 +24,9 @@ def validate_policy(policy: Any) -> None:
             != {"metric", "minimum_pairs", "minimum_improvement", "baseline_cases"}
             or policy.get("coverage_basis", "full_case") not in ("full_case", "tool_events")
             or type(policy.get("require_turn_context", False)) is not bool
-            or policy["metric"] not in ("tool_errors", "tool_calls")
+            or policy["metric"] not in ("tool_errors", "tool_calls", "codex_model_calls")
+            or policy["metric"] == "codex_model_calls" and (
+                not policy.get("require_turn_context") or "coverage_basis" in policy)
             or type(policy["minimum_pairs"]) is not int or not 2 <= policy["minimum_pairs"] <= 200
             or type(policy["minimum_improvement"]) not in (float, int)
             or not 0 <= policy["minimum_improvement"] < math.inf):
@@ -68,6 +70,20 @@ def _sample(store: Store, case_id: str) -> dict[str, Any]:
         turn = events[-1].get("native_turn_key")
         if not turn or any(event.get("native_turn_key") != turn for event in events):
             context_status = "ambiguous"
+    receipt = events[-1].get("codex_model_call_receipt")
+    if not isinstance(receipt, dict):
+        receipt = {}
+    model_calls = receipt.get("count")
+    model_started = parse_ts(receipt.get("started_at"))
+    if (not has_timed_source or session["agent"] != "codex"
+            or session.get("origin") != "interactive" or context_status != "observed"
+            or receipt.get("thread_origin") != "interactive"
+            or events[0]["kind"] != "prompt" or events[-1].get("text") != "turn_complete"
+            or type(model_calls) is not int or model_calls < 1
+            or not model_started or not model_started.tzinfo or model_started > min(times)
+            or any(coverage.get(gap) for gap in ("malformed_records", "missing_timestamps",
+                       "divergent_copy", "source_incomplete", "unknown_copy_boundary"))):
+        model_calls, model_started = None, None
     return {
         "context_status": context_status,
         "identity": (session["agent"], session.get("session_id")),
@@ -77,6 +93,8 @@ def _sample(store: Store, case_id: str) -> dict[str, Any]:
         "model": context.get("model") if context else session.get("model"),
         "started": min(times) if times else None, "ended": max(times) if times else None,
         "complete": completed, "tool_events_complete": tool_events_complete, "tool_calls": calls,
+        "codex_model_calls": model_calls,
+        "codex_model_started": model_started.astimezone(timezone.utc) if model_started else None,
         "tool_representation": next(iter(representations)) if len(representations) == 1 else None,
         "tool_errors": sum(event.get("status") == "error" for event in results)
                        if known_errors else None,
@@ -91,6 +109,8 @@ def _in_scope(cwd: str | None, scope: Path, project: str | None) -> bool:
 
 
 def _sufficient_coverage(sample: dict[str, Any], policy: dict[str, Any]) -> bool:
+    if policy["metric"] == "codex_model_calls":
+        return sample["codex_model_calls"] is not None
     if policy.get("coverage_basis") == "tool_events":
         return bool(sample["tool_events_complete"])
     return bool(sample["complete"])
@@ -172,14 +192,15 @@ def observe(store: Store, study_id: str, spec: dict[str, Any]) -> dict[str, Any]
         sources = {before["identity"], after["identity"]}
         content = {before["content"], after["content"]}
         contexts = {before["context_status"], after["context_status"]}
+        after_started = after["codex_model_started"] if metric == "codex_model_calls" else after["started"]
         reason = None
         if (left in discovery or right in discovery or sources & excluded_sources
                 or len(sources) != 2 or len(content) != 2 or seen_sources & sources
                 or seen_content & content):
             reason = "reused_or_copied_evidence"
         elif (left not in known or right in known or not _sufficient_coverage(before, policy)
-              or not _sufficient_coverage(after, policy) or before["ended"] >= frozen or after["started"] <= frozen
-              or after["started"].date() <= adopted):
+              or not _sufficient_coverage(after, policy) or before["ended"] >= frozen
+              or after_started <= frozen or after_started.date() <= adopted):
             reason = "missing_coverage_or_wrong_window"
         elif (contexts & {"missing", "ambiguous"}
               or policy.get("require_turn_context") and contexts != {"observed"}):
@@ -189,7 +210,7 @@ def observe(store: Store, study_id: str, spec: dict[str, Any]) -> dict[str, Any]
               or before["identity"][0] != after["identity"][0]
               or not before["model"] or before["model"] != after["model"]):
             reason = "project_harness_or_model_labels_differ"
-        elif (before["tool_representation"] and after["tool_representation"]
+        elif (metric != "codex_model_calls" and before["tool_representation"] and after["tool_representation"]
               and before["tool_representation"] != after["tool_representation"]):
             reason = "tool_representations_differ"
         elif before[metric] is None or after[metric] is None:
@@ -203,7 +224,8 @@ def observe(store: Store, study_id: str, spec: dict[str, Any]) -> dict[str, Any]
         outcomes.append({**pair, "eligible": True, "baseline_value": before[metric],
                          "candidate_value": after[metric],
                          "reduction": before[metric] - after[metric],
-                         "uses_tool_events_only": not (before["complete"] and after["complete"]),
+                         "uses_tool_events_only": policy.get("coverage_basis") == "tool_events"
+                         and not (before["complete"] and after["complete"]),
                          "basis": "recorded_turn_context" if contexts == {"observed"}
                          else "includes_session_labels"})
 
@@ -218,7 +240,8 @@ def observe(store: Store, study_id: str, spec: dict[str, Any]) -> dict[str, Any]
             comparison = "observed_increase"
     record = {"study_id": study_id, "adoption_id": adoption_id, "metric": metric,
               "comparison": comparison, "eligible_pairs": len(reductions),
-              "coverage_basis": policy.get("coverage_basis", "full_case"),
+              "coverage_basis": ("codex_model_calls" if metric == "codex_model_calls"
+                                 else policy.get("coverage_basis", "full_case")),
               "tool_events_only_pairs": sum(row.get("uses_tool_events_only", False)
                                            for row in outcomes),
               "excluded_pairs": len(pairs) - len(reductions), "exclusions": dict(counts),

@@ -507,7 +507,7 @@ def test_study_freezes_absence_when_proposal_adds_a_skill(tmp_path):
         run(store, key)
 
 
-@pytest.mark.parametrize("coverage_basis", ["full_case", "tool_events"])
+@pytest.mark.parametrize("coverage_basis", ["full_case", "tool_events", "codex_model_calls"])
 def test_natural_work_observation_measures_only_eligible_pairs(
     tmp_path, monkeypatch, capsys, coverage_basis,
 ):
@@ -530,7 +530,7 @@ def test_natural_work_observation_measures_only_eligible_pairs(
     proposal["scope"] = str(project)
     policy["proposal_id"] = store.put("proposals", proposal)
 
-    def add(name, timestamp, errors, complete=True, model="one"):
+    def add(name, timestamp, errors, complete=True, model="one", native_started=None):
         events = [{"id": "p", "kind": "prompt", "text": name, "timestamp": timestamp}]
         for n in range(2):
             events.extend([
@@ -549,17 +549,28 @@ def test_natural_work_observation_measures_only_eligible_pairs(
         if coverage_basis == "tool_events":
             events[2]["truncated"] = True
             coverage["complete"] = False
-        snapshot = store.put("sessions", {"agent": "pi", "session_id": name, "model": "one",
+        if coverage_basis == "codex_model_calls":
+            events[1]["tool_representation"] = "model_call"
+            events[3]["tool_representation"] = "execution_item"
+            events[-1]["codex_model_call_receipt"] = {
+                "count": 1 + errors, "started_at": native_started or timestamp,
+                "thread_origin": "interactive",
+            }
+            coverage["complete"] = False
+        agent = "codex" if coverage_basis == "codex_model_calls" else "pi"
+        snapshot = store.put("sessions", {"agent": agent, "session_id": name, "model": "one",
             "cwd": str(project), "origin": "interactive", "events": events, "coverage": coverage})
         return store.put("cases", {"session_snapshot": snapshot, "events": events,
             "coverage": coverage, "omitted_task_events": 0})
 
     baseline = [add("old" + str(n), "2025-02-27T12:00:00+00:00", 1) for n in range(3)]
     policy["observation_policy"] = {
-        "metric": "tool_errors", "minimum_pairs": 2, "minimum_improvement": 0,
-        "require_turn_context": True, "coverage_basis": coverage_basis,
+        "metric": "codex_model_calls" if coverage_basis == "codex_model_calls" else "tool_errors",
+        "minimum_pairs": 2, "minimum_improvement": 0, "require_turn_context": True,
         "baseline_cases": {case_id: "workspace setup" for case_id in baseline},
     }
+    if coverage_basis != "codex_model_calls":
+        policy["observation_policy"]["coverage_basis"] = coverage_basis
     invalid = add("incomplete-baseline", "2025-02-27T12:00:00+00:00", 1, complete=False)
     too_few = policy["observation_policy"] | {"baseline_cases": {
         baseline[0]: "workspace setup", invalid: "workspace setup",
@@ -605,6 +616,17 @@ def test_natural_work_observation_measures_only_eligible_pairs(
     mismatch = json.loads(capsys.readouterr().out)
     assert mismatch["comparison"] == "inconclusive"
     assert mismatch["exclusions"] == {"project_harness_or_model_labels_differ": 1}
+
+    if coverage_basis == "codex_model_calls":
+        old_turn = add("already-open", "2025-03-02T10:00:00+00:00", 0,
+                       native_started="2025-03-01T10:00:00+00:00")
+        spec.write_text(json.dumps({"adoption_id": adoption, "pairs": [
+            {"baseline": baseline[0], "candidate": old_turn, "family": "workspace setup"},
+        ]}))
+        assert main(command) == 0
+        assert json.loads(capsys.readouterr().out)["exclusions"] == {
+            "missing_coverage_or_wrong_window": 1,
+        }
 
     spec.write_text(json.dumps({"adoption_id": adoption, "pairs": []}))
     assert main(command) == 0
