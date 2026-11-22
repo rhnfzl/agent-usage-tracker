@@ -133,6 +133,18 @@ binds to loopback and scopes one token to the selected evidence. It supports exp
 credentials over the tunnel. It does not run an OAuth authorization server or a multi-tenant
 service. The host's normal AUT usage sink does not provide transcript access.
 
+## Follow linked tool results
+
+Codex native logs can contain web-search results that the T3 projection omits.
+AUT uses a native result only when its recorded item ID matches one result in the corroborated
+native turn. The result has a `source_result` reference to its native event. Select both
+snapshots when exporting a bundle that needs the reference. The T3 case keeps the redacted text.
+Read the native event with full content access if you need the captured original.
+
+Claude Code web-search result blocks are captured directly when present. Pi and Cursor records
+with a missing result payload leave a tool gap. An unlinked or ambiguous search result leaves a gap. A clipped result keeps its reference
+and still leaves the T3 run incomplete. Other gaps still apply when a result is recovered.
+
 ## Find retries across sessions
 
 ```sh

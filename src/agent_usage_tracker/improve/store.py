@@ -303,6 +303,13 @@ def audit(store: Store, home: Path, *, days: int = 7, limit: int = 40,
         supplements = {sid: store.get("sessions", sid) for sid in row["supplemental_sources"]}
         if corroborated := t3.link_native_context(row, supplements, shared_native):
             counts["t3_corroborated_turns"] += corroborated
+            restored = row["coverage"].get("linked_web_search_results", 0)
+            if restored:
+                counts["t3_linked_web_search_results"] += restored
+                counts["matched_results"] += restored
+                counts["unmatched_calls"] -= restored
+                counts["truncated_events"] += sum(
+                    e["truncated"] for e in row["events"] if e.get("source_result"))
             updated = store.put("sessions", row)
             sessions[index] = updated
             copies["t3", row["session_id"]] = [updated]

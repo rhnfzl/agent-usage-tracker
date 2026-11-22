@@ -184,6 +184,13 @@ class Evidence:
                 if (self.content != "metadata" and isinstance(commit, str) and COMMIT_ID.fullmatch(commit)
                         and isinstance(ref, str) and CHECKPOINT_REF.fullmatch(ref)):
                     result["workspace_checkpoint"].update(commit=commit, ref=ref)
+        provenance = event.get("source_result")
+        if isinstance(provenance, dict):
+            session_id, event_id = provenance.get("session_id"), provenance.get("event_id")
+            if (isinstance(session_id, str) and (session_id in self.keys or session_id in self.supplemental)
+                    and (selected is None or session_id in selected)
+                    and isinstance(event_id, str) and EVENT_ID.fullmatch(event_id)):
+                result["source_result"] = {"session_id": session_id, "event_id": event_id}
         if self.content != "metadata":
             result.update({field: self._label(event[field]) for field in EVENT_LABELS
                            if isinstance(event.get(field), str)})

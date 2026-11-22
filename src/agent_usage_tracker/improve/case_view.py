@@ -149,6 +149,12 @@ def write_case_view(store: Store, case_id: str) -> dict[str, Any]:
                     f"{event['table']} record {event['record_id']}" if event.get("record_id") else
                     "source position unavailable")
         title = labels.get(event["kind"], str(event["kind"]))
+        linked = event.get("source_result")
+        provenance = ""
+        if linked and linked["session_id"] in session.get("supplemental_sources", []):
+            native = store.path("sessions", linked["session_id"]).as_uri()
+            provenance = (f'<p class="reference">Native result <a href="{escape(native, quote=True)}">'
+                          f'{escape(linked["event_id"])}</a></p>')
         details = "Used in model input" if seen else "Captured context omitted from model input"
         if event.get("truncated"):
             details += "; body clipped in the frozen snapshot"
@@ -156,7 +162,7 @@ def write_case_view(store: Store, case_id: str) -> dict[str, Any]:
                       f'<h2>{escape(title)}</h2><p>{escape(details)}</p>'
                       f'<p class="reference">{escape(location)} · event '
                       f'<code>{escape(str(event["id"]))}</code> · '
-                      f'{escape(str(event.get("status", "unknown")))}</p>'
+                      f'{escape(str(event.get("status", "unknown")))}</p>{provenance}'
                       f'<pre>{escape(str(event.get("text", "")))}</pre></section>')
     status = ("Model input passes basic completeness checks; this does not establish task success."
               if eligible else "Model input remains incomplete; this view does not upgrade a judgment.")

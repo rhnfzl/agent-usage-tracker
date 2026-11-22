@@ -122,6 +122,60 @@ def resolve_run_checkpoints(session: dict[str, Any]) -> int:
     return resolved
 
 
+def _tool_coverage(events: list[dict[str, Any]], coverage: dict[str, Any]) -> None:
+    calls = {e['call_id'] for e in events if e['kind'] == 'call'}
+    results = {e['call_id'] for e in events if e['kind'] == 'result'}
+    coverage.update(calls=len(calls), matched_results=len(calls & results),
+                    unmatched_calls=len(calls - results), orphan_results=len(results - calls),
+                    source_incomplete=bool(coverage.get('projection_gaps') or coverage.get('incomplete_runs')
+                                           or coverage.get('byte_cap_reached')))
+    coverage['complete'] = not any(coverage.get(k) for k in (
+        'unmatched_calls', 'orphan_results', 'truncated_events', 'byte_cap_reached',
+        'source_incomplete', 'missing_timestamps'))
+
+
+def _link_web_results(session: dict[str, Any], available: dict[str, dict[str, Any]],
+                      scoped: dict[str, tuple[str, str, dict[str, Any]]]) -> None:
+    native_results: dict[tuple[str, str, str], list[dict[str, Any]]] = defaultdict(list)
+    refs = session.pop('web_search_refs', {})
+    if not refs:
+        return
+    for key, source in available.items():
+        for event in source['events']:
+            turn, call = event.get('native_turn_key'), event.get('call_id')
+            if (turn and call and event['kind'] == 'result' and event.get('tool') == 'web.search'
+                    and event.get('status') == 'success'):
+                native_results[key, turn, native_item_key(call)].append(event)
+    coverage = session['coverage']
+    attached = recovered = 0
+    for event in session['events']:
+        if event['id'] not in refs or event['run_id'] not in scoped:
+            continue
+        key, turn, _ = scoped[event['run_id']]
+        found = native_results.get((key, turn, refs[event['id']]), [])
+        if len(found) != 1 or found[0].get('tool_event_ambiguous'):
+            continue
+        result = found[0]
+        event.update(kind='result', status=result['status'], text=result['text'],
+                     truncated=result['truncated'], source_sha256=result['source_sha256'],
+                     source_result={'session_id': key, 'event_id': result['id']})
+        attached += 1
+        if result['truncated']:
+            coverage['truncated_events'] += 1
+            continue
+        run = coverage['run_coverage'][event['run_id']]
+        gaps = run['projection_gaps']
+        gaps['web_search'] -= 1
+        if not gaps['web_search']:
+            del gaps['web_search']
+        run['source_incomplete'] = bool(gaps or run['missing_timestamps'])
+        recovered += 1
+    if attached:
+        coverage['projection_gaps'] -= recovered
+        coverage['linked_web_search_results'] = attached
+        _tool_coverage(session['events'], coverage)
+
+
 def link_native_context(session: dict[str, Any], supplements: dict[str, dict[str, Any]],
                         shared_native: set[str]) -> int:
     """Attach observed Codex context to T3 runs corroborated by distinct items."""
@@ -155,6 +209,8 @@ def link_native_context(session: dict[str, Any], supplements: dict[str, dict[str
         matches[run] = key, turn, context
         targets[key, turn] += 1
 
+    scoped = {run: match for run, match in matches.items() if targets[match[0], match[1]] == 1}
+    _link_web_results(session, supplements, scoped)
     linked = 0
     for event in session['events']:
         match = matches.get(event['run_id'])
@@ -310,6 +366,7 @@ def _thread(db: sqlite3.Connection, path: Path, thread: str, cwd: str, since: fl
     run_coverage: dict[str, dict[str, Any]] = {}
     native_runs: dict[str, dict[str, Any]] = {}
     checkpoints: dict[str, dict[str, str]] = {}
+    web_search_refs: dict[str, str] = {}
 
     def emit(kind: str, value: Any, record: dict[str, Any], timestamp: Any,
              run: str, provider: str, *, call: str = '', tool: str = '',
@@ -330,7 +387,7 @@ def _thread(db: sqlite3.Connection, path: Path, thread: str, cwd: str, since: fl
                        'truncated': clipped, 'source_sha256': _hash(raw),
                        'call_id': call, 'tool': tool, 'status': status,
                        'run_id': run, 'provider': provider,
-                       **({'raw_text': raw} if capture_full else {}),
+                       **({'raw_text': raw} if capture_full and kind != 'tool_gap' else {}),
                        **({"retry_target_sha256": target_keys[0], "retry_arguments_sha256": target_keys[1]}
                           if target_keys else {})})
 
@@ -411,6 +468,16 @@ def _thread(db: sqlite3.Connection, path: Path, thread: str, cwd: str, since: fl
                          status=result)
                 else:
                     gaps["unfinished_tool"] += 1
+            elif kind == 'web_search':
+                gaps['web_search'] += 1
+                call_id = str(item['key'])
+                emit('call', {'patterns': value.get('patterns', [])}, item, at, key, provider,
+                     call=call_id, tool='web.search')
+                size = len(events)
+                emit('tool_gap', 'Search result missing from T3 projection', item, end, key, provider,
+                     call=call_id, tool='web.search')
+                if len(events) > size and (native_id := _strong_codex_id(value.get('nativeItemRef'))):
+                    web_search_refs[events[-1]['id']] = native_item_key(native_id)
             elif kind == 'assistant_message':
                 emit('reply', value.get('text', ''), item, end, key, provider)
                 if value.get('streaming'):
@@ -449,25 +516,18 @@ def _thread(db: sqlite3.Connection, path: Path, thread: str, cwd: str, since: fl
     order = {r['key']: index for index, r in enumerate(runs)}
     events.sort(key=lambda e: (order[e['run_id']], e['timestamp'],
                               e['kind'] == 'boundary', e['kind'] == 'reply'))
-    calls = {e['call_id'] for e in events if e['kind'] == 'call'}
-    results = {e['call_id'] for e in events if e['kind'] == 'result'}
     state: dict[str, Any] = dict(coverage)
     state['tool_events_checked'] = True
     state['run_coverage'] = run_coverage
-    state.update(calls=len(calls), matched_results=len(calls & results),
-                 unmatched_calls=len(calls - results), orphan_results=len(results - calls),
-                 truncated_events=coverage['truncated_events'],
-                 byte_cap_reached=bool(coverage['byte_cap_reached']),
-                 source_incomplete=bool(coverage['projection_gaps'] or coverage['incomplete_runs']
-                                        or coverage['byte_cap_reached']))
-    state['complete'] = not any(state.get(k) for k in (
-        'unmatched_calls', 'orphan_results', 'truncated_events', 'byte_cap_reached',
-        'source_incomplete', 'missing_timestamps'))
+    state['truncated_events'] = coverage['truncated_events']
+    state['byte_cap_reached'] = bool(coverage['byte_cap_reached'])
+    _tool_coverage(events, state)
     return {'version': VERSION, 'agent': 't3', 'session_id': 't3:' + thread,
             'cwd': cwd, 'origin': 'interactive', 'model': None,
             'providers': sorted(seen_providers), 'native_sessions': sorted(native),
             **({'native_runs': native_runs} if native_runs else {}),
             **({'checkpoint_refs': checkpoints} if checkpoints else {}),
+            **({'web_search_refs': web_search_refs} if web_search_refs else {}),
             'instruction_exposure': {'status': 'unknown',
                 'reason': 'Project files alone do not prove past instruction delivery.'},
             'events': events, 'coverage': state,
