@@ -19,7 +19,7 @@ from typing import Any
 from ..collectors.activity_common import result_status
 from ..event import parse_ts
 from ..redact import redact
-from .evidence import TEXT_LIMIT, VERSION, _text, native_item_key
+from .evidence import file_retry_keys, TEXT_LIMIT, VERSION, _text, native_item_key
 from .setup_git import COMMIT_ID, _read_git
 
 MAX_ROWS = 20000
@@ -292,6 +292,7 @@ def _thread(db: sqlite3.Connection, path: Path, thread: str, cwd: str, since: fl
         text = redact(raw)
         clipped = len(text) > TEXT_LIMIT
         coverage['truncated_events'] += clipped
+        target_keys = file_retry_keys(raw) if kind == "call" and len(raw) <= TEXT_LIMIT else None
         events.append({'id': _hash([thread, run, record['key'], kind])[:32],
                        'kind': kind, 'line': None, 'byte_offset': None,
                        'record_id': record['key'], 'table': record['table'],
@@ -299,7 +300,9 @@ def _thread(db: sqlite3.Connection, path: Path, thread: str, cwd: str, since: fl
                        'truncated': clipped, 'source_sha256': _hash(raw),
                        'call_id': call, 'tool': tool, 'status': status,
                        'run_id': run, 'provider': provider,
-                       **({'raw_text': raw} if capture_full else {})})
+                       **({'raw_text': raw} if capture_full else {}),
+                       **({"retry_target_sha256": target_keys[0], "retry_arguments_sha256": target_keys[1]}
+                          if target_keys else {})})
 
     for run in runs:
         before = coverage.copy()

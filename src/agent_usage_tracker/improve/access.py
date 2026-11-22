@@ -82,7 +82,7 @@ class Evidence:
         audit = store.get("audits", audit_id)
         self.keys = audit["session_ids"]
         self.audit_id = audit_id
-        self.coverage = audit["coverage"]
+        self.coverage = audit.get("coverage", {})
         self.ambiguous = set(audit.get("ambiguous_session_ids", []))
         self.supplemental = set(audit.get("supplemental_session_ids", []))
 
@@ -373,6 +373,20 @@ class Evidence:
         page = list(islice(remaining, limit + 1))
         return {"items": page[:limit], "next_offset": offset + limit if len(page) > limit else None,
                 **self.describe()}
+
+    def retries(self, minimum_sessions: int = 2, limit: int = 20, tool: str = "") -> dict[str, Any]:
+        """Find retry patterns across primary sessions in a local audit."""
+        from .retries import discover
+
+        _page(0, limit)
+        if type(minimum_sessions) is not int or not 1 <= minimum_sessions <= 200:
+            raise AutError("evidence: minimum sessions must be 1..200")
+        if tool and self.content == "metadata":
+            raise AutError("evidence: tool filters require content access")
+        if self.store is None:
+            raise AutError("evidence: retry discovery requires a local audit")
+        return {**self.describe(), **discover(self.store, self.keys, self.ambiguous, minimum_sessions,
+                                             limit, tool, self._label if self.content != "metadata" else None)}
 
     def compare(self, baseline: str, candidate: str, cases: bool = False) -> dict[str, Any]:
         """Compare observed session or attempt counts and the first differing tool outcome."""

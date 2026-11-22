@@ -136,6 +136,10 @@ def _save_session(store: Store, evidence: dict[str, Any]) -> str:
     content = {event["id"]: {"text": event.pop("raw_text"),
                              "attachment_omitted": event.pop("attachment_omitted", False)}
                for event in evidence["events"] if "raw_text" in event}
+    retry_keys = {event["id"]: [event.pop("retry_target_sha256"), event.pop("retry_arguments_sha256")]
+                  for event in evidence["events"] if "retry_target_sha256" in event}
+    if retry_keys:
+        evidence["retry_keys"] = retry_keys
     if content:
         evidence["full_content_id"] = store.put("session_content", content)
     return store.put("sessions", evidence)

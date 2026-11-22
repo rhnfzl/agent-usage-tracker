@@ -42,7 +42,7 @@ def test_stdio_matches_cli_and_cannot_write(connection):
                 tools = await client.list_tools()
                 assert {tool.name for tool in tools.tools} == {
                     "describe", "search", "session", "event", "compare", "commits", "case",
-                    "ordinary_work"}
+                    "ordinary_work", "retries"}
                 result = await client.call_tool("event", {"session_id": key, "event_id": "event"})
                 assert result.structuredContent == expected
                 ranked = await client.call_tool("search", {"query": "password", "mode": "ranked"})
@@ -58,6 +58,8 @@ def test_stdio_matches_cli_and_cannot_write(connection):
                     [sys.executable, *args, "ordinary-work"], text=True))
                 work = await client.call_tool("ordinary_work", {})
                 assert work.structuredContent == expected_work
+                retries = await client.call_tool("retries", {})
+                assert not retries.isError and retries.structuredContent["groups"] == []
 
     asyncio.run(asyncio.wait_for(run(), timeout=15))
 

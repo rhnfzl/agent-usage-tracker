@@ -93,6 +93,30 @@ def source_signature(text: str, status: str, tool: str) -> str:
                                     sort_keys=True).encode()).hexdigest()
 
 
+def file_retry_keys(text: str) -> tuple[str, str] | None:
+    """Fingerprint a structured file target and its arguments without exposing either."""
+    try:
+        args = json.loads(text)
+    except (ValueError, RecursionError):
+        return None
+    if not isinstance(args, dict):
+        return None
+    names = {"file_path", "notebook_path", "path"}.intersection(args)
+    if len(names) != 1:
+        return None
+    name = names.pop()
+    path = args.pop(name)
+    if not isinstance(path, str) or not path.strip() or "[redacted]" in path:
+        return None
+    try:
+        target = json.dumps([name, path])
+        arguments = json.dumps(args, sort_keys=True, allow_nan=False)
+    except (ValueError, RecursionError):
+        return None
+    return (hashlib.sha256(target.encode()).hexdigest(),
+            hashlib.sha256(arguments.encode()).hexdigest())
+
+
 def trace_event(agent: str, session: str, kind: str, identity: str, value: object,
                 timestamp: object, *, call: object = "", tool: object = "",
                 status: str = "unknown", omitted_attachment: bool = False,
@@ -104,6 +128,8 @@ def trace_event(agent: str, session: str, kind: str, identity: str, value: objec
     signature = source_signature(raw, status, str(tool or ""))
     cleaned = redact(raw)
     content = {"raw_text": raw, "attachment_omitted": omitted_attachment} if capture_full else {}
+    if kind == "call" and len(raw) <= TEXT_LIMIT and (keys := file_retry_keys(raw)):
+        content.update(retry_target_sha256=keys[0], retry_arguments_sha256=keys[1])
     return {"id": hashlib.sha256(f"{agent}|{session}|{kind}|{identity}".encode()).hexdigest()[:32],
             "kind": kind, "timestamp": timestamp, "text": cleaned[:TEXT_LIMIT],
             "truncated": omitted_attachment or len(cleaned) > TEXT_LIMIT, "source_sha256": signature,

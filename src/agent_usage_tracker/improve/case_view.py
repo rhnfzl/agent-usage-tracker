@@ -2,20 +2,17 @@
 
 from __future__ import annotations
 
-from collections import Counter
 import hashlib
 from html import escape
 from pathlib import Path
-import re
 from typing import Any
 
 from ..config import AutError
 from ..state import atomic_write_text
-from .evidence import event_links
+from .retries import FINGERPRINT, references, retries
 from .store import Store
 
 _READ_TOOLS = {"read", "read_file"}
-_FINGERPRINT = re.compile(r"[a-f0-9]{64}")
 
 
 def _attempt(session: dict[str, Any], case: dict[str, Any]) -> list[dict[str, Any]]:
@@ -46,37 +43,6 @@ def _link(index: int, label: str) -> str:
     return f'<a href="#event-{index}">{escape(label)}</a>'
 
 
-def _repeated_after_error(events: list[dict[str, Any]]) -> list[tuple[int, int, int, int | None]]:
-    """Link consecutive identical requests when the earlier result already recorded an error."""
-    positions = {event["id"]: index for index, event in enumerate(events)}
-    links = event_links(events)
-    counts = Counter((e.get("run_id"), e.get("call_id"), e["kind"]) for e in events)
-    previous: dict[tuple[str, str, str], int] = {}
-    rows = []
-    for index, call in enumerate(events):
-        if call["kind"] != "call":
-            continue
-        run, tool, fingerprint = call.get("run_id"), call.get("tool"), call.get("source_sha256")
-        if not tool or not isinstance(fingerprint, str) or not _FINGERPRINT.fullmatch(fingerprint):
-            continue
-        key = (run or "", tool, fingerprint)
-        earlier = previous.pop(key, None)
-        identity = (run, call.get("call_id"))
-        if (not identity[1] or counts[(*identity, "call")] != 1
-                or counts[(*identity, "result")] > 1 or call.get("truncated")
-                or not call.get("text", "").strip()):
-            continue
-        previous[key] = index
-        if earlier is None:
-            continue
-        failure = positions.get(links.get(events[earlier]["id"], ""))
-        if failure is None or failure >= index or events[failure].get("status") != "error":
-            continue
-        result = positions.get(links.get(call["id"], ""))
-        rows.append((earlier, failure, index, result))
-    return rows
-
-
 def _context(events: list[dict[str, Any]], session: dict[str, Any],
              snapshot: Path, revision: str) -> str:
     context_bytes = 0
@@ -101,7 +67,7 @@ def _context(events: list[dict[str, Any]], session: dict[str, Any],
             tool = str(event.get("tool", "")).casefold()
             fingerprint, call_id = event.get("source_sha256"), event.get("call_id")
             if (tool in _READ_TOOLS and isinstance(call_id, str) and call_id
-                    and isinstance(fingerprint, str) and _FINGERPRINT.fullmatch(fingerprint)):
+                    and isinstance(fingerprint, str) and FINGERPRINT.fullmatch(fingerprint)):
                 reads.setdefault((tool, fingerprint), {}).setdefault(call_id, index)
 
     output_report = ("<p>No tool output size is available in this capture.</p>"
@@ -153,13 +119,13 @@ def write_case_view(store: Store, case_id: str) -> dict[str, Any]:
     clipped = sum(bool(event.get("truncated")) for event in events)
     eligible = bool(case.get("coverage", {}).get("complete") and not omitted
                     and not case.get("omitted_task_events") and not clipped)
-    repeats = _repeated_after_error(events)
+    repeats = list(retries(events, session.get("retry_keys")))
     retry_rows = []
-    for first, error, retry, result in repeats:
+    for first, error, retry, result, match in repeats:
         outcome = (_link(result, str(events[result].get("status", "unknown")))
                    if result is not None else "Result unavailable")
-        links = (_link(first, events[first]["tool"]), _link(error, "Error"),
-                 _link(retry, "Repeated request"), outcome)
+        label = "Repeated request" if match == "identical" else "Changed arguments for same target"
+        links = (_link(first, events[first]["tool"]), _link(error, "Error"), _link(retry, label), outcome)
         retry_rows.append("<li>" + " · ".join(links) + "</li>")
     source = session.get("source", {})
     if not isinstance(source, dict):
@@ -228,9 +194,8 @@ def write_case_view(store: Store, case_id: str) -> dict[str, Any]:
     atomic_write_text(target, page)
     return {"case_id": case_id, "path": str(target), "captured_events": len(events),
             "model_events": len(selected), "omitted_model_events": omitted,
-            "clipped_events": clipped, "eligible": eligible, "repeated_after_error": len(repeats), "private": True,
-            "repeat_events": [{"first_call": events[a]["id"], "error_result": events[b]["id"],
-                               "repeated_call": events[c]["id"],
-                               "later_result": events[d]["id"] if d is not None else None}
-                              for a, b, c, d in repeats[:100]],
+            "clipped_events": clipped, "eligible": eligible, "private": True,
+            "repeated_after_error": sum(match[-1] == "identical" for match in repeats),
+            "changed_arguments_after_error": sum(match[-1] == "changed_arguments" for match in repeats),
+            "repeat_events": [references(events, match) for match in repeats[:100]],
             "html_sha256": hashlib.sha256(page.encode()).hexdigest()}

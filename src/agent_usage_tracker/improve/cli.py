@@ -15,7 +15,7 @@ from .schedule import freeze_cycle_audit, run_once
 from .store import Store, audit
 from .trial import run_trial
 from .validation import validate
-from . import study_cli
+from . import checkpoint_replay, study_cli
 
 
 def register(sub: Any) -> None:
@@ -112,6 +112,7 @@ def register(sub: Any) -> None:
     adopt.add_argument("--kind", choices=("instruction", "skill", "config", "code"))
     adopt.add_argument("--note")
     study_cli.register(actions)
+    checkpoint_replay.register(actions)
     actions.add_parser("status", help="show local progress counts without trace text")
 
 
@@ -148,9 +149,12 @@ def run(args: argparse.Namespace) -> None:
         return
     preview = args.improve_cmd == "study" and (
         args.study_cmd == "preflight" or args.study_cmd == "observe" and getattr(args, "preview", False))
+    preview |= args.improve_cmd == "replay" and not args.execute
     store = Store(root, read_only=preview)
     if args.improve_cmd == "study":
         result = study_cli.run(args, store)
+    elif args.improve_cmd == "replay":
+        result = checkpoint_replay.cli(args, store)
     elif args.improve_cmd == "desktop":
         from .desktop import import_desktop
         try:
@@ -224,6 +228,8 @@ def run(args: argparse.Namespace) -> None:
         result = {"records": {kind: len(store.keys(kind)) for kind in kinds},
                   "private": True, "human_verified": False}
     print(json.dumps(result, sort_keys=True))
+    if args.improve_cmd == "replay" and args.execute and result["status"] != "completed":
+        raise AutError(f"replay: {result['status']}; see the saved receipt")
     if result.get("status") == "stale":
         raise AutError(result["message"])
     if args.improve_cmd in {"run", "diagnose", "audit"} \

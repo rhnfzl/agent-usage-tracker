@@ -120,7 +120,7 @@ def test_inspect_links_interleaved_retry_and_its_result(tmp_path):
 
 
 def test_retry_requires_observed_failure_before_distinct_matching_call(tmp_path):
-    from agent_usage_tracker.improve.case_view import _repeated_after_error
+    from agent_usage_tracker.improve.retries import retries
 
     _, _, _, session = native_case(tmp_path)
     first, failure, retry, success = session["events"][1:5]
@@ -134,5 +134,5 @@ def test_retry_requires_observed_failure_before_distinct_matching_call(tmp_path)
         [first, failure, dict(retry, truncated=True)],
         [first, failure, dict(failure, id="duplicate"), retry],
     ):
-        assert not _repeated_after_error(sequence)
-    assert _repeated_after_error([first, failure, retry]) == [(0, 1, 2, None)]
+        assert not list(retries(sequence))
+    assert list(retries([first, failure, retry])) == [(0, 1, 2, None, "identical")]
