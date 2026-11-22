@@ -48,6 +48,23 @@ uvx agent-usage-tracker improve audit --days 7 --limit 30
 
 The [improvement guide](https://github.com/rhnfzl/agent-usage-tracker/blob/main/docs/improvement.md) covers private evidence, advisory judgments, drafts, and the review inbox. The [study guide](https://github.com/rhnfzl/agent-usage-tracker/blob/main/docs/improvement-studies.md) explains how to test a candidate. Source edits require an explicit decision. A passing check supports the tested change; measuring an improvement in real work requires comparable follow-up.
 
+## How I run AUT
+
+I run AUT on an Apple silicon Mac to track agent usage, classify work, and find recurring problems. AUT sends usage metadata to a self-hosted database. The local labeler combines that metadata with request and reply text on the Mac.
+
+![Agent logs feed usage reporting, local decision models for provisional labels, and private evidence review. Inkling drafts proposals for recurring problems, then a person reviews them.](https://raw.githubusercontent.com/rhnfzl/agent-usage-tracker/main/docs/assets/aut-local-setup.png)
+
+| Job | Models I use | Method |
+| --- | --- | --- |
+| What my message is doing | Elephant 1, PPLX Decider Flash, Kev 4B | Weighted scores |
+| What kind of work I’m doing | PPLX Decider Flash, Elephant 1, Clef Flash | Majority vote |
+| Where work with no code changes stands | Elephant 1, Kev 4B, Clef Flash | Weighted scores |
+| Draft a fix for a recurring problem | Inkling 2 Mini via llama.cpp | Low reasoning effort, then human review |
+
+The label recipes leave uncertain cases unknown. I run the larger Inkling model only when a recurring problem is eligible for a draft. Each proposal goes to a private inbox for review.
+
+You can adapt this setup by starting with one [local decision model](https://github.com/rhnfzl/agent-usage-tracker/blob/main/docs/local-labels.md#ongoing-local-estimates) per job and checking it against examples you’ve reviewed. Add [offline drafting](https://github.com/rhnfzl/agent-usage-tracker/blob/main/docs/improvement.md#drafted-proposals) when you have a recurring problem worth testing a fix for.
+
 ## Collectors
 
 Claude Code, Codex, and Pi supply native token records. Cursor CLI supplies prompts and activity. For Cursor token totals, choose one of the IDE, API, or SDK sources to avoid double-counting. T3 Code activity and ActivityWatch are optional. See the [collector matrix](https://github.com/rhnfzl/agent-usage-tracker/blob/main/docs/reference.md#collectors) and [coverage guide](https://github.com/rhnfzl/agent-usage-tracker/blob/main/docs/harness-coverage.md).
