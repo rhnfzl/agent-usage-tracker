@@ -38,6 +38,8 @@ def register(subparsers: Any) -> None:
     action.add_argument("--coverage-basis", choices=COVERAGE_BASES)
     action.add_argument("--require-turn-context", action="store_true")
     action.add_argument("--require-setup-revision", action="store_true")
+    action.add_argument("--require-worktree-setup", action="store_true",
+                        help="require recorded contents or absence of the setup file in the worktree")
     action.add_argument("--include-excluded", action="store_true")
     for name in ("before", "agent", "cursor"):
         action.add_argument(f"--{name}", default="")
@@ -78,7 +80,10 @@ def _preflight(args: argparse.Namespace, store: Store) -> dict[str, Any]:
         raise AutError("improve: proposal must link discovery evidence")
     reserved = reserved_evidence(store, proposal, draft["discovery_cases"], draft["control_cases"])
     policy = {"metric": args.metric, "require_turn_context": args.require_turn_context
-              or args.require_setup_revision, "require_setup_revision": args.require_setup_revision}
+              or args.require_setup_revision or args.require_worktree_setup,
+              "require_setup_revision": args.require_setup_revision}
+    if args.require_worktree_setup:
+        policy["require_worktree_setup"] = True
     if args.coverage_basis:
         policy["coverage_basis"] = args.coverage_basis
     before = parse_ts(args.before) if args.before else None

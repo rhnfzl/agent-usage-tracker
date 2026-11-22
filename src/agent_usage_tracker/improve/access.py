@@ -19,7 +19,7 @@ from .evidence import event_links
 from .ranked_search import RankedSearch
 from .setup_git import COMMIT_ID
 from .store import Store, canonical, digest
-from .turn_revisions import details as turn_revision_details
+from .turn_revisions import SETUP_FILE_LIMIT, details as turn_revision_details
 
 MODES = ("metadata", "redacted", "full")
 BUNDLE_LIMIT = 64 * 1024 * 1024
@@ -148,8 +148,15 @@ class Evidence:
                     revision = context.get("session_start_revision")
                     if isinstance(revision, str) and COMMIT_ID.fullmatch(revision):
                         visible["session_start_revision"] = revision
-                    if turn_revision := turn_revision_details(context.get("turn_start_revision")):
-                        visible["turn_start_revision"] = turn_revision
+                    receipt = context.get("turn_start_revision")
+                    if turn_revision := turn_revision_details(receipt):
+                        visible["turn_start_revision"] = {
+                            "commit": turn_revision["commit"], "recorded_at": turn_revision["recorded_at"],
+                        }
+                        checked = (receipt.get("setup_files_checked") if self.bundled and isinstance(receipt, dict)
+                                   else len(turn_revision.get("setup_files", {})))
+                        if type(checked) is int and 1 <= checked <= SETUP_FILE_LIMIT:
+                            visible["turn_start_revision"]["setup_files_checked"] = checked
             result["turn_context"] = visible
         if self.content != "metadata":
             result.update({field: self._label(event[field]) for field in EVENT_LABELS

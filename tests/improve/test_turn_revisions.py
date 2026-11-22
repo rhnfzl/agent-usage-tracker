@@ -38,16 +38,20 @@ def test_project_hook_records_a_later_worktree_turn_for_baseline_preflight(tmp_p
     revision = git(worktree, "rev-parse", "HEAD")
 
     root = tmp_path / "private"
+    relative_target = "skills folder/SKILL.md"
+    target_key = path_fingerprint(worktree / relative_target)
     start = datetime.now(timezone.utc) - timedelta(seconds=1)
     done = subprocess.run([sys.executable, "-m", "agent_usage_tracker.cli", "evidence",
-                           "--root", str(root), "record-codex-turn", "--project", str(project)],
+                           "--root", str(root), "record-codex-turn", "--project", str(project),
+                           "--setup-file", relative_target],
                           input=hook(worktree, "later"), capture_output=True, check=True)
     assert not done.stdout and not done.stderr
     store = Store(root, read_only=True)
     record = lookup(store, "session", "later")
     assert record["commit"] == revision
+    assert record["setup_files"] == {target_key: None}
     saved = store.path(RECORD_KIND, record["turn_key"]).read_text()
-    assert "private-fixture" not in saved and str(worktree) not in saved
+    assert "private-fixture" not in saved and str(worktree) not in saved and relative_target not in saved
     receipt_time = datetime.fromisoformat(record["recorded_at"])
     record_hook(root, project, hook(worktree, "later"))
     assert lookup(store, "session", "later") == record
@@ -78,8 +82,12 @@ def test_project_hook_records_a_later_worktree_turn_for_baseline_preflight(tmp_p
     events = [event for event in reader.session(snapshot)["items"] if event["kind"] == "boundary"]
     assert events[0]["turn_context"]["session_start_revision"] == header
     assert events[1]["turn_context"]["turn_start_revision"] == {
-        "commit": revision, "recorded_at": receipt_time.isoformat(),
+        "commit": revision, "recorded_at": receipt_time.isoformat(), "setup_files_checked": 1,
     }
+    bundle = tmp_path / "share.json"
+    reader.export(bundle, [snapshot])
+    assert Evidence("redacted", bundle=bundle).session(snapshot)["items"] == reader.session(snapshot)["items"]
+    assert target_key not in bundle.read_text()
     metadata = Evidence("metadata", store, captured["audit_id"])
     assert "turn_start_revision" not in metadata.event(snapshot, events[1]["id"])["turn_context"]
     case = freeze_case(writable, captured["audit_id"], snapshot, events[1]["id"])
@@ -87,9 +95,23 @@ def test_project_hook_records_a_later_worktree_turn_for_baseline_preflight(tmp_p
     assert saved_attempt["setup_revision"] == revision
     reserved = ReservedEvidence(frozenset(), frozenset(), frozenset())
     policy = {"metric": "tool_calls", "coverage_basis": "tool_events",
-              "require_setup_revision": True, "require_turn_context": True}
-    proposal = {"scope": str(project), "target": "new-skill.md", "before_sha256": None}
-    assert baseline_gate(policy, proposal, reserved)(saved_attempt) is None
+              "require_setup_revision": True, "require_turn_context": True, "require_worktree_setup": True}
+    proposal = {"scope": str(project), "target": relative_target, "before_sha256": None}
+    check = baseline_gate(policy, proposal, reserved)
+    assert check(saved_attempt) is None
+    assert check(saved_attempt | {"setup_files": {}}) == "worktree_setup_unverified"
+
+    local = worktree / relative_target
+    local.parent.mkdir()
+    local.write_text("untracked local instructions", encoding="utf-8")
+    record_hook(root, project, hook(worktree, "dirty"), (relative_target,))
+    dirty = lookup(store, "session", "dirty")
+    assert dirty["commit"] == revision
+    assert set(dirty["setup_files"]) == {target_key}
+    assert dirty["setup_files"][target_key] is not None
+    assert check(saved_attempt | {"setup_files": dirty["setup_files"]}) == "worktree_setup_unverified"
+    record_hook(root, project, hook(worktree, "later"), (relative_target,))
+    assert lookup(store, "session", "later")["conflict"] is True
 
     git(worktree, "commit", "-qm", "worktree moves", "--allow-empty")
     record_hook(root, project, hook(worktree, "later"))
@@ -108,6 +130,25 @@ def test_hook_skips_other_projects_and_unrecognized_inputs(tmp_path):
     record_hook(root, project, hook(project, "turn", "Stop"))
     record_hook(root, project, b"invalid")
     assert not root.exists()
+
+
+def test_hook_checks_literal_scoped_paths_and_keeps_unavailable_files_unknown(tmp_path):
+    from hashlib import sha256
+
+    project, root = tmp_path / "project", tmp_path / "private"
+    scope = project / "subproject"
+    scope.mkdir(parents=True)
+    git(project, "init", "-q")
+    git(project, "commit", "-qm", "start", "--allow-empty")
+    (scope / "present").write_bytes(b"correct\r\n")
+    (scope / "folder").mkdir()
+    (scope / "large").write_bytes(b"x" * (1024 * 1024 + 1))
+    record_hook(root, scope, hook(project, "escape"), ("../other",))
+    assert not root.exists()
+    record_hook(root, scope, hook(project, "files"), ("present", "missing", "folder", "large"))
+    files = lookup(Store(root, read_only=True), "session", "files")["setup_files"]
+    assert files == {path_fingerprint(scope.resolve() / "present"): sha256(b"correct\r\n").hexdigest(),
+                     path_fingerprint(scope.resolve() / "missing"): None}
 
 
 def test_turn_revision_rejects_late_mismatched_and_ambiguous_receipts(tmp_path):

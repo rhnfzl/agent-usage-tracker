@@ -16,7 +16,7 @@ from ..config import AutError
 from ..event import parse_ts
 from .case_view import _attempt
 from .evidence import event_links
-from .file_reads import observed_file_read
+from .file_reads import observed_file_read, path_fingerprint
 from .judge import _attempt_coverage, _complete_attempt
 from .setup_git import COMMIT_ID, target_in_workspace, verify_setup
 from .store import Store, repository
@@ -39,12 +39,14 @@ def validate_measurement(policy: dict[str, Any]) -> None:
 def validate_policy(policy: Any) -> None:
     if (not isinstance(policy, dict)
             or set(policy) - {"require_turn_context", "coverage_basis", "require_setup_revision",
-                              "require_approved_file_read"}
+                              "require_approved_file_read", "require_worktree_setup"}
             != {"metric", "minimum_pairs", "minimum_improvement", "baseline_cases"}
             or type(policy.get("require_setup_revision", False)) is not bool
             or policy.get("require_setup_revision") and not policy.get("require_turn_context")
             or type(policy.get("require_approved_file_read", False)) is not bool
             or policy.get("require_approved_file_read") and not policy.get("require_turn_context")
+            or type(policy.get("require_worktree_setup", False)) is not bool
+            or policy.get("require_worktree_setup") and not policy.get("require_turn_context")
             or type(policy["minimum_pairs"]) is not int or not 2 <= policy["minimum_pairs"] <= 200
             or type(policy["minimum_improvement"]) not in (float, int)
             or not 0 <= policy["minimum_improvement"] < math.inf):
@@ -109,9 +111,12 @@ def _sample_attempt(session: dict[str, Any], case: dict[str, Any],
                        "divergent_copy", "source_incomplete", "unknown_copy_boundary"))):
         model_calls, model_started = None, None
     setup_revision = None
+    setup_files: dict[str, str | None] = {}
     if context and context_status == "observed":
         observed = turn_revision_details(context.get("turn_start_revision"))
         setup_revision = observed["commit"] if observed else context.get("session_start_revision")
+        if observed is not None:
+            setup_files = observed.get("setup_files", {})
     return {
         "context_status": context_status,
         "identity": (session["agent"], session.get("session_id")),
@@ -120,6 +125,7 @@ def _sample_attempt(session: dict[str, Any], case: dict[str, Any],
         "cwd": context.get("cwd") if context else session.get("cwd"),
         "model": context.get("model") if context else session.get("model"),
         "setup_revision": setup_revision,
+        "setup_files": setup_files,
         "read_origin": _read_origin(session, case["session_snapshot"], events[-1], context, turn)
         if context and context_status == "observed" and turn else None,
         "started": min(times) if times else None, "ended": max(times) if times else None,
@@ -176,6 +182,14 @@ def _is_revision(value: Any) -> bool:
     return isinstance(value, str) and bool(COMMIT_ID.fullmatch(value))
 
 
+def _matches_worktree(sample: dict[str, Any], target: Path | None, expected: str | None) -> bool:
+    if target is None:
+        return False
+    key = path_fingerprint(target)
+    files = sample["setup_files"]
+    return key in files and files[key] == expected
+
+
 def baseline_gate(policy: dict[str, Any], proposal: dict[str, Any], reserved: ReservedEvidence,
                   before: datetime | None = None) -> Callable[[dict[str, Any]], str | None]:
     scope = Path(proposal["scope"]).resolve()
@@ -189,6 +203,10 @@ def baseline_gate(policy: dict[str, Any], proposal: dict[str, Any], reserved: Re
     def matches_setup(revision: str) -> bool:
         return verify_setup(proposal, revision, "before")["status"] == "verified"
 
+    @lru_cache(maxsize=200)
+    def read_target(cwd: str) -> Path | None:
+        return target_in_workspace(proposal, cwd)
+
     def check(sample: dict[str, Any]) -> str | None:
         if sample["source_identities"] & reserved.sources or sample["content"] in reserved.fingerprints:
             return "reserved_study_evidence"
@@ -201,6 +219,9 @@ def baseline_gate(policy: dict[str, Any], proposal: dict[str, Any], reserved: Re
         revision = sample["setup_revision"]
         if policy.get("require_setup_revision") and (not _is_revision(revision) or not matches_setup(revision)):
             return "setup_revision_unverified"
+        if (policy.get("require_worktree_setup")
+                and not _matches_worktree(sample, read_target(sample["cwd"]), proposal["before_sha256"])):
+            return "worktree_setup_unverified"
         return None
 
     return check
@@ -222,6 +243,8 @@ def check_baselines(store: Store, policy: dict[str, Any], proposal: dict[str, An
         needed = " with recorded turn context" if policy.get("require_turn_context") else ""
         if policy.get("require_setup_revision"):
             needed += " and verified setup revisions"
+        if policy.get("require_worktree_setup"):
+            needed += " and verified worktree setup"
         raise AutError(f"improve: not enough eligible baseline cases{needed}")
 
 
@@ -252,6 +275,7 @@ def observe(store: Store, study_id: str, spec: dict[str, Any], *,
     proposal = store.get("proposals", study["proposal_id"])
     require_setup = policy.get("require_setup_revision", False)
     require_read = policy.get("require_approved_file_read", False)
+    require_worktree = policy.get("require_worktree_setup", False)
 
     @lru_cache(maxsize=400)
     def read_setup(revision: str, condition: str) -> dict[str, str]:
@@ -321,6 +345,9 @@ def observe(store: Store, study_id: str, spec: dict[str, Any], *,
                 and read_setup(sample["setup_revision"], condition)["status"] == "verified"
                 for sample, condition in ((before, "before"), (after, "after"))):
             reason = "setup_revision_unverified"
+        elif require_worktree and not all(_matches_worktree(sample, read_target(sample["cwd"]),
+                proposal[f"{condition}_sha256"]) for sample, condition in ((before, "before"), (after, "after"))):
+            reason = "worktree_setup_unverified"
         elif before[metric] is None or after[metric] is None:
             reason = "metric_unknown"
         approved_read = None
@@ -347,6 +374,7 @@ def observe(store: Store, study_id: str, spec: dict[str, Any], *,
                          "uses_tool_events_only": policy.get("coverage_basis") == "tool_events"
                          and not (before["complete"] and after["complete"]),
                          "setup_revision_verified": require_setup,
+                         **({"worktree_setup_verified": True} if require_worktree else {}),
                          **({"approved_file_read": approved_read} if approved_read else {}),
                          "basis": "recorded_turn_context" if contexts == {"observed"}
                          else "includes_session_labels"})
@@ -371,6 +399,7 @@ def observe(store: Store, study_id: str, spec: dict[str, Any], *,
                                                    for row in outcomes),
               "setup_revision_verified_pairs": sum(row.get("setup_revision_verified", False)
                                                       for row in outcomes),
+              **({"worktree_setup_verified_pairs": len(reductions)} if require_worktree else {}),
               "approved_file_read_pairs": sum("approved_file_read" in row for row in outcomes),
               **({"adoption_commit_setup": adoption_setup} if require_setup else {}),
               "unpaired_baseline_ids": unpaired, "mean_reduction": reduction, "pairs": outcomes,

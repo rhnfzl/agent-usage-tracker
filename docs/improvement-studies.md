@@ -317,8 +317,16 @@ workspace, and timing before attaching the receipt to a completed attempt. You c
 on the boundary event with full or redacted access. T3 can use the receipt when its run matches
 the native Codex turn. Earlier attempts keep the evidence available when they were captured.
 
-A verified revision describes the committed file. Check the separate read evidence
-when the study also needs to establish what the agent received.
+A verified revision describes the committed file. To also check the file in the actual worktree,
+add `--setup-file .agents/skills/example/SKILL.md` to the hook command. Use paths relative to
+`--project`. Repeat the option for up to 16 paths. AUT records only digests or confirmed absence.
+Symlinks, unavailable files, and files above 1 MiB leave the setup unknown.
+
+Use `--require-worktree-setup` in study preflight. Set `require_worktree_setup: true` and
+`require_turn_context: true` in the frozen observation policy. AUT checks the original file on
+the baseline side and the approved file on the candidate side. A new file must be absent at
+baseline. A working copy with different bytes leaves the pair ineligible, even when the
+commit is correct. The report counts pairs with verified worktree setup.
 
 Set `require_approved_file_read: true` with `require_turn_context: true` to require evidence
 that the candidate received the approved file contents. AUT recognizes a successful native

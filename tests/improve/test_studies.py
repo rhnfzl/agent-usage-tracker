@@ -644,6 +644,7 @@ def test_natural_work_observation_measures_only_eligible_pairs(
 
 @pytest.mark.parametrize("read_mode", [None, "native", "mirrored"])
 def test_strict_observation_checks_adoption_and_session_setup_revisions(tmp_path, monkeypatch, read_mode):
+    import hashlib
     import json
     import subprocess
     from datetime import datetime, timezone
@@ -685,7 +686,7 @@ def test_strict_observation_checks_adoption_and_session_setup_revisions(tmp_path
     new = git("rev-parse", "HEAD")
     policy["proposal_id"] = proposal
 
-    def add(name, phase, revision, exit_code, returned="after", read_turn=None):
+    def add(name, phase, revision, exit_code, returned="after", read_turn=None, worktree_content=None):
         stamp = "2025-02-27T12:00:00Z" if phase == "baseline" else "2025-03-03T12:00:00Z"
         cwd = str(source)
         rows = [
@@ -711,8 +712,11 @@ def test_strict_observation_checks_adoption_and_session_setup_revisions(tmp_path
             from agent_usage_tracker.improve.file_reads import path_fingerprint
 
             assert session == turn == name
+            workspace_text = worktree_content or ("before" if phase == "baseline" else "after")
             return {"workspace_sha256": path_fingerprint(source), "commit": revision,
-                    "recorded_at": stamp}
+                    "recorded_at": stamp, "setup_files": {
+                        path_fingerprint(source / "setup"): hashlib.sha256(workspace_text.encode()).hexdigest(),
+                    }}
 
         row = read_session(path, "codex", track_native_items=read_mode == "mirrored",
                            turn_revision=lookup_revision if read_mode == "mirrored" else None)
@@ -744,6 +748,8 @@ def test_strict_observation_checks_adoption_and_session_setup_revisions(tmp_path
     }
     if read_mode:
         policy["observation_policy"]["require_approved_file_read"] = True
+    if read_mode == "mirrored":
+        policy["observation_policy"]["require_worktree_setup"] = True
     wrong = add("baseline-with-candidate", "baseline", new, 0)
     with pytest.raises(AutError, match="verified setup revisions"):
         create(store, policy | {"observation_policy": policy["observation_policy"] |
@@ -759,9 +765,17 @@ def test_strict_observation_checks_adoption_and_session_setup_revisions(tmp_path
     assert observed["setup_revision_verified_pairs"] == 2
     assert observed["approved_file_read_pairs"] == (2 if read_mode else 0)
     if read_mode == "mirrored":
+        assert observed["worktree_setup_verified_pairs"] == 2
         for pair in observed["pairs"]:
             native_source = store.get("sessions", pair["approved_file_read"]["session_snapshot"])
             assert native_source["agent"] == "codex"
+        changed = add("dirty-worktree", "candidate", new, 0, worktree_content="local changes")
+        dirty = observe(store, key, {"adoption_id": adopted["adoption_id"], "pairs": [
+            pairs[0], {**pairs[1], "candidate": changed},
+        ]}, preview=True)
+        assert dirty["exclusions"] == {"worktree_setup_unverified": 1}
+        assert dirty["worktree_setup_verified_pairs"] == 1
+        assert dirty["comparison"] == "inconclusive"
     assert observed["adoption_commit_setup"] == {"status": "verified", "revision": new}
     assert not observed["attempt_setup_exposure_verified"]
     excluded = observe(store, key, {"adoption_id": wrongly_adopted["adoption_id"], "pairs": pairs})

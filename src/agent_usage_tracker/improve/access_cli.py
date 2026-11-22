@@ -32,6 +32,8 @@ def register(commands: Any) -> None:
     capture.add_argument("--project", type=Path)
     record = actions.add_parser("record-codex-turn", help="record Git context from a Codex prompt hook")
     record.add_argument("--project", type=Path, required=True)
+    record.add_argument("--setup-file", action="append", default=[], metavar="PROJECT_PATH",
+                        help="record the file digest or absence for this project-relative setup path")
 
     actions.add_parser("describe", help="report the evidence scope and coverage")
     search = actions.add_parser("search", help="filter captured events and return matching references")
@@ -96,7 +98,7 @@ def run(args: argparse.Namespace) -> None:
             raise AutError("evidence: the Codex turn hook uses a store, not an audit or bundle")
         from .turn_revisions import HOOK_INPUT_LIMIT, record_hook
 
-        record_hook(root, args.project, sys.stdin.buffer.read(HOOK_INPUT_LIMIT + 1))
+        record_hook(root, args.project, sys.stdin.buffer.read(HOOK_INPUT_LIMIT + 1), tuple(args.setup_file))
         return
     if action == "capture":
         if args.audit or args.bundle or args.content == "metadata":
