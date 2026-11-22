@@ -83,7 +83,8 @@ def test_installed_files_are_verified_without_relying_on_installer_archive_hashe
         runtime._verify_wheel(wheel, library)
 
 
-def test_code_runtime_preserves_separate_release_identity(tmp_path, monkeypatch):
+@pytest.mark.parametrize("semantic", [False, True])
+def test_code_runtime_preserves_separate_release_identity(tmp_path, monkeypatch, semantic):
     store = Store(tmp_path / "private")
     wheel = tmp_path / "package.whl"
     wheel.write_bytes(b"wheel")
@@ -99,11 +100,12 @@ def test_code_runtime_preserves_separate_release_identity(tmp_path, monkeypatch)
         return json.dumps({"module": str(release / "site/agent_usage_tracker/__init__.py"),
                            "library": str(release / "site"),
                            "source": {"url": (release / wheel.name).as_uri()},
-                           "code_available": True, "version": "0.4.0"})
+                           "code_available": True, "semantic_available": True, "version": "0.4.0"})
 
     monkeypatch.setattr(runtime.subprocess, "check_output", check_output)
     monkeypatch.setattr(runtime, "_verify_wheel", lambda *_: None)
-    installed = runtime.install(store, wheel, root, code=True)
-    assert installed["extras"] == ["label", "mcp", "code"]
-    assert installed["runtime"].endswith("-code")
-    assert commands[-1][-1].endswith("[label,mcp,code]")
+    installed = runtime.install(store, wheel, root, code=True, semantic=semantic)
+    extras = ["label", "mcp", "code"] + (["semantic"] if semantic else [])
+    assert installed["extras"] == extras
+    assert installed["runtime"].endswith("-code-semantic" if semantic else "-code")
+    assert commands[-1][-1].endswith(f"[{','.join(extras)}]")

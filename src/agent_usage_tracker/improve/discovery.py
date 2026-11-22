@@ -20,7 +20,7 @@ DEFAULT_MODEL = "mlx-community/Qwen3-4B-Instruct-2507-4bit"
 DEFAULT_QUESTION = ("What is surprising about how this person and their agents work? "
                     "Find decisions, recurring difficulties, changes in practice, or ideas worth "
                     "testing. Consider related work in other projects.")
-POLICY = 7
+POLICY = 8
 
 # This is reviewed Python. The model supplies data for searches and cannot supply executable code.
 _RECIPE = """
@@ -37,7 +37,7 @@ for scope in scopes:
         anchor = task["anchor"]
         if anchor:
             detail = read("context", scope=anchor["scope"], session_id=anchor["session_id"],
-                          event_id=anchor["event_id"], radius=1, text_limit=300)
+                          event_id=anchor["event_id"], radius=0, limit=300)
             lead = detail["receipt"]
         page = read("search", scope=scope, lead=lead, query=task["query"],
                     kind=task["kind"], mode=params["mode"],
@@ -58,13 +58,18 @@ for scope in scopes:
             if session in covered:
                 continue
             detail = read("context", scope=scope, lead=page["receipt"],
-                          session_id=session, event_id=event, radius=2, text_limit=640, focus=task["query"])
+                          session_id=session, event_id=event, radius=2, limit=640,
+                          focus=task["query"], view="conversation")
+            observed = detail["data"]
+            items = observed["neighbors"] + [observed["anchor"]]
+            if observed["counterpart"]:
+                items.append(observed["counterpart"])
             seen.append(event)
             selected += 1
             covered.append(session)
             rows.append({"scope": scope, "session_id": session, "event_id": event,
-                         "query": task["query"], "items": detail["data"]["items"],
-                         "coverage": detail["data"]["session"]["coverage"]})
+                         "query": task["query"], "items": sorted(items, key=lambda item: item["position"]),
+                         "coverage": observed["coverage"]})
 {"rows": rows, "pages": pages, "known_matches": known_matches}
 """
 

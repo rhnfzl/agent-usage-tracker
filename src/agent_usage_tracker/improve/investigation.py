@@ -15,7 +15,8 @@ from typing import Any, Literal, get_args, get_origin, get_type_hints
 
 from .. import __version__
 from ..config import AutError
-from .access import Evidence
+from .access import Evidence, READ_OPERATIONS
+from .semantic_search import LocalEmbedder
 from .store import Store, canonical, digest
 
 CONTRACT = 1
@@ -26,8 +27,7 @@ MAX_CALLS = 48
 MAX_DATA = 2 * 1024 * 1024
 MAX_OUTPUT = 65_536
 TIMEOUT = 12
-OPERATIONS = ("describe", "search", "session", "event", "compare", "commits", "case",
-              "ordinary_work", "context")
+MODEL_TIMEOUT = 30
 WORKER = "agent_usage_tracker.improve.investigation"
 
 
@@ -44,37 +44,42 @@ def _matches(value: Any, annotation: Any) -> bool:
     if get_origin(annotation) is Literal:
         return any(type(value) is type(choice) and value == choice
                    for choice in get_args(annotation))
+    if get_origin(annotation) is list:
+        element_type, = get_args(annotation)
+        return type(value) is list and all(_matches(item, element_type) for item in value)
     if options := get_args(annotation):
         return any(_matches(value, option) for option in options)
     return type(value) is annotation
 
 
-def catalog() -> dict[str, Any]:
+def catalog(*, with_model: bool = False) -> dict[str, Any]:
     operations = {}
-    for name in OPERATIONS:
+    for name in READ_OPERATIONS:
         method = getattr(Evidence, name)
         hints = get_type_hints(method)
         fields = {}
         for param in list(inspect.signature(method).parameters.values())[1:]:
             field = {"type": inspect.formatannotation(hints[param.name])}
             if param.default is not inspect.Parameter.empty:
-                field["default"] = param.default
+                field["default"] = "exact" if name == "search" and param.name == "mode" else param.default
             fields[param.name] = field
         operations[name] = {"description": method.__doc__, "arguments": fields}
     return {"contract": CONTRACT, "operations": operations,
             "interface": "read(operation, scope='1', lead=None, **arguments) returns receipt and data",
             "limits": {"source_bytes": MAX_SOURCE, "parameter_bytes": MAX_PARAMS,
-                       "calls": MAX_CALLS, "seconds": TIMEOUT, "output_bytes": MAX_OUTPUT}}
+                       "calls": MAX_CALLS, "seconds": MODEL_TIMEOUT if with_model else TIMEOUT,
+                       "output_bytes": MAX_OUTPUT}}
 
 
 def scope_specs(root: Path, content: str, audit: str | None, bundle: Path | None,
-                audits: list[str], bundles: list[Path]) -> list[dict[str, Any]]:
+                audits: list[str], bundles: list[Path], model_path: Path | None = None) -> list[dict[str, Any]]:
     sources = [(audit, bundle), *((key, None) for key in audits),
                *((None, path) for path in bundles)]
     if len(sources) > MAX_SCOPES:
         raise AutError(f"investigation: select at most {MAX_SCOPES} evidence scopes")
     specs = [{"audit": key, "bundle": str(path.expanduser().resolve()) if path else None,
-              "root": str(root.expanduser().resolve()) if key else None, "content": content}
+              "root": str(root.expanduser().resolve()) if key else None, "content": content,
+              **({"embedding_model": str(model_path)} if model_path else {})}
              for key, path in sources]
     if len({(row["audit"], row["bundle"]) for row in specs}) != len(specs):
         raise AutError("investigation: select distinct evidence scopes")
@@ -89,6 +94,10 @@ def _bounded(value: Any, limit: int, label: str) -> bytes:
     if len(data) > limit:
         raise AutError(f"investigation: {label} exceeds {limit} bytes")
     return data
+
+
+def _timeout(specs: list[dict[str, Any]]) -> int:
+    return MODEL_TIMEOUT if any(spec.get("embedding_model") for spec in specs) else TIMEOUT
 
 
 def run(source: str, params: dict[str, Any], specs: list[dict[str, Any]],
@@ -109,7 +118,7 @@ def run(source: str, params: dict[str, Any], specs: list[dict[str, Any]],
            if name in os.environ}
     try:
         process = subprocess.run([sys.executable, "-I", "-m", WORKER], input=payload,
-                                 capture_output=True, timeout=TIMEOUT, env=env, check=False)
+                                 capture_output=True, timeout=_timeout(specs), env=env, check=False)
     except subprocess.TimeoutExpired as exc:
         raise InvestigationTimeout("investigation: execution exceeded the wall-clock limit") from exc
     except OSError as exc:
@@ -152,6 +161,9 @@ def _references(operation: str, value: dict[str, Any]) -> list[dict[str, str]]:
                     tool.get("result_event_id"))
     elif operation == "event":
         include(value["session_id"], value["id"])
+    elif operation == "context":
+        events = [value["anchor"], value["counterpart"], *value["neighbors"]]
+        include(value["session_id"], *(event["id"] for event in events if event))
     elif operation == "case":
         include(value["session_id"], *value["event_ids"])
     else:
@@ -166,11 +178,16 @@ def _references(operation: str, value: dict[str, Any]) -> list[dict[str, str]]:
 def _open_scope(spec: dict[str, Any]) -> Evidence:
     store = Store(Path(spec["root"]), read_only=True) if spec["root"] else None
     bundle = Path(spec["bundle"]) if spec["bundle"] else None
-    return Evidence(spec["content"], store, spec["audit"], bundle)
+    model = spec.get("embedding_model")
+    embedder = LocalEmbedder(Path(model)) if model else None
+    return Evidence(spec["content"], store, spec["audit"], bundle, embedder=embedder)
 
 
 def _describe_scope(evidence: Evidence) -> dict[str, Any]:
-    return {**evidence.describe(), "bundle": digest(evidence.bundled) if evidence.bundled else None}
+    result = {**evidence.describe(), "bundle": digest(evidence.bundled) if evidence.bundled else None}
+    if evidence.embedding_model_id is not None:
+        result["embedding_model"] = evidence.embedding_model_id
+    return result
 
 
 def pin_scopes(specs: list[dict[str, Any]], primary: Evidence) -> dict[str, Any]:
@@ -206,7 +223,7 @@ def _execute(source: str, params: dict[str, Any], specs: list[dict[str, Any]],
         calls += 1
         if calls > MAX_CALLS:
             raise AutError("investigation: evidence call budget exhausted")
-        if not isinstance(operation, str) or operation not in OPERATIONS:
+        if not isinstance(operation, str) or operation not in READ_OPERATIONS:
             raise AutError("investigation: unknown evidence operation")
         if not isinstance(scope, str) or scope not in sources:
             raise AutError("investigation: unknown evidence scope")
@@ -221,18 +238,24 @@ def _execute(source: str, params: dict[str, Any], specs: list[dict[str, Any]],
             raise AutError("investigation: invalid argument names for evidence operation") from exc
         if any(not _matches(value, hints[name]) for name, value in arguments.items()):
             raise AutError("investigation: invalid argument types for evidence operation")
-        data = method(**arguments)
+        # Existing recipe receipts used literal search when mode was omitted.
+        call_arguments = {"mode": "exact", **arguments} if operation == "search" else arguments
+        data = method(**call_arguments)
         encoded = _bounded(data, MAX_DATA - data_bytes, "evidence data")
         data_bytes += len(encoded)
         receipt = len(reads) + 1
+        has_more = any(data.get(key) is not None for key in ("next_cursor", "next_offset"))
+        if operation == "context":
+            events = [data["anchor"], data["counterpart"], *data["neighbors"]]
+            has_more = any(event and event.get("next_offset") is not None for event in events)
         reads.append({"receipt": receipt, "lead": lead, "scope": scope, "operation": operation,
                       "arguments_sha256": digest(arguments), "data_sha256": digest(data),
-                      "has_more": any(data.get(key) is not None for key in ("next_cursor", "next_offset")),
+                      "has_more": has_more,
                       "references": _references(operation, data)})
         return {"receipt": receipt, "data": data}
 
     try:
-        with Monty(max_processes=1, request_timeout=TIMEOUT) as pool, pool.checkout(
+        with Monty(max_processes=1, request_timeout=_timeout(specs)) as pool, pool.checkout(
             limits={"max_feed_duration_secs": 3, "max_memory": 32 * 1024 * 1024,
                     "max_recursion_depth": 128, "max_suspensions": 256, "max_total_sleep_secs": 0},
             os_policy={"datetime": datetime(2000, 1, 1, tzinfo=timezone.utc),

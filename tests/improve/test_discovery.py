@@ -96,17 +96,17 @@ def test_context_reads_across_tools_respects_scope_and_bounds(tmp_path):
                    {"kind": "boundary", "id": "end", "text": "turn_complete"}])
     snapshot = store.put("sessions", {"agent": "codex", "coverage": {}, "events": events})
     audit = store.put("audits", {"session_ids": [snapshot], "coverage": {}})
-    around = Evidence("redacted", store, audit).context(snapshot, "reply", radius=1, text_limit=5)
-    assert [item["id"] for item in around["items"]] == ["start", "reply", "end"]
-    assert around["items"][1]["position"] == 1151
-    assert around["items"][1]["text"] == "long "
-    assert around["items"][1]["truncated"] is True
+    around = Evidence("redacted", store, audit).context(snapshot, "reply", radius=1, limit=5, view="conversation")
+    assert [item["id"] for item in around["neighbors"]] == ["start", "end"]
+    assert around["anchor"]["position"] == 1151
+    assert around["anchor"]["text"] == "long "
+    assert around["anchor"]["truncated"] is True
     focused = Evidence("redacted", store, audit).context(
-        snapshot, "reply", radius=1, text_limit=30, focus="choose this")
-    assert focused["items"][1]["text"].endswith("CHOOSE THIS")
-    assert focused["items"][1]["text_offset"] > 1_000
+        snapshot, "reply", radius=1, limit=30, focus="choose this")
+    assert focused["anchor"]["text"].endswith("CHOOSE THIS")
+    assert focused["anchor"]["text_offset"] > 1_000
     metadata = Evidence("metadata", store, audit).context(snapshot, "reply", radius=1)
-    assert all("text" not in item for item in metadata["items"])
+    assert all("text" not in item for item in [metadata["anchor"], *metadata["neighbors"]])
 
 
 def test_reuses_prior_questions_when_a_new_audit_arrives(tmp_path, monkeypatch):
