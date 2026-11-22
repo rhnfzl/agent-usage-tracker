@@ -20,7 +20,7 @@ def test_exact_search_preview_keeps_casefolded_match(capsys, tmp_path):
     audit = store.put("audits", {"session_ids": [session], "coverage": {}})
 
     result = invoke(capsys, store.root, "--audit", audit, "--content", "redacted",
-                    "search", "--query", "STRASSE FAILED")
+                    "search", "--mode", "exact", "--query", "STRASSE FAILED")
 
     assert result["items"][0]["event_id"] == "result"
     assert "Straße failed" in result["items"][0]["preview"]
@@ -375,3 +375,90 @@ def test_restored_snapshot_without_full_text_stays_readable(tmp_path, capsys):
     event = invoke(capsys, store.root, "--audit", audit_id, "event", key, "event")
     assert event["text"] == "password=[redacted]"
     assert event["text_source"] == "snapshot_redacted"
+
+
+def test_context_links_distant_events_and_preserves_metadata_bundle(tmp_path, capsys):
+    store = Store(tmp_path / "private")
+    events = [{"id": "call", "kind": "call", "call_id": "abcdefgh", "text": "check state"}]
+    events += [{"id": f"gap-{i}", "kind": "reply", "text": "waiting"} for i in range(9)]
+    events += [{"id": "result", "kind": "result", "call_id": "abcdefgh", "text": "ended cleanly"},
+               {"id": "orphan", "kind": "result", "text": "unknown"}]
+    key = store.put("sessions", {"agent": "pi", "coverage": {}, "events": events})
+    audit = store.put("audits", {"session_ids": [key], "coverage": {}})
+    scope = ("--audit", audit)
+    result = invoke(capsys, store.root, *scope, "context", key, "result", "--radius", "1", "--limit", "5")
+    assert result["link_status"] == "matched"
+    assert result["counterpart"]["id"] == "call"
+    assert result["counterpart"]["text"] == "check"
+    assert result["counterpart"]["next_offset"] == 5
+    assert [event["id"] for event in result["neighbors"]] == ["gap-8", "orphan"]
+    assert invoke(capsys, store.root, *scope, "context", key, "orphan")["link_status"] == "missing"
+
+    bundle = tmp_path / "metadata.json"
+    invoke(capsys, store.root, *scope, "--content", "metadata", "export", str(bundle), key)
+    result = invoke(capsys, store.root, "--bundle", str(bundle), "context", key, "call", "--radius", "0")
+    assert result["counterpart"]["id"] == "result"
+    assert "text" not in result["counterpart"]
+    describe = invoke(capsys, store.root, "--bundle", str(bundle), "describe", "--text-coverage")
+    assert describe["text_coverage"] == {"hidden": 12}
+
+
+def test_evaluate_keeps_event_recall_and_empty_controls_distinct(tmp_path, capsys):
+    store = Store(tmp_path / "private")
+    key = store.put("sessions", {"agent": "pi", "coverage": {}, "events": [
+        {"id": "a", "kind": "result", "text": "cache ready"}]})
+    audit = store.put("audits", {"session_ids": [key], "coverage": {}})
+    labels = tmp_path / "labels.json"
+    labels.write_text(json.dumps({"version": 1, "audit_id": audit, "content": "full", "cases": [
+        {"id": "a", "category": "exact", "query": "cache ready", "relevant": [[key, "a"]]},
+        {"id": "b", "category": "absent", "query": "no occurrence here", "relevant": []},
+    ]}))
+    report = invoke(capsys, store.root, "--audit", audit, "evaluate", str(labels), "--mode", "ranked")
+    result = report["modes"]["ranked"]
+    assert result["counts"] == {"answerable": 1, "session_hits": 1, "event_hits": 1,
+                                 "unanswerable": 1, "empty_unanswerable": 1}
+    assert result["cases"][0]["event_rank"] == 1
+    assert result["cases"][1]["event_rank"] is None
+    assert main(["evidence", "--root", str(store.root), "--audit", audit,
+                 "--content", "redacted", "evaluate", str(labels)]) == 1
+
+
+def test_tool_argument_search_projects_only_the_scoped_field(tmp_path, capsys):
+    store = Store(tmp_path / "private")
+    events = [
+        {"id": "reply", "kind": "reply", "text": '{"a/b":[{"~file":"guide.md"}]}'},
+        {"id": "other", "kind": "call", "text": '{"comment":"guide.md","a/b":[{"~file":"notes"}]}'},
+        {"id": "match", "kind": "call", "text": '{"a/b":[{"~file":"guide.md"}]}'},
+        {"id": "again", "kind": "call", "text": '{"a/b":[{"~file":"guide.md"}]}'},
+        {"id": "clipped", "kind": "call", "truncated": True, "text": '{"a/b":[{"~file":"guide.md"}]}'},
+        {"id": "shell", "kind": "call", "text": "cat guide.md"},
+        {"id": "secret", "kind": "call", "text": r'{"\u0074oken":"fixture-only"}'},
+    ]
+    key = store.put("sessions", {"agent": "pi", "coverage": {}, "events": events})
+    empty = store.put("sessions", {"agent": "codex", "coverage": {}, "events": []})
+    audit = store.put("audits", {"session_ids": [key, empty], "coverage": {}})
+    scope = ("--audit", audit)
+    search = (*scope, "search", "--argument-path", "/a~1b/0/~0file",
+              "--query", "guide.md", "--mode", "exact", "--limit", "1")
+    page = invoke(capsys, store.root, *search)
+    assert [(hit["id"], hit["preview"]) for hit in page["items"]] == [("match", "guide.md")]
+    assert page["argument_coverage"] == {"resolved": 2, "unavailable": 0}
+    next_page = invoke(capsys, store.root, *search, "--cursor", page["next_cursor"])
+    assert next_page["items"][0]["id"] == "again"
+    assert main(["evidence", "--root", str(store.root), *search, "--argument-path", "/wrong",
+                 "--cursor", page["next_cursor"]]) == 1
+    capsys.readouterr()
+    ranked = invoke(capsys, store.root, *search, "--mode", "ranked")
+    assert ranked["indexed_events"] == 3
+    listed = invoke(capsys, store.root, *scope, "list-sessions", "--agent", "codex")
+    assert [(row["id"], row["event_count"]) for row in listed["items"]] == [(empty, 0)]
+
+    meta = (*scope, "--content", "metadata")
+    assert main(["evidence", "--root", str(store.root), *meta, "search", "--argument-path", "/token"]) == 1
+    capsys.readouterr()
+    redacted = invoke(capsys, store.root, *scope, "--content", "redacted", "search",
+                      "--argument-path", "/token", "--query", "fixture-only", "--mode", "exact")
+    assert redacted["items"] == []
+    raw = invoke(capsys, store.root, *scope, "search", "--argument-path", "",
+                 "--query", "cat guide.md", "--mode", "exact")
+    assert [item["id"] for item in raw["items"]] == ["shell"]

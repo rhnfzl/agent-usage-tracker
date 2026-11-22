@@ -16,15 +16,19 @@ from ..config import AutError
 from ..event import parse_ts
 from ..redact import redact
 from .evidence import event_links
-from .ranked_search import RankedSearch
+from .ranked_search import RankedSearch, SearchMode, WordSearchUnavailable, words
+from .semantic_search import Embedder, SemanticUnavailable
 from .setup_git import COMMIT_ID
 from .store import Store, canonical, digest
 from .t3 import CHECKPOINT_REF
+from .tool_arguments import argument_text, parse_pointer
 from .turn_revisions import SETUP_FILE_LIMIT, details as turn_revision_details
 
 MODES = ("metadata", "redacted", "full")
 BUNDLE_LIMIT = 64 * 1024 * 1024
 PAGE_SIZE = 100
+READ_OPERATIONS = ("describe", "list_sessions", "search", "session", "event", "context",
+                   "compare", "commits", "case", "ordinary_work")
 SEARCH_BUDGET = 10_000
 IDENTITY = re.compile(r"[a-f0-9]{64}")
 EVENT_METADATA = ("id", "kind", "status", "timestamp", "line", "byte_offset", "truncated")
@@ -63,14 +67,14 @@ def _exact_preview(text: str, needle: str) -> str | None:
 
 class Evidence:
     def __init__(self, content: str, store: Store | None = None, audit_id: str | None = None,
-                 bundle: Path | None = None) -> None:
+                 bundle: Path | None = None, *, embedder: Embedder | None = None) -> None:
         if content not in MODES or bool(audit_id) == bool(bundle):
             raise AutError("evidence: select exactly one audit or bundle and a valid content mode")
         self.content = content
         self.store = store
         self.bundled: dict[str, Any] = {}
         self.supplemental: set[str] = set()
-        self._ranked = RankedSearch()
+        self._ranked = RankedSearch(embedder)
         if bundle is not None:
             self.bundled = _read_bundle(bundle)
             self.keys = list(self.bundled["sessions"])
@@ -194,20 +198,87 @@ class Evidence:
                     self.content == "redacted" and origin == "captured_full") else origin
         return result
 
-    def describe(self) -> dict[str, Any]:
+    def describe(self, text_coverage: bool = False) -> dict[str, Any]:
         """Report the fixed evidence scope, content mode, and capture coverage."""
-        return {"audit_id": self.audit_id, "content": self.content,
-                "sessions": len(self.keys), "coverage": _coverage(self.coverage)}
+        result = {"audit_id": self.audit_id, "content": self.content,
+                  "sessions": len(self.keys), "coverage": _coverage(self.coverage)}
+        if text_coverage:
+            counts: Counter[str] = Counter()
+            for key in self.keys:
+                for event in self._read(key)["events"]:
+                    visible = self._event(event)
+                    if self.content == "metadata":
+                        counts["hidden"] += 1
+                    elif visible.get("text"):
+                        counts[visible["text_source"]] += 1
+                    else:
+                        counts["empty"] += 1
+                    if visible.get("truncated"):
+                        counts["truncated"] += 1
+            result["text_coverage"] = dict(counts)
+        return result
+
+    def list_sessions(self, offset: int = 0, limit: int = 30, agent: str = "",
+                      workspace: str = "") -> dict[str, Any]:
+        """List captured sessions and their coverage. Pass a returned ID to session or search."""
+        _page(offset, limit)
+        if workspace and self.content == "metadata":
+            raise AutError("evidence: workspace filtering requires content access")
+        items = []
+        for index in range(offset, len(self.keys)):
+            row = self._read(self.keys[index], include_text=False)
+            if (agent and row["agent"] != agent) or (
+                    workspace and self._label(row.get("cwd") or "") != workspace):
+                continue
+            items.append({**self._summary(row), "event_count": len(row["events"])})
+            if len(items) == limit:
+                offset = index + 1
+                break
+        else:
+            offset = len(self.keys)
+        return {"items": items, "next_offset": offset if offset < len(self.keys) else None,
+                **self.describe()}
+
+    @property
+    def embedding_model_id(self) -> str | None:
+        return self._ranked.model_id
 
     def search(self, query: str = "", agent: str = "", kind: str = "", status: str = "",
                since: str = "", until: str = "", cursor: str = "", limit: int = 20,
                tool: str = "", workspace: str = "",
-               mode: Literal["exact", "ranked"] = "exact") -> dict[str, Any]:
-        """Find exact phrases or rank word matches, returning event references and previews."""
+               mode: SearchMode = "auto", session_id: str = "",
+               exclude_sessions: list[str] | None = None, group_by_session: bool = False,
+               argument_path: str | None = None) -> dict[str, Any]:
+        """Find cited events by phrase, words, meaning, or combined ranking.
+        Auto ranks with hybrid when configured and BM25 otherwise.
+        Group ranked results by session, then filter by session_id to drill down.
+        Supply an RFC 6901 argument_path to search a recorded tool input field.
+        """
         _page(0, limit)
-        if len(query) > 500 or ((query or tool or workspace) and self.content == "metadata"):
+        if len(query) > 500 or ((query or tool or workspace or argument_path is not None) and self.content == "metadata"):
             raise AutError("evidence: text, tool and workspace filters require content access; "
                            "queries can contain up to 500 characters")
+        pointer = parse_pointer(argument_path) if argument_path is not None else None
+        if pointer is not None:
+            if kind and kind != "call":
+                raise AutError("evidence: argument paths search call events")
+            kind = "call"
+        with_text = bool(query) or pointer is not None
+        excluded = set(exclude_sessions or ())
+        authorized = set(self.keys) | self.supplemental
+        if (session_id and session_id not in authorized) or excluded - authorized:
+            raise AutError("evidence: session is outside this audit or bundle")
+        auto = mode == "auto"
+        if auto:
+            if not 1 <= len(words(query)) <= 32 or re.match(r"^[0-9]+:", cursor):
+                mode = "exact"
+            elif cursor.startswith("auto-ranked:") or self._ranked.model_id is None:
+                mode = "ranked"
+            else:
+                mode = "hybrid"
+        if group_by_session and mode == "exact":
+            raise AutError("evidence: session grouping requires a ranking mode")
+        keys = [key for key in ([session_id] if session_id else self.keys) if key not in excluded]
         start, end = parse_ts(since), parse_ts(until)
         if (since and (start is None or start.tzinfo is None)) or (
                 until and (end is None or end.tzinfo is None)) or (start and end and start >= end):
@@ -225,57 +296,108 @@ class Evidence:
 
         def sessions(first: int, *, with_text: bool, observe_file: Callable[[Path], None] | None = None
                      ) -> Iterator[tuple[int, str, dict[str, Any]]]:
-            for index in range(first, len(self.keys)):
-                key = self.keys[index]
+            for index in range(first, len(keys)):
+                key = keys[index]
                 row = self._read(key, include_text=with_text, observe_file=observe_file)
                 if ((agent and row["agent"] != agent)
                         or (workspace and self._label(row.get("cwd") or "") != workspace)):
                     continue
                 yield index, key, row
 
-        def hit(key: str, row: dict[str, Any], event: dict[str, Any]) -> dict[str, Any]:
+        def hit(key: str, row: dict[str, Any], event: dict[str, Any]) -> dict[str, Any] | None:
+            projected = self._event(event, text=with_text)
+            if pointer is not None:
+                if event.get("truncated"):
+                    return None
+                selected = argument_text(projected["text"], pointer, redacted=self.content == "redacted")
+                if selected is None:
+                    return None
+                projected["text"] = selected
             return {"session_id": key, "event_id": event["id"], "agent": row["agent"],
-                    **self._event(event, text=bool(query))}
+                    **projected}
 
-        if mode == "ranked":
+        filters: list[str | None] = [agent, kind, status, since, until, tool, workspace]
+        if pointer is not None:
+            filters.append(argument_path)
+        field = {"argument_path": argument_path} if pointer is not None else {}
+        scope = digest([self.audit_id, keys, self.content, filters])
+        fallback = None
+
+        def binding_for(chosen: SearchMode) -> str:
+            model = self._ranked.model_id if chosen in ("semantic", "hybrid") else None
+            return digest([scope, query, chosen, group_by_session, model])[:24]
+
+        def entries(observe_file: Callable[[Path], None]) -> Iterator[dict[str, Any]]:
+            for _, key, row in sessions(0, with_text=True, observe_file=observe_file):
+                for event in row["events"]:
+                    if matches(event) and (candidate := hit(key, row, event)) is not None:
+                        yield candidate
+
+        while mode != "exact":
             if self.content == "metadata":
                 raise AutError("evidence: ranked search requires content access")
-            binding = digest([self.audit_id, self.keys, self.content, query,
-                              agent, kind, status, since, until, tool, workspace])[:24]
+            binding = binding_for(mode)
+            cursor_mode = f"auto-{mode}" if auto else mode
             offset = 0
             if cursor:
-                match = re.fullmatch(rf"ranked:([0-9]{{1,6}}):{binding}", cursor)
+                match = re.fullmatch(rf"{cursor_mode}:([0-9]{{1,6}}):{binding}", cursor)
                 if not match:
                     raise AutError("evidence: ranked cursor does not match this query and scope")
                 offset = int(match[1])
-            def entries(observe_file: Callable[[Path], None]) -> Iterator[dict[str, Any]]:
-                for _, key, row in sessions(0, with_text=True, observe_file=observe_file):
-                    for event in row["events"]:
-                        if matches(event):
-                            yield hit(key, row, event)
+            try:
+                ranked_hits, more, count = self._ranked.search(
+                    scope, query, entries, offset, limit, mode=mode,
+                    by_session=group_by_session or mode == "sessions",
+                    prefer_phrase=auto and mode == "hybrid")
+            except SemanticUnavailable as exc:
+                if not auto or cursor:
+                    raise
+                fallback, mode = str(exc), "ranked"
+                continue
+            except WordSearchUnavailable as exc:
+                if not auto or cursor or group_by_session:
+                    raise
+                fallback, mode = str(exc), "exact"
+                break
+            continuation = f"{cursor_mode}:{offset + limit}:{binding}" if more else None
+            response = {"items": ranked_hits, "next_cursor": continuation, "indexed_events": count,
+                        "search_mode": mode, **field, **self.describe()}
+            if mode in ("semantic", "hybrid"):
+                response["embedding_model"] = self._ranked.model_id
+            if fallback:
+                response["fallback_reason"] = fallback
+            return response
 
-            scope = digest([self.keys, self.content, agent, kind, status, since, until, tool, workspace])
-            ranked_hits, more, count = self._ranked.search(scope, query, entries, offset, limit)
-            continuation = f"ranked:{offset + limit}:{binding}" if more else None
-            return {"items": ranked_hits, "next_cursor": continuation, "indexed_events": count,
-                    "search_mode": "ranked", **self.describe()}
-
-        if cursor and not re.fullmatch(r"[0-9]{1,6}:[0-9]{1,8}", cursor):
-            raise AutError("evidence: invalid search cursor")
-        first, offset = map(int, (cursor or "0:0").split(":"))
+        summary = {**self.describe(), **field}
+        if auto and query:
+            summary["search_mode"] = "exact"
+        if fallback:
+            summary["fallback_reason"] = fallback
+        suffix = f":{binding_for('exact')}" if session_id or excluded or pointer is not None else ""
+        if cursor and not re.fullmatch(rf"[0-9]{{1,6}}:[0-9]{{1,8}}{suffix}", cursor):
+            raise AutError("evidence: invalid search cursor for this scope")
+        first, offset = map(int, (cursor.removesuffix(suffix) or "0:0").split(":"))
         needle = query.casefold()
         hits: list[dict[str, Any]] = []
         scanned = 0
-        for index, key, row in sessions(first, with_text=bool(query)):
+        argument_counts = Counter({"resolved": 0, "unavailable": 0})
+        if pointer is not None:
+            summary["argument_coverage"] = argument_counts
+        for index, key, row in sessions(first, with_text=with_text):
             events = row["events"]
             for position in range(offset if index == first else 0, len(events)):
                 if len(hits) >= limit or scanned >= SEARCH_BUDGET:
-                    return {"items": hits, "next_cursor": f"{index}:{position}", **self.describe()}
+                    return {"items": hits, "next_cursor": f"{index}:{position}{suffix}", **summary}
                 scanned += 1
                 event = events[position]
                 if not matches(event):
                     continue
                 result = hit(key, row, event)
+                if result is None:
+                    argument_counts["unavailable"] += 1
+                    continue
+                if pointer is not None:
+                    argument_counts["resolved"] += 1
                 text = result.pop("text", "")
                 if needle:
                     preview = _exact_preview(text, needle)
@@ -283,7 +405,7 @@ class Evidence:
                         continue
                     result["preview"] = preview
                 hits.append(result)
-        return {"items": hits, "next_cursor": None, **self.describe()}
+        return {"items": hits, "next_cursor": None, **summary}
 
     def session(self, session_id: str, offset: int = 0, limit: int = 30) -> dict[str, Any]:
         """Read a page of event references and related snapshots in one session."""
@@ -309,6 +431,43 @@ class Evidence:
                               next_offset=offset + limit if offset + limit < len(text) else None)
             return {"session_id": session_id, **result, **self.describe()}
         raise AutError("evidence: event is missing from this session")
+
+    def context(self, session_id: str, event_id: str, radius: int = 2,
+                limit: int = 2_000) -> dict[str, Any]:
+        """Read a cited event, its recorded tool counterpart, and nearby events.
+        Limit bounds the text per event. Use event to read longer text.
+        """
+        _page(0, limit, 8_000)
+        if type(radius) is not int or not 0 <= radius <= 5:
+            raise AutError("evidence: use a context radius of 0..5 events")
+        row = self._read(session_id)
+        events = row["events"]
+        positions = {event["id"]: index for index, event in enumerate(events)}
+        if event_id not in positions:
+            raise AutError("evidence: event is missing from this session")
+        index = positions[event_id]
+        anchor = events[index]
+        links = row["links"] if self.bundled else event_links(events)
+        partner = links.get(event_id)
+        if anchor["kind"] == "result":
+            partner = next((call for call, result in links.items() if result == event_id), None)
+
+        def visible(event: dict[str, Any]) -> dict[str, Any]:
+            result = self._event(event)
+            if "text" in result:
+                text = result["text"]
+                result.update(text=text[:limit], text_chars=len(text),
+                              next_offset=limit if len(text) > limit else None)
+            return result
+
+        neighbors = events[max(0, index - radius):index + radius + 1]
+        return {"session_id": session_id, "anchor": visible(anchor),
+                "counterpart": visible(events[positions[partner]]) if partner is not None else None,
+                "link_status": ("matched" if partner is not None else
+                                "missing" if anchor["kind"] in ("call", "result") else "not_applicable"),
+                "neighbors": [visible(event) for event in neighbors
+                              if event["id"] not in (event_id, partner)],
+                "coverage": row["coverage"], "content": self.content, "audit_id": self.audit_id}
 
     def commits(self, commit: str, offset: int = 0, limit: int = 30,
                 source: Literal["command", "checkpoint"] = "command") -> dict[str, Any]:

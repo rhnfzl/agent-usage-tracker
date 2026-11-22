@@ -7,6 +7,7 @@ import pytest
 from agent_usage_tracker.cli import main
 from agent_usage_tracker.config import AutError
 from agent_usage_tracker.improve.access import Evidence
+from agent_usage_tracker.improve.semantic_search import SemanticUnavailable
 from agent_usage_tracker.improve.store import Store
 
 
@@ -29,8 +30,12 @@ def test_ranked_search_finds_reordered_terms_and_pages_within_the_grant(tmp_path
     args = ["evidence", "--root", str(store.root), "--audit", audit_id]
     query = ["search", "--query", "permissions cache", "--limit", "1"]
 
-    assert main([*args, *query]) == 0
+    assert main([*args, *query, "--mode", "exact"]) == 0
     assert json.loads(capsys.readouterr().out)["items"] == []
+    assert main([*args, *query]) == 0
+    automatic = json.loads(capsys.readouterr().out)
+    assert automatic["search_mode"] == "ranked"
+    assert automatic["items"][0]["event_id"] == "precise"
     assert main([*args, *query, "--mode", "ranked"]) == 0
     first = json.loads(capsys.readouterr().out)
     assert first["items"][0]["event_id"] == "precise"
@@ -122,3 +127,133 @@ def test_commit_provenance_uses_matched_calls_and_the_selected_scope(tmp_path, c
         "session_id": first, "call_event_id": "c", "result_event_id": "r",
         "observed_sha": "abcdef1", "match": "observed_prefix",
     }]
+
+
+def test_session_search_groups_before_paging_and_binds_cursor(tmp_path):
+    store = Store(tmp_path / "private")
+
+    def session(texts):
+        return store.put("sessions", {"agent": "codex", "coverage": {}, "events": [
+            {"id": str(i), "kind": "result", "text": text} for i, text in enumerate(texts)
+        ]})
+
+    noisy = session(["cache", "cache failure", "cache failure", "unrelated"])
+    other = session(["cache was unavailable"])
+    audit = store.put("audits", {"session_ids": [noisy, other], "coverage": {}})
+    reader = Evidence("redacted", store, audit)
+    first = reader.search("cache failure", mode="sessions", limit=1)
+    hit, = first["items"]
+    assert (hit["session_id"], hit["event_id"], hit["matching_events"]) == (noisy, "1", 3)
+    cursor = first["next_cursor"]
+    with pytest.raises(AutError, match="cursor"):
+        reader.search("cache failure", mode="ranked", cursor=cursor)
+    second = reader.search("cache failure", mode="sessions", cursor=cursor)
+    hit, = second["items"]
+    assert (hit["session_id"], hit["matching_events"]) == (other, 1)
+    assert second["next_cursor"] is None
+
+
+def test_semantic_and_hybrid_share_the_authorized_index_and_page(tmp_path):
+    class Embedder:
+        model_id = "local-test"
+        prepared = 0
+
+        def prepare(self, rows):
+            self.prepared += 1
+            assert list(rows) == [(1, "restart cache"), (2, "daemon recovered")]
+            return self
+
+        def rank(self, query):
+            assert query == "restart"
+            return {2: "daemon recovered", 1: "restart cache"}
+
+    store = Store(tmp_path / "private")
+    first = store.put("sessions", {"agent": "codex", "coverage": {}, "events": [
+        {"id": "words", "kind": "reply", "text": "restart cache"},
+        {"id": "meaning", "kind": "reply", "text": "daemon recovered"},
+    ]})
+    other = store.put("sessions", {"agent": "pi", "coverage": {}, "events": [
+        {"id": "outside", "kind": "reply", "text": "restart"},
+    ]})
+    audit = store.put("audits", {"session_ids": [first, other], "coverage": {}})
+    model = Embedder()
+    reader = Evidence("full", store, audit, embedder=model)
+
+    semantic = reader.search("restart", session_id=first, mode="semantic")
+    assert [hit["event_id"] for hit in semantic["items"]] == ["meaning", "words"]
+    hybrid = reader.search("restart", session_id=first, mode="hybrid", limit=1)
+    assert hybrid["embedding_model"] == "local-test"
+    hit, = hybrid["items"]
+    assert (hit["event_id"], hit["word_rank"], hit["semantic_rank"]) == ("words", 1, 2)
+    second = reader.search("restart", session_id=first, mode="hybrid", cursor=hybrid["next_cursor"])
+    assert [hit["event_id"] for hit in second["items"]] == ["meaning"]
+    with pytest.raises(AutError, match="cursor"):
+        reader.search("restart", session_id=other, mode="hybrid", cursor=hybrid["next_cursor"])
+    assert model.prepared == 1
+    with pytest.raises(AutError, match="embedding-model"):
+        Evidence("full", store, audit).search("restart", mode="hybrid")
+
+
+def test_scoped_exact_search_and_exclusion_respect_cursor(tmp_path):
+    store = Store(tmp_path / "private")
+
+    def snapshot(name):
+        return store.put("sessions", {"agent": name, "coverage": {}, "events": [
+            {"id": "first", "kind": "reply", "text": "cache"},
+            {"id": "second", "kind": "reply", "text": "cache"},
+        ]})
+
+    first, second = snapshot("codex"), snapshot("pi")
+    audit = store.put("audits", {"session_ids": [first, second], "coverage": {}})
+    reader = Evidence("full", store, audit)
+    page = reader.search("cache", session_id=second, limit=1)
+    assert [(hit["session_id"], hit["event_id"]) for hit in page["items"]] == [(second, "first")]
+    with pytest.raises(AutError, match="cursor"):
+        reader.search("cache", session_id=first, cursor=page["next_cursor"])
+    with pytest.raises(AutError, match="outside"):
+        reader.search("cache", session_id="0" * 64)
+    assert reader.search("cache", session_id=second, cursor=page["next_cursor"])["items"][0][
+        "event_id"] == "second"
+    assert [hit["session_id"] for hit in reader.search(
+        "cache", mode="sessions", exclude_sessions=[second])["items"]] == [first]
+
+
+def test_auto_exposes_hybrid_and_retains_lexical_fallback_on_continuation(tmp_path, monkeypatch):
+    class LocalModel:
+        model_id = "test"
+
+        def prepare(self, rows):
+            assert len(list(rows)) == 3
+            return self
+
+        def rank(self, query):
+            return {2: "similar", 3: "closest meaning", 1: "literal marker"}
+
+    store = Store(tmp_path / "private")
+    key = store.put("sessions", {"agent": "codex", "coverage": {}, "events": [
+        {"id": "literal", "kind": "result", "text": "literal marker"},
+        {"id": "reordered", "kind": "result", "text": "marker literal"},
+        {"id": "meaning", "kind": "result", "text": "closest meaning"},
+    ]})
+    audit = store.put("audits", {"session_ids": [key], "coverage": {}})
+    model = LocalModel()
+    reader = Evidence("full", store, audit, embedder=model)
+    assert reader.search("literal marker", mode="hybrid", limit=1)["items"][0]["event_id"] == "reordered"
+    first = reader.search("literal marker", limit=1)
+    assert first["search_mode"] == "hybrid"
+    assert first["items"][0]["event_id"] == "literal"
+    assert reader.search("literal marker", cursor=first["next_cursor"])["search_mode"] == "hybrid"
+    with pytest.raises(AutError, match="cursor"):
+        reader.search("literal marker", mode="hybrid", cursor=first["next_cursor"])
+
+    def unavailable(_):
+        raise SemanticUnavailable("test model unavailable")
+
+    monkeypatch.setattr(model, "rank", unavailable)
+    ranked = reader.search("literal marker", limit=1)
+    assert ranked["search_mode"] == "ranked"
+    assert ranked["fallback_reason"] == "test model unavailable"
+    page = reader.search("literal marker", cursor=ranked["next_cursor"])
+    assert [hit["event_id"] for hit in page["items"]] == ["reordered"]
+    with pytest.raises(SemanticUnavailable, match="unavailable"):
+        reader.search("literal marker", mode="hybrid")
