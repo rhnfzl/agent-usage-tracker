@@ -133,7 +133,8 @@ check() {
     (time check_sink) >"$scratch/sink.log" 2>&1 & pids+=("$!")
 
     printf 'Running lint, both time zones (%s workers each), MCP, and SQL concurrently\n' "$workers"
-    local i stage failed=0
+    local i stage failed=0 cleanup_pid
+    local -a cleanup_pids=()
     for i in "${!stages[@]}"; do
         stage=${stages[i]}
         if ! wait "${pids[i]}"; then
@@ -142,6 +143,24 @@ check() {
         fi
         printf '\n%s\n' "$stage"
         cat "$scratch/$stage.log"
+        # Each stage owns its scratch files. Run cleanup once its tests have stopped.
+        case $stage in
+            utc|la)
+                rm -rf -- "$scratch/$stage" "$scratch/$stage-cache" &
+                cleanup_pids+=("$!")
+                ;;
+            mcp)
+                rm -rf -- "$scratch/mcp" "$scratch/mcp-cache" "$scratch/code" "$scratch/code-cache" &
+                cleanup_pids+=("$!")
+                ;;
+            sink)
+                rm -rf -- "$scratch/sql" "$scratch/sql-cache" &
+                cleanup_pids+=("$!")
+                ;;
+        esac
+    done
+    for cleanup_pid in "${cleanup_pids[@]}"; do
+        wait "$cleanup_pid" || failed=1
     done
     [[ $failed == 0 ]] || die "local preflight failed"
 }
