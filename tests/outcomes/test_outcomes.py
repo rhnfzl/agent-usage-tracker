@@ -72,7 +72,7 @@ def _lines(tag: str, n: int = 10) -> str:
     return "".join(f"{tag} line {i}\n" for i in range(n))
 
 
-def _world(d: Path) -> tuple[Path, dict[str, str]]:
+def _seed_world(d: Path) -> tuple[Path, dict[str, str]]:
     """origin (bare) + one clone with every outcome. Returns the clone and name -> full SHA."""
     origin, work = d / "origin.git", d / "projects" / "work"
     subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(origin)], check=True)
@@ -126,9 +126,9 @@ def _states(outs: list[dict]) -> dict[str, tuple]:
     return {o["sha"]: (o["state"], o["survival"], o["repo_key"]) for o in outs}
 
 
-def test_states_from_git():
+def test_states_from_git(world):
     with tempfile.TemporaryDirectory() as d:
-        work, s = _world(Path(d))
+        work, s = world(Path(d))
         key = _key(str(Path(d) / "origin.git"))
         clones = oc.find_clones([str(Path(d) / "projects")], RepoKeys(SALT))
         assert len(clones) == 1 and clones[0].key == key, clones
@@ -148,9 +148,9 @@ def test_states_from_git():
         assert stats["found"] == 9 and stats["not_found"] == 0, stats
 
 
-def test_null_key_resolution_needs_matching_time():
+def test_null_key_resolution_needs_matching_time(world):
     with tempfile.TemporaryDirectory() as d:
-        work, s = _world(Path(d))
+        work, s = world(Path(d))
         key = _key(str(Path(d) / "origin.git"))
         clones = oc.find_clones([str(Path(d) / "projects")], RepoKeys(SALT))
         rows = [_row(s["A"], None, 30, short=7),                   # time matches: resolved
@@ -166,9 +166,9 @@ def test_null_key_resolution_needs_matching_time():
         assert stats["null_key_resolved"] == 1 and stats["not_found"] == 2, stats
 
 
-def test_null_key_resolved_counts_the_chosen_clone_of_each_anchor():
+def test_null_key_resolved_counts_the_chosen_clone_of_each_anchor(world):
     with tempfile.TemporaryDirectory() as d:
-        _, s = _world(Path(d))
+        _, s = world(Path(d))
         local = Path(d) / "projects" / "local"             # no origin, so a clone without a key
         local.mkdir()
         _g(local, "init", "-q", "-b", "main")
@@ -186,9 +186,9 @@ def test_young_missing_commit_is_undecided():
     assert _states(outs)["abcdef1234"][0] == "undecided", outs
 
 
-def test_survival_cached_and_never_recomputed(monkeypatch):
+def test_survival_cached_and_never_recomputed(monkeypatch, world):
     with tempfile.TemporaryDirectory() as d:
-        work, s = _world(Path(d))
+        work, s = world(Path(d))
         key = _key(str(Path(d) / "origin.git"))
         clones = oc.find_clones([str(Path(d) / "projects")], RepoKeys(SALT))
         cache: dict = {}
@@ -200,11 +200,11 @@ def test_survival_cached_and_never_recomputed(monkeypatch):
         assert stats["survival_cached"] == 1 and stats["survival_computed"] == 0, stats
 
 
-def test_gh_merged_pr_counts_as_merged(monkeypatch):
+def test_gh_merged_pr_counts_as_merged(monkeypatch, world):
     if os.name == "nt":                    # the fakes are POSIX shell scripts
         return
     with tempfile.TemporaryDirectory() as d:
-        work, s = _world(Path(d))
+        work, s = world(Path(d))
         url = "https://github.com/owner/repo.git"
         _g(work, "remote", "set-url", "origin", url)              # refs stay, no fetch happens
         bindir = Path(d) / "bin"
@@ -233,9 +233,9 @@ def test_pending_writes_only_changes():
     assert [o["sha"][0] for o in oc.pending(outs, stored)] == ["b", "c"]
 
 
-def test_run_outcomes_dry_run_writes_nothing(monkeypatch):
+def test_run_outcomes_dry_run_writes_nothing(monkeypatch, world):
     with tempfile.TemporaryDirectory() as d:
-        work, s = _world(Path(d))
+        work, s = world(Path(d))
         key = _key(str(Path(d) / "origin.git"))
         monkeypatch.setenv("AUT_STATE", str(Path(d) / "state" / "state.json"))
         sent: dict = {"rows": [], "scan": []}
@@ -295,9 +295,9 @@ def test_final_state_is_kept_when_the_commit_goes_missing():
     assert oc.pending(outs, {}) == outs                             # never seen: written once
 
 
-def test_gh_failure_leaves_the_commit_undecided(monkeypatch):
+def test_gh_failure_leaves_the_commit_undecided(monkeypatch, world):
     with tempfile.TemporaryDirectory() as d:
-        work, s = _world(Path(d))
+        work, s = world(Path(d))
         url = "https://github.com/owner/repo.git"
         _g(work, "remote", "set-url", "origin", url)
         bindir = Path(d) / "bin"
@@ -313,9 +313,9 @@ def test_gh_failure_leaves_the_commit_undecided(monkeypatch):
         assert stats["gh_failed"] == 1 and cache == {}, (stats, cache)
 
 
-def test_stale_default_ref_defers_survival():
+def test_stale_default_ref_defers_survival(world):
     with tempfile.TemporaryDirectory() as d:
-        work, s = _world(Path(d))
+        work, s = world(Path(d))
         key = _key(str(Path(d) / "origin.git"))
         _g(work, "update-ref", "refs/remotes/origin/main", s["A"])   # last pulled at A's time
         clones = oc.find_clones([str(Path(d) / "projects")], RepoKeys(SALT))
@@ -328,9 +328,9 @@ def test_stale_default_ref_defers_survival():
         assert (outs[0]["state"], outs[0]["survival"]) == ("merged", 1.0), outs
 
 
-def test_most_advanced_clone_wins():
+def test_most_advanced_clone_wins(world):
     with tempfile.TemporaryDirectory() as d:
-        work, s = _world(Path(d))
+        work, s = world(Path(d))
         stale = Path(d) / "projects" / "stale"
         subprocess.run(["git", "clone", "-q", str(Path(d) / "origin.git"), str(stale)], check=True)
         _g(stale, "update-ref", "refs/remotes/origin/main", s["D"])  # never pulled since
@@ -344,9 +344,9 @@ def test_most_advanced_clone_wins():
         assert outs[0]["state"] == "merged", outs
 
 
-def test_amend_with_the_same_ts_is_ordered_after_the_commit():
+def test_amend_with_the_same_ts_is_ordered_after_the_commit(world):
     with tempfile.TemporaryDirectory() as d:
-        work, s = _world(Path(d))
+        work, s = world(Path(d))
         key = _key(str(Path(d) / "origin.git"))
         clones = oc.find_clones([str(Path(d) / "projects")], RepoKeys(SALT))
         rows = [_row(s["G2"], key, 25, "sg", amend=True), _row(s["G"], key, 25, "sg")]
@@ -370,9 +370,9 @@ def test_outcome_repo_roots_must_be_a_list_of_strings(monkeypatch):
             raise AssertionError("a non-list must refuse")
 
 
-def test_cache_is_saved_before_the_sink_is_written(monkeypatch):
+def test_cache_is_saved_before_the_sink_is_written(monkeypatch, world):
     with tempfile.TemporaryDirectory() as d:
-        work, s = _world(Path(d))
+        work, s = world(Path(d))
         key = _key(str(Path(d) / "origin.git"))
         monkeypatch.setenv("AUT_STATE", str(Path(d) / "state" / "state.json"))
         monkeypatch.setattr(oc, "load_rows", lambda dsn: [_row(s["D"], key, 40)])
@@ -394,10 +394,10 @@ def _claude_session(proj: Path, sid: str, entrypoint: str, mtime: float) -> None
     os.utime(p, (mtime, mtime))
 
 
-def test_manual_outcome_picks_newest_interactive_session():
+def test_manual_outcome_picks_newest_interactive_session(world):
     with tempfile.TemporaryDirectory() as d:
         home = Path(d)
-        work, s = _world(home)
+        work, s = world(home)
         proj = home / ".claude" / "projects" / re.sub(r"[^A-Za-z0-9]", "-", str(work))
         _claude_session(proj, "old-cli", "cli", NOW - 500)
         _claude_session(proj, "new-cli", "cli", NOW - 100)
@@ -445,9 +445,9 @@ def test_cli_outcome_and_outcomes(monkeypatch):
         assert '"merged": 2' in out.getvalue() and "DRY-RUN" in out.getvalue(), out.getvalue()
 
 
-def test_fetch_only_clones_with_a_row_key(monkeypatch):
+def test_fetch_only_clones_with_a_row_key(monkeypatch, world):
     with tempfile.TemporaryDirectory() as d:
-        work, s = _world(Path(d))
+        work, s = world(Path(d))
         fetched: list = []
         monkeypatch.setenv("AUT_STATE", str(Path(d) / "state" / "state.json"))
         monkeypatch.setattr(oc, "load_rows", lambda dsn: [_row(s["A"], None, 30)])       # the SHA is there, no key
@@ -465,9 +465,9 @@ def test_fetch_only_clones_with_a_row_key(monkeypatch):
         assert [c.path for c in fetched] == [str(work)], fetched
 
 
-def test_dry_run_never_fetches_or_asks_gh(monkeypatch):
+def test_dry_run_never_fetches_or_asks_gh(monkeypatch, world):
     with tempfile.TemporaryDirectory() as d:
-        work, s = _world(Path(d))
+        work, s = world(Path(d))
         key = _key(str(Path(d) / "origin.git"))
         monkeypatch.setattr(oc, "load_rows", lambda dsn: [_row(s["F"], key, 25)])
         monkeypatch.setattr(oc, "load_stored", lambda dsn: {})
@@ -493,13 +493,13 @@ def _with_git(match, fn):
         return fn()
 
 
-def test_a_git_failure_never_replaces_a_stored_state():
+def test_a_git_failure_never_replaces_a_stored_state(world):
     reads = {"default log": lambda a: a[0] == "log" and "--format=%H %ct %P" in a,
              "branches": lambda a: a[0] == "rev-list" and "--branches" in a,
              "reverts": lambda a: a[0] == "log" and "--grep=This reverts commit" in a,
              "lookup": lambda a: a[0] == "cat-file"}
     with tempfile.TemporaryDirectory() as d:
-        work, s = _world(Path(d))
+        work, s = world(Path(d))
         key = _key(str(Path(d) / "origin.git"))
         clones = oc.find_clones([str(Path(d) / "projects")], RepoKeys(SALT))
         rows = [_row(s["A"], key, 30)]
@@ -513,10 +513,10 @@ def test_a_git_failure_never_replaces_a_stored_state():
         assert outs[0]["state"] == "merged" and "sticky" not in outs[0], outs   # healthy again
 
 
-def test_a_clone_that_cannot_answer_may_know_more(monkeypatch):
+def test_a_clone_that_cannot_answer_may_know_more(monkeypatch, world):
     """The stale clone says open; the current one fails: do not take the stale answer."""
     with tempfile.TemporaryDirectory() as d:
-        work, s = _world(Path(d))
+        work, s = world(Path(d))
         stale = Path(d) / "projects" / "stale"
         subprocess.run(["git", "clone", "-q", str(Path(d) / "origin.git"), str(stale)], check=True)
         _g(stale, "update-ref", "refs/remotes/origin/main", s["D"])
@@ -530,9 +530,9 @@ def test_a_clone_that_cannot_answer_may_know_more(monkeypatch):
         assert stats["repo_unreadable"] == 1, stats
 
 
-def test_a_cached_gh_answer_counts_without_gh():
+def test_a_cached_gh_answer_counts_without_gh(world):
     with tempfile.TemporaryDirectory() as d:
-        _work, s = _world(Path(d))
+        _work, s = world(Path(d))
         clones = oc.find_clones([str(Path(d) / "projects")], RepoKeys(SALT))
         outs, stats = oc.evaluate([_row(s["F"], None, 25)], clones, NOW,
                                   cache={f"gh:{s['F']}": True}, use_gh=False)
@@ -549,14 +549,14 @@ def test_a_cache_from_before_the_failed_read_rule_is_measured_again(monkeypatch)
         assert oc._load_cache()["abc"] == 0.1
 
 
-def test_failed_survival_is_neither_scored_nor_cached():
+def test_failed_survival_is_neither_scored_nor_cached(world):
     reads = {"blame": lambda a: a[0] == "blame" or a[0] == "ls-tree",
              "blame only": lambda a: a[0] == "blame",          # the file is there: a real failure
              "numstat": lambda a: a[0] == "show",
              "parents": lambda a: a[0] == "rev-list" and "--parents" in a,
              "base": lambda a: a[0] == "rev-list" and "--first-parent" in a}
     with tempfile.TemporaryDirectory() as d:
-        work, s = _world(Path(d))
+        work, s = world(Path(d))
         key = _key(str(Path(d) / "origin.git"))
         clones = oc.find_clones([str(Path(d) / "projects")], RepoKeys(SALT))
         rows = [_row(s["A"], key, 30)]
@@ -597,9 +597,9 @@ def test_the_keyed_anchor_wins_a_duplicate_whatever_the_row_order(monkeypatch):
         assert [o["state"] for o in outs] == ["merged"], rows
 
 
-def test_a_read_failure_sends_a_degraded_heartbeat(monkeypatch, capsys):
+def test_a_read_failure_sends_a_degraded_heartbeat(monkeypatch, capsys, world):
     with tempfile.TemporaryDirectory() as d:
-        work, s = _world(Path(d))
+        work, s = world(Path(d))
         key = _key(str(Path(d) / "origin.git"))
         monkeypatch.setenv("AUT_STATE", str(Path(d) / "state" / "state.json"))
         scan: list = []
