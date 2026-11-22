@@ -57,8 +57,9 @@ def register(commands: Any) -> None:
         action.add_argument("--offset", type=int, default=0)
         action.add_argument("--limit", type=int, default=limit)
 
-    commits = actions.add_parser("commits", help="find sessions that recorded a commit result")
+    commits = actions.add_parser("commits", help="find runs by a recorded Git result or checkpoint commit")
     commits.add_argument("commit")
+    commits.add_argument("--source", choices=("command", "checkpoint"), default="command")
     commits.add_argument("--offset", type=int, default=0)
     commits.add_argument("--limit", type=int, default=30)
 
@@ -164,7 +165,7 @@ def run(args: argparse.Namespace) -> None:
         elif action == "session":
             value = evidence.session(args.session_id, args.offset, args.limit)
         elif action == "commits":
-            value = evidence.commits(args.commit, args.offset, args.limit)
+            value = evidence.commits(args.commit, args.offset, args.limit, args.source)
         elif action == "compare":
             value = evidence.compare(args.baseline, args.candidate, args.cases)
         elif action == "case":

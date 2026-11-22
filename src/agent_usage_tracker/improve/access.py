@@ -8,7 +8,7 @@ import re
 import tempfile
 from collections import Counter
 from collections.abc import Callable, Iterator, Mapping
-from itertools import zip_longest
+from itertools import islice, zip_longest
 from pathlib import Path
 from typing import Any, Literal
 
@@ -295,11 +295,14 @@ class Evidence:
             return {"session_id": session_id, **result, **self.describe()}
         raise AutError("evidence: event is missing from this session")
 
-    def commits(self, commit: str, offset: int = 0, limit: int = 30) -> dict[str, Any]:
-        """Find captured Git commit results in the selected sessions."""
+    def commits(self, commit: str, offset: int = 0, limit: int = 30,
+                source: Literal["command", "checkpoint"] = "command") -> dict[str, Any]:
+        """Find captured Git commit results or saved workspace checkpoints."""
         from .outputs import commit_evidence
 
         _page(offset, limit)
+        if source == "checkpoint":
+            return self._checkpoint_commits(commit, offset, limit)
         if not re.fullmatch(r"[0-9a-fA-F]{7,40}", commit):
             raise AutError("evidence: use a hexadecimal commit prefix of 7..40 characters")
         commit = commit.lower()
@@ -323,6 +326,31 @@ class Evidence:
                         "observed_prefix" if commit.startswith(observed) else "query_prefix")
                 items.append({"session_id": key, **link, "match": kind})
         return {"items": items, "next_offset": None, **self.describe()}
+
+    def _checkpoint_commits(self, commit: str, offset: int, limit: int) -> dict[str, Any]:
+        if self.content == "metadata":
+            raise AutError("evidence: checkpoint commit lookup requires content access")
+        if not re.fullmatch(r"[0-9a-fA-F]{7,64}", commit):
+            raise AutError("evidence: use a hexadecimal checkpoint commit prefix of 7..64 characters")
+        prefix = commit.lower()
+
+        def matches() -> Iterator[dict[str, Any]]:
+            for key in self.keys:
+                row = self._read(key, include_text=False)
+                if row["agent"] != "t3":
+                    continue
+                for event in row["events"]:
+                    if event["kind"] != "boundary" or "workspace_checkpoint" not in event:
+                        continue
+                    saved = self._event(event, text=False).get("workspace_checkpoint", {})
+                    recorded = saved.get("commit")
+                    if recorded and recorded.startswith(prefix):
+                        yield {"session_id": key, "event_id": event["id"], **saved}
+
+        remaining = (item for index, item in enumerate(matches()) if index >= offset)
+        page = list(islice(remaining, limit + 1))
+        return {"items": page[:limit], "next_offset": offset + limit if len(page) > limit else None,
+                **self.describe()}
 
     def compare(self, baseline: str, candidate: str, cases: bool = False) -> dict[str, Any]:
         """Compare observed session or attempt counts and the first differing tool outcome."""

@@ -116,6 +116,37 @@ def test_compare_uses_observed_events_and_audit_scope(tmp_path, capsys):
     assert main(["evidence", "--root", str(store.root), *scope, "compare", first, third]) == 1
 
 
+def test_checkpoint_commit_lookup_pages_within_the_selected_grant(tmp_path, capsys):
+    store = Store(tmp_path / "private")
+    sha = "a" * 64
+    checkpoint = {"commit": sha, "captured_at": "2026-01-01T10:00:00+00:00",
+                  "ref": "refs/t3/orchestration-v2/checkpoints/" + "x" * 43 + "/ordinal/1"}
+    snapshots = [store.put("sessions", {"agent": "t3", "coverage": {}, "events": [
+        {"id": f"run-{i}", "kind": "boundary", "workspace_checkpoint": checkpoint},
+    ]}) for i in range(3)]
+    audit = store.put("audits", {"session_ids": snapshots[:2], "coverage": {}})
+    scope = ("--audit", audit, "--content", "redacted")
+    assert invoke(capsys, store.root, *scope, "commits", sha[:40])["items"] == []
+    first = invoke(capsys, store.root, *scope, "commits", sha, "--source", "checkpoint", "--limit", "1")
+    assert first["items"] == [{"session_id": snapshots[0], "event_id": "run-0", **checkpoint}]
+    second = invoke(capsys, store.root, *scope, "commits", sha[:7], "--source", "checkpoint",
+                    "--offset", str(first["next_offset"]), "--limit", "1")
+    assert second["items"] == [{"session_id": snapshots[1], "event_id": "run-1", **checkpoint}]
+    assert second["next_offset"] is None
+    beyond = invoke(capsys, store.root, *scope, "commits", sha, "--source", "checkpoint",
+                    "--offset", str(2**64))
+    assert beyond["items"] == []
+    assert beyond["next_offset"] is None
+
+    bundle = tmp_path / "checkpoints.json"
+    invoke(capsys, store.root, *scope, "export", str(bundle), snapshots[1])
+    shared = invoke(capsys, store.root, "--bundle", str(bundle),
+                    "commits", sha, "--source", "checkpoint")
+    assert shared["items"] == second["items"]
+    assert main(["evidence", "--root", str(store.root), "--audit", audit, "--content", "metadata",
+                 "commits", sha, "--source", "checkpoint"]) == 1
+
+
 def test_freeze_selected_attempt_and_compare_without_a_judge(tmp_path, capsys):
     store = Store(tmp_path / "private")
     events = [

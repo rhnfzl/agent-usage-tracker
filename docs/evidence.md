@@ -37,6 +37,9 @@ For a completed T3 run with a ready workspace checkpoint, AUT resolves its local
 when it captures the audit. Open the boundary event to see the checkpoint time and, with
 full or redacted access, the ref and commit. This is the workspace state saved by T3 after a run.
 Ordinary-work studies still verify turn-start setup from the evidence recorded for that turn.
+If you already have a checkpoint SHA, use
+`aut evidence --audit AUDIT_ID commits CHECKPOINT_SHA --source checkpoint` to find its run.
+MCP accepts the same `source` option.
 
 The project filter includes its Git worktrees and excludes sessions with recorded directories in
 other repositories. It cannot infer where unrecorded tool activity took place. Select explicit
