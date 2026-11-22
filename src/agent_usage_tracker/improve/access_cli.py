@@ -29,6 +29,18 @@ def register(commands: Any) -> None:
                         help="content available through this command or MCP connection")
     actions = parser.add_subparsers(dest="evidence_cmd", required=True)
 
+    context = actions.add_parser("context", help="read the conversation around a cited event")
+    context.add_argument("session_id")
+    context.add_argument("event_id")
+    context.add_argument("--radius", type=int, default=2)
+    context.add_argument("--text-limit", type=int, default=700)
+    context.add_argument("--focus", default="", help="center the anchor excerpt near these words")
+    discover = actions.add_parser("discover", help="investigate open questions locally across audits")
+    discover.add_argument("--include-audit", action="append", default=[])
+    discover.add_argument("--question", help="optional direction for the investigation")
+    discover.add_argument("--model", help="cached local instruct model")
+    discover.add_argument("--rounds", type=int, choices=(1, 2, 3), default=2)
+
     capture = actions.add_parser("capture", help="save a private audit with full text by default")
     capture.add_argument("--days", type=int, default=7)
     capture.add_argument("--limit", type=int, default=20)
@@ -114,6 +126,15 @@ def register(commands: Any) -> None:
 def run(args: argparse.Namespace) -> None:
     root = args.root or Path(os.environ.get("AUT_IMPROVE_ROOT", str(data_dir() / "improve")))
     action = args.evidence_cmd
+    if action == "discover":
+        if args.bundle or args.content not in (None, "redacted"):
+            raise AutError("discovery: use redacted audits in a private local store")
+        from .discovery import run as discover
+
+        value = discover(Store(root), args.audit, args.include_audit, question=args.question,
+                         model_name=args.model, rounds=args.rounds)
+        print(json.dumps(value, sort_keys=True))
+        return
     with_code = action in {"run-code", "replay-code", "code-catalog"} or (
         action == "mcp" and args.code)
     args.content = args.content or ("redacted" if with_code else "full")
@@ -199,6 +220,8 @@ def run(args: argparse.Namespace) -> None:
         elif action == "search":
             value = evidence.search(args.query, args.agent, args.kind, args.status, args.since,
                                     args.until, args.cursor, args.limit, args.tool, args.workspace, args.mode)
+        elif action == "context":
+            value = evidence.context(args.session_id, args.event_id, args.radius, args.text_limit, args.focus)
         elif action == "event":
             value = evidence.event(args.session_id, args.event_id, args.offset, args.limit)
         elif action == "session":
@@ -220,7 +243,7 @@ def run(args: argparse.Namespace) -> None:
 
 
 def _code(args: argparse.Namespace, root: Path) -> dict[str, Any]:
-    from .investigation import CONTRACT, MAX_SOURCE, catalog, run, scope_specs
+    from .investigation import CONTRACT, MAX_SOURCE, catalog, run, save, scope_specs
     from .store import digest
 
     if args.evidence_cmd == "code-catalog":
@@ -255,9 +278,5 @@ def _code(args: argparse.Namespace, root: Path) -> dict[str, Any]:
         raise AutError("investigation: provide UTF-8 source and valid JSON parameters") from exc
     value = run(source, params, specs)
     if args.save:
-        record = {"contract": CONTRACT, "source": source, "params": params,
-                  "scopes": value["scopes"], "result_sha256": digest(value),
-                  "reads": value["reads"], "aut_version": value["aut_version"],
-                  "runtime_version": value["runtime_version"]}
-        value["run_id"] = Store(root).put("investigation_runs", record)
+        value["run_id"] = save(Store(root), source, params, value)
     return value

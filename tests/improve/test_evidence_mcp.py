@@ -42,7 +42,7 @@ def test_stdio_matches_cli_and_cannot_write(connection):
                 tools = await client.list_tools()
                 assert {tool.name for tool in tools.tools} == {
                     "describe", "search", "session", "event", "compare", "commits", "case",
-                    "ordinary_work"}
+                    "ordinary_work", "context"}
                 result = await client.call_tool("event", {"session_id": key, "event_id": "event"})
                 assert result.structuredContent == expected
                 ranked = await client.call_tool("search", {"query": "password", "mode": "ranked"})

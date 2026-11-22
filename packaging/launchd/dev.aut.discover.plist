@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>dev.aut.discover</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>__AUT_PYTHON__</string>
+        <string>-I</string>
+        <string>-m</string>
+        <string>agent_usage_tracker.cli</string>
+        <string>evidence</string>
+        <string>--root</string>
+        <string>__AUT_PRIVATE_STORE__</string>
+        <string>discover</string>
+    </array>
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Weekday</key>
+        <integer>0</integer>
+        <key>Hour</key>
+        <integer>9</integer>
+        <key>Minute</key>
+        <integer>15</integer>
+    </dict>
+    <key>WorkingDirectory</key>
+    <string>__AUT_PRIVATE_STORE__</string>
+    <key>StandardOutPath</key>
+    <string>__AUT_PRIVATE_STORE__/discover.stdout.log</string>
+    <key>StandardErrorPath</key>
+    <string>__AUT_PRIVATE_STORE__/discover.stderr.log</string>
+</dict>
+</plist>

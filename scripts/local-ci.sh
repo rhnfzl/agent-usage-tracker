@@ -73,7 +73,7 @@ check_mcp() {
     run --with-editable '.[test,mcp,code]' pytest -q tests/improve/test_evidence_mcp.py \
         --basetemp "$scratch/mcp" -o "cache_dir=$scratch/mcp-cache"
     run --with-editable '.[test,mcp,code]' pytest -q \
-        tests/improve/test_investigation.py tests/improve/test_session_observability.py \
+        tests/improve/test_investigation.py tests/improve/test_discovery.py tests/improve/test_session_observability.py \
         --basetemp "$scratch/code" -o "cache_dir=$scratch/code-cache"
 }
 

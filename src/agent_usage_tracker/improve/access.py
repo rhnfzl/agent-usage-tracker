@@ -61,6 +61,17 @@ def _exact_preview(text: str, needle: str) -> str | None:
     return text[start:start + 240]
 
 
+def _context_offset(text: str, focus: str, limit: int) -> int:
+    if not focus.strip():
+        return 0
+    # Search the original text so Unicode case-folding cannot shift source offsets.
+    terms = [focus, *sorted(re.findall(r"[^\W_]+", focus), key=len, reverse=True)]
+    for term in terms:
+        if found := re.search(re.escape(term), text, re.IGNORECASE):
+            return min(len(text) - limit, max(0, found.start() - limit // 3))
+    return 0
+
+
 class Evidence:
     def __init__(self, content: str, store: Store | None = None, audit_id: str | None = None,
                  bundle: Path | None = None) -> None:
@@ -294,6 +305,35 @@ class Evidence:
         return {"session": self._summary(row), "items": items,
                 "next_offset": offset + limit if offset + limit < len(events) else None,
                 **self.describe()}
+
+    def context(self, session_id: str, event_id: str, radius: int = 2,
+                text_limit: int = 700, focus: str = "") -> dict[str, Any]:
+        """Read a bounded conversation neighborhood around an event reference."""
+        _page(0, radius, 5)
+        _page(0, text_limit, 2_000)
+        if len(focus) > 100:
+            raise AutError("evidence: context focus must be at most 100 characters")
+        row = self._read(session_id)
+        events = row["events"]
+        position = next((i for i, event in enumerate(events) if event["id"] == event_id), None)
+        if position is None:
+            raise AutError("evidence: event is missing from this session")
+        conversational = {"prompt", "reply", "boundary", "compaction"}
+        before = list(islice((i for i in range(position - 1, -1, -1)
+                              if events[i]["kind"] in conversational), radius))
+        after = islice((i for i in range(position + 1, len(events))
+                        if events[i]["kind"] in conversational), radius)
+        items = []
+        for index in (*reversed(before), position, *after):
+            event = self._event(events[index])
+            if "text" in event and len(event["text"]) > text_limit:
+                text = event["text"]
+                offset = _context_offset(text, focus, text_limit) if index == position else 0
+                event.update(text=text[offset:offset + text_limit], text_offset=offset,
+                             truncated=True)
+            items.append({**event, "position": index})
+        return {"session": self._summary(row), "anchor": event_id,
+                "event_count": len(events), "items": items}
 
     def event(self, session_id: str, event_id: str, offset: int = 0,
               limit: int = 8_000) -> dict[str, Any]:
