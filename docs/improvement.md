@@ -87,6 +87,64 @@ Trace text stays in the private view, outside command output and the configured 
 Missing and clipped evidence stays visible. Inspection does not make a judgment eligible or verified.
 The original link opens the current file; the displayed evidence remains the immutable saved snapshot.
 
+### Turn a repeated request into a regression check
+
+Inspect the section **Requests repeated after a tool error**. Each row links the original call,
+its error, the next matching request and its result when available. Matching stays within one
+run and attempt. It recognizes identical request fingerprints and changed arguments for the same
+structured file target. Clipped requests and ambiguous call IDs are excluded. Older captures
+can match a changed request when both file targets are visible. Changed shell commands and
+requests without a comparable file target require manual review.
+
+The JSON receipt includes up to 100 event links in `repeat_events` and full counts in
+`repeated_after_error` and `changed_arguments_after_error`.
+Use [retry discovery](evidence.md#find-retries-across-sessions) to find cases across an audit.
+
+For example, an edit guard can require a fresh file read. If an edit fails, the agent reads
+the file, and the identical edit succeeds, inspect the error and the intervening read.
+Test the change “read the target before the first edit when the guard requires it.”
+Use the same starting file and guard for both runs. Check the final file contents and count
+guard errors. Include a control where the agent already read the file to catch redundant reads.
+
+Use the case as discovery evidence. Freeze the acceptance check and controls in a
+[private study](improvement-studies.md) before applying a candidate to fresh work.
+A successful tool result alone cannot establish that the resulting edit was correct.
+
+## Resume an instrumented workflow at a tool call
+
+Replay saves a private checkpoint before each call. Select one to pass the saved state and pending
+call to a candidate adapter. Earlier calls are skipped. The selected call and subsequent calls run
+through the candidate adapter. A replay writes a new receipt linked to the original checkpoint.
+
+```sh
+aut improve replay --start-file start.json --adapter baseline.py --execute
+aut improve replay --checkpoint CHECKPOINT_ID
+aut improve replay --checkpoint CHECKPOINT_ID --adapter candidate.py --execute
+aut improve replay --run RUN_ID
+```
+
+The start file contains `{"state": {}, "call": {"tool": "read", "arguments": {}}}`.
+The trusted Python file defines `advance(state, call)`. It executes the pending call and returns
+either the next object with `state` and `call` or an object with a single `result` field.
+A Python workflow can call `agent_usage_tracker.improve.checkpoint_replay.run` directly
+with the same adapter interface.
+
+Put the context needed for later calls in the serializable state. Use fixtures or restore any
+external state the later calls depend on. The adapter runs with your local permissions and owns its
+tool permissions and timeouts. Use a scratch workspace for calls that change files or other state.
+AUT saves the supplied checkpoint state as private JSON. Keep credentials out of the state.
+
+Each receipt lists checkpoint IDs and links to the private file with the final result. If an
+adapter fails, its pending checkpoint remains available. If the run reaches the step limit, the
+last checkpoint is the next pending call. In either case inspect external state before retrying.
+Historical Claude Code, Codex, Cursor, Pi, and T3 logs support diagnosis. They do not carry the
+execution state required by this replay interface.
+
+Use `--expect-file expected.json` to freeze a structured result before execution. The receipt
+includes its `expectation_id`. Pass `--expect EXPECTATION_ID` to check another replay against the
+same result. A mismatch keeps the completed receipt and returns a nonzero exit code.
+Have the adapter report values read from the resulting state that matter to task acceptance.
+
 ## Review with local models
 
 Install the existing label extra and cache the required weights separately:

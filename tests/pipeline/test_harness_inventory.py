@@ -99,8 +99,9 @@ def test_other_platform_is_unknown_without_scanning(roots, catalog, tmp_path, mo
     def forbidden(*args, **kwargs):
         pytest.fail("unsupported platform must not scan directories")
 
-    monkeypatch.setattr(harness_inventory.os, "scandir", forbidden)
-    report = harness_inventory.discover(tmp_path, catalog)
+    with monkeypatch.context() as patch:
+        patch.setattr(harness_inventory.os, "scandir", forbidden)
+        report = harness_inventory.discover(tmp_path, catalog)
     assert report["status"] == "unknown"
     assert report["completeness"] == "unknown"
     assert report["observations"] == []

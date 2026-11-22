@@ -19,7 +19,7 @@ from typing import Any
 from ..collectors.activity_common import result_status
 from ..event import parse_ts
 from ..redact import redact
-from .evidence import TEXT_LIMIT, VERSION, _text, native_item_key
+from .evidence import file_retry_keys, TEXT_LIMIT, VERSION, _text, native_item_key
 from .setup_git import COMMIT_ID, _read_git
 
 MAX_ROWS = 20000
@@ -30,6 +30,24 @@ _CHECKPOINT_TABLE = 'orchestration_v2_projection_checkpoints'
 _SCOPE_TABLE = 'orchestration_v2_projection_checkpoint_scopes'
 # Item states after which T3 will add no output.
 TERMINAL = {"completed", "failed", "error", "interrupted", "cancelled"}
+_UNSUPPORTED_GAP_KINDS = {
+    "notification", "run_interrupt_request", "run_interrupt_result", "subagent",
+    "system_notice", "todo_list", "user_input_request", "web_search",
+}
+_PROJECTION_GAP_KINDS = _UNSUPPORTED_GAP_KINDS | {
+    "prompt_context", "no_items", "items_omitted", "metadata_omitted",
+    "unfinished_tool", "streaming_reply", "unsupported_item",
+}
+
+
+def projection_gaps(coverage: dict[str, Any], run_id: str | None) -> dict[str, int]:
+    runs = coverage.get("run_coverage")
+    run = runs.get(run_id) if isinstance(runs, dict) else None
+    gaps = run.get("projection_gaps") if isinstance(run, dict) else None
+    if not isinstance(gaps, dict):
+        return {}
+    return {kind: count for kind, count in gaps.items()
+            if kind in _PROJECTION_GAP_KINDS and type(count) is int and count > 0}
 
 
 def _hash(value: Any) -> str:
@@ -104,6 +122,60 @@ def resolve_run_checkpoints(session: dict[str, Any]) -> int:
     return resolved
 
 
+def _tool_coverage(events: list[dict[str, Any]], coverage: dict[str, Any]) -> None:
+    calls = {e['call_id'] for e in events if e['kind'] == 'call'}
+    results = {e['call_id'] for e in events if e['kind'] == 'result'}
+    coverage.update(calls=len(calls), matched_results=len(calls & results),
+                    unmatched_calls=len(calls - results), orphan_results=len(results - calls),
+                    source_incomplete=bool(coverage.get('projection_gaps') or coverage.get('incomplete_runs')
+                                           or coverage.get('byte_cap_reached')))
+    coverage['complete'] = not any(coverage.get(k) for k in (
+        'unmatched_calls', 'orphan_results', 'truncated_events', 'byte_cap_reached',
+        'source_incomplete', 'missing_timestamps'))
+
+
+def _link_web_results(session: dict[str, Any], available: dict[str, dict[str, Any]],
+                      scoped: dict[str, tuple[str, str, dict[str, Any]]]) -> None:
+    native_results: dict[tuple[str, str, str], list[dict[str, Any]]] = defaultdict(list)
+    refs = session.pop('web_search_refs', {})
+    if not refs:
+        return
+    for key, source in available.items():
+        for event in source['events']:
+            turn, call = event.get('native_turn_key'), event.get('call_id')
+            if (turn and call and event['kind'] == 'result' and event.get('tool') == 'web.search'
+                    and event.get('status') == 'success'):
+                native_results[key, turn, native_item_key(call)].append(event)
+    coverage = session['coverage']
+    attached = recovered = 0
+    for event in session['events']:
+        if event['id'] not in refs or event['run_id'] not in scoped:
+            continue
+        key, turn, _ = scoped[event['run_id']]
+        found = native_results.get((key, turn, refs[event['id']]), [])
+        if len(found) != 1 or found[0].get('tool_event_ambiguous'):
+            continue
+        result = found[0]
+        event.update(kind='result', status=result['status'], text=result['text'],
+                     truncated=result['truncated'], source_sha256=result['source_sha256'],
+                     source_result={'session_id': key, 'event_id': result['id']})
+        attached += 1
+        if result['truncated']:
+            coverage['truncated_events'] += 1
+            continue
+        run = coverage['run_coverage'][event['run_id']]
+        gaps = run['projection_gaps']
+        gaps['web_search'] -= 1
+        if not gaps['web_search']:
+            del gaps['web_search']
+        run['source_incomplete'] = bool(gaps or run['missing_timestamps'])
+        recovered += 1
+    if attached:
+        coverage['projection_gaps'] -= recovered
+        coverage['linked_web_search_results'] = attached
+        _tool_coverage(session['events'], coverage)
+
+
 def link_native_context(session: dict[str, Any], supplements: dict[str, dict[str, Any]],
                         shared_native: set[str]) -> int:
     """Attach observed Codex context to T3 runs corroborated by distinct items."""
@@ -137,6 +209,8 @@ def link_native_context(session: dict[str, Any], supplements: dict[str, dict[str
         matches[run] = key, turn, context
         targets[key, turn] += 1
 
+    scoped = {run: match for run, match in matches.items() if targets[match[0], match[1]] == 1}
+    _link_web_results(session, supplements, scoped)
     linked = 0
     for event in session['events']:
         match = matches.get(event['run_id'])
@@ -268,9 +342,21 @@ def _thread(db: sqlite3.Connection, path: Path, thread: str, cwd: str, since: fl
     providers = records('orchestration_v2_projection_provider_threads',
                         'provider_thread_id,provider', 'provider_thread_id',
                         f'AND provider_thread_id IN ({recent_providers})', (thread, cutoff))
+    metadata_capped = bool(coverage['byte_cap_reached'])
+    item_filter = f"run_id IN ({recent}) AND type<>'reasoning'"
     items = records('orchestration_v2_projection_turn_items',
                     'turn_item_id,run_id,type,status,updated_at', 'updated_at DESC,ordinal DESC',
-                    f'AND run_id IN ({recent}) AND type<>\'reasoning\'', (thread, cutoff))
+                    f'AND {item_filter}', (thread, cutoff))
+    items_by_run: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for item in items:
+        items_by_run[item['columns'][1]].append(item)
+
+    expected_items = {}
+    if coverage['byte_cap_reached'] and not metadata_capped:
+        # Count only metadata from the same snapshot and scope as the captured item rows.
+        expected_items = dict(db.execute(
+            "SELECT run_id,count(*) FROM orchestration_v2_projection_turn_items "
+            f"WHERE thread_id=? AND {item_filter} GROUP BY run_id", (thread, thread, cutoff)))
     provider_map = {r['key']: r['value'] for r in providers}
     human = {r['key']: r for r in messages if r['columns'][2] == 'user'
              and r['value'].get('createdBy') == 'user'
@@ -280,6 +366,7 @@ def _thread(db: sqlite3.Connection, path: Path, thread: str, cwd: str, since: fl
     run_coverage: dict[str, dict[str, Any]] = {}
     native_runs: dict[str, dict[str, Any]] = {}
     checkpoints: dict[str, dict[str, str]] = {}
+    web_search_refs: dict[str, str] = {}
 
     def emit(kind: str, value: Any, record: dict[str, Any], timestamp: Any,
              run: str, provider: str, *, call: str = '', tool: str = '',
@@ -292,6 +379,7 @@ def _thread(db: sqlite3.Connection, path: Path, thread: str, cwd: str, since: fl
         text = redact(raw)
         clipped = len(text) > TEXT_LIMIT
         coverage['truncated_events'] += clipped
+        target_keys = file_retry_keys(raw) if kind == "call" and len(raw) <= TEXT_LIMIT else None
         events.append({'id': _hash([thread, run, record['key'], kind])[:32],
                        'kind': kind, 'line': None, 'byte_offset': None,
                        'record_id': record['key'], 'table': record['table'],
@@ -299,10 +387,13 @@ def _thread(db: sqlite3.Connection, path: Path, thread: str, cwd: str, since: fl
                        'truncated': clipped, 'source_sha256': _hash(raw),
                        'call_id': call, 'tool': tool, 'status': status,
                        'run_id': run, 'provider': provider,
-                       **({'raw_text': raw} if capture_full else {})})
+                       **({'raw_text': raw} if capture_full and kind != 'tool_gap' else {}),
+                       **({"retry_target_sha256": target_keys[0], "retry_arguments_sha256": target_keys[1]}
+                          if target_keys else {})})
 
     for run in runs:
         before = coverage.copy()
+        gaps: Counter[str] = Counter()
         key, provider, provider_thread, status, requested, completed, proven = run['columns']
         prompt = human.get(run['value'].get('userMessageId'))
         if not proven:
@@ -330,15 +421,20 @@ def _thread(db: sqlite3.Connection, path: Path, thread: str, cwd: str, since: fl
                 emit('prompt', message['value'].get('text', ''), message,
                      message['columns'][3], key, provider)
                 if message['value'].get('attachments') or message['value'].get('context'):
-                    coverage['projection_gaps'] += 1
-        run_items = [item for item in items if item['columns'][1] == key]
+                    gaps["prompt_context"] += 1
+        run_items = items_by_run[key]
         if provider == 'codex' and status == 'completed' and (native_id := _strong_codex_id(ref)):
             native_items = {native_item_key(native_item) for item in run_items
                             if (native_item := _strong_codex_id(item['value'].get('nativeItemRef')))}
             if len(native_items) >= 2:
                 native_runs[key] = {'session_id': native_id, 'items': sorted(native_items)}
-        if not run_items:
-            coverage['projection_gaps'] += 1
+        omitted = expected_items.get(key, len(run_items)) - len(run_items)
+        if metadata_capped:
+            gaps["metadata_omitted"] += 1
+        elif omitted:
+            gaps["items_omitted"] += omitted
+        elif not run_items:
+            gaps["no_items"] += 1
         for item in run_items:
             value = item['value']
             kind = value.get('type')
@@ -356,31 +452,41 @@ def _thread(db: sqlite3.Connection, path: Path, thread: str, cwd: str, since: fl
                     output = (value.get('failure') if kind == 'error' else
                               'File change reported ' + str(item_state)
                               if kind == 'file_change' else value.get('output', ''))
-                    failed = item_state in {'failed', 'error'}
+                    failed = kind == 'error' or item_state in {'failed', 'error'}
                     if isinstance(output, dict):
                         failed = failed or output.get('isError') is True
-                    if item_state in {'interrupted', 'cancelled'} and not failed:
+                    exit_code = value.get('exitCode')
+                    if failed or (type(exit_code) is int and exit_code != 0):
+                        result = 'error'
+                    elif item_state in {'interrupted', 'cancelled'}:
                         result = 'unknown'
-                    elif kind in {'file_change', 'error'} or 'output' in value:
-                        result = result_status(_text(output), failed)
-                    elif type(value.get('exitCode')) is int:
-                        result = result_status({'exit_code': value['exitCode']}, failed)
+                    elif type(exit_code) is int:
+                        result = 'success'
                     else:
-                        result = ('error' if failed else
-                                  'success' if item_state == 'completed' else 'unknown')
+                        result = result_status(_text(output), False if item_state == 'completed' else None)
                     emit('result', output, item, end, key, provider, call=call_id,
                          status=result)
                 else:
-                    coverage['projection_gaps'] += 1
+                    gaps["unfinished_tool"] += 1
+            elif kind == 'web_search':
+                gaps['web_search'] += 1
+                call_id = str(item['key'])
+                emit('call', {'patterns': value.get('patterns', [])}, item, at, key, provider,
+                     call=call_id, tool='web.search')
+                size = len(events)
+                emit('tool_gap', 'Search result missing from T3 projection', item, end, key, provider,
+                     call=call_id, tool='web.search')
+                if len(events) > size and (native_id := _strong_codex_id(value.get('nativeItemRef'))):
+                    web_search_refs[events[-1]['id']] = native_item_key(native_id)
             elif kind == 'assistant_message':
                 emit('reply', value.get('text', ''), item, end, key, provider)
                 if value.get('streaming'):
-                    coverage['projection_gaps'] += 1
+                    gaps["streaming_reply"] += 1
             elif kind in {'compaction', 'handoff'}:
                 emit('compaction', 'Context changed: ' + kind, item, at, key, provider)
             elif kind not in {'reasoning', 'user_message', 'checkpoint'}:
                 # Secret and approval payloads are deliberately never normalized into text.
-                coverage['projection_gaps'] += 1
+                gaps[kind if kind in _UNSUPPORTED_GAP_KINDS else "unsupported_item"] += 1
         if status == 'completed' and completed:
             emit('boundary', 'turn_complete', run, completed, key, provider)
             checkpoint_id = run['value'].get('checkpointId')
@@ -397,10 +503,12 @@ def _thread(db: sqlite3.Connection, path: Path, thread: str, cwd: str, since: fl
                         checkpoints[key] = checkpoint
         else:
             coverage['incomplete_runs'] += 1
-        run_coverage[key] = {'source_incomplete': bool(coverage['byte_cap_reached']) or any(
+        coverage['projection_gaps'] += sum(gaps.values())
+        run_coverage[key] = {'source_incomplete': metadata_capped or any(
             coverage[name] > before[name] for name in (
                 'projection_gaps', 'incomplete_runs', 'missing_timestamps')),
-                'missing_timestamps': coverage['missing_timestamps'] - before['missing_timestamps']}
+                'missing_timestamps': coverage['missing_timestamps'] - before['missing_timestamps'],
+                **({"projection_gaps": dict(gaps)} if gaps else {})}
     totals['t3_byte_capped_threads'] += bool(coverage['byte_cap_reached'])
     if not events:
         return None
@@ -408,25 +516,18 @@ def _thread(db: sqlite3.Connection, path: Path, thread: str, cwd: str, since: fl
     order = {r['key']: index for index, r in enumerate(runs)}
     events.sort(key=lambda e: (order[e['run_id']], e['timestamp'],
                               e['kind'] == 'boundary', e['kind'] == 'reply'))
-    calls = {e['call_id'] for e in events if e['kind'] == 'call'}
-    results = {e['call_id'] for e in events if e['kind'] == 'result'}
     state: dict[str, Any] = dict(coverage)
     state['tool_events_checked'] = True
     state['run_coverage'] = run_coverage
-    state.update(calls=len(calls), matched_results=len(calls & results),
-                 unmatched_calls=len(calls - results), orphan_results=len(results - calls),
-                 truncated_events=coverage['truncated_events'],
-                 byte_cap_reached=bool(coverage['byte_cap_reached']),
-                 source_incomplete=bool(coverage['projection_gaps'] or coverage['incomplete_runs']
-                                        or coverage['byte_cap_reached']))
-    state['complete'] = not any(state.get(k) for k in (
-        'unmatched_calls', 'orphan_results', 'truncated_events', 'byte_cap_reached',
-        'source_incomplete', 'missing_timestamps'))
+    state['truncated_events'] = coverage['truncated_events']
+    state['byte_cap_reached'] = bool(coverage['byte_cap_reached'])
+    _tool_coverage(events, state)
     return {'version': VERSION, 'agent': 't3', 'session_id': 't3:' + thread,
             'cwd': cwd, 'origin': 'interactive', 'model': None,
             'providers': sorted(seen_providers), 'native_sessions': sorted(native),
             **({'native_runs': native_runs} if native_runs else {}),
             **({'checkpoint_refs': checkpoints} if checkpoints else {}),
+            **({'web_search_refs': web_search_refs} if web_search_refs else {}),
             'instruction_exposure': {'status': 'unknown',
                 'reason': 'Project files alone do not prove past instruction delivery.'},
             'events': events, 'coverage': state,

@@ -28,7 +28,7 @@ MODES = ("metadata", "redacted", "full")
 BUNDLE_LIMIT = 64 * 1024 * 1024
 PAGE_SIZE = 100
 READ_OPERATIONS = ("describe", "list_sessions", "search", "session", "event", "context",
-                   "compare", "commits", "case", "ordinary_work")
+                   "compare", "commits", "case", "ordinary_work", "retries")
 SEARCH_BUDGET = 10_000
 IDENTITY = re.compile(r"[a-f0-9]{64}")
 EVENT_METADATA = ("id", "kind", "status", "timestamp", "line", "byte_offset", "truncated")
@@ -97,7 +97,7 @@ class Evidence:
         audit = store.get("audits", audit_id)
         self.keys = audit["session_ids"]
         self.audit_id = audit_id
-        self.coverage = audit["coverage"]
+        self.coverage = audit.get("coverage", {})
         self.ambiguous = set(audit.get("ambiguous_session_ids", []))
         self.supplemental = set(audit.get("supplemental_session_ids", []))
 
@@ -199,6 +199,13 @@ class Evidence:
                 if (self.content != "metadata" and isinstance(commit, str) and COMMIT_ID.fullmatch(commit)
                         and isinstance(ref, str) and CHECKPOINT_REF.fullmatch(ref)):
                     result["workspace_checkpoint"].update(commit=commit, ref=ref)
+        provenance = event.get("source_result")
+        if isinstance(provenance, dict):
+            session_id, event_id = provenance.get("session_id"), provenance.get("event_id")
+            if (isinstance(session_id, str) and (session_id in self.keys or session_id in self.supplemental)
+                    and (selected is None or session_id in selected)
+                    and isinstance(event_id, str) and EVENT_ID.fullmatch(event_id)):
+                result["source_result"] = {"session_id": session_id, "event_id": event_id}
         if self.content != "metadata":
             result.update({field: self._label(event[field]) for field in EVENT_LABELS
                            if isinstance(event.get(field), str)})
@@ -557,6 +564,20 @@ class Evidence:
         return {"items": page[:limit], "next_offset": offset + limit if len(page) > limit else None,
                 **self.describe()}
 
+    def retries(self, minimum_sessions: int = 2, limit: int = 20, tool: str = "") -> dict[str, Any]:
+        """Find retry patterns across primary sessions in a local audit."""
+        from .retries import discover
+
+        _page(0, limit)
+        if type(minimum_sessions) is not int or not 1 <= minimum_sessions <= 200:
+            raise AutError("evidence: minimum sessions must be 1..200")
+        if tool and self.content == "metadata":
+            raise AutError("evidence: tool filters require content access")
+        if self.store is None:
+            raise AutError("evidence: retry discovery requires a local audit")
+        return {**self.describe(), **discover(self.store, self.keys, self.ambiguous, minimum_sessions,
+                                             limit, tool, self._label if self.content != "metadata" else None)}
+
     def compare(self, baseline: str, candidate: str, cases: bool = False) -> dict[str, Any]:
         """Compare observed session or attempt counts and the first differing tool outcome."""
         def observed(key: str) -> tuple[dict[str, Any], list[dict[str, Any]]]:
@@ -627,7 +648,8 @@ class Evidence:
                 "coverage": _coverage(case["coverage"]),
                 "omitted_task_events": case.get("omitted_task_events", 0)}
 
-    def ordinary_work(self, metric: Literal["tool_calls", "tool_errors", "codex_model_calls"] = "tool_calls",
+    def ordinary_work(self, metric: Literal["tool_calls", "tool_errors", "identical_tool_retries",
+                                           "codex_model_calls"] = "tool_calls",
                       coverage_basis: Literal["full_case", "tool_events"] | None = None,
                       require_turn_context: bool = False, agent: str = "", before: str = "",
                       include_excluded: bool = False, cursor: str = "", limit: int = 30) -> dict[str, Any]:

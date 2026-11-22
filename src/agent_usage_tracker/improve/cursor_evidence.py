@@ -141,14 +141,18 @@ def read(path: Path, since: float, max_bytes: int, *, capture_full: bool = False
                         emit("call", key, block.get("args", {}), mid, call=call, tool=tool)
                         replied = False
                     elif role == "tool" and block.get("type") == "tool-result":
-                        value = block.get("result", "")
+                        replied = False
+                        if "result" not in block:
+                            emit("tool_gap", key, "Cursor tool result payload unavailable", mid,
+                                 call=call, tool=tool)
+                            continue
+                        value = block["result"]
                         error = dict_or_empty(options.get("highLevelToolCallResult")).get("isError")
                         status = result_status(value, error)
                         if tool == "Shell" and isinstance(value, str) and (ex := cursor_cli.EXIT_LINE.match(value)):
                             status = "error" if error is True or int(ex[1]) else "success"
                         emit("result", key, value, mid, call=call, tool=tool, status=status,
                              omitted_attachment=omitted)
-                        replied = False
 
     calls = {e["call_id"] for e in events if e["kind"] == "call"}
     results = {e["call_id"] for e in events if e["kind"] == "result"}

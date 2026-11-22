@@ -54,6 +54,8 @@ It uses a disposable TimescaleDB container on a random loopback port.
 The preflight defaults to Python 3.11. Set `AUT_CI_PYTHON` to test another supported version.
 For the Mac batch publisher, pass `./scripts/local-ci.sh quick` as `--light` and `./scripts/local-ci.sh check` as `--full`.
 The full local preflight fails above 60 seconds, including dependency setup and cleanup.
+Successful unit-test scratch directories are removed as the tests finish.
+The MCP and code-mode tests share one test environment.
 It lets every check finish and reports the results before rejecting an over-budget run.
 GitHub still runs the required platform matrix for the pull request. That run has its own runner queue and timing.
 

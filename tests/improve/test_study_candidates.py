@@ -130,3 +130,47 @@ def test_study_preflight_reserves_skill_evidence_and_linked_native_sessions(tmp_
                         proposal, before, reserved)
     check_baselines(store, policy | {"baseline_cases": {unique: "task", independent: "task"}},
                     proposal, before, reserved)
+
+
+def test_retry_metric_excludes_unknown_or_unverifiable_calls(tmp_path, capsys):
+    from agent_usage_tracker.improve.evidence import trace_event
+
+    store = Store(tmp_path / "private")
+    stamp = "2026-01-02T12:00:00Z"
+    snapshots = []
+    for sid in ("retry", "clean", "unknown", "clipped", "missing_fingerprint"):
+        def event(kind, key, text, **extra):
+            return trace_event("claude_code", sid, kind, key, text, stamp, **extra)
+
+        events = [
+            event("prompt", "p", "Verify the change"),
+            event("call", "first", "pytest", call="a", tool="Bash"),
+            event("result", "r1", "result", call="a", status={
+                "clean": "success", "unknown": "unknown",
+            }.get(sid, "error")),
+            event("call", "second", "pytest", call="b", tool="Bash"),
+            event("result", "r2", "result", call="b", status="success"),
+            event("boundary", "end", "turn_complete"),
+        ]
+        if sid == "clipped":
+            events[1]["truncated"] = True
+        if sid == "missing_fingerprint":
+            events[1].pop("source_sha256")
+        snapshots.append(store.put("sessions", {
+            "agent": "claude_code", "origin": "interactive", "session_id": sid,
+            "cwd": str(tmp_path), "model": "test-model",
+            "coverage": {"complete": True, "tool_events_checked": True}, "events": events,
+        }))
+    audit = store.put("audits", {"session_ids": snapshots, "coverage": {}})
+    assert main(["evidence", "--root", str(store.root), "--audit", audit,
+                 "ordinary-work", "--coverage-basis", "tool_events", "--metric",
+                 "identical_tool_retries", "--include-excluded"]) == 0
+    report = json.loads(capsys.readouterr().out)
+    for key, expected in zip(snapshots, (1, 0, None, None, None)):
+        item = next(item for item in report["items"] if item["session_id"] == key)
+        assert item["metric_value"] == expected, item
+        if expected is None:
+            assert item["reason"] == "metric_unknown"
+        else:
+            case_id = freeze_case(store, audit, key, item["event_id"])
+            assert _sample(store, case_id)["identical_tool_retries"] == expected

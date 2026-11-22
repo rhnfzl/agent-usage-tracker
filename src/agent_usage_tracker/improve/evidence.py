@@ -93,6 +93,30 @@ def source_signature(text: str, status: str, tool: str) -> str:
                                     sort_keys=True).encode()).hexdigest()
 
 
+def file_retry_keys(text: str) -> tuple[str, str] | None:
+    """Fingerprint a structured file target and its arguments without exposing either."""
+    try:
+        args = json.loads(text)
+    except (ValueError, RecursionError):
+        return None
+    if not isinstance(args, dict):
+        return None
+    names = {"file_path", "notebook_path", "path"}.intersection(args)
+    if len(names) != 1:
+        return None
+    name = names.pop()
+    path = args.pop(name)
+    if not isinstance(path, str) or not path.strip() or "[redacted]" in path:
+        return None
+    try:
+        target = json.dumps([name, path])
+        arguments = json.dumps(args, sort_keys=True, allow_nan=False)
+    except (ValueError, RecursionError):
+        return None
+    return (hashlib.sha256(target.encode()).hexdigest(),
+            hashlib.sha256(arguments.encode()).hexdigest())
+
+
 def trace_event(agent: str, session: str, kind: str, identity: str, value: object,
                 timestamp: object, *, call: object = "", tool: object = "",
                 status: str = "unknown", omitted_attachment: bool = False,
@@ -104,6 +128,8 @@ def trace_event(agent: str, session: str, kind: str, identity: str, value: objec
     signature = source_signature(raw, status, str(tool or ""))
     cleaned = redact(raw)
     content = {"raw_text": raw, "attachment_omitted": omitted_attachment} if capture_full else {}
+    if kind == "call" and len(raw) <= TEXT_LIMIT and (keys := file_retry_keys(raw)):
+        content.update(retry_target_sha256=keys[0], retry_arguments_sha256=keys[1])
     return {"id": hashlib.sha256(f"{agent}|{session}|{kind}|{identity}".encode()).hexdigest()[:32],
             "kind": kind, "timestamp": timestamp, "text": cleaned[:TEXT_LIMIT],
             "truncated": omitted_attachment or len(cleaned) > TEXT_LIMIT, "source_sha256": signature,
@@ -326,9 +352,13 @@ def read_session(path: Path, agent: str, max_bytes: int = BYTE_LIMIT,
             if role == "user":
                 emit("prompt", content, line, record, key=entry)
             elif role == "toolResult":
-                emit("result", content, line, record, call=message.get("toolCallId"),
-                     tool=message.get("toolName"),
-                     status=result_status(_text(content), message.get("isError")))
+                if "content" not in message:
+                    emit("tool_gap", "Pi tool result payload unavailable", line, record,
+                         call=message.get("toolCallId"), tool=message.get("toolName"))
+                else:
+                    emit("result", content, line, record, call=message.get("toolCallId"),
+                         tool=message.get("toolName"),
+                         status=result_status(_text(content), message.get("isError")))
             elif role == "assistant":
                 for index, block in enumerate(content if isinstance(content, list) else []):
                     if not isinstance(block, dict):
@@ -528,6 +558,15 @@ def read_session(path: Path, agent: str, max_bytes: int = BYTE_LIMIT,
                         sub == "item_completed" and item.get("type") == "ContextCompaction"):
                     model_calls = None
                     emit("compaction", "context was compacted", line, record, key=item.get("id"))
+                elif (sub == "item_completed" and item.get("type") == "Extension"
+                      and item.get("kind") == "web.search" and isinstance(item.get("id"), str)
+                      and item["id"] and isinstance(item.get("results"), list)
+                      and all(isinstance(row, dict) for row in item["results"])):
+                    emit("call", {"query": item.get("query"), "action": item.get("action")},
+                         line, record, call=item["id"], tool="web.search",
+                         tool_representation="execution_item")
+                    emit("result", {"results": item["results"]}, line, record, call=item["id"],
+                         tool="web.search", status="success")
                 elif sub in {"web_search_end", "image_generation_end"} or (
                         sub == "item_completed"
                         and item.get("type") in _CODEX_UNCOUNTED_COMPLETED_ITEMS):
@@ -554,20 +593,30 @@ def read_session(path: Path, agent: str, max_bytes: int = BYTE_LIMIT,
         model = message.get("model") or model
         content = message.get("content", "")
         blocks = [b for b in content if isinstance(b, dict)] if isinstance(content, list) else []
-        if kind == "assistant":
-            for index, block in enumerate(blocks):
-                if block.get("type") == "tool_use":
-                    emit("call", block.get("input", {}), line, record,
-                         call=block.get("id"), tool=block.get("name"))
-                elif block.get("type") == "text":
-                    emit("reply", block.get("text", ""), line, record,
-                         key=f"{record.get('uuid', line)}:{index}")
-        elif kind == "user":
-            for block in blocks:
-                if block.get("type") == "tool_result":
-                    value = block.get("content", "")
+        for index, block in enumerate(blocks):
+            block_type = block.get("type")
+            if kind == "assistant" and block_type == "tool_use":
+                emit("call", block.get("input", {}), line, record,
+                     call=block.get("id"), tool=block.get("name"))
+            elif kind == "assistant" and block_type == "server_tool_use" and block.get("name") == "web_search":
+                emit("call", block.get("input", {}), line, record, call=block.get("id"), tool="web.search")
+            elif kind in {"assistant", "user"} and block_type == "web_search_tool_result":
+                value = block.get("content")
+                if isinstance(value, list) and all(isinstance(row, dict) for row in value):
+                    emit("result", {"results": value}, line, record, call=block.get("tool_use_id"),
+                         tool="web.search", status="success")
+                elif isinstance(value, dict) and value.get("type") == "web_search_tool_result_error":
                     emit("result", value, line, record, call=block.get("tool_use_id"),
-                         status=result_status(value, block.get("is_error", False)))
+                         tool="web.search", status="error")
+                else:
+                    emit("tool_gap", "Unsupported Claude web search result", line, record)
+            elif kind == "assistant" and block_type == "text":
+                emit("reply", block.get("text", ""), line, record, key=f"{record.get('uuid', line)}:{index}")
+            elif kind == "user" and block_type == "tool_result":
+                value = block.get("content", "")
+                emit("result", value, line, record, call=block.get("tool_use_id"),
+                     status=result_status(value, block.get("is_error", False)))
+        if kind == "user":
             human = claude_code.human_text(record)
             if human is not None:
                 emit("prompt", human, line, record, key=record.get("uuid"))
@@ -587,7 +636,8 @@ def read_session(path: Path, agent: str, max_bytes: int = BYTE_LIMIT,
                     unmatched_calls=len(calls - results), orphan_results=len(results - calls),
                     truncated_events=counts["truncated_events"],
                     copied_records=counts["copied_records"])
-    coverage["complete"] = last_closed and not any(coverage.get(k) for k in (
+    coverage["complete"] = last_closed and not any(e["kind"] == "tool_gap" for e in events) \
+        and not any(coverage.get(k) for k in (
         "unmatched_calls", "orphan_results", "partial_tail", "byte_cap_reached",
         "truncated_events", "malformed_records", "conflicting_records", "missing_timestamps",
         "unknown_copy_boundary", "source_incomplete"))

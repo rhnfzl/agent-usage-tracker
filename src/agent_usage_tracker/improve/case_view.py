@@ -5,15 +5,14 @@ from __future__ import annotations
 import hashlib
 from html import escape
 from pathlib import Path
-import re
 from typing import Any
 
 from ..config import AutError
 from ..state import atomic_write_text
+from .retries import FINGERPRINT, references, retries
 from .store import Store
 
 _READ_TOOLS = {"read", "read_file"}
-_READ_FINGERPRINT = re.compile(r"[a-f0-9]{64}")
 
 
 def _attempt(session: dict[str, Any], case: dict[str, Any]) -> list[dict[str, Any]]:
@@ -68,7 +67,7 @@ def _context(events: list[dict[str, Any]], session: dict[str, Any],
             tool = str(event.get("tool", "")).casefold()
             fingerprint, call_id = event.get("source_sha256"), event.get("call_id")
             if (tool in _READ_TOOLS and isinstance(call_id, str) and call_id
-                    and isinstance(fingerprint, str) and _READ_FINGERPRINT.fullmatch(fingerprint)):
+                    and isinstance(fingerprint, str) and FINGERPRINT.fullmatch(fingerprint)):
                 reads.setdefault((tool, fingerprint), {}).setdefault(call_id, index)
 
     output_report = ("<p>No tool output size is available in this capture.</p>"
@@ -120,6 +119,14 @@ def write_case_view(store: Store, case_id: str) -> dict[str, Any]:
     clipped = sum(bool(event.get("truncated")) for event in events)
     eligible = bool(case.get("coverage", {}).get("complete") and not omitted
                     and not case.get("omitted_task_events") and not clipped)
+    repeats = list(retries(events, session.get("retry_keys")))
+    retry_rows = []
+    for first, error, retry, result, match in repeats:
+        outcome = (_link(result, str(events[result].get("status", "unknown")))
+                   if result is not None else "Result unavailable")
+        label = "Repeated request" if match == "identical" else "Changed arguments for same target"
+        links = (_link(first, events[first]["tool"]), _link(error, "Error"), _link(retry, label), outcome)
+        retry_rows.append("<li>" + " · ".join(links) + "</li>")
     source = session.get("source", {})
     if not isinstance(source, dict):
         raise AutError("improve: source metadata is not a source record")
@@ -142,6 +149,12 @@ def write_case_view(store: Store, case_id: str) -> dict[str, Any]:
                     f"{event['table']} record {event['record_id']}" if event.get("record_id") else
                     "source position unavailable")
         title = labels.get(event["kind"], str(event["kind"]))
+        linked = event.get("source_result")
+        provenance = ""
+        if linked and linked["session_id"] in session.get("supplemental_sources", []):
+            native = store.path("sessions", linked["session_id"]).as_uri()
+            provenance = (f'<p class="reference">Native result <a href="{escape(native, quote=True)}">'
+                          f'{escape(linked["event_id"])}</a></p>')
         details = "Used in model input" if seen else "Captured context omitted from model input"
         if event.get("truncated"):
             details += "; body clipped in the frozen snapshot"
@@ -149,7 +162,7 @@ def write_case_view(store: Store, case_id: str) -> dict[str, Any]:
                       f'<h2>{escape(title)}</h2><p>{escape(details)}</p>'
                       f'<p class="reference">{escape(location)} · event '
                       f'<code>{escape(str(event["id"]))}</code> · '
-                      f'{escape(str(event.get("status", "unknown")))}</p>'
+                      f'{escape(str(event.get("status", "unknown")))}</p>{provenance}'
                       f'<pre>{escape(str(event.get("text", "")))}</pre></section>')
     status = ("Model input passes basic completeness checks; this does not establish task success."
               if eligible else "Model input remains incomplete; this view does not upgrade a judgment.")
@@ -177,6 +190,10 @@ def write_case_view(store: Store, case_id: str) -> dict[str, Any]:
             f'<p>Recorded source hash: <code>{escape(str(source.get("sha256", "unavailable")))}</code></p>'
             f'<p><a href="{escape(snapshot.as_uri(), quote=True)}">Frozen source snapshot</a></p>'
             + ''.join(supplements) + '</details>'
+            + '<section><h2>Requests repeated after a tool error</h2>'
+            + ("<ul>" + "".join(retry_rows) + "</ul>" if repeats else
+               "<p>No matching sequence in the captured attempt.</p>")
+            + "</section>"
             + _context(events, session, snapshot, case["session_snapshot"])
             + ''.join(blocks) + '</main></body></html>')
     target = store.path("case_views", case_id).with_suffix(".html")
@@ -184,4 +201,7 @@ def write_case_view(store: Store, case_id: str) -> dict[str, Any]:
     return {"case_id": case_id, "path": str(target), "captured_events": len(events),
             "model_events": len(selected), "omitted_model_events": omitted,
             "clipped_events": clipped, "eligible": eligible, "private": True,
+            "repeated_after_error": sum(match[-1] == "identical" for match in repeats),
+            "changed_arguments_after_error": sum(match[-1] == "changed_arguments" for match in repeats),
+            "repeat_events": [references(events, match) for match in repeats[:100]],
             "html_sha256": hashlib.sha256(page.encode()).hexdigest()}

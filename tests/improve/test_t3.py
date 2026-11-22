@@ -516,3 +516,146 @@ def test_t3_context_gaps_do_not_pass_judge_completeness(tmp_path, kind):
     assert rows
     assert not any(row['coverage']['complete'] for row in rows)
     db.close()
+
+
+def test_t3_structured_command_exit_precedes_stdout(tmp_path):
+    home = tmp_path / 'home'
+    db, _ = fixture_db(home)
+    with db:
+        add_run(db)
+        item(db, 'r1', 'nonzero', 'command_execution', 3,
+             input='check', output='Normal output', exitCode=7)
+        item(db, 'r1', 'zero', 'command_execution', 4,
+             input='check', output='Process exited with code 7', exitCode=0)
+        item(db, 'r1', 'cancelled', 'command_execution', 5,
+             input='check', output='Partial output', status='cancelled', exitCode=0)
+        item(db, 'r1', 'app-error', 'error', 6, failure='Tool execution failed')
+    db.close()
+
+    _, _, sessions = capture(tmp_path, home)
+    outcomes = {e['record_id']: e['status'] for e in sessions[0]['events'] if e['kind'] == 'result'}
+    assert outcomes == {'cmdr1': 'error', 'nonzero': 'error', 'zero': 'success',
+                        'cancelled': 'unknown', 'app-error': 'error'}
+
+
+def test_t3_work_preview_names_projection_gaps_without_revealing_payload(tmp_path):
+    home = tmp_path / 'home'
+    db, _ = fixture_db(home)
+    with db:
+        add_run(db)
+        item(db, 'r1', 'notice', 'system_notice', 3, message='private notice body')
+        item(db, 'r1', 'search', 'web_search', 4, patterns=['private query'])
+        item(db, 'r1', 'unavailable', 'custom_fixture_secret_type', 5, text='private text')
+    db.close()
+    store, capture_result, _ = capture(tmp_path, home)
+    view = Evidence('metadata', store, capture_result['audit_id'])
+    row, = view.ordinary_work('identical_tool_retries', 'tool_events', include_excluded=True)['items']
+    assert row['reason'] == 'measurement_coverage_incomplete'
+    assert row['projection_gaps'] == {'system_notice': 1, 'web_search': 1, 'unsupported_item': 1}
+    assert 'private' not in json.dumps(row) and 'custom_fixture_secret_type' not in json.dumps(row)
+
+
+def test_t3_item_cap_only_excludes_runs_with_omitted_items(tmp_path, monkeypatch):
+    from agent_usage_tracker.improve import t3
+
+    home = tmp_path / 'home'
+    db, _ = fixture_db(home)
+    with db:
+        add_run(db, 'older', ordinal=1)
+        add_run(db, 'newer', ordinal=2)
+        db.execute("UPDATE orchestration_v2_projection_turn_items SET updated_at=? WHERE run_id='newer'",
+                   ('2026-01-01T10:00:11Z',))
+    db.close()
+    # Each metadata table fits. The item limit retains both items from the newer run.
+    monkeypatch.setattr(t3, 'MAX_ROWS', 2)
+
+    store, result, (session,) = capture(tmp_path, home)
+    coverage = session['coverage']
+    assert coverage['byte_cap_reached'] and not coverage['complete']
+    assert coverage['run_coverage']['older']['source_incomplete']
+    assert coverage['run_coverage']['older']['projection_gaps'] == {'items_omitted': 2}
+    assert not coverage['run_coverage']['newer']['source_incomplete']
+    snapshot = store.get('audits', result['audit_id'])['session_ids'][0]
+    boundary = next(e for e in session['events'] if e['run_id'] == 'newer' and e['kind'] == 'boundary')
+    case = freeze_case(store, result['audit_id'], snapshot, boundary['id'])
+    assert _sample(store, case)['tool_events_complete']
+
+
+def test_t3_metadata_cap_keeps_run_incomplete_when_item_scope_is_unverified(tmp_path, monkeypatch):
+    from agent_usage_tracker.improve import t3
+
+    home = tmp_path / 'home'
+    db, _ = fixture_db(home)
+    with db:
+        add_run(db, 'a-older', ordinal=1)
+        add_run(db, 'z-newer', ordinal=2)
+        db.execute("UPDATE orchestration_v2_projection_turn_items SET updated_at=? WHERE run_id='z-newer'",
+                   ('2026-01-01T10:00:11Z',))
+    db.close()
+    monkeypatch.setattr(t3, 'MAX_ROWS', 1)
+
+    _, _, (session,) = capture(tmp_path, home)
+    run = session['coverage']['run_coverage']['a-older']
+    assert run['source_incomplete']
+    assert run['projection_gaps'] == {'metadata_omitted': 1}
+
+
+@pytest.mark.parametrize('outcome', ['observed', 'missing', 'wrong_turn', 'clipped'])
+def test_t3_web_search_uses_only_a_corroborated_native_result(tmp_path, outcome):
+    home = tmp_path / 'home'
+    db, _ = fixture_db(home)
+    ref = {'driver': 'codex', 'strength': 'strong'}
+    with db:
+        add_run(db, provider='codex')
+        item(db, 'r1', 'search', 'web_search', 3, patterns=['fixture query'],
+             nativeItemRef={**ref, 'nativeId': 'native-search'})
+        for key in ('one', 'two'):
+            item(db, 'r1', key, 'assistant_message', 4, text=key,
+                 nativeItemRef={**ref, 'nativeId': key})
+    db.close()
+
+    folder = home / '.codex/sessions'
+    folder.mkdir(parents=True)
+    rows = [('session_meta', {'id': 'nativer1', 'source': 'cli'})]
+
+    def turn(key, items):
+        rows.extend([
+            ('event_msg', {'type': 'task_started', 'turn_id': key}),
+            ('turn_context', {'turn_id': key, 'model': 'model', 'cwd': str(tmp_path)}),
+            ('event_msg', {'type': 'user_message', 'message': 'Fix the checks'}),
+            *[('event_msg', {'type': 'item_completed', 'item': value}) for value in items],
+            ('event_msg', {'type': 'task_complete', 'turn_id': key}),
+        ])
+
+    search = {'type': 'Extension', 'kind': 'web.search', 'id': 'native-search', 'query': 'fixture query'}
+    if outcome != 'missing':
+        search['results'] = [{'title': 'Sample', 'snippet': 'x ' * 4000 if outcome == 'clipped' else 'Evidence'}]
+    anchors = [{'type': 'AgentMessage', 'id': key, 'text': key} for key in ('one', 'two')]
+    turn('t1', anchors if outcome == 'wrong_turn' else [*anchors, search])
+    if outcome == 'wrong_turn':
+        turn('t2', [search])
+    log = folder / 'rollout-nativer1.jsonl'
+    log.write_text(''.join(json.dumps({'type': k, 'timestamp': END, 'payload': p}) + '\n' for k, p in rows))
+    store, result, (session,) = capture(tmp_path, home, capture_full=True)
+    audit_id = result['audit_id']
+    view = Evidence('metadata', store=store, audit_id=audit_id)
+    primary, = store.get('audits', audit_id)['session_ids']
+    if outcome in {'observed', 'clipped'}:
+        assert session['coverage']['complete'] == (outcome == 'observed')
+        result_event, = [event for event in session['events']
+                         if event['kind'] == 'result' and event['tool'] == 'web.search']
+        source = view.event(primary, result_event['id'])['source_result']
+        assert source['session_id'] == session['supplemental_sources'][0]
+        native = Evidence('redacted', store=store, audit_id=audit_id).event(
+            source['session_id'], source['event_id'])
+        assert not native['truncated']
+        assert result_event['truncated'] == (outcome == 'clipped')
+        full = Evidence('full', store=store, audit_id=audit_id)
+        assert 'Search result missing' not in full.event(primary, result_event['id'])['text']
+        restricted = store.put('audits', {'session_ids': [primary]})
+        assert 'source_result' not in Evidence('metadata', store=store, audit_id=restricted).event(
+            primary, result_event['id'])
+        assert result['t3_linked_web_search_results'] == 1
+    else:
+        assert not session['coverage']['complete']
+        assert not any('source_result' in event for event in session['events'])

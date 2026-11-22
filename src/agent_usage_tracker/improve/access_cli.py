@@ -99,6 +99,11 @@ def register(commands: Any) -> None:
     commits.add_argument("--offset", type=int, default=0)
     commits.add_argument("--limit", type=int, default=30)
 
+    retries = actions.add_parser("retries", help="find repeated and changed requests after tool errors")
+    retries.add_argument("--minimum-sessions", type=int, default=2)
+    retries.add_argument("--limit", type=int, default=20)
+    retries.add_argument("--tool", default="")
+
     compare = actions.add_parser("compare", help="compare observed failures and activity in two sessions")
     compare.add_argument("baseline")
     compare.add_argument("candidate")
@@ -261,6 +266,8 @@ def run(args: argparse.Namespace) -> None:
             value = evidence.session(args.session_id, args.offset, args.limit)
         elif action == "commits":
             value = evidence.commits(args.commit, args.offset, args.limit, args.source)
+        elif action == "retries":
+            value = evidence.retries(args.minimum_sessions, args.limit, args.tool)
         elif action == "compare":
             value = evidence.compare(args.baseline, args.candidate, args.cases)
         elif action == "case":
