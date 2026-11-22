@@ -31,6 +31,10 @@ MODEL_TIMEOUT = 30
 WORKER = "agent_usage_tracker.improve.investigation"
 
 
+class InvestigationTimeout(AutError):
+    """The evidence worker exceeded the wall-clock limit."""
+
+
 def require_runtime() -> None:
     if find_spec("pydantic_monty") is None:
         raise AutError("investigation: install agent-usage-tracker[code] to run recipes")
@@ -116,7 +120,7 @@ def run(source: str, params: dict[str, Any], specs: list[dict[str, Any]],
         process = subprocess.run([sys.executable, "-I", "-m", WORKER], input=payload,
                                  capture_output=True, timeout=_timeout(specs), env=env, check=False)
     except subprocess.TimeoutExpired as exc:
-        raise AutError("investigation: execution exceeded the wall-clock limit") from exc
+        raise InvestigationTimeout("investigation: execution exceeded the wall-clock limit") from exc
     except OSError as exc:
         raise AutError("investigation: could not start the local runtime") from exc
     if process.returncode:
@@ -128,6 +132,15 @@ def run(source: str, params: dict[str, Any], specs: list[dict[str, Any]],
     if "error" in response:
         raise AutError(response["error"])
     return dict(response)
+
+
+
+def save(store: Store, source: str, params: dict[str, Any], value: dict[str, Any]) -> str:
+    return store.put("investigation_runs", {
+        "contract": CONTRACT, "source": source, "params": params, "scopes": value["scopes"],
+        "result_sha256": digest(value), "reads": value["reads"],
+        "aut_version": value["aut_version"], "runtime_version": value["runtime_version"],
+    })
 
 
 def _references(operation: str, value: dict[str, Any]) -> list[dict[str, str]]:

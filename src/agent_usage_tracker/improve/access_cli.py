@@ -32,6 +32,12 @@ def register(commands: Any) -> None:
     parser.add_argument("--embedding-model", type=Path, help="local sentence model directory")
     actions = parser.add_subparsers(dest="evidence_cmd", required=True)
 
+    discover = actions.add_parser("discover", help="investigate open questions locally across audits")
+    discover.add_argument("--include-audit", action="append", default=[])
+    discover.add_argument("--question", help="optional direction for the investigation")
+    discover.add_argument("--model", help="cached local instruct model")
+    discover.add_argument("--rounds", type=int, choices=(1, 2, 3), default=2)
+
     capture = actions.add_parser("capture", help="save a private audit with full text by default")
     capture.add_argument("--days", type=int, default=7)
     capture.add_argument("--limit", type=int, default=20)
@@ -84,6 +90,8 @@ def register(commands: Any) -> None:
     context.add_argument("event_id")
     context.add_argument("--radius", type=int, default=2)
     context.add_argument("--limit", type=int, default=2_000)
+    context.add_argument("--focus", default="", help="center the anchor excerpt near these words")
+    context.add_argument("--view", choices=("nearby", "conversation"), default="nearby")
 
     commits = actions.add_parser("commits", help="find runs by a recorded Git result or checkpoint commit")
     commits.add_argument("commit")
@@ -140,6 +148,15 @@ def register(commands: Any) -> None:
 def run(args: argparse.Namespace) -> None:
     root = args.root or Path(os.environ.get("AUT_IMPROVE_ROOT", str(data_dir() / "improve")))
     action = args.evidence_cmd
+    if action == "discover":
+        if args.bundle or args.content not in (None, "redacted"):
+            raise AutError("discovery: use redacted audits in a private local store")
+        from .discovery import run as discover
+
+        value = discover(Store(root), args.audit, args.include_audit, question=args.question,
+                         model_name=args.model, rounds=args.rounds)
+        print(json.dumps(value, sort_keys=True))
+        return
     configured_model = args.embedding_model or os.environ.get("AUT_EVIDENCE_EMBEDDING_MODEL")
     model_path = Path(configured_model).expanduser().resolve() if configured_model else None
     with_code = action in {"run-code", "replay-code", "code-catalog"} or (
@@ -237,7 +254,7 @@ def run(args: argparse.Namespace) -> None:
         elif action == "event":
             value = evidence.event(args.session_id, args.event_id, args.offset, args.limit)
         elif action == "context":
-            value = evidence.context(args.session_id, args.event_id, args.radius, args.limit)
+            value = evidence.context(args.session_id, args.event_id, args.radius, args.limit, args.focus, args.view)
         elif action == "list-sessions":
             value = evidence.list_sessions(args.offset, args.limit, args.agent, args.workspace)
         elif action == "session":
@@ -259,7 +276,7 @@ def run(args: argparse.Namespace) -> None:
 
 
 def _code(args: argparse.Namespace, root: Path, model_path: Path | None) -> dict[str, Any]:
-    from .investigation import CONTRACT, MAX_SOURCE, catalog, run, scope_specs
+    from .investigation import CONTRACT, MAX_SOURCE, catalog, run, save, scope_specs
     from .store import digest
 
     if args.evidence_cmd == "code-catalog":
@@ -294,9 +311,5 @@ def _code(args: argparse.Namespace, root: Path, model_path: Path | None) -> dict
         raise AutError("investigation: provide UTF-8 source and valid JSON parameters") from exc
     value = run(source, params, specs)
     if args.save:
-        record = {"contract": CONTRACT, "source": source, "params": params,
-                  "scopes": value["scopes"], "result_sha256": digest(value),
-                  "reads": value["reads"], "aut_version": value["aut_version"],
-                  "runtime_version": value["runtime_version"]}
-        value["run_id"] = Store(root).put("investigation_runs", record)
+        value["run_id"] = save(Store(root), source, params, value)
     return value

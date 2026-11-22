@@ -67,13 +67,10 @@ def default_paths(cfg: Config) -> list[Path]:
 def default_excludes() -> list[str]:
     from .label.core import data_dir
     root = Path(os.environ.get("AUT_IMPROVE_ROOT", str(data_dir() / "improve"))).expanduser()
-    return list(dict.fromkeys(map(str, (
-        data_dir() / "label" / "models",
-        data_dir() / "improve" / "session_content",
-        root.resolve() / "session_content",
-        data_dir() / "improve" / "investigation_runs",
-        root.resolve() / "investigation_runs",
-    ))))
+    private = ("session_content", "investigation_runs", "discoveries", "discovery_heads")
+    paths = [data_dir() / "label" / "models",
+             *(base / name for base in (data_dir() / "improve", root.resolve()) for name in private)]
+    return list(dict.fromkeys(map(str, paths)))
 
 
 def _status_path() -> Path:

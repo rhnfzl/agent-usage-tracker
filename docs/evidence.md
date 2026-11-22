@@ -414,3 +414,41 @@ The private audit remains available. Retry with
 `aut evidence --audit AUDIT_ID observe`, or select a bundle to deliver a smaller
 set of sessions. The request carries an `Idempotency-Key` that matches the bundle
 digest. A receiver can use it to deduplicate identical deliveries.
+
+## Discover patterns in your work
+
+Use discovery to follow questions that arise from the evidence. It can compare decisions across
+projects, find a counterexample, or keep an unanswered question for another run.
+
+```sh
+aut evidence discover
+aut evidence --audit RECENT discover --include-audit OLDER \
+  --question "Where did an explanation change the next instruction?"
+aut evidence --audit AUDIT --content redacted context SESSION EVENT
+```
+
+`discover` runs a local cached MLX instruct model and bounded Code Mode searches over saved
+redacted audits. Install the `label` and `code` extras, or use the stable runtime installer with
+`--code`. The default model is `mlx-community/Qwen3-4B-Instruct-2507-4bit`.
+Pass `--model` for another model already in your cache. Discovery uses the newest three saved audits
+by default. Select up to four distinct audits explicitly and use `--rounds` to limit follow-up.
+
+Code Mode records which source prompted each search and saves replayable receipts.
+`context --focus "matching phrase"` keeps the matching part of a long event in view. AUT uses the
+local Git workspace to identify projects. Missing workspace or source identity stays visible.
+Two records of the same native session cannot support a comparison. Separate sessions may still
+belong to one task, so review the cited context before counting recurrence.
+
+The private HTML digest shows model-proposed findings, open leads and coverage. It includes only
+captured excerpts. Candidate counts describe the searches that ran. They do not measure how often
+a pattern occurs. The same question, model revision and audit selection reuse the latest report.
+With new audits, the investigator sees the previous run's open questions and identifies evidence
+pairs it has already reported.
+
+For recurring local review, use the pinned Python from the runtime installer in
+`packaging/launchd/dev.aut.discover.plist`. Replace its placeholders with absolute paths to the
+runtime and existing private store, then load it as a user LaunchAgent. The sample runs on Sunday
+at 09:15 local time. AUT saves the digest under `discoveries/` in that store.
+Default backups exclude its reports, pointers, and Code Mode run records for the standard store
+and the store set by `AUT_IMPROVE_ROOT`. For another `--root`, exclude those directories from backups
+explicitly. The command never applies a proposed practice.

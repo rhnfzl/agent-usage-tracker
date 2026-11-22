@@ -65,6 +65,17 @@ def _exact_preview(text: str, needle: str) -> str | None:
     return text[start:start + 240]
 
 
+def _context_offset(text: str, focus: str, limit: int) -> int:
+    if not focus.strip():
+        return 0
+    # Search the original text so Unicode case-folding cannot shift source offsets.
+    terms = [focus, *sorted(re.findall(r"[^\W_]+", focus), key=len, reverse=True)]
+    for term in terms:
+        if found := re.search(re.escape(term), text, re.IGNORECASE):
+            return min(len(text) - limit, max(0, found.start() - limit // 3))
+    return 0
+
+
 class Evidence:
     def __init__(self, content: str, store: Store | None = None, audit_id: str | None = None,
                  bundle: Path | None = None, *, embedder: Embedder | None = None) -> None:
@@ -433,11 +444,14 @@ class Evidence:
         raise AutError("evidence: event is missing from this session")
 
     def context(self, session_id: str, event_id: str, radius: int = 2,
-                limit: int = 2_000) -> dict[str, Any]:
-        """Read a cited event, its recorded tool counterpart, and nearby events.
-        Limit bounds the text per event. Use event to read longer text.
+                limit: int = 2_000, focus: str = "",
+                view: Literal["nearby", "conversation"] = "nearby") -> dict[str, Any]:
+        """Read an event and its recorded counterpart with nearby events or conversation.
+        Limit bounds the text per event. Focus finds a relevant excerpt in the anchor.
         """
         _page(0, limit, 8_000)
+        if len(focus) > 100 or view not in ("nearby", "conversation"):
+            raise AutError("evidence: use a valid context view and at most 100 focus characters")
         if type(radius) is not int or not 0 <= radius <= 5:
             raise AutError("evidence: use a context radius of 0..5 events")
         row = self._read(session_id)
@@ -452,21 +466,31 @@ class Evidence:
         if anchor["kind"] == "result":
             partner = next((call for call, result in links.items() if result == event_id), None)
 
-        def visible(event: dict[str, Any]) -> dict[str, Any]:
-            result = self._event(event)
+        def visible(position: int) -> dict[str, Any]:
+            result = {**self._event(events[position]), "position": position}
             if "text" in result:
                 text = result["text"]
-                result.update(text=text[:limit], text_chars=len(text),
-                              next_offset=limit if len(text) > limit else None)
+                offset = _context_offset(text, focus, limit) if position == index and len(text) > limit else 0
+                end = offset + limit
+                result.update(text=text[offset:end], text_chars=len(text),
+                              next_offset=end if len(text) > end else None)
+                if len(text) > limit:
+                    result.update(text_offset=offset, truncated=True)
             return result
 
-        neighbors = events[max(0, index - radius):index + radius + 1]
-        return {"session_id": session_id, "anchor": visible(anchor),
-                "counterpart": visible(events[positions[partner]]) if partner is not None else None,
+        if view == "conversation":
+            kinds = {"prompt", "reply", "boundary", "compaction"}
+            before = islice((p for p in range(index - 1, -1, -1) if events[p]["kind"] in kinds), radius)
+            after = islice((p for p in range(index + 1, len(events)) if events[p]["kind"] in kinds), radius)
+            neighbors = [*reversed(list(before)), *after]
+        else:
+            neighbors = list(range(max(0, index - radius), min(len(events), index + radius + 1)))
+        return {"session_id": session_id, "anchor": visible(index),
+                "counterpart": visible(positions[partner]) if partner is not None else None,
                 "link_status": ("matched" if partner is not None else
                                 "missing" if anchor["kind"] in ("call", "result") else "not_applicable"),
-                "neighbors": [visible(event) for event in neighbors
-                              if event["id"] not in (event_id, partner)],
+                "neighbors": [visible(p) for p in neighbors
+                              if events[p]["id"] not in (event_id, partner)],
                 "coverage": row["coverage"], "content": self.content, "audit_id": self.audit_id}
 
     def commits(self, commit: str, offset: int = 0, limit: int = 30,
