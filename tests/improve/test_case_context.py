@@ -86,3 +86,53 @@ def test_case_context_does_not_infer_repeats_or_compactions_from_clipped_evidenc
     assert "Compaction capture is unsupported for this evidence stream" in page
     assert "Clipped text" in page and "Source capture is incomplete" in page
     assert "Actual model context tokens are unknown" in page
+
+
+def test_inspect_links_interleaved_retry_and_its_result(tmp_path):
+    trace, _, _, _ = native_case(tmp_path)
+    prompt, call, result, _, _, _, boundary = [
+        json.loads(line) for line in trace.read_text().splitlines()
+    ]
+    records = [prompt]
+    for index, (tool, args, output, failed) in enumerate([
+        ("Edit", {"file_path": "sample.txt", "old_string": "old", "new_string": "new"},
+         "Read the target in this context before editing.", True),
+        ("Read", {"file_path": "sample.txt"}, "old", False),
+        ("Edit", {"file_path": "sample.txt", "old_string": "old", "new_string": "new"},
+         "Edit applied", False),
+    ]):
+        identifier = f"step-{index}"
+        records.extend([
+            {**call, "uuid": f"call-{index}", "message": {
+                **call["message"], "id": identifier, "content": [
+                    {"type": "tool_use", "id": identifier, "name": tool, "input": args}]}},
+            {**result, "uuid": f"result-{index}", "message": {
+                "role": "user", "content": [{"type": "tool_result", "tool_use_id": identifier,
+                                             "content": output, "is_error": failed}]}},
+        ])
+    trace.write_text("".join(json.dumps(row) + "\n" for row in [*records, boundary]))
+    session = read_session(trace, "claude_code")
+    page, _ = render_case(tmp_path, session)
+    section = page.split("Requests repeated after a tool error</h2>")[1].split("</section>")[0]
+    for index, label in [(1, "Edit"), (2, "Error"), (5, "Repeated request"), (6, "success")]:
+        assert f'<a href="#event-{index}">{label}</a>' in section
+    assert "#event-3" not in section
+
+
+def test_retry_requires_observed_failure_before_distinct_matching_call(tmp_path):
+    from agent_usage_tracker.improve.case_view import _repeated_after_error
+
+    _, _, _, session = native_case(tmp_path)
+    first, failure, retry, success = session["events"][1:5]
+    failure["status"] = "error"
+    for sequence in (
+        [first, retry, failure, success],
+        [first, dict(failure, status="unknown"), retry],
+        [first, failure, dict(retry, source_sha256="d" * 64)],
+        [first, failure, dict(retry, run_id="other")],
+        [first, failure, dict(retry, call_id=first["call_id"])],
+        [first, failure, dict(retry, truncated=True)],
+        [first, failure, dict(failure, id="duplicate"), retry],
+    ):
+        assert not _repeated_after_error(sequence)
+    assert _repeated_after_error([first, failure, retry]) == [(0, 1, 2, None)]

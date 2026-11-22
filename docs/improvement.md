@@ -87,6 +87,24 @@ Trace text stays in the private view, outside command output and the configured 
 Missing and clipped evidence stays visible. Inspection does not make a judgment eligible or verified.
 The original link opens the current file; the displayed evidence remains the immutable saved snapshot.
 
+### Turn a repeated request into a regression check
+
+Inspect the section **Requests repeated after a tool error**. Each row links the original call,
+its error, the next identical captured request and its result when available. Matching uses the
+tool name and request fingerprint within one run and attempt. Clipped requests and ambiguous
+call IDs are excluded. The JSON receipt includes the event IDs for the first 100 matches in `repeat_events`
+and the full count in `repeated_after_error`.
+
+For example, an edit guard can require a fresh file read. If an edit fails, the agent reads
+the file, and the identical edit succeeds, inspect the error and the intervening read.
+Test the change “read the target before the first edit when the guard requires it.”
+Use the same starting file and guard for both runs. Check the final file contents and count
+guard errors. Include a control where the agent already read the file to catch redundant reads.
+
+Use the case as discovery evidence. Freeze the acceptance check and controls in a
+[private study](improvement-studies.md) before applying a candidate to fresh work.
+A successful tool result alone cannot establish that the resulting edit was correct.
+
 ## Review with local models
 
 Install the existing label extra and cache the required weights separately:
