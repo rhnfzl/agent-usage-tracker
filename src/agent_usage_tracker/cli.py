@@ -320,6 +320,8 @@ def _build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="cmd", required=True)
     from .improve.cli import register
     register(sub)
+    from .improve.access_cli import register as register_evidence
+    register_evidence(sub)
     from .observation_cli import register as register_observations
     from .overview_cli import register as register_overview
     register_observations(sub)
@@ -462,6 +464,10 @@ def _dispatch(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None
     if args.cmd == "improve":
         from .improve.cli import run
         run(args)
+        return
+    if args.cmd == "evidence":
+        from .improve.access_cli import run as run_evidence
+        run_evidence(args)
         return
     if args.cmd == "observe":
         from .observation_cli import run as run_observation

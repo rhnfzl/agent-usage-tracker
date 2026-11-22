@@ -41,16 +41,38 @@ def prepare(store: Store, case_id: str, scope: Path, target: Path, before: str,
     if authority == "model_drafted_proposal" and len(after) - len(before) > 1200:
         raise AutError("improve: drafted replacement adds more than 1200 characters")
     candidate = original.replace(before, after, 1)
+    return save_change(store, case_id, scope, target, original, candidate, file_digest(target),
+                       before, after, authority=authority, extra=extra)
+
+
+def matches_file(path: Path, expected: str | None) -> bool:
+    if expected is not None:
+        return path.is_file() and file_digest(path) == expected
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return True
+    return False
+
+
+def save_change(store: Store, case_id: str, scope: Path, target: Path, original: str,
+                candidate: str, before_digest: str | None, before: str, after: str,
+                *, authority: str = AUTHORITIES[0], extra: dict[str, Any] | None = None) -> str:
     relative = target.relative_to(scope).as_posix()
-    patch = "".join(difflib.unified_diff(original.splitlines(keepends=True),
-                                       candidate.splitlines(keepends=True),
-                                       fromfile=f"a/{relative}", tofile=f"b/{relative}"))
+    lines = difflib.unified_diff(
+        original.splitlines(keepends=True), candidate.splitlines(keepends=True),
+        fromfile=f"a/{relative}" if before_digest is not None else "/dev/null",
+        tofile=f"b/{relative}",
+    )
+    patch = "".join(line if line.endswith("\n") else line + "\n\\ No newline at end of file\n"
+                    for line in lines)
     value: dict[str, Any] = {"version": 1, "case_id": case_id, "scope": str(scope),
-        "target": relative, "before_sha256": file_digest(target),
+        "target": relative, "before_sha256": before_digest,
         "after_sha256": hashlib.sha256(candidate.encode()).hexdigest(),
         "before": original, "after": candidate, "diff": patch,
         "span": {"before": before, "after": after}, "authority": authority, "state": "draft",
-        "rollback": "Restore the exact saved before content in an isolated candidate."}
+        "rollback": ("Restore the exact saved before content in an isolated candidate."
+                     if before_digest is not None else "Remove the added file from the candidate.")}
     if extra:
         if extra.keys() & (value.keys() - {"rollback"}):
             raise AutError("improve: proposal extra fields cannot replace its core fields")
@@ -71,14 +93,22 @@ def stage(store: Store, proposal_id: str, candidate_root: Path) -> Path:
             or target != root / relative or not source.is_relative_to(scope)
             or not target.is_relative_to(root)):
         raise AutError("improve: stage only inside an independent candidate directory")
-    if not source.is_file() or file_digest(source) != proposal["before_sha256"]:
+    expected = proposal["before_sha256"]
+    if expected is None and (root.is_relative_to(scope) or source != scope / relative):
+        raise AutError("improve: a new file needs an independent candidate and a direct path")
+    if not matches_file(source, expected):
         raise AutError("improve: proposal base changed; prepare a new proposal")
-    if target.exists() and file_digest(target) not in {
-            proposal["before_sha256"], proposal["after_sha256"]}:
+    if not matches_file(target, None) and not (
+            matches_file(target, expected) or matches_file(target, proposal["after_sha256"])):
         raise AutError("improve: candidate contains unrelated changes")
     target.parent.mkdir(parents=True, exist_ok=True)
-    mode = stat.S_IMODE(target.stat().st_mode if target.exists() else source.stat().st_mode)
-    atomic_write_text(target, proposal["after"], shared=True, newline="")
-    os.chmod(target, mode)
+    mode: int | None
+    if target.exists():
+        mode = stat.S_IMODE(target.stat().st_mode)
+    else:
+        mode = stat.S_IMODE(source.stat().st_mode) if expected is not None else None
+    atomic_write_text(target, proposal["after"], shared=mode is not None, newline="")
+    if mode is not None:
+        os.chmod(target, mode)
     store.append("proposal_staged", proposal_id=proposal_id, candidate=str(root))
     return target

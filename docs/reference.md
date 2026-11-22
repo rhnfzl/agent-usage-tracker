@@ -49,6 +49,10 @@ other command refuses it.
 | `aut label teach --task T --n N [--budget-usd X] [--days D]` | teacher (silver) labels for a stratified sample of up to N units (default spend cap 5 USD, window 90 days) | same, plus `claude` on `PATH` |
 | `aut label review [--task T] [--days D]` | answer gold labels one unit at a time on a local page | `pg_dsn` |
 | `aut improve label --rubric ID [--limit N]` | compare advisory judges with human labels on a token-protected local page; no model calls | eligible cases in the private store |
+| `aut evidence capture` | save a private session audit with available full text or redacted snapshots | local logs, no model or sink |
+| `aut evidence --audit ID [--content MODE] search\|session\|event\|compare` | investigate scoped sessions and return JSON | a private audit or `--bundle PATH` |
+| `aut evidence --audit ID export PATH SESSION_ID...` | share selected sessions in a private bundle | an audit or bundle |
+| `aut evidence --audit ID mcp [--transport stdio\|http]` | offer the evidence readers as tools to an MCP client | MCP extra, a selected audit or bundle |
 | `aut improve report-card [--days 28] [--format md\|html\|json]` | refresh qualifications, write private Markdown and HTML reports, and print the chosen format; no model or sink calls | private store and optional ledger timezone setting |
 | `aut improve draft [--max-groups 1] [--budget-usd 1] [--budget-s 360] [--mode auto\|failover\|round_robin] [--order codex,claude,cursor,pi] [--excerpts none\|all] [--target PATH] [--reconsider KEY] [--explain-model MODEL]` | draft recurring groups into private candidates for human review; no source edits or acceptance | safely isolated signed-in Pi 1.5.0, or cached MLX model; see [adapter limits](improvement.md#drafted-proposals) |
 | `aut label eval --task T [--days D]` | score every backend on your gold labels (saved scores are re-used) and print one table: quality, speed, memory | same as `run` |

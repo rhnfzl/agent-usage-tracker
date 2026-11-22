@@ -114,8 +114,14 @@ def test_audit_excludes_automated_bodies_but_keeps_interactive_evidence(tmp_path
     home = tmp_path / "home"
     folder = home / ".codex/sessions"
     folder.mkdir(parents=True)
-    for name, source in (("automated", {"subagent": "review"}), ("human", "cli")):
-        records = [{"type": "session_meta", "payload": {"id": name, "source": source}},
+    for name, source, thread_source in (
+        ("automated", {"subagent": "review"}, None),
+        ("delegated", "vscode", "subagent"),
+        ("human", "cli", "user"),
+    ):
+        records = [{"type": "session_meta", "payload": {
+            "id": name, "source": source, "thread_source": thread_source,
+        }},
                    {"type": "event_msg", "timestamp": "2001-09-09T01:46:40Z",
                     "payload": {"type": "user_message", "message": name}}]
         path = folder / f"rollout-{name}.jsonl"
@@ -125,7 +131,7 @@ def test_audit_excludes_automated_bodies_but_keeps_interactive_evidence(tmp_path
     monkeypatch.setattr(evidence, "redact", lambda text: seen.append(text) or text)
     store = Store(tmp_path / "private")
     result = audit(store, home, idle_s=0, since_epoch=0)
-    assert result["automated_sources"] == 1
+    assert result["automated_sources"] == 2
     assert result["sessions"] == 1
     assert seen == ["human"]
     assert store.get("sessions", store.keys("sessions")[0])["events"][0]["text"] == "human"

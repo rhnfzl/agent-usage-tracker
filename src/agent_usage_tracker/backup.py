@@ -66,7 +66,12 @@ def default_paths(cfg: Config) -> list[Path]:
 
 def default_excludes() -> list[str]:
     from .label.core import data_dir
-    return [str(data_dir() / "label" / "models")]      # model caches: GBs, downloaded again
+    root = Path(os.environ.get("AUT_IMPROVE_ROOT", str(data_dir() / "improve"))).expanduser()
+    return list(dict.fromkeys(map(str, (
+        data_dir() / "label" / "models",
+        data_dir() / "improve" / "session_content",
+        root.resolve() / "session_content",
+    ))))
 
 
 def _status_path() -> Path:

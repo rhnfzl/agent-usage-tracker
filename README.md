@@ -48,6 +48,8 @@ uvx agent-usage-tracker improve audit --days 7 --limit 30
 
 The [improvement guide](https://github.com/rhnfzl/agent-usage-tracker/blob/main/docs/improvement.md) covers private evidence, advisory judgments, drafts, and the review inbox. The [study guide](https://github.com/rhnfzl/agent-usage-tracker/blob/main/docs/improvement-studies.md) explains how to test a candidate. Source edits require an explicit decision. A passing check supports the tested change; measuring an improvement in real work requires comparable follow-up.
 
+You can also ask a coding agent to explore that evidence directly. Run `aut evidence capture` for a private full-text audit, then search and compare runs through the CLI or MCP. Choose what the client can read and link useful findings to a repair you can test. See the [agent evidence guide](docs/evidence.md).
+
 ## How I run AUT
 
 I run AUT on an Apple silicon Mac to track agent usage, classify work, and find recurring problems. AUT sends usage metadata to a self-hosted database. The local labeler combines that metadata with request and reply text on the Mac.
@@ -71,7 +73,7 @@ Claude Code, Codex, and Pi supply native token records. Cursor CLI supplies prom
 
 ## Privacy model
 
-Normal collection works from existing logs. If you configure a sink, it receives usage and activity metadata such as counts, project basenames, and commit IDs. Prompt text and tool output stay off that path. Optional remote drafting sends selected file text and review summaries after redaction. Conversation excerpts require separate opt-in. See the [privacy and network-call reference](https://github.com/rhnfzl/agent-usage-tracker/blob/main/docs/reference.md#privacy-model) and [drafting guide](https://github.com/rhnfzl/agent-usage-tracker/blob/main/docs/improvement.md#drafted-proposals).
+Normal collection works from existing logs. If you configure a sink, it receives usage and activity metadata such as counts, project basenames, and commit IDs. Prompt text and tool output stay off that path. Optional remote drafting sends selected file text and review summaries after redaction. Remote drafting requires a separate opt-in for conversation excerpts. Evidence access uses the content mode you choose for that connection or export. See the [privacy and network-call reference](https://github.com/rhnfzl/agent-usage-tracker/blob/main/docs/reference.md#privacy-model) and [drafting guide](https://github.com/rhnfzl/agent-usage-tracker/blob/main/docs/improvement.md#drafted-proposals).
 
 Usage is measured in tokens. Dollar estimates apply API list rates and are separate from subscription billing. AUT is a CLI with an optional self-hosted dashboard.
 

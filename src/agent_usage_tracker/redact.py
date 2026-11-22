@@ -36,9 +36,26 @@ PATTERNS = (
 )
 
 
+# Each listed regex needs at least one of these literals to match.
+_REQUIRED_LITERALS = {
+    "url_credentials": ("://",),
+    "assignment": ("=", ":"),
+    "json_credential": ('"',),
+    "jwt": ("eyJ",),
+    "sk_key": ("sk-",),
+    "github_pat": ("github_pat_",),
+    "github_token": ("gh",),
+    "slack_token": ("xox",),
+    "aws_key": ("AKIA", "ASIA"),
+    "email": ("@",),
+}
+
+
 def redact(text: str) -> str:
     """The redaction alone."""
-    for _, pattern, repl in PATTERNS:
+    for name, pattern, repl in PATTERNS:
+        if (literals := _REQUIRED_LITERALS.get(name)) and all(part not in text for part in literals):
+            continue
         text = pattern.sub(repl, text)
     return text
 
