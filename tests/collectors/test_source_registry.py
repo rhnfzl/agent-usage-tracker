@@ -205,9 +205,11 @@ def test_registered_codex_names_and_private_inspection_share_discovery(tmp_path)
 
     home, root = tmp_path / 'home', tmp_path / 'codex-profile'
     registry(home, sources=[source(root)])
-    _write_jsonl(root / 'sessions/rollout-native.jsonl', [_meta('native'), _tok(T(2)),
+    log = root / 'sessions/rollout-native.jsonl'
+    _write_jsonl(log, [_meta('native'), _tok(T(2)),
         {'type': 'event_msg', 'timestamp': T(3),
          'payload': {'type': 'user_message', 'message': 'Fix the parser'}}])
+    os.utime(log, (1_000_000_000, 1_000_000_000))
     _write_jsonl(root / 'session_index.jsonl', [{'id': 'native', 'thread_name': 'A title'}])
     assert codex.thread_names(home) == {'native': 'A title'}
     result = audit(Store(tmp_path / 'private'), home, idle_s=0, since_epoch=0)

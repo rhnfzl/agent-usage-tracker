@@ -38,7 +38,9 @@ def test_http_bounds_retry_partial_private(tmp_path):
     with receiver(tmp_path) as address:
         assert request(address, 'GET', '/health', auth=False)[0] == 200
         assert request(address, 'GET', '/v1/report', auth=False)[0] == 401
-        assert request(address, 'POST', '/v1/ingest', '{}', headers={'Authorization': 'Bearer wrong'})[0] == 401
+        assert request(address, 'POST', '/v1/ingest', headers={
+            'Authorization': 'Bearer wrong', 'Content-Length': '2',
+        }) == (401, {'error': 'unauthorized'})
         assert request(address, 'POST', '/v1/ingest', '{')[0] == 400
         assert request(address, 'POST', '/v1/ingest', '', headers={'Content-Length': str(8*1024*1024+1)})[0] == 413
         row = dict(version=1, kind='tool', id='a', timestamp='2026-01-01T00:00:00Z', status='error')
@@ -60,5 +62,14 @@ def test_otlp_and_rejected_framing(tmp_path):
     with receiver(tmp_path) as address:
         body = json.dumps(dict(format='otlp', source='otlp', stream='metrics', role='primary', payload={}))
         assert request(address, 'POST', '/v1/ingest', body)[0] == 200
-        assert request(address, 'POST', '/v1/ingest', body, headers={'Content-Type': 'text/plain'})[0] == 415
-        assert request(address, 'POST', '/v1/ingest', body, headers={'Transfer-Encoding': 'chunked'})[0] == 400
+        # Header rejection must reply without waiting for or accepting body bytes.
+        length = str(len(body.encode()))
+        assert request(address, 'POST', '/v1/ingest', headers={
+            'Content-Type': 'text/plain', 'Content-Length': length,
+        }) == (415, {'error': 'expected application/json'})
+        assert request(address, 'POST', '/v1/ingest', headers={
+            'Transfer-Encoding': 'chunked',
+        }) == (400, {'error': 'invalid framing'})
+        assert request(address, 'POST', '/v1/ingest', headers={
+            'Transfer-Encoding': 'chunked', 'Content-Length': length,
+        }) == (400, {'error': 'invalid framing'})

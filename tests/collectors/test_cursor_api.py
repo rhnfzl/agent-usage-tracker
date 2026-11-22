@@ -115,11 +115,13 @@ def test_cursor_api(monkeypatch) -> None:
 
 def test_cursor_cookie_not_sent_through_a_redirect(monkeypatch) -> None:
     from agent_usage_tracker.collectors import cursor_api
-    seen: list[tuple[str, str | None]] = []
+    seen: list[tuple[str, str | None, bytes]] = []
 
     class Handler(http.server.BaseHTTPRequestHandler):
         def _answer(self) -> None:
-            seen.append((self.path, self.headers.get("Cookie")))
+            # Drain the POST body before replying so a socket close cannot discard unread data.
+            body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
+            seen.append((self.path, self.headers.get("Cookie"), body))
             self.send_response(302 if self.path.endswith("get-me") else 200)
             self.send_header("Location", f"http://127.0.0.1:{self.server.server_port}/elsewhere")
             self.send_header("Content-Length", "2")
@@ -143,7 +145,7 @@ def test_cursor_cookie_not_sent_through_a_redirect(monkeypatch) -> None:
     finally:
         srv.shutdown()
         srv.server_close()
-    assert [p for p, _c in seen] == ["/get-me"], seen      # the cookie never reached /elsewhere
+    assert seen == [("/get-me", "secret-cookie", b"{}")]  # The redirect target received no request.
 
 
 def test_cursor_api_token_gone_is_unavailable_not_silent() -> None:
