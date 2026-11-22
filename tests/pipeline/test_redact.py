@@ -68,3 +68,25 @@ def test_json_credential_redaction_leaves_other_values_intact() -> None:
     assert json.loads(clean_text(json.dumps(message))) == {
         "headers": {"Authorization": "[redacted]", "Cookie": "[redacted]"},
         "body": {"apiKey": "[redacted]", "title": "keep"}}
+
+
+def test_literal_free_text_skips_regexes_that_cannot_match(monkeypatch) -> None:
+    from agent_usage_tracker import redact as policy
+
+    visited = []
+
+    class Traced:
+        def __init__(self, name, pattern):
+            self.name, self.pattern = name, pattern
+
+        def sub(self, replacement, text):
+            visited.append(self.name)
+            return self.pattern.sub(replacement, text)
+
+    monkeypatch.setattr(policy, "PATTERNS", tuple(
+        (name, Traced(name, pattern), replacement)
+        for name, pattern, replacement in PATTERNS
+    ))
+    assert policy.redact("ordinary cache output") == "ordinary cache output"
+    assert not {"email", "url_credentials", "assignment", "jwt", "github_pat"} & set(visited)
+    assert policy.redact("a.b@example.test token:secret") == "[redacted] token:[redacted]"
