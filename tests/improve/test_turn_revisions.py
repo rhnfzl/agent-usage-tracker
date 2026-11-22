@@ -1,7 +1,12 @@
 import json
+import os
 import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
+from hashlib import sha256
+from types import SimpleNamespace
+
+import pytest
 
 from agent_usage_tracker.improve.access import Evidence
 from agent_usage_tracker.improve.evidence import read_session
@@ -10,7 +15,7 @@ from agent_usage_tracker.improve.judge import freeze_case
 from agent_usage_tracker.improve.store import Store, audit
 from agent_usage_tracker.improve.study_independence import ReservedEvidence
 from agent_usage_tracker.improve.study_observe import _sample, baseline_gate
-from agent_usage_tracker.improve.turn_revisions import RECORD_KIND, lookup, record_hook
+from agent_usage_tracker.improve.turn_revisions import RECORD_KIND, _file_digest, lookup, record_hook
 
 
 def git(repo, *args):
@@ -133,8 +138,6 @@ def test_hook_skips_other_projects_and_unrecognized_inputs(tmp_path):
 
 
 def test_hook_checks_literal_scoped_paths_and_keeps_unavailable_files_unknown(tmp_path):
-    from hashlib import sha256
-
     project, root = tmp_path / "project", tmp_path / "private"
     scope = project / "subproject"
     scope.mkdir(parents=True)
@@ -149,6 +152,34 @@ def test_hook_checks_literal_scoped_paths_and_keeps_unavailable_files_unknown(tm
     files = lookup(Store(root, read_only=True), "session", "files")["setup_files"]
     assert files == {path_fingerprint(scope.resolve() / "present"): sha256(b"correct\r\n").hexdigest(),
                      path_fingerprint(scope.resolve() / "missing"): None}
+
+
+@pytest.mark.parametrize("changes_during_read", [False, True])
+def test_setup_digest_compares_change_timestamps_from_the_same_api(tmp_path, monkeypatch,
+                                                                   changes_during_read):
+    target = tmp_path / "setup"
+    contents = b"setup instructions\r\n"
+    target.write_bytes(contents)
+    fstat = os.fstat
+    calls = 0
+
+    def handle_stat(fd):
+        nonlocal calls
+        calls += 1
+        result = fstat(fd)
+        # On affected Windows builds, path and handle APIs return different ctimes.
+        return SimpleNamespace(st_mode=result.st_mode, st_size=result.st_size,
+                               st_ino=result.st_ino, st_dev=result.st_dev,
+                               st_mtime_ns=result.st_mtime_ns,
+                               st_ctime_ns=result.st_ctime_ns + 100
+                               + (calls if changes_during_read else 0))
+
+    monkeypatch.setattr(os, "fstat", handle_stat)
+    if changes_during_read:
+        with pytest.raises(ValueError, match="changed while reading"):
+            _file_digest(tmp_path.resolve(), (target.name,))
+    else:
+        assert _file_digest(tmp_path.resolve(), (target.name,)) == sha256(contents).hexdigest()
 
 
 def test_turn_revision_rejects_late_mismatched_and_ambiguous_receipts(tmp_path):
