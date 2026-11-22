@@ -36,6 +36,7 @@ merge = ["torch>=2.14", "peft>=0.21", "transformers>=5.17", "huggingface_hub>=1.
 
 # The evidence CLI runs without the optional MCP server.
 mcp = ["mcp>=1.30,<2"]
+code = ["pydantic-monty>=1.6,<1.7"]
 
 # Run the suite: pip install -e '.[test]' && pytest -q
 test = ["pytest", "pytest-xdist==3.8.0"]
@@ -89,5 +90,5 @@ disallow_any_generics = true
 # Optional extras: the base install, and CI's lint job, have none of them.
 [[tool.mypy.overrides]]
 module = ["psycopg.*", "mlx.*", "mlx_lm.*", "huggingface_hub.*", "transformers.*", "torch.*", "peft.*",
-          "mcp.*", "anyio.*", "uvicorn.*", "starlette.*"]
+          "mcp.*", "anyio.*", "uvicorn.*", "starlette.*", "pydantic_monty.*"]
 ignore_missing_imports = true

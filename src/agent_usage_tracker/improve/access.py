@@ -475,7 +475,7 @@ class Evidence:
                                   agent, before, include_excluded, cursor, limit, self._label,
                                   supplemental=self.supplemental)
 
-    def export(self, path: Path, ids: list[str]) -> dict[str, Any]:
+    def bundle_bytes(self, ids: list[str]) -> tuple[str, bytes]:
         if not ids or len(set(ids)) != len(ids):
             raise AutError("evidence: select distinct session IDs for export")
         sessions = {}
@@ -496,9 +496,14 @@ class Evidence:
             sessions[key] = projected
         payload = {"version": 1, "audit_id": self.audit_id, "content": self.content,
                    "coverage": _coverage(self.coverage), "sessions": sessions}
-        data = (canonical({"sha256": digest(payload), "evidence": payload}) + "\n").encode("utf-8")
+        identity = digest(payload)
+        data = (canonical({"sha256": identity, "evidence": payload}) + "\n").encode("utf-8")
         if len(data) > BUNDLE_LIMIT:
             raise AutError("evidence: select fewer sessions for the 64 MiB bundle limit")
+        return identity, data
+
+    def export(self, path: Path, ids: list[str]) -> dict[str, Any]:
+        _, data = self.bundle_bytes(ids)
         _create_bundle(path, data)
         return {"path": str(path), "sessions": len(ids), "content": self.content}
 
