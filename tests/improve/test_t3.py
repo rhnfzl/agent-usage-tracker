@@ -553,3 +553,48 @@ def test_t3_work_preview_names_projection_gaps_without_revealing_payload(tmp_pat
     assert row['reason'] == 'measurement_coverage_incomplete'
     assert row['projection_gaps'] == {'system_notice': 1, 'web_search': 1, 'unsupported_item': 1}
     assert 'private' not in json.dumps(row) and 'custom_fixture_secret_type' not in json.dumps(row)
+
+
+def test_t3_item_cap_only_excludes_runs_with_omitted_items(tmp_path, monkeypatch):
+    from agent_usage_tracker.improve import t3
+
+    home = tmp_path / 'home'
+    db, _ = fixture_db(home)
+    with db:
+        add_run(db, 'older', ordinal=1)
+        add_run(db, 'newer', ordinal=2)
+        db.execute("UPDATE orchestration_v2_projection_turn_items SET updated_at=? WHERE run_id='newer'",
+                   ('2026-01-01T10:00:11Z',))
+    db.close()
+    # Each metadata table fits. The item limit retains both items from the newer run.
+    monkeypatch.setattr(t3, 'MAX_ROWS', 2)
+
+    store, result, (session,) = capture(tmp_path, home)
+    coverage = session['coverage']
+    assert coverage['byte_cap_reached'] and not coverage['complete']
+    assert coverage['run_coverage']['older']['source_incomplete']
+    assert coverage['run_coverage']['older']['projection_gaps'] == {'items_omitted': 2}
+    assert not coverage['run_coverage']['newer']['source_incomplete']
+    snapshot = store.get('audits', result['audit_id'])['session_ids'][0]
+    boundary = next(e for e in session['events'] if e['run_id'] == 'newer' and e['kind'] == 'boundary')
+    case = freeze_case(store, result['audit_id'], snapshot, boundary['id'])
+    assert _sample(store, case)['tool_events_complete']
+
+
+def test_t3_metadata_cap_keeps_run_incomplete_when_item_scope_is_unverified(tmp_path, monkeypatch):
+    from agent_usage_tracker.improve import t3
+
+    home = tmp_path / 'home'
+    db, _ = fixture_db(home)
+    with db:
+        add_run(db, 'a-older', ordinal=1)
+        add_run(db, 'z-newer', ordinal=2)
+        db.execute("UPDATE orchestration_v2_projection_turn_items SET updated_at=? WHERE run_id='z-newer'",
+                   ('2026-01-01T10:00:11Z',))
+    db.close()
+    monkeypatch.setattr(t3, 'MAX_ROWS', 1)
+
+    _, _, (session,) = capture(tmp_path, home)
+    run = session['coverage']['run_coverage']['a-older']
+    assert run['source_incomplete']
+    assert run['projection_gaps'] == {'metadata_omitted': 1}

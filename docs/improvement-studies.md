@@ -197,6 +197,8 @@ Review the task family before freezing a case. The preview reports distinct sess
 exclusions for each page. Add `--include-excluded` to see individual reasons.
 For incomplete T3 captures, the preview reports available projection gap counts by item kind.
 The counts identify missing evidence without exposing the item payloads.
+If the item capture limit omits rows, AUT reports how many belong to each affected run.
+Other runs can still qualify when their tool evidence is complete.
 Follow `next_cursor` to continue the scan. Use `--before` with a timezone to exclude later work.
 The study checks source reuse, project and model compatibility, and any required setup evidence.
 

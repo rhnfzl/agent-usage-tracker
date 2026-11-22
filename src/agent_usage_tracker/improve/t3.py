@@ -35,7 +35,8 @@ _UNSUPPORTED_GAP_KINDS = {
     "system_notice", "todo_list", "user_input_request", "web_search",
 }
 _PROJECTION_GAP_KINDS = _UNSUPPORTED_GAP_KINDS | {
-    "prompt_context", "no_items", "unfinished_tool", "streaming_reply", "unsupported_item",
+    "prompt_context", "no_items", "items_omitted", "metadata_omitted",
+    "unfinished_tool", "streaming_reply", "unsupported_item",
 }
 
 
@@ -285,9 +286,21 @@ def _thread(db: sqlite3.Connection, path: Path, thread: str, cwd: str, since: fl
     providers = records('orchestration_v2_projection_provider_threads',
                         'provider_thread_id,provider', 'provider_thread_id',
                         f'AND provider_thread_id IN ({recent_providers})', (thread, cutoff))
+    metadata_capped = bool(coverage['byte_cap_reached'])
+    item_filter = f"run_id IN ({recent}) AND type<>'reasoning'"
     items = records('orchestration_v2_projection_turn_items',
                     'turn_item_id,run_id,type,status,updated_at', 'updated_at DESC,ordinal DESC',
-                    f'AND run_id IN ({recent}) AND type<>\'reasoning\'', (thread, cutoff))
+                    f'AND {item_filter}', (thread, cutoff))
+    items_by_run: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for item in items:
+        items_by_run[item['columns'][1]].append(item)
+
+    expected_items = {}
+    if coverage['byte_cap_reached'] and not metadata_capped:
+        # Count only metadata from the same snapshot and scope as the captured item rows.
+        expected_items = dict(db.execute(
+            "SELECT run_id,count(*) FROM orchestration_v2_projection_turn_items "
+            f"WHERE thread_id=? AND {item_filter} GROUP BY run_id", (thread, thread, cutoff)))
     provider_map = {r['key']: r['value'] for r in providers}
     human = {r['key']: r for r in messages if r['columns'][2] == 'user'
              and r['value'].get('createdBy') == 'user'
@@ -352,13 +365,18 @@ def _thread(db: sqlite3.Connection, path: Path, thread: str, cwd: str, since: fl
                      message['columns'][3], key, provider)
                 if message['value'].get('attachments') or message['value'].get('context'):
                     gaps["prompt_context"] += 1
-        run_items = [item for item in items if item['columns'][1] == key]
+        run_items = items_by_run[key]
         if provider == 'codex' and status == 'completed' and (native_id := _strong_codex_id(ref)):
             native_items = {native_item_key(native_item) for item in run_items
                             if (native_item := _strong_codex_id(item['value'].get('nativeItemRef')))}
             if len(native_items) >= 2:
                 native_runs[key] = {'session_id': native_id, 'items': sorted(native_items)}
-        if not run_items:
+        omitted = expected_items.get(key, len(run_items)) - len(run_items)
+        if metadata_capped:
+            gaps["metadata_omitted"] += 1
+        elif omitted:
+            gaps["items_omitted"] += omitted
+        elif not run_items:
             gaps["no_items"] += 1
         for item in run_items:
             value = item['value']
@@ -419,7 +437,7 @@ def _thread(db: sqlite3.Connection, path: Path, thread: str, cwd: str, since: fl
         else:
             coverage['incomplete_runs'] += 1
         coverage['projection_gaps'] += sum(gaps.values())
-        run_coverage[key] = {'source_incomplete': bool(coverage['byte_cap_reached']) or any(
+        run_coverage[key] = {'source_incomplete': metadata_capped or any(
             coverage[name] > before[name] for name in (
                 'projection_gaps', 'incomplete_runs', 'missing_timestamps')),
                 'missing_timestamps': coverage['missing_timestamps'] - before['missing_timestamps'],
