@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections import Counter
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -18,6 +18,7 @@ from ..redact import redact
 from ..state import parse_record
 from .file_reads import capture_file_read
 from .setup_git import COMMIT_ID
+from .turn_revisions import match as match_turn_revision
 
 TEXT_LIMIT = 6000
 BYTE_LIMIT = 16 * 1024 * 1024
@@ -171,7 +172,9 @@ def read_session(path: Path, agent: str, max_bytes: int = BYTE_LIMIT,
                  imports: dict[str, datetime] | None = None, *,
                  exclude_automated: bool = False, recent: bool = False,
                  capture_full: bool = False, track_workspaces: bool = False,
-                 track_native_items: bool = False) -> dict[str, Any] | None:
+                 track_native_items: bool = False,
+                 turn_revision: Callable[[str, str], dict[str, Any]] | None = None
+                 ) -> dict[str, Any] | None:
     if agent not in {"claude_code", "codex", "pi"} or max_bytes < 1:
         raise ValueError("choose a supported trace source and a positive byte limit")
     events: list[dict[str, Any]] = []
@@ -188,6 +191,8 @@ def read_session(path: Path, agent: str, max_bytes: int = BYTE_LIMIT,
     recorded_context: dict[str, Any] | None = None
     session_start_revision: str | None = None
     turn_start_revision: str | None = None
+    turn_started_at: datetime | None = None
+    first_work_at: datetime | None = None
     seen_native_turns: set[str] = set()
     model_calls: _CodexModelCalls | None = None
     item_turns: dict[str, set[str]] = {}
@@ -274,6 +279,7 @@ def read_session(path: Path, agent: str, max_bytes: int = BYTE_LIMIT,
         if record is None:
             counts["malformed_records"] += 1
             session_start_revision = turn_start_revision = None
+            turn_started_at = None
             continue
         kind = record.get("type")
         if track_workspaces:
@@ -352,6 +358,7 @@ def read_session(path: Path, agent: str, max_bytes: int = BYTE_LIMIT,
                     copied_until = ordinal if isinstance(ordinal, int) else 0
             elif kind == "session_meta":
                 session_start_revision = turn_start_revision = None
+                turn_started_at = None
             if unknown_copy_boundary or (line < 0 and copied_until):
                 counts["unknown_copy_boundary"] += 1
                 model_calls = None
@@ -365,12 +372,24 @@ def read_session(path: Path, agent: str, max_bytes: int = BYTE_LIMIT,
                 counts["imported_records"] += 1
                 model_calls = None
                 session_start_revision = turn_start_revision = None
+                turn_started_at = None
                 continue
             if kind not in {"session_meta", "turn_context"} and not in_window(record):
                 model_calls = None
                 session_start_revision = turn_start_revision = None
+                turn_started_at = None
                 continue
             sub = payload.get("type")
+            if turn_revision and active_turn and turn_started_at and first_work_at is None:
+                if (kind == "response_item" and (sub in _CODEX_MODEL_CALLS
+                        or sub in _CODEX_UNCOUNTED_RESPONSE_TOOLS
+                        or sub == "message" and payload.get("role") == "assistant")
+                        or kind == "event_msg" and (sub in {"agent_message", "exec_command_end"}
+                        or sub == "item_completed" and dict_or_empty(payload.get("item")).get("type")
+                        in {"AssistantMessage", "CommandExecution", *_CODEX_UNCOUNTED_COMPLETED_ITEMS})):
+                    first_work_at = parse_ts(record.get("timestamp"))
+                    if first_work_at is None or first_work_at.tzinfo is None:
+                        turn_started_at = None
             if track_native_items and active_turn_key:
                 item_id = None
                 if kind == "event_msg" and sub == "item_completed":
@@ -430,9 +449,11 @@ def read_session(path: Path, agent: str, max_bytes: int = BYTE_LIMIT,
                     turn_start_revision = session_start_revision if active_turn and started and started.tzinfo else None
                     session_start_revision = None
                     model_calls = None
+                    turn_started_at = first_work_at = None
                     if (origin == "interactive" and active_turn and started and started.tzinfo
                             and active_turn not in seen_native_turns):
                         model_calls = _CodexModelCalls(started)
+                        turn_started_at = started
                     if active_turn:
                         seen_native_turns.add(active_turn)
                 elif sub == "user_message":
@@ -453,6 +474,18 @@ def read_session(path: Path, agent: str, max_bytes: int = BYTE_LIMIT,
                             and completed_context.get("cwd") == cwd):
                         completed_context = {**completed_context,
                                              "session_start_revision": turn_start_revision}
+                    if (last_closed and origin == "interactive" and turn_revision and turn_started_at
+                            and active_turn and completed_context and completed_context["status"] == "observed"):
+                        saved = turn_revision(session, active_turn)
+                        end = parse_ts(record.get("timestamp"))
+                        if end and end.tzinfo and first_work_at:
+                            end = min(first_work_at, end)
+                        if saved.get("conflict"):
+                            completed_context.pop("session_start_revision", None)
+                        elif revision := match_turn_revision(
+                            saved, completed_context["cwd"], turn_started_at, end,
+                        ):
+                            completed_context["turn_start_revision"] = revision
                     receipt = (model_calls.receipt(record.get("timestamp"))
                                if model_calls is not None and last_closed and completed_context
                                and completed_context["status"] == "observed" else None)
@@ -461,6 +494,7 @@ def read_session(path: Path, agent: str, max_bytes: int = BYTE_LIMIT,
                     active_turn, active_turn_key, recorded_context = None, None, None
                     model_calls = None
                     session_start_revision = turn_start_revision = None
+                    turn_started_at = first_work_at = None
                 elif sub == "item_completed" and item.get("type") == "CommandExecution":
                     identity = item.get("id") or f"command-{line}"
                     emit("call", item.get("command", ""), line, record,

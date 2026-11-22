@@ -21,6 +21,7 @@ from .judge import _attempt_coverage, _complete_attempt
 from .setup_git import COMMIT_ID, target_in_workspace, verify_setup
 from .store import Store, repository
 from .study_independence import ReservedEvidence, attempt_fingerprint, reserved_evidence, source_identities
+from .turn_revisions import details as turn_revision_details
 
 METRICS = ("tool_errors", "tool_calls", "codex_model_calls")
 COVERAGE_BASES = ("full_case", "tool_events")
@@ -107,6 +108,10 @@ def _sample_attempt(session: dict[str, Any], case: dict[str, Any],
             or any(coverage.get(gap) for gap in ("malformed_records", "missing_timestamps",
                        "divergent_copy", "source_incomplete", "unknown_copy_boundary"))):
         model_calls, model_started = None, None
+    setup_revision = None
+    if context and context_status == "observed":
+        observed = turn_revision_details(context.get("turn_start_revision"))
+        setup_revision = observed["commit"] if observed else context.get("session_start_revision")
     return {
         "context_status": context_status,
         "identity": (session["agent"], session.get("session_id")),
@@ -114,8 +119,7 @@ def _sample_attempt(session: dict[str, Any], case: dict[str, Any],
         "content": attempt_fingerprint(events),
         "cwd": context.get("cwd") if context else session.get("cwd"),
         "model": context.get("model") if context else session.get("model"),
-        "setup_revision": context.get("session_start_revision")
-        if context and context_status == "observed" else None,
+        "setup_revision": setup_revision,
         "read_origin": _read_origin(session, case["session_snapshot"], events[-1], context, turn)
         if context and context_status == "observed" and turn else None,
         "started": min(times) if times else None, "ended": max(times) if times else None,

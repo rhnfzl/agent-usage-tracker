@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -29,6 +30,8 @@ def register(commands: Any) -> None:
     capture.add_argument("--limit", type=int, default=20)
     capture.add_argument("--idle-s", type=int, default=120)
     capture.add_argument("--project", type=Path)
+    record = actions.add_parser("record-codex-turn", help="record Git context from a Codex prompt hook")
+    record.add_argument("--project", type=Path, required=True)
 
     actions.add_parser("describe", help="report the evidence scope and coverage")
     search = actions.add_parser("search", help="filter captured events and return matching references")
@@ -88,6 +91,13 @@ def register(commands: Any) -> None:
 def run(args: argparse.Namespace) -> None:
     root = args.root or Path(os.environ.get("AUT_IMPROVE_ROOT", str(data_dir() / "improve")))
     action = args.evidence_cmd
+    if action == "record-codex-turn":
+        if args.audit or args.bundle:
+            raise AutError("evidence: the Codex turn hook uses a store, not an audit or bundle")
+        from .turn_revisions import HOOK_INPUT_LIMIT, record_hook
+
+        record_hook(root, args.project, sys.stdin.buffer.read(HOOK_INPUT_LIMIT + 1))
+        return
     if action == "capture":
         if args.audit or args.bundle or args.content == "metadata":
             raise AutError("evidence: capture takes no scope and requires full or redacted content")

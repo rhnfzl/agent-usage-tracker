@@ -690,7 +690,7 @@ def test_strict_observation_checks_adoption_and_session_setup_revisions(tmp_path
         cwd = str(source)
         rows = [
             ("session_meta", {"id": name, "source": "cli", "cwd": cwd,
-                              "git": {"commit_hash": revision}}),
+                              **({"git": {"commit_hash": revision}} if read_mode != "mirrored" else {})}),
             ("event_msg", {"type": "task_started", "turn_id": name}),
             ("turn_context", {"turn_id": name, "model": "one", "cwd": cwd}),
             ("event_msg", {"type": "item_completed", "item": {"type": "UserMessage",
@@ -707,7 +707,15 @@ def test_strict_observation_checks_adoption_and_session_setup_revisions(tmp_path
         path = tmp_path / (name + ".jsonl")
         path.write_text("".join(json.dumps({"type": kind, "payload": payload, "timestamp": stamp})
                                 + "\n" for kind, payload in rows))
-        row = read_session(path, "codex", track_native_items=read_mode == "mirrored")
+        def lookup_revision(session, turn):
+            from agent_usage_tracker.improve.file_reads import path_fingerprint
+
+            assert session == turn == name
+            return {"workspace_sha256": path_fingerprint(source), "commit": revision,
+                    "recorded_at": stamp}
+
+        row = read_session(path, "codex", track_native_items=read_mode == "mirrored",
+                           turn_revision=lookup_revision if read_mode == "mirrored" else None)
         if read_mode == "mirrored":
             native = store.put("sessions", row)
             app = {
@@ -722,6 +730,7 @@ def test_strict_observation_checks_adoption_and_session_setup_revisions(tmp_path
                 for key in ("native_turn_key", "turn_context", "native_file_read"):
                     event.pop(key, None)
             assert link_native_context(app, {native: row}, set()) == 1
+            assert app["events"][-1]["turn_context"]["turn_start_revision"]["commit"] == revision
             row = app
         snapshot = store.put("sessions", row)
         audit = store.put("audits", {"session_ids": [snapshot]})

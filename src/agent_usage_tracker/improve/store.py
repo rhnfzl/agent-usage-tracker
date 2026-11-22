@@ -11,7 +11,7 @@ import subprocess
 import time
 from collections import Counter
 from datetime import datetime, timezone
-from functools import lru_cache
+from functools import lru_cache, partial
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +22,7 @@ from ..git_safe import git_argv, git_env
 from ..state import _locked, atomic_write_text
 from .evidence import read_session
 from . import cursor_evidence, t3
+from .turn_revisions import RECORD_KIND, lookup as lookup_turn_revision
 
 
 def canonical(value: Any) -> str:
@@ -174,6 +175,7 @@ def audit(store: Store, home: Path, *, days: int = 7, limit: int = 40,
                 counts["unreadable_sources"] += 1
     sessions: list[str] = []
     imports = codex.imported_until(home)
+    turn_revision = partial(lookup_turn_revision, store) if (store.root / RECORD_KIND).is_dir() else None
     seen: set[tuple[str, str]] = set()
     identities: dict[tuple[str, str], str] = {}
     copies: dict[tuple[str, str], list[str]] = {}
@@ -213,7 +215,8 @@ def audit(store: Store, home: Path, *, days: int = 7, limit: int = 40,
                 evidence = read_session(candidate, agent, max_bytes=max_bytes, since_epoch=since,
                                         imports=imports, exclude_automated=True, recent=True,
                                         capture_full=capture_full, track_workspaces=project is not None,
-                                        track_native_items=agent == "codex" and bool(mirrors))
+                                        track_native_items=agent == "codex" and bool(mirrors),
+                                        turn_revision=turn_revision)
         except (OSError, ValueError, TypeError, OverflowError, sqlite3.DatabaseError, AutError):
             counts["unreadable_sources"] += 1
             continue

@@ -288,9 +288,37 @@ For a new file, the baseline revision must show that the path is absent.
 Git objects must be available locally. Missing revisions and different contents exclude the pair.
 
 AUT can use a native Codex session header for the first observed turn in the same workspace.
-Later turns need their own revision evidence. Fetch or create a new capture when a source
-or local Git object is missing. The report counts verified revisions separately from evidence
-that the agent loaded the file or that the working copy matched its commit.
+To measure later turns, opt in to recording a Git revision at prompt submission. Add a command
+handler to Codex's `UserPromptSubmit` hooks, then review and trust it in Codex. Use absolute
+paths for `aut`, the store, and the project. Use the same store for the hook and the evidence
+capture. [Codex hook configuration](https://learn.chatgpt.com/docs/hooks#review-and-trust-hooks)
+
+```json
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/path/to/aut evidence --root /path/to/private-store record-codex-turn --project /path/to/repo",
+            "timeout": 12
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+The hook records the Git revision, time, and workspace fingerprint for that native turn.
+It works from the project and its linked Git worktrees. The capture checks the session, turn,
+workspace, and timing before attaching the receipt to a completed attempt. You can inspect it
+on the boundary event with full or redacted access. T3 can use the receipt when its run matches
+the native Codex turn. Earlier attempts keep the evidence available when they were captured.
+
+A verified revision describes the committed file. Check the separate read evidence
+when the study also needs to establish what the agent received.
 
 Set `require_approved_file_read: true` with `require_turn_context: true` to require evidence
 that the candidate received the approved file contents. AUT recognizes a successful native

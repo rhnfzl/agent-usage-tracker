@@ -19,6 +19,7 @@ from .evidence import event_links
 from .ranked_search import RankedSearch
 from .setup_git import COMMIT_ID
 from .store import Store, canonical, digest
+from .turn_revisions import details as turn_revision_details
 
 MODES = ("metadata", "redacted", "full")
 BUNDLE_LIMIT = 64 * 1024 * 1024
@@ -147,6 +148,8 @@ class Evidence:
                     revision = context.get("session_start_revision")
                     if isinstance(revision, str) and COMMIT_ID.fullmatch(revision):
                         visible["session_start_revision"] = revision
+                    if turn_revision := turn_revision_details(context.get("turn_start_revision")):
+                        visible["turn_start_revision"] = turn_revision
             result["turn_context"] = visible
         if self.content != "metadata":
             result.update({field: self._label(event[field]) for field in EVENT_LABELS
