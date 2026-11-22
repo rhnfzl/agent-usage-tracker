@@ -228,8 +228,11 @@ def run(args: argparse.Namespace) -> None:
         result = {"records": {kind: len(store.keys(kind)) for kind in kinds},
                   "private": True, "human_verified": False}
     print(json.dumps(result, sort_keys=True))
-    if args.improve_cmd == "replay" and args.execute and result["status"] != "completed":
-        raise AutError(f"replay: {result['status']}; see the saved receipt")
+    if args.improve_cmd == "replay" and args.execute:
+        if result["status"] != "completed":
+            raise AutError(f"replay: {result['status']}; see the saved receipt")
+        if result.get("result_matches_expected") is False:
+            raise AutError("replay: result differs from the frozen expectation; see the saved receipt")
     if result.get("status") == "stale":
         raise AutError(result["message"])
     if args.improve_cmd in {"run", "diagnose", "audit"} \

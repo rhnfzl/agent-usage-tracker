@@ -516,3 +516,23 @@ def test_t3_context_gaps_do_not_pass_judge_completeness(tmp_path, kind):
     assert rows
     assert not any(row['coverage']['complete'] for row in rows)
     db.close()
+
+
+def test_t3_structured_command_exit_precedes_stdout(tmp_path):
+    home = tmp_path / 'home'
+    db, _ = fixture_db(home)
+    with db:
+        add_run(db)
+        item(db, 'r1', 'nonzero', 'command_execution', 3,
+             input='check', output='Normal output', exitCode=7)
+        item(db, 'r1', 'zero', 'command_execution', 4,
+             input='check', output='Process exited with code 7', exitCode=0)
+        item(db, 'r1', 'cancelled', 'command_execution', 5,
+             input='check', output='Partial output', status='cancelled', exitCode=0)
+        item(db, 'r1', 'app-error', 'error', 6, failure='Tool execution failed')
+    db.close()
+
+    _, _, sessions = capture(tmp_path, home)
+    outcomes = {e['record_id']: e['status'] for e in sessions[0]['events'] if e['kind'] == 'result'}
+    assert outcomes == {'cmdr1': 'error', 'nonzero': 'error', 'zero': 'success',
+                        'cancelled': 'unknown', 'app-error': 'error'}

@@ -141,7 +141,9 @@ aut evidence --audit AUDIT_ID retries --tool Edit --minimum-sessions 1
 ```
 
 The query groups retries by agent and tool. It counts occurrences and distinct source sessions.
-The default requires two distinct source sessions. Duplicate incidents in snapshots count once.
+The default requires two distinct source sessions. Duplicate incidents in snapshots count once. An observed result takes precedence over a missing
+one. If snapshots show conflicting observed outcomes, the query excludes that incident and
+increments `conflicting_incidents`.
 Divergent snapshots and linked supplemental sources do not contribute to the counts.
 The result shows identical and changed-argument match counts and the observed result statuses.
 A group can contain several causes. Use its example event IDs to inspect the original failure

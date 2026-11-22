@@ -226,7 +226,8 @@ Select comparable task families yourself, then freeze the cases you want to use.
 }
 ```
 
-Use `tool_errors` or `tool_calls`. The threshold is a mean reduction per eligible pair. Record the
+Use `tool_errors`, `tool_calls`, or `identical_tool_retries`. The threshold is a mean reduction per
+eligible pair. Record the
 adoption with `aut improve adopt`. Then capture fresh ordinary work and pair attempts with the
 same task family and matching recorded project, harness, and model labels. Use independent sessions for every case.
 
@@ -252,6 +253,20 @@ the time window. Candidates must come from a UTC day after the recorded adoption
 Unpaired baselines, too few eligible pairs, or a mean reduction within the threshold leave the result
 inconclusive. The result reports a decrease or increase in the measured count.
 The controlled trial keeps its own result.
+
+### Measure repeated requests after errors
+
+Use `identical_tool_retries` to count identical requests repeated after a known tool error
+in the same captured attempt. Select this metric in `ordinary-work`, study preflight, and the
+frozen observation policy. AUT requires complete tool-event coverage, known result statuses,
+and usable request fingerprints. A missing fingerprint or clipped request makes the count unknown.
+An attempt with enough evidence and zero matching retries is a valid zero.
+If an older snapshot lacks the tool-event verification marker, capture the source again with
+the current AUT before choosing study cases.
+
+Provide `baseline_reviews` when freezing a retry study. An operator must accept candidate
+attempts using the same criterion. This keeps an attempt that stopped before finishing the task
+from being counted as a better outcome. Changed-argument matches remain available for investigation.
 
 ### Require reviewed task acceptance
 

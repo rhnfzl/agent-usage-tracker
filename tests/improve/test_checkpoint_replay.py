@@ -68,3 +68,44 @@ def test_failed_and_step_limited_replays_keep_resumable_checkpoints(tmp_path):
     resumed = run(store, lambda state, call: {"result": call["tool"]},
                   checkpoint=failed["checkpoints"][0])
     assert store.get("replay_runs", resumed["run_id"])["result"] == "two"
+
+
+def test_replay_reuses_frozen_expectation_and_rejects_result_mismatch(tmp_path, capsys):
+    import json
+
+    store = Store(tmp_path / "private")
+    start = tmp_path / "start.json"
+    start.write_text('{"state":{},"call":{"tool":"edit","arguments":{}}}')
+    expect = tmp_path / "expect.json"
+    expect.write_text('{"accepted":true}')
+    adapter = tmp_path / "adapter.py"
+    adapter.write_text("def advance(state, call):\n    return {'result': {'accepted': 1}}\n")
+    args = ["improve", "--root", str(store.root), "replay"]
+    assert main([*args, "--start-file", str(start), "--adapter", str(adapter), "--execute",
+                 "--expect-file", str(expect)]) == 1
+    baseline = json.loads(capsys.readouterr().out)
+    assert baseline["status"] == "completed"
+    assert baseline["result_matches_expected"] is False
+    adapter.write_text("def advance(state, call):\n    return {'result': {'accepted': True}}\n")
+    expect.write_text('{"accepted":false}')
+    assert main([*args, "--checkpoint", baseline["checkpoints"][0], "--adapter", str(adapter),
+                 "--execute", "--expect", baseline["expectation_id"]]) == 0
+    candidate = json.loads(capsys.readouterr().out)
+    assert candidate["expectation_id"] == baseline["expectation_id"]
+    assert candidate["result_matches_expected"] is True
+    assert main([*args, "--run", candidate["run_id"]]) == 0
+    assert json.loads(capsys.readouterr().out) == candidate
+
+
+def test_replay_records_adapter_exit_before_returning_control(tmp_path):
+    from agent_usage_tracker.improve.checkpoint_replay import run
+
+    store = Store(tmp_path / "private")
+
+    def exits(state, call):
+        raise SystemExit(0)
+
+    receipt = run(store, exits, start={"state": {}, "call": {"tool": "verify", "arguments": {}}})
+    assert receipt["status"] == "failed"
+    assert receipt["error"] == "SystemExit"
+    assert len(receipt["checkpoints"]) == 1

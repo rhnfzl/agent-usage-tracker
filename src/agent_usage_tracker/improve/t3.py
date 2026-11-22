@@ -359,18 +359,18 @@ def _thread(db: sqlite3.Connection, path: Path, thread: str, cwd: str, since: fl
                     output = (value.get('failure') if kind == 'error' else
                               'File change reported ' + str(item_state)
                               if kind == 'file_change' else value.get('output', ''))
-                    failed = item_state in {'failed', 'error'}
+                    failed = kind == 'error' or item_state in {'failed', 'error'}
                     if isinstance(output, dict):
                         failed = failed or output.get('isError') is True
-                    if item_state in {'interrupted', 'cancelled'} and not failed:
+                    exit_code = value.get('exitCode')
+                    if failed or (type(exit_code) is int and exit_code != 0):
+                        result = 'error'
+                    elif item_state in {'interrupted', 'cancelled'}:
                         result = 'unknown'
-                    elif kind in {'file_change', 'error'} or 'output' in value:
-                        result = result_status(_text(output), failed)
-                    elif type(value.get('exitCode')) is int:
-                        result = result_status({'exit_code': value['exitCode']}, failed)
+                    elif type(exit_code) is int:
+                        result = 'success'
                     else:
-                        result = ('error' if failed else
-                                  'success' if item_state == 'completed' else 'unknown')
+                        result = result_status(_text(output), False if item_state == 'completed' else None)
                     emit('result', output, item, end, key, provider, call=call_id,
                          status=result)
                 else:

@@ -58,3 +58,31 @@ def test_discovery_counts_sessions_and_preserves_references(tmp_path, capsys):
     assert "error_result" in group["examples"][0]
     for private in ("private/", "Missing match", "Edit", "retry_target_sha256"):
         assert private not in json.dumps(value)
+
+
+def test_retry_discovery_prefers_observed_result_in_later_snapshot(tmp_path):
+    from agent_usage_tracker.improve.access import Evidence
+
+    store = Store(tmp_path / "private")
+    events = trace("same")
+    snapshots = [
+        store.put("sessions", {"session_id": "same", "agent": "claude_code",
+                               "coverage": {"complete": False}, "events": events[:4]}),
+        store.put("sessions", {"session_id": "same", "agent": "claude_code",
+                               "coverage": {"complete": True}, "events": events}),
+    ]
+    for order in (snapshots, snapshots[::-1]):
+        audit = store.put("audits", {"session_ids": order})
+        group, = Evidence("metadata", store, audit).retries(minimum_sessions=1)["groups"]
+        assert group["occurrences"] == 1
+        assert group["outcomes"] == {"success": 1}
+        assert group["examples"][0]["session_id"] == snapshots[1]
+
+    conflicting = store.put("sessions", {"session_id": "same", "agent": "claude_code",
+                                          "coverage": {"complete": True},
+                                          "events": trace("same", status="error")})
+    for order in ([*snapshots, conflicting], [conflicting, *snapshots]):
+        audit = store.put("audits", {"session_ids": order})
+        result = Evidence("metadata", store, audit).retries(minimum_sessions=1)
+        assert result["groups"] == []
+        assert result["conflicting_incidents"] == 1

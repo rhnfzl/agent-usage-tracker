@@ -140,6 +140,11 @@ last checkpoint is the next pending call. In either case inspect external state 
 Historical Claude Code, Codex, Cursor, Pi, and T3 logs support diagnosis. They do not carry the
 execution state required by this replay interface.
 
+Use `--expect-file expected.json` to freeze a structured result before execution. The receipt
+includes its `expectation_id`. Pass `--expect EXPECTATION_ID` to check another replay against the
+same result. A mismatch keeps the completed receipt and returns a nonzero exit code.
+Have the adapter report values read from the resulting state that matter to task acceptance.
+
 ## Review with local models
 
 Install the existing label extra and cache the required weights separately:

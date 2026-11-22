@@ -50,13 +50,15 @@ def _checkpoint(store: Store, key: str) -> dict[str, Any]:
 
 def run(store: Store, advance: Adapter, *, start: dict[str, Any] | None = None,
         checkpoint: str | None = None, max_steps: int = 50,
-        adapter_sha256: str | None = None) -> dict[str, Any]:
+        adapter_sha256: str | None = None, expectation_id: str | None = None) -> dict[str, Any]:
     """Record each pending call, then execute it using the caller's trusted adapter."""
     if (start is None) == (checkpoint is None) or type(max_steps) is not int or not 1 <= max_steps <= 200:
         raise AutError("replay: select one starting input or checkpoint and 1..200 steps")
     saved = _checkpoint(store, checkpoint) if checkpoint is not None else None
     pending = _input(saved["input"] if saved else start)
     step = saved["step"] if saved else 0
+    expected = (store.get("replay_expectations", expectation_id)["result"]
+                if expectation_id is not None else None)
     execution = uuid4().hex
     checkpoints: list[str] = []
     status, error, result = "step_limit", None, None
@@ -76,18 +78,23 @@ def run(store: Store, advance: Adapter, *, start: dict[str, Any] | None = None,
                 status = "completed"
                 break
             pending = _input(response)
-        except (Exception, KeyboardInterrupt) as exc:
+        except (Exception, KeyboardInterrupt, SystemExit) as exc:
             status, error = "failed", type(exc).__name__
             break
     receipt = {"version": 1, "execution": execution, "resumed_from": checkpoint,
                "checkpoints": checkpoints, "status": status, "adapter_sha256": adapter_sha256,
                "result": result, "error": error}
+    if expectation_id is not None:
+        receipt["expectation_id"] = expectation_id
+        receipt["result_matches_expected"] = (_bounded(result) == _bounded(expected)
+                                              if status == "completed" else None)
     return _summary(store, store.put("replay_runs", receipt), receipt)
 
 
 def _summary(store: Store, key: str, receipt: dict[str, Any]) -> dict[str, Any]:
     return {"run_id": key, "path": str(store.path("replay_runs", key)), **{field: receipt[field] for field in (
-        "resumed_from", "checkpoints", "status", "adapter_sha256", "error")}, "private": True}
+        "resumed_from", "checkpoints", "status", "adapter_sha256", "error",
+        "expectation_id", "result_matches_expected") if field in receipt}, "private": True}
 
 
 def register(actions: Any) -> None:
@@ -97,6 +104,9 @@ def register(actions: Any) -> None:
     source.add_argument("--start-file", type=Path)
     source.add_argument("--run", dest="replay_run")
     replay.add_argument("--adapter", type=Path, help="trusted Python file defining advance(state, call)")
+    expectation = replay.add_mutually_exclusive_group()
+    expectation.add_argument("--expect-file", type=Path, help="freeze the expected JSON result")
+    expectation.add_argument("--expect", help="reuse a frozen result expectation ID")
     replay.add_argument("--execute", action="store_true")
     replay.add_argument("--max-steps", type=int, default=50)
 
@@ -113,6 +123,8 @@ def _read(path: Path) -> bytes:
 
 
 def cli(args: argparse.Namespace, store: Store) -> dict[str, Any]:
+    if (args.expect or args.expect_file) and not args.execute:
+        raise AutError("replay: result expectations require --execute")
     if args.replay_run:
         if args.execute or args.adapter:
             raise AutError("replay: --run reads a receipt")
@@ -133,14 +145,24 @@ def cli(args: argparse.Namespace, store: Store) -> dict[str, Any]:
             start = _input(json.loads(_read(args.start_file)))
         except (ValueError, UnicodeError, RecursionError) as exc:
             raise AutError("replay: start file must contain valid JSON") from exc
+    expectation_id = args.expect
+    if args.expect_file:
+        try:
+            expected = json.loads(_read(args.expect_file))
+        except (ValueError, UnicodeError, RecursionError) as exc:
+            raise AutError("replay: expected result file must contain valid JSON") from exc
+        _bounded(expected)
+        expectation_id = store.put("replay_expectations", {"result": expected})
+    if expectation_id is not None:
+        store.get("replay_expectations", expectation_id)
     source = _read(args.adapter)
     namespace = {"__file__": str(args.adapter.resolve()), "__name__": "__aut_replay_adapter__"}
     try:
         exec(compile(source, str(args.adapter), "exec"), namespace)
-    except Exception as exc:
+    except (Exception, SystemExit) as exc:
         raise AutError(f"replay: adapter failed to load ({type(exc).__name__})") from exc
     advance = namespace.get("advance")
     if not callable(advance):
         raise AutError("replay: adapter must define advance(state, call)")
     return run(store, advance, start=start, checkpoint=args.checkpoint, max_steps=args.max_steps,
-               adapter_sha256=hashlib.sha256(source).hexdigest())
+               adapter_sha256=hashlib.sha256(source).hexdigest(), expectation_id=expectation_id)

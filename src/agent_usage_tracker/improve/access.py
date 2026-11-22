@@ -458,7 +458,8 @@ class Evidence:
                 "coverage": _coverage(case["coverage"]),
                 "omitted_task_events": case.get("omitted_task_events", 0)}
 
-    def ordinary_work(self, metric: Literal["tool_calls", "tool_errors", "codex_model_calls"] = "tool_calls",
+    def ordinary_work(self, metric: Literal["tool_calls", "tool_errors", "identical_tool_retries",
+                                           "codex_model_calls"] = "tool_calls",
                       coverage_basis: Literal["full_case", "tool_events"] | None = None,
                       require_turn_context: bool = False, agent: str = "", before: str = "",
                       include_excluded: bool = False, cursor: str = "", limit: int = 30) -> dict[str, Any]:

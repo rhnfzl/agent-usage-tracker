@@ -60,6 +60,8 @@ def test_stdio_matches_cli_and_cannot_write(connection):
                 assert work.structuredContent == expected_work
                 retries = await client.call_tool("retries", {})
                 assert not retries.isError and retries.structuredContent["groups"] == []
+                metric = await client.call_tool("ordinary_work", {"metric": "identical_tool_retries"})
+                assert not metric.isError and metric.structuredContent["metric"] == "identical_tool_retries"
 
     asyncio.run(asyncio.wait_for(run(), timeout=15))
 

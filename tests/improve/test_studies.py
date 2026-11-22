@@ -642,8 +642,9 @@ def test_natural_work_observation_measures_only_eligible_pairs(
     assert set(no_work["unpaired_baseline_ids"]) == set(baseline)
 
 
+@pytest.mark.parametrize("metric", ["tool_errors", "identical_tool_retries"])
 def test_reviewed_ordinary_work_requires_accepted_outcomes_for_the_frozen_cohort(
-    tmp_path, monkeypatch, capsys,
+    tmp_path, monkeypatch, capsys, metric,
 ):
     import json
     from datetime import datetime, timezone
@@ -673,15 +674,20 @@ def test_reviewed_ordinary_work_requires_accepted_outcomes_for_the_frozen_cohort
     def add(name, when, error=False):
         events = [
             {"id": "prompt", "kind": "prompt", "text": "Check workspace " + name},
-            {"id": "call", "kind": "call", "call_id": "cmd", "text": "verify"},
+            {"id": "call", "kind": "call", "call_id": "cmd", "text": "verify",
+             "tool": "bash", "source_sha256": "a" * 64},
             {"id": "result", "kind": "result", "call_id": "cmd",
              "status": "error" if error else "success", "text": "First check"},
+            {"id": "repeat", "kind": "call", "call_id": "retry", "text": "verify",
+             "tool": "bash", "source_sha256": "a" * 64},
+            {"id": "second-result", "kind": "result", "call_id": "retry",
+             "status": "success", "text": "Second check"},
             {"id": "reply", "kind": "reply", "text": "Report for " + name},
             {"id": "end", "kind": "boundary", "text": "turn_complete"},
         ]
         for event in events:
             event["timestamp"] = when
-        coverage = {"complete": True, "tool_events_checked": True, "calls": 1, "matched_results": 1}
+        coverage = {"complete": True, "tool_events_checked": True, "calls": 2, "matched_results": 2}
         snapshot = store.put("sessions", {"agent": "pi", "session_id": name, "origin": "interactive",
             "model": "same", "cwd": str(project), "events": events, "coverage": coverage})
         audit = store.put("audits", {"session_ids": [snapshot]})
@@ -700,9 +706,13 @@ def test_reviewed_ordinary_work_requires_accepted_outcomes_for_the_frozen_cohort
     capsys.readouterr()
     reviews = {case: review(case) for case in baseline}
     observation = {
-        "metric": "tool_errors", "minimum_pairs": 2, "minimum_improvement": 0,
+        "metric": metric, "minimum_pairs": 2, "minimum_improvement": 0,
         "baseline_cases": dict.fromkeys(baseline, family), "baseline_reviews": reviews,
     }
+    if metric == "identical_tool_retries":
+        without_reviews = {name: value for name, value in observation.items() if name != "baseline_reviews"}
+        with pytest.raises(AutError, match="frozen task acceptance"):
+            create(store, spec | {"observation_policy": without_reviews})
     different = review(baseline[2], same_criterion="Only the first check needs to finish.")
     with pytest.raises(AutError, match="one frozen acceptance criterion"):
         create(store, spec | {"observation_policy": observation | {
@@ -723,6 +733,7 @@ def test_reviewed_ordinary_work_requires_accepted_outcomes_for_the_frozen_cohort
 
     result = observe(store, study, {"adoption_id": adoption, "pairs": pairs})
     assert result["comparison"] == "observed_decrease"
+    assert result["mean_reduction"] == 1
     assert result["task_acceptance"] == {"basis": "operator_review", "all_cases_accepted": True,
                                          "candidate_results": {"accepted": 3}}
     assert result["pairs"][0]["baseline_review_id"] == reviews[baseline[0]]
