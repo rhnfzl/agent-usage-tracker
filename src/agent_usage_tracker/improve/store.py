@@ -183,8 +183,16 @@ def audit(store: Store, home: Path, *, days: int = 7, limit: int = 40,
     project_repo = project_identity(project) if project else None
     if project and project_repo is None:
         raise AutError("improve: project must be a readable local Git repository")
+
+    def matches_workspace(cwd: object) -> bool:
+        if not isinstance(cwd, str) or "\x00" in cwd:
+            return False
+        path = Path(cwd)
+        return path.is_absolute() and project_identity(path) == project_repo
+
     t3_rows, t3_counts = t3.snapshots(home, since=since, limit=limit,
-                                    idle_s=idle_s, max_bytes=max_bytes, capture_full=capture_full)
+                                    idle_s=idle_s, max_bytes=max_bytes, capture_full=capture_full,
+                                    workspace_allowed=matches_workspace if project else None)
     counts.update(t3_counts)
     claims = Counter(native_id for row in t3_rows for driver, native_id in row["native_sessions"]
                      if driver == "codex")
@@ -227,8 +235,7 @@ def audit(store: Store, home: Path, *, days: int = 7, limit: int = 40,
             counts["automated_sources"] += 1
             continue
         workspaces = evidence.pop("observed_workspaces", []) or [evidence["cwd"]]
-        if project and any(not cwd or not Path(cwd).is_absolute()
-                           or project_identity(Path(cwd)) != project_repo for cwd in workspaces):
+        if project and any(not matches_workspace(cwd) for cwd in workspaces):
             counts["other_projects"] += 1
             continue
         if agent == "t3" and (verified := t3.resolve_run_checkpoints(evidence)):

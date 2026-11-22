@@ -95,6 +95,43 @@ def test_t3_human_work_and_provider_switch_are_one_session(tmp_path):
     db.close()
 
 
+@pytest.mark.parametrize('use_linked_worktree', [False, True])
+def test_t3_project_filter_precedes_thread_limit(tmp_path, use_linked_worktree):
+    home = tmp_path / 'home'
+    db, _ = fixture_db(home)
+    project = tmp_path / 'project'
+    worktree = tmp_path / 'linked'
+    outside = tmp_path / 'outside'
+    for folder in (project, outside):
+        subprocess.run(['git', 'init', '-q', str(folder)], check=True)
+    subprocess.run(['git', '-C', str(project), '-c', 'user.name=Test', '-c',
+                    'user.email=test@example.test', 'commit', '--allow-empty', '-qm', 'start'],
+                   check=True)
+    subprocess.run(['git', '-C', str(project), 'worktree', 'add', '--detach', '-q',
+                    str(worktree)], check=True)
+
+    with db:
+        add_run(db)
+        db.execute('UPDATE projection_projects SET workspace_root=?', (str(project),))
+        thread_path = str(worktree) if use_linked_worktree else None
+        db.execute('UPDATE orchestration_v2_projection_threads SET payload_json=?',
+                   (json.dumps({'worktreePath': thread_path}),))
+        db.execute('INSERT INTO orchestration_v2_projection_threads VALUES (?,?,?,?)',
+                   ('other', 'p', '2026-01-02T10:00:00Z',
+                    json.dumps({'worktreePath': str(outside)})))
+        db.execute('INSERT INTO orchestration_v2_projection_messages VALUES (?,?,?,?,?,?)',
+                   ('outside-prompt', 'other', 'outside-run', 'user', START,
+                    json.dumps({'createdBy': 'user'})))
+    db.close()
+
+    _, result, sessions = capture(tmp_path, home, project=project, limit=1)
+
+    assert [session['session_id'] for session in sessions] == ['t3:app']
+    assert sessions[0]['cwd'] == (thread_path or str(project))
+    assert result['other_projects'] == 1
+    assert 't3_unread_threads' not in result
+
+
 @pytest.mark.parametrize('limit', [1, 30])
 def test_t3_native_mirror_is_not_another_observation(tmp_path, limit):
     home = tmp_path / 'home'

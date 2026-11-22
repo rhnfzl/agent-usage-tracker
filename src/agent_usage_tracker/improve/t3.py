@@ -10,6 +10,7 @@ import sqlite3
 import subprocess
 import time
 from collections import Counter, defaultdict
+from collections.abc import Callable
 from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
@@ -150,7 +151,9 @@ def link_native_context(session: dict[str, Any], supplements: dict[str, dict[str
 
 
 def snapshots(home: Path, *, since: float, limit: int, idle_s: int,
-              max_bytes: int, capture_full: bool = False) -> tuple[list[dict[str, Any]], Counter[str]]:
+              max_bytes: int, capture_full: bool = False,
+              workspace_allowed: Callable[[str], bool] | None = None
+              ) -> tuple[list[dict[str, Any]], Counter[str]]:
     path = home / ".t3/userdata/statev2.sqlite"
     counts: Counter[str] = Counter()
     if not path.exists():
@@ -161,11 +164,25 @@ def snapshots(home: Path, *, since: float, limit: int, idle_s: int,
         with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=1)) as db:
             db.execute("PRAGMA query_only=ON")
             db.execute("BEGIN")
-            threads = db.execute("""SELECT t.thread_id, t.updated_at,
+            project_filter = ""
+            if workspace_allowed is not None:
+                def scoped_workspace(cwd: object) -> int:
+                    if isinstance(cwd, str) and workspace_allowed(cwd):
+                        return 1
+                    counts["other_projects"] += 1
+                    return 0
+
+                # Other projects must not use the requested project's thread budget.
+                db.create_function("aut_scoped_workspace", 1, scoped_workspace)
+                project_filter = """AND aut_scoped_workspace(COALESCE(
+                    CASE WHEN json_valid(t.payload_json) THEN
+                        NULLIF(json_extract(t.payload_json, '$.worktreePath'), '')
+                    END, p.workspace_root, ''))"""
+            threads = db.execute(f"""SELECT t.thread_id, t.updated_at,
                     CASE WHEN length(CAST(t.payload_json AS BLOB))<=? THEN t.payload_json END,
                     p.workspace_root FROM orchestration_v2_projection_threads t
                 LEFT JOIN projection_projects p ON p.project_id=t.project_id
-                WHERE julianday(t.updated_at)>=julianday(?)
+                WHERE julianday(t.updated_at)>=julianday(?) {project_filter}
                 ORDER BY EXISTS(SELECT 1 FROM orchestration_v2_projection_messages m
                     WHERE m.thread_id=t.thread_id AND m.role='user'
                     AND json_extract(m.payload_json,'$.createdBy')='user') DESC,

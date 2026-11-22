@@ -42,7 +42,8 @@ If you already have a checkpoint SHA, use
 MCP accepts the same `source` option.
 
 The project filter includes its Git worktrees and excludes sessions with recorded directories in
-other repositories. It cannot infer where unrecorded tool activity took place. Select explicit
+other repositories. T3 applies the thread limit within that project.
+The filter cannot infer where unrecorded tool activity took place. Select explicit
 sessions before sharing externally. Use `--workspace` or `--tool` to filter on recorded labels. Capture uses AUT's existing Claude Code, Codex, Pi,
 Cursor CLI, and T3 Code sources and preserves their coverage limits. It skips recently active
 sources by default. Session and event IDs refer to frozen evidence. A fresh capture can include
