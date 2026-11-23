@@ -18,6 +18,8 @@ from agent_usage_tracker.improve.study_independence import ReservedEvidence
 from agent_usage_tracker.improve.study_observe import _sample, baseline_gate
 from agent_usage_tracker.improve.turn_revisions import RECORD_KIND, _file_digest, lookup, record_hook
 
+from .transcript_fixtures import write_completed_transcript
+
 
 def git(repo, *args):
     return subprocess.check_output([
@@ -80,11 +82,13 @@ def test_project_hook_records_a_later_worktree_turn_for_baseline_preflight(tmp_p
             ("event_msg", ended, {"type": "agent_message", "message": "Done " + turn}),
             ("event_msg", ended, {"type": "task_complete", "turn_id": turn}),
         ])
-    path.write_text("".join(json.dumps({"type": kind, "timestamp": time.isoformat(),
-                                        "payload": payload}) + "\n" for kind, time, payload in rows))
-    # Model a completed transcript even when the filesystem clock has finer resolution.
     completed_stamp = completed_at.timestamp()
-    os.utime(path, (completed_stamp, completed_stamp))
+    write_completed_transcript(
+        path,
+        "".join(json.dumps({"type": kind, "timestamp": time.isoformat(), "payload": payload}) + "\n"
+                for kind, time, payload in rows),
+        completed_at=completed_stamp,
+    )
     writable = Store(root)
     with monkeypatch.context() as clock:
         clock.setattr(improve_store, "time", SimpleNamespace(time=lambda: completed_stamp + 1))

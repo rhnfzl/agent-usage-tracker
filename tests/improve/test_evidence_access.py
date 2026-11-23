@@ -1,9 +1,10 @@
 import json
-import os
 from datetime import datetime, timezone
 
 from agent_usage_tracker.cli import main
 from agent_usage_tracker.improve.store import Store
+
+from .transcript_fixtures import write_completed_transcript
 
 
 def invoke(capsys, root, *args):
@@ -43,9 +44,7 @@ def test_capture_search_content_modes_and_bundle(tmp_path, monkeypatch, capsys):
     text = "A failed setup password=fixture-only " + "x" * 6100
     row = {"timestamp": stamp.isoformat(), "type": "user", "sessionId": "demo", "entrypoint": "cli",
            "uuid": "user", "cwd": str(tmp_path), "message": {"role": "user", "content": text}}
-    log.write_text(json.dumps(row) + "\n", encoding="utf-8")
-    completed = stamp.timestamp() - 1
-    os.utime(log, (completed, completed))
+    write_completed_transcript(log, json.dumps(row) + "\n", completed_at=stamp.timestamp() - 1)
     monkeypatch.setattr("agent_usage_tracker.improve.store.claude_code.main_session_files",
                         lambda _: [str(log)])
 
@@ -84,7 +83,7 @@ def test_larger_capture_budget_recovers_a_clipped_prompt_under_a_new_scope(tmp_p
     monkeypatch.setattr(evidence_store.t3, "snapshots", lambda *a, **kw: ([], {}))
     log = tmp_path / "rollout.jsonl"
     monkeypatch.setattr(evidence_store.codex, "session_files", lambda _: [str(log)])
-    stamp = datetime.now(timezone.utc).isoformat()
+    stamp = datetime.now(timezone.utc)
     records = [
         ("session_meta", {"id": "source", "source": "cli", "cwd": str(tmp_path)}),
         ("event_msg", {"type": "task_started", "turn_id": "real-turn"}),
@@ -94,8 +93,11 @@ def test_larger_capture_budget_recovers_a_clipped_prompt_under_a_new_scope(tmp_p
         ("event_msg", {"type": "agent_message", "message": "Finished"}),
         ("event_msg", {"type": "task_complete", "turn_id": "real-turn"}),
     ]
-    log.write_text("".join(json.dumps({"type": kind, "timestamp": stamp, "payload": payload}) + "\n"
-                           for kind, payload in records), encoding="utf-8")
+    write_completed_transcript(
+        log, "".join(json.dumps({"type": kind, "timestamp": stamp.isoformat(), "payload": payload}) + "\n"
+                     for kind, payload in records),
+        completed_at=stamp.timestamp() - 1,
+    )
     root = tmp_path / "private"
     capture = ("--content", "redacted", "capture", "--idle-s", "0", "--max-mib")
     assert main(["evidence", "--root", str(root), *capture, "257"]) == 1
@@ -310,12 +312,13 @@ def test_project_audit_excludes_mixed_workspace_history(tmp_path, monkeypatch):
     unrelated = tmp_path / "unrelated"
     log = home / "mixed.jsonl"
     stamp = datetime.now(timezone.utc)
-    log.write_text("".join(json.dumps({
-        "timestamp": stamp.isoformat(), "type": "user", "sessionId": "mixed", "entrypoint": "cli",
-        "uuid": str(n), "cwd": str(cwd), "message": {"role": "user", "content": str(n)},
-    }) + "\n" for n, cwd in enumerate((unrelated, wanted))), encoding="utf-8")
-    completed = stamp.timestamp() - 1
-    os.utime(log, (completed, completed))
+    write_completed_transcript(
+        log, "".join(json.dumps({
+            "timestamp": stamp.isoformat(), "type": "user", "sessionId": "mixed", "entrypoint": "cli",
+            "uuid": str(n), "cwd": str(cwd), "message": {"role": "user", "content": str(n)},
+        }) + "\n" for n, cwd in enumerate((unrelated, wanted))),
+        completed_at=stamp.timestamp() - 1,
+    )
     monkeypatch.setattr(module, "repository", lambda path: str(path))
     monkeypatch.setattr(module.claude_code, "main_session_files", lambda _: [log])
     monkeypatch.setattr(module.codex, "session_files", lambda _: [])

@@ -3,7 +3,6 @@
 import base64
 import hashlib
 import json
-import os
 import sqlite3
 import subprocess
 
@@ -13,6 +12,8 @@ from agent_usage_tracker.improve.access import Evidence
 from agent_usage_tracker.improve.judge import cases, freeze_case
 from agent_usage_tracker.improve.store import Store, audit
 from agent_usage_tracker.improve.study_observe import _sample
+
+from .transcript_fixtures import write_completed_transcript
 
 
 TABLES = {
@@ -144,8 +145,7 @@ def test_t3_native_mirror_is_not_another_observation(tmp_path, limit):
                                              'originator': 'T3 Code'}},
            {'type': 'event_msg', 'timestamp': '2020-01-01T00:00:00Z',
             'payload': {'type': 'user_message', 'message': 'native-only check'}}]
-    (folder / 'rollout-native.jsonl').write_text(''.join(json.dumps(r)+'\n' for r in raw))
-    os.utime(folder / 'rollout-native.jsonl', (1_000_000_000, 1_000_000_000))
+    write_completed_transcript(folder / 'rollout-native.jsonl', ''.join(json.dumps(r)+'\n' for r in raw))
     store, result, sessions = capture(tmp_path, home, limit=limit)
     assert result['sessions'] == 1
     assert result['t3_native_mirrors'] == 1
@@ -166,9 +166,7 @@ def test_t3_identical_linked_native_files_share_one_supplement(tmp_path):
     folder.mkdir(parents=True)
     raw = json.dumps({'type': 'session_meta', 'payload': {'id': 'nativer1', 'source': 'cli'}})+'\n'
     for name in ['rollout-one.jsonl', 'rollout-two.jsonl']:
-        (folder / name).write_text(raw)
-        # Keep fixtures idle when filesystem timestamps lead the wall clock.
-        os.utime(folder / name, (1_000_000_000, 1_000_000_000))
+        write_completed_transcript(folder / name, raw)
     _, result, sessions = capture(tmp_path, home, limit=1)
     assert len(sessions[0]['supplemental_sources']) == 1
     assert result['duplicates'] == 1
@@ -230,11 +228,10 @@ def test_t3_turn_context_requires_distinct_native_items_in_one_completed_turn(tm
     stamp = '2026-01-01T10:00:11Z' if mode == 'late_native' else END
     raw = ''.join(json.dumps({'type': kind, 'timestamp': stamp, 'payload': payload}) + '\n'
                   for kind, payload in rows)
-    (folder / 'rollout-native.jsonl').write_text(raw)
-    os.utime(folder / 'rollout-native.jsonl', (1_000_000_000, 1_000_000_000))
+    write_completed_transcript(folder / 'rollout-native.jsonl', raw)
     if mode == 'two_copies':
-        (folder / 'rollout-other.jsonl').write_text(raw.replace('actual-model', 'different-model'))
-        os.utime(folder / 'rollout-other.jsonl', (1_000_000_000, 1_000_000_000))
+        write_completed_transcript(folder / 'rollout-other.jsonl',
+                                   raw.replace('actual-model', 'different-model'))
     store, result, [session] = capture(tmp_path, home)
     audit_id = result['audit_id']
     key, = store.get('audits', audit_id)['session_ids']
@@ -635,8 +632,9 @@ def test_t3_web_search_uses_only_a_corroborated_native_result(tmp_path, outcome)
     if outcome == 'wrong_turn':
         turn('t2', [search])
     log = folder / 'rollout-nativer1.jsonl'
-    log.write_text(''.join(json.dumps({'type': k, 'timestamp': END, 'payload': p}) + '\n' for k, p in rows))
-    os.utime(log, (1_000_000_000, 1_000_000_000))
+    write_completed_transcript(
+        log, ''.join(json.dumps({'type': k, 'timestamp': END, 'payload': p}) + '\n' for k, p in rows)
+    )
     store, result, (session,) = capture(tmp_path, home, capture_full=True)
     audit_id = result['audit_id']
     view = Evidence('metadata', store=store, audit_id=audit_id)
