@@ -12,6 +12,7 @@
   aut setup             preview configuration and optional scan scheduling
   aut demo              run the usage report on synthetic agent logs
   aut overview          open a private local usage and source health page
+  aut advise            replay or record in-session advice
   aut export [--out F]  write all usage as CSV (bulk load, offline bridge); never the watermark
   aut summary [--json]  show local usage, source coverage and unknown values by date
   aut quota             capture and inspect local quota observations
@@ -322,6 +323,8 @@ def _build_parser() -> argparse.ArgumentParser:
     register(sub)
     from .improve.access_cli import register as register_evidence
     register_evidence(sub)
+    from .improve.advice_cli import register as register_advice
+    register_advice(sub)
     from .observation_cli import register as register_observations
     from .overview_cli import register as register_overview
     register_observations(sub)
@@ -468,6 +471,10 @@ def _dispatch(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None
     if args.cmd == "evidence":
         from .improve.access_cli import run as run_evidence
         run_evidence(args)
+        return
+    if args.cmd == "advise":
+        from .improve.advice_cli import run as run_advice
+        run_advice(args)
         return
     if args.cmd == "observe":
         from .observation_cli import run as run_observation

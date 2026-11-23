@@ -450,6 +450,24 @@ class Evidence:
             return {"session_id": session_id, **result, **self.describe()}
         raise AutError("evidence: event is missing from this session")
 
+    def tool_result_at(self, session_id: str, event_id: str
+                       ) -> tuple[dict[str, Any], dict[str, Any]] | None:
+        """Return a result and its paired call using only the prefix through that result."""
+        row = self._read(session_id)
+        prefix: list[dict[str, Any]] = []
+        for event in row["events"]:
+            prefix.append(event)
+            if event["id"] != event_id:
+                continue
+            if event["kind"] != "result" or row["coverage"].get("divergent_copy"):
+                return None
+            partners = event_links(prefix)
+            for call in prefix[:-1]:
+                if partners.get(call["id"]) == event_id:
+                    return self._event(call), self._event(event)
+            return None
+        raise AutError("evidence: event is missing from this session")
+
     def context(self, session_id: str, event_id: str, radius: int = 2,
                 limit: int = 2_000, focus: str = "",
                 view: Literal["nearby", "conversation"] = "nearby") -> dict[str, Any]:
