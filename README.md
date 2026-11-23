@@ -49,9 +49,9 @@ In Codex, review the AUT hook with `/hooks` before it can run. See the [session 
 | How much of my work is building, debugging, planning, or review? | Optional local models estimate work categories and leave uncertain cases unknown. |
 | What if I lose this laptop? | Optional encrypted backups of agent logs and AUT settings with restic. |
 
-## From a repeated problem to a fix you can review
+## Improve how your agents work
 
-![AUT reads agent logs for a local report or self-hosted history. A separate optional workflow checks local evidence, groups recurring problems, and drafts a fix for approval.](https://raw.githubusercontent.com/rhnfzl/agent-usage-tracker/main/docs/assets/aut-workflow.png)
+![Live tool results can trigger optional advice during a session. Saved logs support usage and evidence review. Both help you decide which workflow changes to test and keep.](docs/assets/aut-workflow.drawio.png)
 
 For example, an agent says the tests passed. AUT can surface the tool result behind that claim. If the result is missing, the judgment can stay unknown. When judgments identify the same problem across distinct tasks, AUT can group those cases and draft a small instruction or config change in an isolated copy. Run a check you trust against the original and the candidate, then decide whether to adopt it.
 
