@@ -1,11 +1,19 @@
-"""Shared for every test folder."""
-
 from __future__ import annotations
 
 import contextlib
+import sys
 import threading
 
 import pytest
+
+
+def pytest_configure():
+    entrypoint = sys.modules["__main__"].__spec__
+    if entrypoint is not None and entrypoint.name == "pytest.__main__":
+        raise pytest.UsageError(
+            "Run the pytest console script (for example, `uv run pytest`). "
+            "`python -m pytest` changes the import path and can hide collection failures."
+        )
 
 
 @pytest.fixture(autouse=True)

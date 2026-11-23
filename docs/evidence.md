@@ -317,8 +317,8 @@ through the existing review and adoption process.
 
 For a rule you can check mechanically, add the smallest test or lint check that rejects the
 observed mistake. Run it against a known bad example and an allowed example. For example,
-AUT checks that local preflight and CI invoke the `pytest` console script. Running
-`python -m pytest` can change the import path and hide errors during test collection.
+AUT rejects `python -m pytest` before collection because it can hide import errors.
+The check runs both entry points against the same test file.
 
 ## Propose a project skill from successful work
 
