@@ -2,7 +2,7 @@
 
 I run AUT on an Apple silicon Mac to track agent usage, classify work, and find recurring problems. AUT sends usage metadata to a self-hosted database. The local labeler combines that metadata with request and reply text on the Mac.
 
-![Agent logs feed usage reporting, local decision models for provisional labels, and private evidence review. Inkling drafts proposals for recurring problems, then a person reviews them.](assets/aut-local-setup.png)
+![One Mac install serves Claude Code, Codex, Cursor, and Pi. Advice, work labels, and proposal review run on the Mac. Usage metadata goes to self-hosted TimescaleDB and Grafana.](assets/aut-local-setup.drawio.png)
 
 | Job | Models I use | Method |
 | --- | --- | --- |
