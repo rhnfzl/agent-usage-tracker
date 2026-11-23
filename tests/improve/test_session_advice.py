@@ -208,7 +208,7 @@ def test_other_clients_share_advice_and_use_native_response(repo, tmp_path, clie
                           tool_name="Shell", error_message=output, failure_type="error")
         else:
             fields.update(hook_event_name="postToolUse", conversation_id="same",
-                          tool_name="Shell", tool_output=json.dumps({"stdout": output, "exitCode": 0}))
+                          tool_name="Shell", tool_output=json.dumps({"output": output, "exitCode": 0}))
         return json.dumps(fields).encode()
 
     response = handle_batch(payload("fail", "pytest -q", FAILURE, True), root, None, "show", client)

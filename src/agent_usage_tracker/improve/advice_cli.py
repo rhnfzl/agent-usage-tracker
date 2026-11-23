@@ -91,6 +91,8 @@ def run(args: argparse.Namespace) -> None:
     if args.advice_cmd == "setup":
         from .advice_setup import configure
 
+        if os.name == "nt":
+            raise AutError("advise: automatic hook setup requires macOS or Linux")
         executable = Path(sys.argv[0]).absolute()
         if executable.name != "aut" or not executable.is_file():
             raise AutError("advise: run setup from a persistently installed aut executable")

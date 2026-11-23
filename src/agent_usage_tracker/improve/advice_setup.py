@@ -97,8 +97,6 @@ def _update(path: Path, client: str, events: tuple[str, ...], entry: dict[str, A
 
 def configure(home: Path, executable: Path, *, apply: bool, mode: str,
               clients: list[str] | None = None) -> list[dict[str, Any]]:
-    if os.name == "nt":
-        raise AutError("advise: automatic hook setup requires macOS or Linux")
     result = []
     for client, (directory, filename, binaries, events) in _CLIENTS.items():
         config = _home(home, client, directory)

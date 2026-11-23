@@ -63,6 +63,8 @@ def _shell_result(payload: dict[str, Any], client: str) -> list[dict[str, Any]]:
         stdout, stderr = value.get("stdout"), value.get("stderr")
         output = "\n".join(item for item in (stdout, stderr) if isinstance(item, str) and item)
         if not output:
+            output = value.get("output")
+        if not output:
             return []
     else:
         return []
@@ -91,7 +93,8 @@ def _batch(raw: bytes, root: Path, project: Path | None, mode: str, client: str)
     for row in rows:
         inputs = row.get("tool_input") if isinstance(row, dict) else None
         if isinstance(inputs, dict):
-            override = inputs.get("working_directory") or inputs.get("workdir")
+            override = (inputs.get("working_directory") or inputs.get("workingDirectory")
+                        or inputs.get("workdir") or inputs.get("cwd"))
             if override is not None and (
                 not isinstance(override, str) or (workdir / override).resolve() != workdir
             ):
