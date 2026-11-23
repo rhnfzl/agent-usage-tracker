@@ -195,12 +195,7 @@ class Source:
                 for ep in self.episodes(since) if ep["id"] in ids and ep["outcome"] == "no_code"}
 
     def episodes_ready(self) -> datetime | None:
-        """The oldest latest covered scan across this machine's observed text sources.
-
-        A successful episode_link receipt bounds scans by rebuild start. An observed source
-        without a covered successful scan holds the watermark. Only legacy sinks without a
-        successful rebuild receipt fall back to the newest episode activity.
-        """
+        """Latest label cutoff shared by this machine's episode sources."""
         dsn = self.cfg.require_pg("label")
         rows = _sql(dsn, "WITH client AS (SELECT %s::text AS machine, %s::text[] AS collectors), "
                     "rebuilt AS (SELECT max(started_at) AS started_at "

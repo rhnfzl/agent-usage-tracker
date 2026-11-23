@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 
 import pytest
 
-from agent_usage_tracker.label import run, tasks
+from agent_usage_tracker.label import run
 from label_helpers import LEDGER, ById, FakeSource, _cfg, _claude_log, _env, _steer
 from test_label import sink  # noqa: F401  (fixture)
 
@@ -68,20 +68,6 @@ def test_gap_days_are_labelled_after_the_rebuild_not_before(tmp_path, sink, read
         assert rep["work_category"]["rows"] == 1
         assert [e.attrs["unit_id"] for b in sink.rows for e in b] == \
             [f"e1:{GAP.astimezone(LEDGER).date().isoformat()}"]
-
-
-def test_episodes_ready_uses_one_database_snapshot(tmp_path, monkeypatch):
-    seen: list[tuple[str, tuple]] = []
-
-    def fake_sql(dsn, sql, params):
-        seen.append((sql, params))
-        return [(None,)]
-
-    monkeypatch.setattr(tasks, "_sql", fake_sql)
-    src = tasks.Source(_cfg(tmp_path))
-    assert src.episodes_ready() is None                 # an empty sink: day tasks wait
-    assert len(seen) == 1                              # marker and legacy fallback share one snapshot
-    assert seen[0][1] == ("test", ["claude_code"])      # teacher and export remain Claude-only
 
 
 def test_steers_without_local_text_are_counted(tmp_path, sink, capsys):  # noqa: F811

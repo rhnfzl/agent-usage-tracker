@@ -58,7 +58,6 @@ REFRESH MATERIALIZED VIEW CONCURRENTLY agents.effort_period;
 REFRESH MATERIALIZED VIEW CONCURRENTLY agents.tokens_cost_by_episode;
 REFRESH MATERIALIZED VIEW CONCURRENTLY agents.audit_daily;
 
--- Labels may use only scans completed before this refresh began.
 INSERT INTO agents.collector_scan (machine, collector, started_at, finished_at, status)
 VALUES ('sink', 'episode_link', refresh_started_at, clock_timestamp(), 'ok');
 
