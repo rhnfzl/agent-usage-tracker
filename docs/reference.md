@@ -21,6 +21,7 @@ other command refuses it.
 | `aut demo [--group-by GROUP] [--json]` | run the usage summary on synthetic logs | |
 | `aut summary [--period PERIOD] [--group-by GROUP] [--json]` | show local usage with source coverage and price gaps. `--since` and `--until` select an explicit ledger date range | local logs |
 | `aut overview [--period PERIOD] [--group-by GROUP] [--no-browser]` | open local usage, source health and available private evidence on a token-protected loopback page | local logs |
+| `aut advise setup`, `aut advise replay`, `aut advise acceptance` | connect coding clients, replay one test-failure suggestion, or record its acceptance for [private review](session-advice.md) | local config, audit or hook input |
 | `aut statusline [--json]` | read bounded local quota and scan caches without collecting again | |
 | `aut quota capture --scope UUID` | record the quota fields in a Claude Code statusline payload on stdin | a local statusline payload |
 | `aut quota check [--notify] [--quiet-hours HH:MM-HH:MM]` | read quota freshness, reset and pace, or explicitly add new notices to the private inbox | cached quota observations |

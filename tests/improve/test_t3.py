@@ -636,6 +636,7 @@ def test_t3_web_search_uses_only_a_corroborated_native_result(tmp_path, outcome)
         turn('t2', [search])
     log = folder / 'rollout-nativer1.jsonl'
     log.write_text(''.join(json.dumps({'type': k, 'timestamp': END, 'payload': p}) + '\n' for k, p in rows))
+    os.utime(log, (1_000_000_000, 1_000_000_000))
     store, result, (session,) = capture(tmp_path, home, capture_full=True)
     audit_id = result['audit_id']
     view = Evidence('metadata', store=store, audit_id=audit_id)

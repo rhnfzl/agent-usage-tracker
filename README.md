@@ -25,6 +25,21 @@ uvx agent-usage-tracker --agents claude_code,codex,cursor_cli,pi export --out us
 
 Local reporting runs without a database, a provider account, or a model. The CLI runs on macOS, Linux, and Windows with Python 3.11 to 3.15. Use the [setup guide](https://github.com/rhnfzl/agent-usage-tracker/blob/main/docs/first-run.md) to fit AUT into your existing setup, or paste the [setup prompt](https://github.com/rhnfzl/agent-usage-tracker/blob/main/docs/first-run.md#set-up-with-a-coding-assistant) into a coding assistant.
 
+## Get feedback while agents work
+
+Install AUT once on macOS or Linux and connect the installed Claude Code, Codex, Cursor, and Pi clients.
+
+```sh
+uv tool install agent-usage-tracker
+aut advise setup
+aut advise setup --apply
+aut overview
+```
+
+The first pilot detects pytest import failures during collection and finds the committed CI command.
+Setup records matches locally by default. Add `--mode show` to the apply command to offer advice during the session.
+In Codex, review the AUT hook with `/hooks` before it can run. See the [session advice guide](docs/session-advice.md).
+
 ## What you can track
 
 | Question | Where to start |
