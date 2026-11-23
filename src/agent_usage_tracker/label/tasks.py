@@ -195,7 +195,7 @@ class Source:
                 for ep in self.episodes(since) if ep["id"] in ids and ep["outcome"] == "no_code"}
 
     def episodes_ready(self) -> datetime | None:
-        """Latest label cutoff shared by this machine's episode sources."""
+        """Earliest of the latest covered scan starts for this machine's observed sources."""
         dsn = self.cfg.require_pg("label")
         rows = _sql(dsn, "WITH client AS (SELECT %s::text AS machine, %s::text[] AS collectors), "
                     "rebuilt AS (SELECT max(started_at) AS started_at "
