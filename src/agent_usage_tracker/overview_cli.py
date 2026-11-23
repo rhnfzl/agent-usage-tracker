@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import sqlite3
 from datetime import date
 from pathlib import Path
 from typing import cast
@@ -13,6 +14,8 @@ from . import local_page, overview
 from .config import AutError, Config, ledger_zone
 from .coverage import build_report
 from .improve import report_card
+from .improve.advice_cli import advice_root
+from .improve.advice_hook import recent
 from .improve.store import Store
 from .label.core import data_dir
 from .quota import quota_snapshot
@@ -39,8 +42,12 @@ def run(cfg: Config, args: argparse.Namespace) -> None:
     root = f"/{token}"
 
     def render_view(report: Summary, period: str, error: str | None = None) -> bytes:
+        try:
+            advice = recent(advice_root())
+        except (OSError, sqlite3.Error, ValueError):
+            advice = []
         return overview.render(report, health, root, period, has_evidence, error=error,
-                               quota=quota_snapshot())
+                               quota=quota_snapshot(), advice=advice)
 
     def on_get(path: str) -> bytes | None:
         if not path:

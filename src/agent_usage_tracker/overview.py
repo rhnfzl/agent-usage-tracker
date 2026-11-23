@@ -6,6 +6,7 @@ from html import escape
 from typing import TYPE_CHECKING, Any, Iterable
 
 from .local_page import head
+from .improve.advice import WORKFLOW
 from .summary import GROUPS, Summary, Totals
 
 if TYPE_CHECKING:
@@ -117,7 +118,8 @@ def _quota(snapshot: QuotaSnapshot) -> str:
 
 def render(report: Summary, health: dict[str, Any], root: str, period: str,
            private_evidence: bool, *, error: str | None = None,
-           quota: QuotaSnapshot | None = None) -> bytes:
+           quota: QuotaSnapshot | None = None,
+           advice: list[dict[str, Any]] | None = None) -> bytes:
     window, group_by, totals = report["window"], report["group_by"], report["totals"]
     since = window["since"] if period == "custom" else ""
     until = window["until"] if period == "custom" else ""
@@ -159,6 +161,29 @@ def render(report: Summary, health: dict[str, Any], root: str, period: str,
     )
     link = (f'<a href="{escape(root)}/improvement">Private improvement report card</a>'
             if private_evidence else 'Run <code>aut improve report-card</code> for improvement evidence.')
+    advice_table = ""
+    if advice:
+        def outcome(value: str, observed_at: str | None) -> str:
+            if not observed_at:
+                return "Unobserved"
+            return "Reported passed" if value == "passed" else value.capitalize()
+
+        advice_table = (
+            "<h2>Session advice</h2>"
+            '<p class="muted">Last 30 observations across all dates. Test output records what '
+            'pytest reported. Task acceptance requires a separate check.</p>'
+            + _table("Recent session advice",
+                     ("Recorded (UTC)", "Client", "Observation", "Suggested CI command", "CI source", "Mode",
+                      "Next pytest result", "Suggested command result", "Task acceptance"),
+                     ((row["recorded_at"], row["client"], row["trigger_ref"][:12], row["command"],
+                       f"{row['revision'][:12]} {WORKFLOW}:{row['line']}",
+                       "Show" if row["mode"] == "show" else "Record only",
+                       outcome(row["next_test"], row["next_at"]),
+                       outcome(row["retry"], row["retry_at"]),
+                       (f"{row['acceptance'].capitalize()} (operator review)"
+                        if row["acceptance_at"] else "Unknown"))
+                      for row in advice))
+        )
     return (
         head("Agent usage overview", "74rem", _CSS) + "<main><h1>Agent usage overview</h1>"
         f'<p class="muted">Private local report · {escape(window["since"])} to '
@@ -173,6 +198,7 @@ def render(report: Summary, health: dict[str, Any], root: str, period: str,
         + (_quota(quota) if quota is not None else "")
         + f'<h2>Source health</h2>{source_health}'
         + issue_list
+        + advice_table
         + '<p class="muted">Run <code>aut doctor --json</code> for full coverage evidence.</p>'
         f'<h2>Private evidence</h2><p>{link}</p></main></body></html>'
     ).encode("utf-8")
