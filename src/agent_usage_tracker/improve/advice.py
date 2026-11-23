@@ -21,7 +21,7 @@ _CI_COMMAND = re.compile(
 _COLLECTION = re.compile(r"(?m)^!+ +Interrupted: [1-9][0-9]* errors? during collection +!+ *$")
 _IMPORT_ERROR = re.compile(r"(?m)^(?:E +)?(?:ModuleNotFoundError|ImportError):")
 _SUMMARY = re.compile(
-    r"(?m)^(?:=+ +)?(?P<counts>\d+ (?:passed|failed|skipped|deselected|errors?|"
+    r"(?m)^(?:=+ +|Pytest: )?(?P<counts>\d+ (?:passed|failed|skipped|deselected|errors?|"
     r"xfailed|xpassed|warnings?)(?:, \d+ [a-z]+)*) in \d+(?:\.\d+)?s"
     r"(?: \([^\r\n]*\))?(?: +=+)? *$"
 )

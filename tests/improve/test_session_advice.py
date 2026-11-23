@@ -102,7 +102,7 @@ def test_hook_records_one_suggestion_then_a_later_retry(repo, tmp_path, mode):
     assert handle_batch(other, root, project, mode) == {}
     assert recent(root)[0]["next_test"] == "tests failed"
     assert recent(root)[0]["retry"] == "unknown"
-    retry = batch(project, ("use-two", CI, [{"type": "text", "text": "23 passed in 0.42s"}]))
+    retry = batch(project, ("use-two", CI, [{"type": "text", "text": "Pytest: 23 passed in 0.42s"}]))
     assert handle_batch(retry, root, project, mode) == {}
     assert recent(root)[0]["retry"] == "passed"
     assert recent(root)[0]["acceptance"] == "unknown"
