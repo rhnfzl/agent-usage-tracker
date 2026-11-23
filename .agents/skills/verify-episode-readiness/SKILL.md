@@ -17,14 +17,18 @@ The `sink-sql` job in GitHub Actions runs these same checks against the shipped 
   that had finished when that rebuild started. Aborting leaves the last published coverage in place.
 - `test_label_cli_waits_for_a_rebuild_to_cover_the_scan` runs the installed CLI against TimescaleDB.
   It checks that the saved label date stays pending after an overlap and advances after the retry.
+- `test_refresh_receipt_spans_the_episode_rebuild` runs the shipped refresh. It checks that
+  the recorded interval contains the time when the database replaces the old episodes.
 
 To replay the old defect, use a scratch worktree. In `Source.episodes_ready`, change the rebuild
 cutoff from `max(started_at)` to `max(finished_at)` and run the checks. The query should admit
 a scan that finished after rebuild start. The model test prints the failing schedule prefix.
-The CLI test should see a successful exit before the retry. Restore the cutoff and run again.
+The CLI test should see the saved date advance before retry. Restore the cutoff and run again.
+Then substitute `clock_timestamp()` for `refresh_started_at` in the receipt INSERT in
+`refresh.sql`. The receipt test should fail. Restore it and rerun the checks.
 
-This model checks readiness given committed receipts with distinct timestamps and one source.
-It does not simulate database scheduling inside a read, clock skew, or delivery over the network.
+The model covers committed receipts with distinct timestamps and one source. It samples between
+steps. Database changes during a read, clock skew, and network delivery are outside its scope.
 The other SQL readiness tests cover multiple sources and legacy sinks.
 
 Coverage map, verified against production code at `fa8caed6ae2871c92568ca0d662398d1c281216d`:

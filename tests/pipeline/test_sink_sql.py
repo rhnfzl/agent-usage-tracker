@@ -15,6 +15,7 @@ import json
 import os
 import shutil
 import subprocess  # nosec B404 # fixed argv, the shipped apply script
+import sysconfig
 import uuid
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -428,7 +429,9 @@ def record_episode_scans(dsn):
 def test_episode_watermark_matches_every_bounded_schedule(dsn, record_episode_scans):
     new_machine, record = record_episode_scans
     epoch = datetime.now(timezone.utc) + timedelta(days=1)
-    for case, steps in enumerate(schedules()):
+    traces = list(schedules())
+    assert len(traces) == 28
+    for case, steps in enumerate(traces):
         machine = new_machine()
         source = Source(Config(machine=machine, agents=(), webhook_url=None, webhook_secret=None,
                                pg_dsn=dsn, home=Path(".")))
@@ -476,7 +479,7 @@ def test_label_cli_waits_for_a_rebuild_to_cover_the_scan(record_episode_scans, t
         "XDG_DATA_HOME": str(tmp_path),
         "XDG_CONFIG_HOME": str(tmp_path),
     }
-    aut = shutil.which("aut")
+    aut = shutil.which("aut", path=sysconfig.get_path("scripts"))
     assert aut, "Install the project to get the aut console script."
     command = [aut, "label", "run", "--task", "work_category"]
 
@@ -634,6 +637,35 @@ def test_mature_outcome_runner_reads_and_rechecks_real_episode_rows(
             result = label_run.run_label(cfg, ["soft_outcome"], local_estimates=True,
                 now=now+timedelta(days=1), backend_for=lambda task, choice: Model())["soft_outcome"]
             assert result["rows"] == 0 and scored == [str(eid)]
+
+
+def test_refresh_receipt_spans_the_episode_rebuild(dsn):
+    job = (SINK_STACK / "sql" / "refresh.sql").read_text(encoding="utf-8").splitlines()
+    with connect(dsn) as conn:
+        conn.execute("CREATE TEMP TABLE rebuild_probe (observed_at timestamptz)")
+        conn.execute("""
+            CREATE FUNCTION pg_temp.record_rebuild_time() RETURNS trigger LANGUAGE plpgsql AS $$
+            BEGIN
+                INSERT INTO rebuild_probe VALUES (clock_timestamp());
+                RETURN NULL;
+            END;
+            $$
+        """)
+        conn.execute("""
+            CREATE TRIGGER record_rebuild_time AFTER TRUNCATE ON agents.episode
+            FOR EACH STATEMENT EXECUTE FUNCTION pg_temp.record_rebuild_time()
+        """)
+        before, = conn.execute("SELECT clock_timestamp()").fetchone()
+        conn.execute("\n".join(line for line in job if not line.startswith("\\")))
+        observed, = conn.execute("SELECT observed_at FROM rebuild_probe").fetchone()
+        receipts = conn.execute(
+            "SELECT started_at, finished_at FROM agents.collector_scan "
+            "WHERE machine = 'sink' AND collector = 'episode_link' AND status = 'ok' "
+            "AND finished_at >= %s", (before,),
+        ).fetchall()
+        conn.rollback()
+    [(started, finished)] = receipts
+    assert before <= started <= observed < finished
 
 
 def test_refresh_deletes_claude_code_relogs_and_keeps_other_duplicates(dsn):
