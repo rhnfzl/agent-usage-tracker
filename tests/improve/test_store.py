@@ -1,11 +1,15 @@
 import json
 import os
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from agent_usage_tracker.config import AutError
+from agent_usage_tracker.improve import store as improve_store
 from agent_usage_tracker.improve.store import Store, audit
+
+from .transcript_fixtures import write_completed_transcript
 
 
 def test_snapshot_is_private_immutable_and_tampering_is_rejected(tmp_path):
@@ -55,9 +59,7 @@ def test_manifest_deduplicates_copied_sources_and_reports_missing_results(tmp_pa
         "message": {"content": [{"type": "tool_use", "id": "c", "name": "Bash",
                                  "input": {"command": "false"}}]}}) + "\n"
     for name in ("one", "copy"):
-        path = folder / f"{name}.jsonl"
-        path.write_text(raw)
-        os.utime(path, (1_000_000_000, 1_000_000_000))
+        write_completed_transcript(folder / f"{name}.jsonl", raw)
     report = audit(Store(tmp_path / "private"), home, days=90, limit=10, idle_s=0,
                    since_epoch=0)
     assert report["sessions"] == 1
@@ -101,8 +103,7 @@ def test_imported_codex_history_is_not_current_native_evidence(tmp_path):
         {"type": "response_item", "timestamp": "2001-09-09T01:46:40Z", "payload": {
             "type": "function_call", "call_id": "old", "name": "read", "arguments": "{}"}}]
     path = folder / "rollout-import.jsonl"
-    path.write_text("".join(json.dumps(row) + "\n" for row in records))
-    os.utime(path, (1_000_000_000, 1_000_000_000))
+    write_completed_transcript(path, "".join(json.dumps(row) + "\n" for row in records))
     result = audit(Store(tmp_path / "private"), home, idle_s=0, since_epoch=0)
     assert result["sessions"] == 0
     assert result["no_recent_evidence"] == 1
@@ -125,8 +126,7 @@ def test_audit_excludes_automated_bodies_but_keeps_interactive_evidence(tmp_path
                    {"type": "event_msg", "timestamp": "2001-09-09T01:46:40Z",
                     "payload": {"type": "user_message", "message": name}}]
         path = folder / f"rollout-{name}.jsonl"
-        path.write_text("".join(json.dumps(row) + "\n" for row in records))
-        os.utime(path, (1_000_000_000, 1_000_000_000))
+        write_completed_transcript(path, "".join(json.dumps(row) + "\n" for row in records))
     seen = []
     monkeypatch.setattr(evidence, "redact", lambda text: seen.append(text) or text)
     store = Store(tmp_path / "private")
@@ -150,8 +150,7 @@ def test_all_divergent_copies_are_ineligible_for_judging(tmp_path):
             {"type": "system", "timestamp": "2001-09-09T01:46:41Z",
              "sessionId": "same", "subtype": "turn_duration"}]
         path = folder / f"{name}.jsonl"
-        path.write_text("".join(json.dumps(row) + "\n" for row in records))
-        os.utime(path, (1_000_000_000, 1_000_000_000))
+        write_completed_transcript(path, "".join(json.dumps(row) + "\n" for row in records))
     store = Store(tmp_path / "private")
     result = audit(store, home, idle_s=0, since_epoch=0)
     assert result["complete_sessions"] == 0
@@ -161,7 +160,7 @@ def test_all_divergent_copies_are_ineligible_for_judging(tmp_path):
 
 
 
-def test_audit_recent_window_keeps_complete_observed_attempt_eligible(tmp_path):
+def test_audit_recent_window_keeps_complete_observed_attempt_eligible(tmp_path, monkeypatch):
     from agent_usage_tracker.improve.judge import cases
 
     home = tmp_path / "home"
@@ -181,8 +180,18 @@ def test_audit_recent_window_keeps_complete_observed_attempt_eligible(tmp_path):
     for record in records:
         record["timestamp"] = "2026-11-12T10:00:00Z"
     path = folder / "rollout-long.jsonl"
-    path.write_text("".join(json.dumps(row) + "\n" for row in records))
-    os.utime(path, (1_000_000_000, 1_000_000_000))
+    audit_time = 1_800_000_000
+    write_text = Path.write_text
+
+    def write_with_fast_file_clock(target, text, **options):
+        length = write_text(target, text, **options)
+        if target == path:
+            os.utime(target, (audit_time + 1, audit_time + 1))
+        return length
+
+    monkeypatch.setattr(Path, "write_text", write_with_fast_file_clock)
+    monkeypatch.setattr(improve_store, "time", SimpleNamespace(time=lambda: audit_time))
+    write_completed_transcript(path, "".join(json.dumps(row) + "\n" for row in records))
     store = Store(tmp_path / "private")
     report = audit(store, home, idle_s=0, since_epoch=0, max_bytes=4096)
     observed = cases(store, report["audit_id"])
