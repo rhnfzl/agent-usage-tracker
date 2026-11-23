@@ -53,6 +53,15 @@ In Codex, review the AUT hook with `/hooks` before it can run. See the [session 
 
 ![Live tool results can trigger optional advice during a session. Saved logs support usage and evidence review. Both help you decide which workflow changes to test and keep.](docs/assets/aut-workflow.drawio.png)
 
+<details>
+<summary>See the implementation blocks</summary>
+
+![AUT separates live advice, saved session evidence, and usage reporting. The diagram shows the commands, Python modules, and storage behind each path.](docs/assets/aut-architecture.png)
+
+[Download the editable Excalidraw scene](docs/assets/aut-architecture.excalidraw) to inspect or extend the diagram.
+
+</details>
+
 For example, an agent says the tests passed. AUT can surface the tool result behind that claim. If the result is missing, the judgment can stay unknown. When judgments identify the same problem across distinct tasks, AUT can group those cases and draft a small instruction or config change in an isolated copy. Run a check you trust against the original and the candidate, then decide whether to adopt it.
 
 Start by freezing a small sample of recent sessions. This step runs locally without a model:
