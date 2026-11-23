@@ -15,6 +15,7 @@ import json
 import os
 import shutil
 import subprocess  # nosec B404 # fixed argv, the shipped apply script
+import sysconfig
 import uuid
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -32,6 +33,7 @@ from agent_usage_tracker.event import (ActivityEvent, EventSession, TimeInterval
 from agent_usage_tracker.label import run as label_run
 from agent_usage_tracker.label.tasks import Source
 from agent_usage_tracker.sink import check_ledger_zone, connect, write_many
+from episode_readiness_model import Step, expected_watermarks, schedules
 from price_fixture import (CATALOG, LEGACY_RATES, PRICE_DAY, PRICE_MODEL,
                            legacy_price_rows, price_config, price_rows)
 
@@ -398,6 +400,102 @@ def test_a_rebuild_without_a_covered_machine_scan_does_not_use_another_episode(d
     assert Source(cfg).episodes_ready() is None
 
 
+@pytest.fixture
+def record_episode_scans(dsn):
+    machines = []
+
+    def new_machine():
+        machine = f"episode-verification-{uuid.uuid4().hex}"
+        machines.append(machine)
+        return machine
+
+    def record(machine, collector, start, finish):
+        with connect(dsn) as conn:
+            conn.execute(
+                "INSERT INTO agents.collector_scan (machine, collector, started_at, finished_at, status) "
+                "VALUES (%s, %s, %s, %s, 'ok')",
+                (machine, collector, start, finish),
+            )
+            conn.commit()
+
+    try:
+        yield new_machine, record
+    finally:
+        with connect(dsn) as conn:
+            conn.execute("DELETE FROM agents.collector_scan WHERE machine = ANY(%s)", (machines,))
+            conn.commit()
+
+
+def test_episode_watermark_matches_every_bounded_schedule(dsn, record_episode_scans):
+    new_machine, record = record_episode_scans
+    epoch = datetime.now(timezone.utc) + timedelta(days=1)
+    traces = list(schedules())
+    assert len(traces) == 28
+    for case, steps in enumerate(traces):
+        machine = new_machine()
+        source = Source(Config(machine=machine, agents=(), webhook_url=None, webhook_secret=None,
+                               pg_dsn=dsn, home=Path(".")))
+        origin = epoch + timedelta(seconds=case * 10)
+        record(machine, "episode_link", origin - timedelta(seconds=1), origin)
+        scan_start = rebuild_start = origin
+        prefix = []
+        for tick, (step, expected_tick) in enumerate(
+            zip(steps, expected_watermarks(steps), strict=True), start=1
+        ):
+            at = origin + timedelta(seconds=tick)
+            prefix.append(step.name)
+            match step:
+                case Step.START_SCAN:
+                    scan_start = at
+                case Step.FINISH_SCAN:
+                    record(machine, "claude_code", scan_start, at)
+                case Step.START_REBUILD:
+                    rebuild_start = at
+                case Step.PUBLISH_REBUILD:
+                    record(machine, "episode_link", rebuild_start, at)
+            expected = None if expected_tick is None else origin + timedelta(seconds=expected_tick)
+            assert source.episodes_ready() == expected, " → ".join(prefix)
+
+
+def test_label_cli_waits_for_a_rebuild_to_cover_the_scan(record_episode_scans, tmp_path):
+    new_machine, record = record_episode_scans
+    machine = new_machine()
+    today = datetime.now(ZoneInfo(DEFAULT_LEDGER_TZ)).replace(hour=0, minute=0, second=0, microsecond=0)
+    yesterday = today - timedelta(days=1)
+    config = tmp_path / "config.toml"
+    config.write_text(
+        f'machine = "{machine}"\nhome = {json.dumps(str(tmp_path))}\n'
+        '[transport]\npg_dsn = "env:AUT_TEST_PG_DSN"\n',
+        encoding="utf-8",
+    )
+    state = tmp_path / "state.json"
+    state.write_text(
+        json.dumps({"collectors": {"label": {"work_category": yesterday.isoformat()}}}),
+        encoding="utf-8",
+    )
+    environment = os.environ | {
+        "AUT_CONFIG": str(config),
+        "AUT_STATE": str(state),
+        "XDG_DATA_HOME": str(tmp_path),
+        "XDG_CONFIG_HOME": str(tmp_path),
+    }
+    aut = shutil.which("aut", path=sysconfig.get_path("scripts"))
+    assert aut, "Install the project to get the aut console script."
+    command = [aut, "label", "run", "--task", "work_category"]
+
+    record(machine, "episode_link", today - timedelta(minutes=2), today + timedelta(minutes=2))
+    record(machine, "claude_code", today, today + timedelta(minutes=1))
+    waiting = subprocess.run(command, env=environment, capture_output=True, text=True, timeout=20)
+    assert json.loads(state.read_text())["collectors"]["label"]["work_category"] == yesterday.isoformat()
+    assert waiting.returncode != 0, waiting.stdout + waiting.stderr
+    assert "waiting for the episode rebuild" in waiting.stderr
+
+    record(machine, "episode_link", today + timedelta(minutes=3), today + timedelta(minutes=4))
+    resumed = subprocess.run(command, env=environment, capture_output=True, text=True, timeout=20)
+    assert resumed.returncode == 0, resumed.stdout + resumed.stderr
+    assert json.loads(state.read_text())["collectors"]["label"]["work_category"] == today.isoformat()
+
+
 @pytest.mark.parametrize("agent", ["codex", "pi", "cursor_cli"])
 def test_local_episode_readiness_uses_supported_collectors_without_expanding_the_teacher(dsn, agent):
     cfg = Config(machine=f"local-only-{agent}", agents=(agent,), webhook_url=None,
@@ -541,7 +639,35 @@ def test_mature_outcome_runner_reads_and_rechecks_real_episode_rows(
             assert result["rows"] == 0 and scored == [str(eid)]
 
 
-# Last in the file: the refresh job rebuilds every derived view and records a sink scan.
+def test_refresh_receipt_spans_the_episode_rebuild(dsn):
+    job = (SINK_STACK / "sql" / "refresh.sql").read_text(encoding="utf-8").splitlines()
+    with connect(dsn) as conn:
+        conn.execute("CREATE TEMP TABLE rebuild_probe (observed_at timestamptz)")
+        conn.execute("""
+            CREATE FUNCTION pg_temp.record_rebuild_time() RETURNS trigger LANGUAGE plpgsql AS $$
+            BEGIN
+                INSERT INTO rebuild_probe VALUES (clock_timestamp());
+                RETURN NULL;
+            END;
+            $$
+        """)
+        conn.execute("""
+            CREATE TRIGGER record_rebuild_time AFTER TRUNCATE ON agents.episode
+            FOR EACH STATEMENT EXECUTE FUNCTION pg_temp.record_rebuild_time()
+        """)
+        before, = conn.execute("SELECT clock_timestamp()").fetchone()
+        conn.execute("\n".join(line for line in job if not line.startswith("\\")))
+        observed, = conn.execute("SELECT observed_at FROM rebuild_probe").fetchone()
+        receipts = conn.execute(
+            "SELECT started_at, finished_at FROM agents.collector_scan "
+            "WHERE machine = 'sink' AND collector = 'episode_link' AND status = 'ok' "
+            "AND finished_at >= %s", (before,),
+        ).fetchall()
+        conn.rollback()
+    [(started, finished)] = receipts
+    assert before <= started <= observed < finished
+
+
 def test_refresh_deletes_claude_code_relogs_and_keeps_other_duplicates(dsn):
     session = EventSession("s-relog", None, "interactive", "t1")
 
