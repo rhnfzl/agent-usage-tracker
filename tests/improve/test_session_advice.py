@@ -1,4 +1,5 @@
 import json
+import shlex
 import subprocess
 from pathlib import Path
 
@@ -236,7 +237,14 @@ def test_global_setup_preserves_existing_hooks_and_reuses_the_executable(tmp_pat
     applied = configure(home, exe, apply=True, mode="record")
     for item in applied:
         assert item["status"] == "installed"
-        assert str(exe) in Path(item["path"]).read_text()
+        written = Path(item["path"]).read_text(encoding="utf-8")
+        if item["client"] == "pi":
+            assert f"const executable = {json.dumps(str(exe))};" in written
+            continue
+        for entries in json.loads(written)["hooks"].values():
+            entry = entries[-1]
+            command = entry["command"] if item["client"] == "cursor" else entry["hooks"][0]["command"]
+            assert shlex.split(command)[0] == str(exe)
     assert json.loads(settings.read_text())["hooks"]["PostToolBatch"][0] == original["hooks"]["PostToolBatch"][0]
     assert all(item["status"] == "unchanged" for item in configure(home, exe, apply=True, mode="record"))
     assert all(item["status"] == "installed" for item in configure(home, exe, apply=True, mode="show"))
