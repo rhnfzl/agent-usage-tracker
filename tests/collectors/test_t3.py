@@ -2,6 +2,7 @@
 
 import json
 import sqlite3
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -12,6 +13,13 @@ from agent_usage_tracker.event import ActivityEvent, CollectorUnavailable, Event
 P = "orchestration_v2_projection_"
 NATIVE = "11111111-2222-4333-8444-555555555555"
 T = "2026-11-14T12:00:"
+NOW = datetime(2026, 11, 14, 12, 30, tzinfo=timezone.utc)
+
+
+@pytest.fixture(autouse=True)
+def clock(monkeypatch):
+    """Fixture rows are dated; pin the proof grace clock just after them."""
+    monkeypatch.setattr(t3, "_now", lambda: NOW)
 
 
 def config(home):
@@ -651,7 +659,7 @@ def test_positive_link_origin_survives_app_binding_and_client_quarantine(origin,
     assert result.attrs['run_origin'] == origin
 
 
-def test_current_oversized_message_fails_degraded_without_ack(tmp_path):
+def test_current_oversized_message_is_counted_from_a_bounded_read(tmp_path):
     c = database(tmp_path)
     message(c)
     run(c)
@@ -666,9 +674,10 @@ def test_current_oversized_message_fails_degraded_without_ack(tmp_path):
     )
     c.commit()
     wm = {}
-    with pytest.raises(CollectorUnavailable):
-        collect(config(tmp_path), wm)
-    assert wm == {}
+    steer, = [r for r in collect(config(tmp_path), wm) if r.kind == "steer"]
+    # One huge prompt must not hold the source degraded for good: exact chars, bounded words.
+    assert steer.attrs == {"via": "typed", "words": 1, "chars": 1024 * 1024 + 1}
+    assert wm["message_ids"] == ["m"]
     # Native linking needs provenance metadata, not the oversized prompt body.
     assert ("codex", NATIVE) in t3.native_bindings(config(tmp_path))
     c.close()
@@ -796,4 +805,150 @@ def test_human_steer_into_unbound_agent_run_stays_unproved(tmp_path):
     c.commit()
     with pytest.raises(CollectorUnavailable, match="overlap is unproved"):
         collect(config(tmp_path))
+    c.close()
+
+
+def test_cursor_sdk_run_is_proved_through_cursor_cli(tmp_path):
+    agent = "agent-5c22059b-bb74-4aa6-9420-161a59ec52b0"
+    c = database(tmp_path)
+    message(c)
+    run(c, provider="cursor")
+    binding(c, native=agent, driver="cursor")
+    c.commit()
+    cfg = config(tmp_path)
+    rows = collect(cfg)
+    humans = [r for r in rows if isinstance(r, UsageEvent) and r.kind == "human"]
+    assert [h.session.session_id for h in humans] == ["t3:app"]
+    assert sum(isinstance(r, ActivityEvent) and r.kind == "turn" for r in rows) == 1
+    # T3 owns the run's turn; the cursor_cli SDK store's turn for it is a mirror.
+    native = ActivityEvent("x", T + "05Z", "cursor_cli", "turn", agent, "run",
+                           {"run_origin": "automated"})
+    assert t3.canonicalize([native], t3.native_bindings(cfg)) == []
+    c.close()
+
+
+def test_unproved_message_stops_degrading_after_grace(tmp_path, monkeypatch, capsys):
+    c = database(tmp_path)
+    message(c)
+    run(c)
+    binding(c, strength="weak")      # may still turn strong, so it waits out the grace
+    c.commit()
+    cfg = config(tmp_path)
+    wm = {}
+    with pytest.raises(CollectorUnavailable, match="1 human messages omitted"):
+        collect(cfg, wm)
+    monkeypatch.setattr(t3, "_now", lambda: NOW + timedelta(hours=24))
+    assert not any(isinstance(r, UsageEvent) for r in collect(cfg, wm))
+    assert "1 human messages left out" in capsys.readouterr().err
+    assert wm.get("message_ids", []) == []   # left out, not acknowledged: a later proof still counts
+    c.close()
+
+
+def test_grace_keeps_fresh_messages_degraded(tmp_path, monkeypatch):
+    c = database(tmp_path)
+    message(c)
+    message(c, mid="new", ts="40Z")
+    run(c)
+    c.commit()
+    monkeypatch.setattr(t3, "_now", lambda: NOW + timedelta(hours=23, minutes=30, seconds=20))
+    with pytest.raises(CollectorUnavailable, match="1 human messages omitted"):
+        collect(config(tmp_path))
+    c.close()
+
+
+@pytest.mark.parametrize("shared", [False, True])
+def test_unprovable_message_is_left_out_at_once(tmp_path, capsys, shared):
+    c = database(tmp_path)
+    message(c)
+    if shared:   # one native ID bound to two app threads proves neither
+        run(c)
+        binding(c)
+        c.execute(f"INSERT INTO {P}threads VALUES (?,?,?,?)", ("other", "p", "{}", T + "20Z"))
+        message(c, mid="m2", ts="02Z")
+        c.execute(f"UPDATE {P}messages SET thread_id='other' WHERE message_id='m2'")
+        c.execute(f"INSERT INTO {P}runs VALUES (?,?,?,?,?,?,?,?)",
+                  ("r2", "other", "codex", "pt2", "completed", T + "03Z", T + "09Z",
+                   json.dumps({"userMessageId": "m2"})))
+        binding(c, pt="pt2")
+        c.execute(f"UPDATE {P}provider_threads SET thread_id='other' WHERE provider_thread_id='pt2'")
+    else:
+        run(c, provider="someNewDriver")
+        binding(c, driver="someNewDriver")
+    c.commit()
+    wm = {}
+    assert not any(isinstance(r, UsageEvent) for r in collect(config(tmp_path), wm))
+    assert "left out" in capsys.readouterr().err
+    assert wm.get("message_ids", []) == []
+    c.close()
+
+
+@pytest.mark.parametrize("status,expect", [("completed", None), ("cancelled", "cancelled"),
+                                           ("interrupted", "cancelled"), ("failed", "error")])
+def test_t3_owns_one_turn_per_ended_app_run(tmp_path, status, expect):
+    c = database(tmp_path)
+    message(c)
+    run(c)
+    binding(c)
+    c.execute(f"UPDATE {P}runs SET status='running', completed_at=NULL")
+    c.commit()
+    cfg = config(tmp_path)
+    native = ActivityEvent("x", T + "05Z", "codex", "turn", NATIVE, "turn", {})
+    wm = {}
+    # Native turns inside the run are always mirrors, whenever they are read.
+    assert t3.canonicalize([native], t3.native_bindings(cfg)) == []
+    assert not [r for r in collect(cfg, wm) if r.kind == "turn"]      # running: not yet
+    c.execute(f"UPDATE {P}runs SET status=?, completed_at=?", (status, T + "10Z"))
+    c.commit()
+    turn, = [r for r in collect(cfg, wm) if r.kind == "turn"]
+    assert turn.attrs.get("status") == expect and turn.session_id == "t3:app"
+    assert collect(cfg, wm) == []
+    c.close()
+
+
+def test_acknowledged_history_never_exhausts_the_text_budget(tmp_path, monkeypatch):
+    c = database(tmp_path)
+    run(c)
+    binding(c)
+    for i in range(30):
+        message(c, mid="m" if i == 0 else f"old{i}", ts=f"{i:02d}Z")
+    c.execute(f"UPDATE {P}messages SET payload_json=json_set(payload_json,'$.text',?)",
+              ("w " * 2000,))
+    c.commit()
+    wm = {"message_ids": [f"old{i}" for i in range(1, 30)]}
+    # Old prompts alone exceed this budget; only the pending one may be read.
+    monkeypatch.setattr(t3, "_MAX_QUERY_BYTES", 20_000)
+    steers = [r for r in collect(config(tmp_path), wm) if r.kind == "steer"]
+    assert [s.attrs["words"] for s in steers] == [2000]
+    c.close()
+
+
+def test_acknowledged_tool_history_never_exhausts_the_row_budget(tmp_path, monkeypatch):
+    c = database(tmp_path)
+    message(c)
+    run(c)
+    binding(c)
+    c.execute(f"INSERT INTO {P}runs VALUES (?,?,?,?,?,?,?,?)",
+              ("old", "app", "codex", "pt", "completed", T + "00Z", T + "00Z", "{}"))
+    for i in range(30):
+        c.execute(f"INSERT INTO {P}turn_items VALUES (?,?,?,?)",
+                  ("old" if i else "r", "command_execution", "completed", '{"exitCode": 1}'))
+    c.commit()
+    monkeypatch.setattr(t3, "_MAX_ROWS", 10)    # old runs' items alone exceed it
+    turn, = [r for r in collect(config(tmp_path)) if r.kind == "turn"]
+    assert turn.attrs["tool_calls"] == 1 and turn.attrs["tool_errors"] == 1
+    c.close()
+
+
+def test_tool_items_with_null_status_count_as_no_error(tmp_path):
+    c = database(tmp_path)
+    message(c)
+    run(c)
+    binding(c)
+    c.execute(f"INSERT INTO {P}turn_items VALUES ('r','file_change',NULL,'{{}}')")
+    c.execute(f"INSERT INTO {P}turn_items VALUES ('r','command_execution','failed','{{}}')")
+    c.execute(f"INSERT INTO {P}turn_items VALUES ('r','command_execution',NULL,'{{\"exitCode\": 2}}')")
+    c.commit()
+    turn, = [r for r in collect(config(tmp_path)) if r.kind == "turn"]
+    assert (turn.attrs["tool_calls"], turn.attrs["tool_errors"]) == (3, 2)
+    assert turn.attrs["by_tool"] == {"file_change": 1, "command_execution": 2}
     c.close()
