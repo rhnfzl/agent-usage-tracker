@@ -160,8 +160,11 @@ t3_activity_since = "2026-11-15T00:00:00Z" # replace with your approved prospect
 Include `"t3"` beside your native collectors when `agents` is explicit.
 T3 uses confirmed web/mobile messages and strong native bindings to avoid mirrored prompts.
 Provider changes share one `t3:<app-thread-id>` session. Native logs remain the source of tokens and costs.
-T3 turns count completed app runs, which can contain several internal agent turns.
-Missing or ambiguous evidence reports degraded coverage. Existing history is not reconciled automatically.
+T3 turns count ended app runs (cancelled and failed ones carry a status), which can contain several internal agent turns.
+Missing or ambiguous evidence reports degraded coverage while proof can still come. A message no scan
+can prove (an unsupported provider, a native session shared by threads), or one still unproved after
+24 h, is left out with a note instead, so it cannot hold the source degraded for good.
+Existing history is not reconciled automatically.
 
 **Pick one Cursor token source.** `cursor`, `cursor_sdk` and `cursor_api` overlap, and more
 than one counts the same usage twice. `cursor_api` is the accurate one. To keep Cursor prompts

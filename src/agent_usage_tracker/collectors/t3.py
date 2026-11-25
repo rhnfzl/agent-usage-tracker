@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import sys
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Collection, Iterator
 
@@ -32,7 +33,20 @@ _MAX_ROWS = 100_000
 _MAX_RECORD_BYTES = 1024 * 1024
 _MAX_QUERY_BYTES = 16 * 1024 * 1024
 _PAGE = 500
-_DRIVERS = {"codex": "codex", "claudeAgent": "claude_code"}
+# T3 native driver -> the aut collector that logs that native session (Cursor SDK runs: cursor_cli).
+_DRIVERS = {"codex": "codex", "claudeAgent": "claude_code", "cursor": "cursor_cli"}
+# Proof comes from T3's own projection, written during the run. A message still unproved after
+# this long (an unsupported driver, a native ID shared by threads) will not be proved later, so
+# it is left out with a note instead of holding the source degraded for good.
+_PROOF_GRACE = timedelta(hours=24)
+_TEXT_PAGE = 50              # pending prompts per query: 50 x 64 Ki chars x 4 bytes < 16 MiB
+_TEXT_PREFIX = 64 * 1024     # characters of one prompt read to count its words
+# An ended app run is one T3 turn; non-completed ones carry cursor_cli's status vocabulary.
+_RUN_STATUS = {"cancelled": "cancelled", "interrupted": "cancelled", "failed": "error"}
+
+
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 def database_path(home: Path) -> Path:
@@ -119,9 +133,10 @@ class Snapshot:
     bindings: dict[tuple[str, str], list[Binding]]
     native_ids: dict[str, tuple[str, str]]
     message_runs: dict[str, list[tuple[Any, ...]]]
-    tool_attrs: dict[str, dict[str, Any]]
     covered_runs: set[str]
     run_threads: dict[str, str]
+    # Runs no later scan can prove: an unmapped strong driver or a native ID shared by threads.
+    unprovable_runs: set[str]
 
 
 def snapshot(con: sqlite3.Connection, since: datetime, *, include_text: bool = True) -> Snapshot:
@@ -188,6 +203,7 @@ def snapshot(con: sqlite3.Connection, since: datetime, *, include_text: bool = T
                 messages.append((*row[:6], payload))
     native_ids = {}
     native_threads = {}
+    unmapped: set[str] = set()
     for ptid, tid, raw in _read(
         con,
         current + "SELECT provider_thread_id,thread_id,json_object('nativeThreadRef',json_object("
@@ -204,11 +220,14 @@ def snapshot(con: sqlite3.Connection, since: datetime, *, include_text: bool = T
             if agent and isinstance(sid, str) and sid:
                 native_ids[ptid] = agent, sid
                 native_threads[ptid] = tid
+            elif not agent:
+                unmapped.add(ptid)
     runs: list[tuple[Any, ...]] = []
     message_runs: dict[str, list[tuple[Any, ...]]] = {}
     bindings: dict[tuple[str, str], list[Binding]] = {}
     run_bindings: dict[str, tuple[str, str]] = {}
     run_threads: dict[str, str] = {}
+    unprovable_runs: set[str] = set()
     for row in raw_runs:
         payload = _payload(row[7])
         proof = proofs.get(str(payload.get("userMessageId")))
@@ -228,29 +247,15 @@ def snapshot(con: sqlite3.Connection, since: datetime, *, include_text: bool = T
         if key and native_threads.get(row[3]) == row[1]:
             run_bindings[row[0]] = key
             bindings.setdefault(key, []).append(Binding("t3:" + row[1], start, end, proof[2]))
+        elif key or row[3] in unmapped:
+            unprovable_runs.add(row[0])
     # A native identity bound to several app threads is not evidence of one canonical session.
     bindings = {
         key: spans
         for key, spans in bindings.items()
         if len({span.session_id for span in spans}) == 1
     }
-    tool_attrs: dict[str, dict[str, Any]] = {}
-    if con.execute(
-        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (_PREFIX + "turn_items",)
-    ).fetchone():
-        for runid, kind, status, exit_code in _read(
-            con,
-            current + f"SELECT run_id,type,status,json_extract(payload_json,'$.exitCode') "
-            f"FROM {_PREFIX}turn_items WHERE run_id IN (SELECT run_id FROM current_runs) "
-            "AND type IN ('command_execution','dynamic_tool','file_change')",
-            cutoff,
-        ):
-            attrs = tool_attrs.setdefault(runid, {"tool_calls": 0, "tool_errors": 0, "by_tool": {}})
-            attrs["tool_calls"] += 1
-            attrs["tool_errors"] += status == "failed" or (
-                type(exit_code) is int and exit_code != 0
-            )
-            attrs["by_tool"][kind] = attrs["by_tool"].get(kind, 0) + 1
+    unprovable_runs |= {rid for rid, key in run_bindings.items() if key not in bindings}
     covered_runs = {rid for rid, key in run_bindings.items() if key in bindings}
     return Snapshot(
         messages,
@@ -259,9 +264,9 @@ def snapshot(con: sqlite3.Connection, since: datetime, *, include_text: bool = T
         bindings,
         native_ids,
         message_runs,
-        tool_attrs,
         covered_runs,
         run_threads,
+        unprovable_runs,
     )
 
 
@@ -389,7 +394,7 @@ def collect(cfg: Config, wm: dict[str, Any]) -> Iterator[Batch]:
     since = _since(cfg)
     try:
         with connection(cfg.home) as con:
-            data = snapshot(con, since)
+            data = snapshot(con, since, include_text=False)
             sent_messages = set(wm.get("message_ids", []))
             sent_runs = set(wm.get("run_ids", []))
             ambiguous = set()
@@ -400,6 +405,16 @@ def collect(cfg: Config, wm: dict[str, Any]) -> Iterator[Batch]:
                 else:
                     ambiguous.add(mid)
             pending: list[tuple[str, str, list[Row]]] = []
+            texts = _texts(
+                con,
+                [m[1] for m in data.messages if m[1] not in sent_messages and m[1] not in ambiguous],
+            )
+
+            def sizes(mid: str) -> dict[str, int]:
+                chars, prefix = texts.get(mid, (0, ""))
+                # shortcut: words come from the first 256 KiB, an undercount only past that size.
+                return {"words": len(prefix.split()), "chars": chars}
+
             for rid, mid, tid, runid, role, ts, payload in data.messages:
                 if mid not in data.message_runs:
                     # A human steer into an agent-started run is proved by that run's binding too.
@@ -411,7 +426,6 @@ def collect(cfg: Config, wm: dict[str, Any]) -> Iterator[Batch]:
                 if mid in sent_messages:
                     continue
                 sid = "t3:" + tid
-                text = payload.get("text") if isinstance(payload.get("text"), str) else ""
                 sess = EventSession(sid, None, "interactive", runid)
                 pending.append(
                     (
@@ -426,20 +440,17 @@ def collect(cfg: Config, wm: dict[str, Any]) -> Iterator[Batch]:
                                 "steer",
                                 sid,
                                 runid,
-                                {
-                                    "via": "typed",
-                                    "words": len(text.split()),
-                                    "chars": len(text),
-                                },
+                                {"via": "typed", **sizes(mid)},
                             ),
                         ],
                     )
                 )
-            for rid, tid, provider, ptid, status, start, end, raw in data.runs:
-                if status != "completed" or not end or rid in sent_runs:
-                    continue
-                if rid not in data.covered_runs:
-                    continue
+            ended = [
+                r for r in data.runs if r[6] and r[0] not in sent_runs and r[0] in data.covered_runs
+            ]
+            tools = _tool_attrs(con, [r[0] for r in ended])
+            for rid, tid, provider, ptid, status, start, end, raw in ended:
+                state = {} if status == "completed" else {"status": _RUN_STATUS.get(status, "error")}
                 pending.append(
                     (
                         "run_ids",
@@ -454,7 +465,8 @@ def collect(cfg: Config, wm: dict[str, Any]) -> Iterator[Batch]:
                                 rid,
                                 {
                                     "duration_ms": ms_between(start, end),
-                                    **data.tool_attrs.get(rid, {}),
+                                    **state,
+                                    **tools.get(rid, {}),
                                 },
                             )
                         ],
@@ -473,11 +485,77 @@ def collect(cfg: Config, wm: dict[str, Any]) -> Iterator[Batch]:
 
                 yield rows, advance
             if ambiguous:
-                raise CollectorUnavailable(
-                    f"t3: {len(ambiguous)} human messages omitted, native overlap is unproved"
-                )
+                stamps = {row[1]: _stamp(row[5]) for row in data.messages}
+                runs_of = {row[1]: [row[3]] for row in data.messages}
+                runs_of.update({m: [r[0] for r in rs] for m, rs in data.message_runs.items()})
+                expired = {
+                    mid
+                    for mid in ambiguous
+                    if (mid in stamps and stamps[mid] < _now() - _PROOF_GRACE)
+                    or (runs_of.get(mid) and set(runs_of[mid]) <= data.unprovable_runs)
+                }
+                if expired:
+                    print(
+                        f"aut: t3: {len(expired)} human messages left out: no native overlap "
+                        "proof is possible (unsupported driver, shared native session) or none "
+                        "came within 24 h",
+                        file=sys.stderr,
+                    )
+                if ambiguous - expired:
+                    raise CollectorUnavailable(
+                        f"t3: {len(ambiguous - expired)} human messages omitted, "
+                        "native overlap is unproved"
+                    )
     except (OSError, sqlite3.Error, ValueError, TypeError) as exc:
         raise CollectorUnavailable("t3: projection database is unavailable or invalid") from exc
+
+
+def _texts(con: sqlite3.Connection, mids: list[str]) -> dict[str, tuple[int, str]]:
+    """message ID -> (character count, bounded prefix), read only for prompts about to be sent.
+
+    Reading every prompt since the cutover would outgrow the query budget and degrade the
+    source for good; this stays bounded however long T3 has been used."""
+    out: dict[str, tuple[int, str]] = {}
+    for offset in range(0, len(mids), _TEXT_PAGE):
+        page = mids[offset : offset + _TEXT_PAGE]
+        marks = ",".join("?" * len(page))
+        for mid, chars, prefix in _read(
+            con,
+            "SELECT message_id,length(json_extract(payload_json,'$.text')),"
+            f"substr(json_extract(payload_json,'$.text'),1,{_TEXT_PREFIX}) "
+            f"FROM {_PREFIX}messages WHERE role = 'user' AND message_id IN ({marks})",
+            tuple(page),
+        ):
+            if isinstance(prefix, str) and type(chars) is int:
+                out[mid] = chars, prefix
+    return out
+
+
+def _tool_attrs(con: sqlite3.Connection, runs: list[str]) -> dict[str, dict[str, Any]]:
+    """Tool counts per run, aggregated in SQL and read only for runs about to be sent."""
+    out: dict[str, dict[str, Any]] = {}
+    if not runs or not con.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (_PREFIX + "turn_items",)
+    ).fetchone():
+        return out
+    for offset in range(0, len(runs), _PAGE):
+        page = runs[offset : offset + _PAGE]
+        marks = ",".join("?" * len(page))
+        for runid, kind, calls, errors in _read(
+            con,
+            # count(CASE ...) is never NULL, even for items whose status is NULL.
+            "SELECT run_id,type,count(*),count(CASE WHEN status = 'failed' OR "
+            "(typeof(json_extract(payload_json,'$.exitCode')) = 'integer' "
+            "AND json_extract(payload_json,'$.exitCode') != 0) THEN 1 END) "
+            f"FROM {_PREFIX}turn_items WHERE run_id IN ({marks}) "
+            "AND type IN ('command_execution','dynamic_tool','file_change') GROUP BY run_id,type",
+            tuple(page),
+        ):
+            attrs = out.setdefault(runid, {"tool_calls": 0, "tool_errors": 0, "by_tool": {}})
+            attrs["tool_calls"] += calls
+            attrs["tool_errors"] += errors
+            attrs["by_tool"][kind] = calls
+    return out
 
 
 def describe(cfg: Config, wm: dict[str, Any]) -> str:
