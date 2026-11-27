@@ -151,6 +151,7 @@ class Config:
     repo_key_salt: str | None = None
     # activitywatch (opt-in): local aw-server, title retention there, and the guards' extensions.
     activitywatch_url: str = DEFAULT_AW_URL
+    activitywatch_bucket_hostname: str | None = None
     activitywatch_title_days: int = 0                  # 0: keep titles for good (no purge)
     activitywatch_titles: bool = True                  # false: intervals and categories, no titles
     activitywatch_deny_apps: tuple[str, ...] = ()      # lowercased app names, dropped entirely
@@ -416,6 +417,7 @@ def _config_from(data: dict[str, Any], path: Path) -> Config:
         cf_access_client_secret=_resolve(transport, "cf_access_client_secret"),
         repo_key_salt=_resolve(data, "repo_key_salt"),
         activitywatch_url=_aw_url(data),
+        activitywatch_bucket_hostname=str(data.get("activitywatch_bucket_hostname") or "").strip() or None,
         activitywatch_title_days=aw_days,
         activitywatch_titles=_as_bool(data.get("activitywatch_titles", True)),
         activitywatch_deny_apps=tuple(str(a).strip().lower()
