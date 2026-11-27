@@ -106,7 +106,7 @@ matter:
 | `cursor_db_path` | found per OS | path to Cursor's `state.vscdb` |
 | `home` | the running user's home | the home directory the collectors read |
 | `ledger_timezone` | `Europe/Amsterdam` | the sink's `AUT_TZ`, and what a day is: `git-days`, `history-steers` and the `label` commands count days in it. `git-days` and `history-steers` stop when it differs from the zone a `sink_stack` sink records. Label gold, silver, eval records, encoders and choices record it; one from another zone is left out, and one with no zone counts only when the machine's zone has the same UTC offsets since 2024 |
-| `activitywatch_*` | see the example | URL, title retention (`0` keeps titles), titles on or off, deny lists, work title patterns, categories |
+| `activitywatch_*` | see the example | URL, bucket hostname, title retention (`0` keeps titles), titles on or off, deny lists, work title patterns, categories |
 | `outcome_repo_roots` | `["~/projects"]` | where `aut outcomes` looks for clones (6 levels deep) |
 | `outcome_fetch` | `false` | fetch and ask `gh` before scoring. Turn it on where the nightly job runs, or squash-merged PRs count as abandoned |
 | `label_tasks` | `[]` | the tasks the nightly `aut label run` labels. Empty means it labels nothing |
@@ -119,6 +119,11 @@ matter:
 
 Keys outside `[transport]` must come before the `[transport]` line in the file, or TOML puts
 them inside that table and aut never sees them.
+
+For a local ActivityWatch server on macOS, AUT checks the Mac's `.local` hostname if the
+server hostname has no matching pair of window and AFK buckets. Set `activitywatch_bucket_hostname`
+to the exact hostname in both bucket records if automatic selection fails. AUT keeps its
+configured `machine` name in the sink.
 
 Files aut keeps on this machine:
 

@@ -139,18 +139,35 @@ def _event_span(ev: dict[str, Any]) -> tuple[datetime, datetime]:
     return start, start + timedelta(seconds=float(ev.get("duration") or 0))
 
 
+def _mac_local_hostname() -> str | None:
+    try:
+        result = subprocess.run(  # nosec B603 # fixed command and arguments
+            ["/usr/sbin/scutil", "--get", "LocalHostName"],
+            capture_output=True, text=True, check=True, timeout=_MAC_TIMEOUT)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    name = result.stdout.strip()
+    return f"{name}.local" if name else None
+
+
 def _buckets(cfg: Config) -> tuple[str, str, datetime] | None:
     """(window bucket, afk bucket, window bucket's first moment) of THIS host, or None."""
-    host = _http(cfg, "GET", "/api/0/info").get("hostname")
+    host = cfg.activitywatch_bucket_hostname or _http(cfg, "GET", "/api/0/info").get("hostname")
     buckets = _http(cfg, "GET", "/api/0/buckets/")
 
-    def pick(kind: str) -> str | None:
+    def pick(hostname: str | None, kind: str) -> str | None:
+        if not hostname:
+            return None
         ids = sorted(b for b, v in buckets.items()
-                     if isinstance(v, dict) and v.get("type") == kind and v.get("hostname") == host)
+                     if isinstance(v, dict) and v.get("type") == kind and v.get("hostname") == hostname)
         return ids[0] if ids else None
 
-    win, afk = pick("currentwindow"), pick("afkstatus")
-    if not (host and win and afk):
+    win, afk = pick(host, "currentwindow"), pick(host, "afkstatus")
+    if (not (win and afk) and not cfg.activitywatch_bucket_hostname and _DARWIN
+            and urllib.parse.urlparse(cfg.activitywatch_url).hostname in LOCAL_HOSTS):
+        local = _mac_local_hostname()
+        win, afk = pick(local, "currentwindow"), pick(local, "afkstatus")
+    if not (win and afk):
         return None
     meta = buckets[win].get("metadata") or {}
     if meta.get("start"):

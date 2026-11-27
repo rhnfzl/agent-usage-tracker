@@ -181,6 +181,57 @@ def test_default_agents_exclude_activitywatch(monkeypatch) -> None:
             pass
 
 
+def test_selects_configured_activitywatch_bucket_hostname(monkeypatch, tmp_path) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text(f'machine = "stable-machine"\nactivitywatch_bucket_hostname = "{HOST}"\n')
+    monkeypatch.setenv("AUT_CONFIG", str(path))
+    cfg = load_config()
+    fake = FakeAW()
+
+    def request(cfg, method, path, body=None):
+        if path == "/api/0/info":
+            return {"hostname": "different-server-hostname"}
+        return fake(cfg, method, path, body)
+
+    monkeypatch.setattr(aw, "_http", request)
+    found = aw._buckets(cfg)
+    assert found is not None and found[:2] == (WIN, AFK)
+    assert cfg.machine == "stable-machine"
+
+
+@pytest.mark.parametrize(("url", "explicit_host", "matches"), [
+    ("http://127.0.0.1:5600", None, True),
+    ("http://aw-host:5600", None, False),
+    ("http://127.0.0.1:5600", "wrong-host", False),
+])
+def test_macos_local_watcher_hostname_fallback(monkeypatch, url, explicit_host, matches) -> None:
+    host = "My-Mac.local"
+    fake = FakeAW()
+
+    def request(cfg, method, path, body=None):
+        if path == "/api/0/info":
+            return {"hostname": "dhcp-name.example"}
+        buckets = fake(cfg, method, path, body)
+        return {
+            bucket.replace(HOST, host): {**meta, "hostname": host}
+            for bucket, meta in buckets.items() if meta["hostname"] == HOST
+        }
+
+    def scutil(args, **kwargs):
+        assert args == ["/usr/sbin/scutil", "--get", "LocalHostName"]
+        return aw.subprocess.CompletedProcess(args, 0, "My-Mac\n")
+
+    monkeypatch.setattr(aw, "_DARWIN", True)
+    monkeypatch.setattr(aw.subprocess, "run", scutil)
+    monkeypatch.setattr(aw, "_http", request)
+    cfg = _cfg(activitywatch_url=url, activitywatch_bucket_hostname=explicit_host)
+    found = aw._buckets(cfg)
+    if matches:
+        assert found is not None and found[:2] == (f"aw-watcher-window_{host}", f"aw-watcher-afk_{host}")
+    else:
+        assert found is None
+
+
 def test_range_and_watermark() -> None:
     now = CREATED + timedelta(hours=4)          # range end = 11:55
     fake = FakeAW([
